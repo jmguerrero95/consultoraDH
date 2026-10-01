@@ -177,6 +177,19 @@ docker compose exec app php artisan db:seed --force       # roles y permisos
 La base de datos de pruebas (`consultora_dh_test`) se crea sola la primera vez
 que se inicializa el volumen de PostgreSQL.
 
+Las migraciones de A02 crean el dominio de negocio: `clients`, `companies`,
+`social_security_entities`, `client_company_assignments` y `client_affiliations`,
+y añaden `subject_type` y `subject_id` a `audit_events`.
+
+Las relaciones con empresas y las afiliaciones se guardan como periodos
+históricos: cerrar o cambiar una relación **marca la fila anterior con su fecha de
+fin y crea una fila nueva**. Por eso no hay borrados en esas dos tablas, y por eso
+las restricciones de unicidad son parciales: sólo una fila abierta por cliente y
+tipo. `db:seed` deja el catálogo de entidades de seguridad social **vacío a
+propósito**: son datos de referencia reales y esta tarea no los inventa. Regístralos
+desde *Configuración → Entidades de seguridad social* antes de registrar
+afiliaciones.
+
 ## 7. Flujo de trabajo del frontend
 
 El servicio `node` mantiene el servidor de desarrollo de Vite con recarga en
@@ -222,7 +235,7 @@ docker compose exec node npm run build       # build de producción
 # Estilo del backend
 docker compose exec app vendor/bin/pint --test
 
-# Interfaz de extremo a extremo (crea una cuenta temporal y la elimina)
+# Interfaz de extremo a extremo (crea dos cuentas temporales y las elimina)
 ./scripts/run-e2e.sh
 ```
 
@@ -233,9 +246,11 @@ La guía completa está en [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 ```
 consultora-dh/
 ├── app/
-│   ├── Domain/           # Lógica de negocio: auditoría, autenticación, usuarios
+│   ├── Domain/           # Lógica de negocio: auditoría, autenticación, usuarios,
+│   │                     # clientes, empresas, afiliaciones, calidad de datos
 │   ├── Http/             # Controladores, Form Requests, middleware, recursos
-│   ├── Models/           # User, AuditEvent
+│   ├── Models/           # User, AuditEvent, Client, Company, ClientCompanyAssignment,
+│   │                     # ClientAffiliation, SocialSecurityEntity
 │   └── Providers/        # Proveedores de servicios
 ├── bootstrap/            # Arranque: rutas, middleware, manejo de errores
 ├── config/               # Configuración (incluye security.php)
@@ -251,8 +266,27 @@ consultora-dh/
 │   ├── js/               # Aplicación Vue
 │   └── views/            # Plantilla Blade del shell
 ├── routes/               # web.php (documento) y api.php (JSON)
-├── scripts/              # Utilidades (run-e2e.sh)
-└── tests/                # Pest, Vitest y Playwright
+├── scripts/              # Utilidades (run-e2e.sh, export-review.sh)
+└── tests/
+    ├── e2e/              # Playwright: flujos de extremo a extremo
+    ├── Feature/A02/      # Pest: clientes, empresas, afiliaciones, permisos
+    └── frontend/         # Vitest: composables, campos de formulario, páginas
+```
+
+### 9.1 Los cuatro flujos de A02 en las pruebas
+
+`scripts/run-e2e.sh` crea **dos** cuentas temporales con contraseñas aleatorias y
+las elimina al terminar:
+
+| Flujo | Qué demuestra |
+| --- | --- |
+| Alta completa | Empresa, cliente, vínculo, afiliación y las entradas de historial |
+| Transferencia | La empresa anterior queda histórica y la nueva queda vigente |
+| Vínculo duplicado | El aviso ofrece transferir, mantener en paralelo o cancelar; al cancelar no cambia nada |
+| Rol de sólo lectura | Ve el portafolio y el servidor responde `403` a cualquier escritura |
+
+El cuarto flujo necesita dos cuentas a propósito: un administrador no puede
+demostrar que una petición sin permiso es rechazada.
 ```
 
 ## 10. Detener el entorno
@@ -297,6 +331,7 @@ Los detalles y la lista completa están en [docs/SECURITY.md](docs/SECURITY.md).
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Comandos, pruebas, depuración |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Plan de A02 a A15 |
 | [docs/TASKS/A01.md](docs/TASKS/A01.md) | Qué se entregó en A01 |
+| [docs/TASKS/A02.md](docs/TASKS/A02.md) | Clientes, empresas, afiliaciones e historial |
 
 ## 13. Licencia
 

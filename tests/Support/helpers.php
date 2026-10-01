@@ -3,8 +3,7 @@
 declare(strict_types=1);
 
 use App\Models\User;
-use Spatie\Permission\Models\Permission;
-use Spatie\Permission\Models\Role;
+use Database\Seeders\DatabaseSeeder;
 use Spatie\Permission\PermissionRegistrar;
 
 /**
@@ -22,25 +21,9 @@ use Spatie\Permission\PermissionRegistrar;
  */
 function seedRoles(): void
 {
-    $permission = Permission::query()->firstOrCreate([
-        'name' => 'settings.view',
-        'guard_name' => 'web',
-    ]);
-
-    foreach ([
-        'Super Admin',
-        'Administrator',
-        'Operations',
-        'Collections',
-        'Support',
-        'Read Only',
-    ] as $name) {
-        Role::query()->firstOrCreate(['name' => $name, 'guard_name' => 'web']);
-    }
-
-    foreach (['Super Admin', 'Administrator'] as $name) {
-        Role::findByName($name, 'web')->givePermissionTo($permission);
-    }
+    // The real seeder, so a test can never pass against a role matrix that does
+    // not exist in production. Seeding is cheap and the suite rolls back.
+    app()->make(DatabaseSeeder::class)->run();
 
     app(PermissionRegistrar::class)->forgetCachedPermissions();
 }

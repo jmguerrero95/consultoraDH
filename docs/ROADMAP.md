@@ -21,15 +21,21 @@ Detalle en [TASKS/A01.md](TASKS/A01.md).
 
 ## Tareas pendientes
 
-### A02 — Clientes, empresas, afiliaciones e historial
+### A02 — Clientes, empresas, afiliaciones e historial ✅
 
-Alcance: alta y gestión de clientes, empresas, afiliaciones (EPS, AFP, ARL y
-Cajas de Compensación Familiar) y sus relaciones históricas. Un cliente puede
-cambiar de afiliación con el tiempo, y el sistema debe poder reconstruir qué
-tenía en una fecha concreta.
+**Completada.** Alcance: alta y gestión de clientes, empresas, afiliaciones (EPS,
+AFP, ARL y Cajas de Compensación Familiar) y sus relaciones históricas. Un cliente
+puede cambiar de empresa y de afiliación con el tiempo, y el sistema reconstruye
+qué tenía en una fecha concreta porque cada relación es un periodo con fecha de
+inicio y de fin, nunca una fila que se sobrescribe.
 
-Prepara: permisos `clients.*`, permisos `affiliations.*`, primera migración de
-dominio de negocio, panel de clientes.
+Entregado: permisos `clients.*`, `companies.*`, `relationships.*`,
+`affiliations.*` y `social_security_entities.*`; nueve comprobaciones de calidad
+de datos; auditoría con sujeto; panel, clientes, empresas y catálogo.
+
+Detalle en [TASKS/A02.md](TASKS/A02.md). Lo que quedó fuera: la administración
+de roles en la interfaz, la reconstrucción por fecha como pantalla y la
+revisión en bloque del paralelismo autorizado.
 
 ### A03 — Periodos, cortes, obligaciones, pagos y cartera
 

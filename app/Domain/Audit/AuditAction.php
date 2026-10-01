@@ -31,4 +31,32 @@ enum AuditAction: string
 
     // Administration
     case AdministratorCreated = 'admin.created';
+
+    // --- A02: clients -------------------------------------------------
+    case ClientCreated = 'client.created';
+    case ClientUpdated = 'client.updated';
+    case ClientActivated = 'client.activated';
+    case ClientDeactivated = 'client.deactivated';
+
+    // --- A02: companies -----------------------------------------------
+    case CompanyCreated = 'company.created';
+    case CompanyUpdated = 'company.updated';
+    case CompanyActivated = 'company.activated';
+    case CompanyDeactivated = 'company.deactivated';
+
+    // --- A02: client/company relationships -----------------------------
+    case RelationshipCreated = 'relationship.created';
+    case RelationshipClosed = 'relationship.closed';
+    case RelationshipTransferred = 'relationship.transferred';
+    case RelationshipParallelAuthorized = 'relationship.parallel_authorized';
+
+    // --- A02: affiliations --------------------------------------------
+    case AffiliationCreated = 'affiliation.created';
+    case AffiliationClosed = 'affiliation.closed';
+    case AffiliationChanged = 'affiliation.changed';
+
+    // --- A02: social security entity catalogue ------------------------
+    case SocialSecurityEntityCreated = 'social_security_entity.created';
+    case SocialSecurityEntityUpdated = 'social_security_entity.updated';
+    case SocialSecurityEntityDeactivated = 'social_security_entity.deactivated';
 }

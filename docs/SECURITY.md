@@ -151,9 +151,20 @@ el cuerpo, y la interfaz indica cuántos segundos faltan.
 
 - **Roles** (`spatie/laravel-permission`): Super Admin, Administrator,
   Operations, Collections, Support, Read Only.
-- **Permisos**: A01 crea y aplica un único permiso, `settings.view`, porque es
-  el único que la aplicación exige. No se crean permisos de negocio por
+- **Permisos**: además de `settings.view`, A02 introduce cinco familias:
+  `clients.*`, `companies.*`, `relationships.*`, `affiliations.*` y
+  `social_security_entities.*`. Cada familia tiene sus verbos (`view`, `create`,
+  `update`, `manage`, `change_status`) y no se crean permisos de negocio por
   adelantado: llegan con su módulo.
+- **Un rol sin permiso recibe `403`, no una respuesta vacía.** Los cinco roles se
+  prueban endpoint por endpoint en `AuthorizationTest`. Donde la ausencia de
+  permiso tiene una forma más honesta que una lista vacía, la API lo dice:
+  `GET /api/clients/{id}` devuelve `{"affiliations": {"visible": false}}` para un
+  rol sin `affiliations.view`, y el historial de auditoría de la ficha omite los
+  eventos de afiliación, que dicen la entidad a la que la persona está afiliada.
+- **`db:seed` es la autoridad de la matriz de permisos.** Revoca cualquier
+  permiso que no esté en su lista, de modo que el rol por defecto y el código no
+  pueden separarse en silencio entre despliegues.
 - **La comprobación es del servidor.** `GET /api/settings` exige
   `settings.view`; un rol sin ese permiso recibe `403`, aunque llegue
   directamente a la URL.
@@ -269,12 +280,34 @@ cambio de dirección.
 | `profile.email_changed` | Cambio del correo (direcciones anterior y nueva) |
 | `profile.password_changed` | Cambio de contraseña |
 | `admin.created` | Alta de administrador |
+| `client.created` · `client.updated` | Alta y edición del cliente |
+| `client.activated` · `client.deactivated` | Cambio de estado del cliente |
+| `company.created` · `company.updated` | Alta y edición de la empresa |
+| `company.activated` · `company.deactivated` | Cambio de estado de la empresa |
+| `relationship.created` · `relationship.closed` | Alta y cierre de un vínculo |
+| `relationship.transferred` | Transferencia a otra empresa |
+| `relationship.parallel_authorized` | Segunda relación abierta, con justificación |
+| `affiliation.created` · `affiliation.closed` | Alta y cierre de una afiliación |
+| `affiliation.changed` | Cambio de entidad, con la entidad anterior y la nueva |
+| `social_security_entity.created` · `.updated` · `.deactivated` | Catálogo |
 
 ### 6.2 Campos
 
 `audit_events` guarda `user_id` (nulo cuando no hay cuenta atribuible),
-`action`, `ip_address`, `user_agent`, `metadata` (JSONB) y `created_at`. La
-tabla es de sólo inserciones: el modelo rechaza actualizaciones y borrados.
+`action`, `ip_address`, `user_agent`, `metadata` (JSONB), `created_at` y, desde
+A02, `subject_type` y `subject_id`. Los dos últimos son lo que permite resolver
+el historial de una ficha con una consulta, en lugar de con un registro de
+cambios escrito a mano y mantenido a mano.
+
+La tabla es de sólo inserciones: el modelo rechaza actualizaciones y borrados.
+
+**Los metadatos guardan identificadores, no copias del registro.** El alta de un
+cliente guarda su documento, que es la identidad que después habrá que
+reconocer, y no sus nombres: el registro ya está enlazado por `subject_id`, y una
+segunda copia de un nombre en una tabla de sólo inserciones son datos personales
+sin propósito operativo que además se desincroniza del original. Una prueba lo
+verifica. La razón social de una empresa sí se guarda, porque una empresa no es
+una persona.
 
 ### 6.3 Qué no se registra nunca
 

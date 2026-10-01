@@ -121,6 +121,25 @@ docker compose exec app php artisan db:seed --force
 docker compose exec app php artisan migrate:fresh --seed   # ⚠ borra la base
 ```
 
+`db:seed` crea los roles y la matriz de permisos, y **revoca** cualquier permiso
+que no esté en su lista. Es la autoridad: si se añade un permiso al código y no al
+seeder, el rol por defecto y el código quedan separados y la ruta responde `403`
+sin que nadie sepa por qué.
+
+El catálogo de entidades de seguridad social se deja **vacío a propósito**. Son
+datos de referencia reales; A02 no los inventa y sí impide que se inventen por
+error. Se registran desde *Configuración → Entidades de seguridad social*.
+
+Para comprobar que las migraciones de un módulo se pueden revertir de verdad, lo
+más limpio es una base de datos desechable:
+
+```bash
+docker compose exec -e DB_DATABASE=a02_check app php artisan migrate --force
+docker compose exec -e DB_DATABASE=a02_check app php artisan db:seed --force
+docker compose exec -e DB_DATABASE=a02_check app php artisan migrate:rollback --step=6
+docker compose exec postgres psql -U postgres -c 'DROP DATABASE a02_check'
+```
+
 ## 7. Cuentas de administrador
 
 ```bash
@@ -221,9 +240,15 @@ docker compose exec node npm run test -- --coverage
 ./scripts/run-e2e.sh tests/e2e/login.spec.ts
 ```
 
-El script genera una contraseña aleatoria, crea una cuenta temporal en la base
-de datos de desarrollo, instala el navegador si hace falta, ejecuta la suite y
-elimina la cuenta. **Ninguna credencial se escribe en disco.**
+El script genera dos contraseñas aleatorias, crea dos cuentas temporales en la
+base de datos de desarrollo, instala el navegador si hace falta, ejecuta la suite
+y elimina las cuentas. **Ninguna credencial se escribe en disco.**
+
+Las dos cuentas son deliberadas: una con rol Super Admin, que es la que usa la
+mayoría de los flujos, y otra con rol Read Only, que es la única forma de
+comprobar que una escritura sin permiso se rechaza en el servidor y no sólo que
+el botón no aparece. También exporta `E2E_STAMP`, un sufijo por ejecución, para
+que los registros creados por un flujo no choquen con los de otro.
 
 Si la primera ejecución falla por falta de navegador:
 

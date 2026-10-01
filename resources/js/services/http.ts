@@ -36,6 +36,16 @@ export class ApiError extends Error {
     /** True when the request never reached the server. */
     readonly isNetworkError: boolean;
 
+    /**
+     * The decoded response body, when there was one.
+     *
+     * A conflict answers with the choices the server is willing to accept, not
+     * just a message, and the interface has to render those choices rather than
+     * invent its own. Keeping the body makes that possible without a second
+     * request to find out what went wrong.
+     */
+    readonly payload: unknown;
+
     constructor(options: {
         message: string;
         status: number;
@@ -43,8 +53,11 @@ export class ApiError extends Error {
         errors?: FieldErrors;
         retryAfter?: number | null;
         isNetworkError?: boolean;
+        payload?: unknown;
     }) {
         super(options.message);
+
+        this.payload = options.payload ?? null;
 
         this.name = 'ApiError';
         this.status = options.status;
@@ -142,6 +155,36 @@ interface RequestOptions {
     signal?: AbortSignal;
     /** Skip the CSRF handshake (used by the handshake request itself). */
     skipCsrf?: boolean;
+    /** Query parameters, appended to the URL. */
+    query?: Record<string, string | number | boolean | null | undefined>;
+}
+
+/**
+ * Build the final URL from a base and a set of query parameters.
+ *
+ * Null, undefined and empty values are dropped rather than sent as
+ * `?search=`. That matters for two reasons: the URL stays readable, and a filter
+ * that has been cleared does not travel to the server as an empty string, which
+ * is a value the validator would have to special case.
+ */
+function withQuery(url: string, query: RequestOptions['query']): string {
+    if (query === undefined) {
+        return url;
+    }
+
+    const params = new URLSearchParams();
+
+    for (const [key, value] of Object.entries(query)) {
+        if (value === null || value === undefined || value === '') {
+            continue;
+        }
+
+        params.set(key, String(value));
+    }
+
+    const search = params.toString();
+
+    return search === '' ? url : `${url}?${search}`;
 }
 
 function buildHeaders(withCsrf: boolean, hasBody: boolean): Headers {
@@ -166,30 +209,26 @@ function buildHeaders(withCsrf: boolean, hasBody: boolean): Headers {
 }
 
 async function toApiError(response: Response): Promise<ApiError> {
-    let payload: {
-        message?: string;
-        code?: string;
-        errors?: FieldErrors;
-        retry_after?: number | null;
-    } = {};
+    let body: Record<string, unknown> = {};
 
     try {
-        payload = (await response.json()) as typeof payload;
+        body = (await response.json()) as Record<string, unknown>;
     } catch {
-        // A non JSON body (an HTML error page, for instance) keeps the default
-        // message below. The raw body is never surfaced to the user.
+        // A non JSON body (an HTML error page, for instance) leaves the map empty
+        // and the default message below is used. The raw body is never shown.
     }
 
     const retryAfterHeader = response.headers.get('Retry-After');
 
     return new ApiError({
-        message: payload.message ?? defaultMessage(response.status),
+        message: typeof body.message === 'string' ? body.message : defaultMessage(response.status),
         status: response.status,
-        code: payload.code ?? null,
-        errors: payload.errors ?? {},
+        code: typeof body.code === 'string' ? body.code : null,
+        errors: (body.errors as FieldErrors | undefined) ?? {},
         retryAfter:
-            payload.retry_after ??
+            (typeof body.retry_after === 'number' ? body.retry_after : null) ??
             (retryAfterHeader !== null ? Number.parseInt(retryAfterHeader, 10) : null),
+        payload: body,
     });
 }
 
@@ -230,7 +269,7 @@ export async function request<T>(method: Method, url: string, options: RequestOp
     let response: Response;
 
     try {
-        response = await fetch(url, {
+        response = await fetch(withQuery(url, options.query), {
             method,
             credentials: 'same-origin',
             headers: buildHeaders(mutating, hasBody),

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import { RouterLink } from 'vue-router';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
@@ -120,6 +121,97 @@ onMounted(load);
                 </div>
             </section>
 
+            <!--
+             | The portfolio counters. Every figure is a count against the tables
+             | themselves, so an empty database shows zeroes rather than a
+             | placeholder, and none of it is an estimate.
+             |
+             | The section is withheld entirely for a role that may not read the
+             | portfolio, because "you cannot see this" and "there is nothing here"
+             | are different statements.
+             -->
+            <section
+                v-if="data.portfolio.visible && data.portfolio.counts"
+                class="cdh-card mb-3"
+                aria-labelledby="portfolio-heading"
+            >
+                <div class="cdh-card__header">
+                    <div>
+                        <h2 id="portfolio-heading" class="cdh-card__title">Portafolio</h2>
+                        <p class="cdh-card__subtitle">
+                            Cifras calculadas sobre los registros actuales.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="cdh-card__body">
+                    <div class="cdh-grid-stats">
+                        <RouterLink
+                            :to="{ name: 'clients' }"
+                            class="cdh-stat cdh-stat--link"
+                            aria-label="Ver clientes"
+                        >
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-people" aria-hidden="true" />
+                                <span>Clientes activos</span>
+                            </p>
+                            <p class="cdh-stat__value">{{ data.portfolio.counts.active_clients }}</p>
+                            <p class="cdh-stat__hint">
+                                {{ data.portfolio.counts.inactive_clients }} inactivos
+                            </p>
+                        </RouterLink>
+
+                        <RouterLink
+                            :to="{ name: 'companies' }"
+                            class="cdh-stat cdh-stat--link"
+                            aria-label="Ver empresas"
+                        >
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-building" aria-hidden="true" />
+                                <span>Empresas activas</span>
+                            </p>
+                            <p class="cdh-stat__value">{{ data.portfolio.counts.active_companies }}</p>
+                            <p class="cdh-stat__hint">
+                                {{ data.portfolio.counts.catalogue_entities }} entidades de seguridad social
+                            </p>
+                        </RouterLink>
+
+                        <article class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-briefcase" aria-hidden="true" />
+                                <span>Relaciones activas</span>
+                            </p>
+                            <p class="cdh-stat__value">{{ data.portfolio.counts.active_relationships }}</p>
+                            <p class="cdh-stat__hint">
+                                {{ data.portfolio.multiple_companies ?? 0 }} con más de una empresa
+                            </p>
+                        </article>
+
+                        <article class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-hospital" aria-hidden="true" />
+                                <span>Afiliaciones activas</span>
+                            </p>
+                            <p class="cdh-stat__value">{{ data.portfolio.counts.active_affiliations }}</p>
+                            <p class="cdh-stat__hint">EPS, AFP, ARL y Cajas</p>
+                        </article>
+
+                        <article class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-exclamation-triangle" aria-hidden="true" />
+                                <span>Alertas de calidad</span>
+                            </p>
+                            <p class="cdh-stat__value">
+                                {{ data.portfolio.counts.data_quality_issues }}
+                            </p>
+                            <p class="cdh-stat__hint">
+                                {{ data.portfolio.counts.data_quality_warnings }} advertencias
+                            </p>
+                        </article>
+                    </div>
+                </div>
+            </section>
+
             <!-- Service connectivity: the only "system health" A01 reports. -->
             <section class="cdh-card" aria-labelledby="services-heading">
                 <div class="cdh-card__header">
@@ -194,21 +286,22 @@ onMounted(load);
                     <div>
                         <h2 id="modules-heading" class="cdh-card__title">Módulos operativos</h2>
                         <p class="cdh-card__subtitle">
-                            Indicadores de clientes, periodos, pagos y documentos.
+                            Indicadores de periodos, cortes, pagos y planillas.
                         </p>
                     </div>
                 </div>
 
                 <div class="cdh-card__body cdh-card__body--flush">
-                    <AppEmptyState
-                        icon="bi-clipboard-data"
-                        title="Todavía no hay información operativa"
-                    >
-                        Esta tarea entrega la base técnica: autenticación, seguridad,
-                        permisos, auditoría y pantallas administrativas. Los indicadores de
-                        clientes, afiliaciones, periodos, pagos y documentos aparecerán aquí a
-                        medida que se implementen los módulos de negocio, sin necesidad de
-                        rediseñar la plataforma.
+                    <!--
+                     | Scoped to what has NOT been built yet. A02 delivered the
+                     | portfolio, so the counters above cover it; what follows names
+                     | only the modules still to come, rather than claiming the whole
+                     | operational area is empty.
+                     -->
+                    <AppEmptyState icon="bi-clipboard-data" title="Sin indicadores operativos todavía">
+                        El portafolio de clientes, empresas y afiliaciones ya está
+                        arriba. Aquí aparecerán los indicadores de periodos, cortes,
+                        pagos y planillas a medida que se implementen esos módulos.
                     </AppEmptyState>
                 </div>
             </section>

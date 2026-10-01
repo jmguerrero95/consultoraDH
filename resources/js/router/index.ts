@@ -21,6 +21,14 @@ declare module 'vue-router' {
         /** The navigation entry, when the route belongs in the sidebar. */
         nav?: { label: string; icon: string; order: number };
         /**
+         * Permission required to see the entry.
+         *
+         * Presentation only. Hiding a link the user cannot open is a courtesy;
+         * the server rejects the request regardless, and the guard here only
+         * exists so nobody is shown a screen that would answer 403.
+         */
+        permission?: string;
+        /**
          * Title used by the document and by the topbar. Optional because a
          * layout record renders no page of its own; the matched child supplies
          * the title.
@@ -75,7 +83,7 @@ const routes: RouteRecordRaw[] = [
                 component: () => import('@/pages/ProfilePage.vue'),
                 meta: {
                     title: 'Mi perfil',
-                    nav: { label: 'Mi perfil', icon: 'bi-person-circle', order: 2 },
+                    nav: { label: 'Mi perfil', icon: 'bi-person-circle', order: 80 },
                 },
             },
             {
@@ -84,7 +92,80 @@ const routes: RouteRecordRaw[] = [
                 component: () => import('@/pages/SettingsPage.vue'),
                 meta: {
                     title: 'Configuración',
-                    nav: { label: 'Configuración', icon: 'bi-sliders', order: 3 },
+                    nav: { label: 'Configuración', icon: 'bi-sliders', order: 90 },
+                    permission: 'settings.view',
+                },
+            },
+            {
+                path: 'clients',
+                name: 'clients',
+                component: () => import('@/pages/clients/ClientListPage.vue'),
+                meta: {
+                    title: 'Clientes',
+                    nav: { label: 'Clientes', icon: 'bi-people', order: 10 },
+                    permission: 'clients.view',
+                },
+            },
+            {
+                path: 'clients/new',
+                name: 'clients.create',
+                component: () => import('@/pages/clients/ClientFormPage.vue'),
+                meta: { title: 'Nuevo cliente', permission: 'clients.create' },
+            },
+            {
+                path: 'clients/:id(\\d+)',
+                name: 'clients.show',
+                component: () => import('@/pages/clients/ClientDetailPage.vue'),
+                meta: { title: 'Ficha del cliente', permission: 'clients.view' },
+            },
+            {
+                path: 'clients/:id(\\d+)/edit',
+                name: 'clients.edit',
+                component: () => import('@/pages/clients/ClientFormPage.vue'),
+                meta: { title: 'Editar cliente', permission: 'clients.update' },
+            },
+            {
+                path: 'companies',
+                name: 'companies',
+                component: () => import('@/pages/companies/CompanyListPage.vue'),
+                meta: {
+                    title: 'Empresas',
+                    nav: { label: 'Empresas', icon: 'bi-building', order: 20 },
+                    permission: 'companies.view',
+                },
+            },
+            {
+                path: 'companies/new',
+                name: 'companies.create',
+                component: () => import('@/pages/companies/CompanyFormPage.vue'),
+                meta: { title: 'Nueva empresa', permission: 'companies.create' },
+            },
+            {
+                path: 'companies/:id(\\d+)',
+                name: 'companies.show',
+                component: () => import('@/pages/companies/CompanyDetailPage.vue'),
+                meta: { title: 'Ficha de la empresa', permission: 'companies.view' },
+            },
+            {
+                path: 'companies/:id(\\d+)/edit',
+                name: 'companies.edit',
+                component: () => import('@/pages/companies/CompanyFormPage.vue'),
+                meta: { title: 'Editar empresa', permission: 'companies.update' },
+            },
+            {
+                // Under Configuración, so the catalogue reads as reference data
+                // rather than as another top level module.
+                path: 'settings/social-security-entities',
+                name: 'social-security-entities',
+                component: () => import('@/pages/settings/SocialSecurityEntityListPage.vue'),
+                meta: {
+                    title: 'Entidades de seguridad social',
+                    nav: {
+                        label: 'Entidades de seguridad social',
+                        icon: 'bi-hospital',
+                        order: 91,
+                    },
+                    permission: 'social_security_entities.view',
                 },
             },
             {
@@ -158,6 +239,12 @@ export function createAppRouter(history: RouterHistory = createWebHistory()): Ro
 
         if (to.meta.guestOnly && auth.isAuthenticated) {
             return { name: 'home' };
+        }
+
+        // Presentation, not authorisation: the server answers 403 regardless.
+        // Redirecting here stops somebody being shown a screen they cannot use.
+        if (to.meta.permission !== undefined && !auth.can(to.meta.permission)) {
+            return { name: 'forbidden' };
         }
 
         return true;

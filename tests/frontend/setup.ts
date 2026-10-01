@@ -14,6 +14,23 @@ import { resetCsrfState } from '@/services/http';
 // behaviour is stubbed rather than reported as an error on every navigation.
 vi.stubGlobal('scrollTo', vi.fn());
 
+/*
+ | jsdom implements <dialog> as an inert element: `showModal` and `close` do not
+ | exist. Every real browser has had them for years, so the gap is stubbed rather
+ | than worked around, which would mean the dialog driven components could not be
+ | exercised at all.
+ */
+if (typeof HTMLDialogElement !== 'undefined') {
+    HTMLDialogElement.prototype.showModal ??= function showModal(this: HTMLDialogElement) {
+        this.open = true;
+    };
+
+    HTMLDialogElement.prototype.close ??= function close(this: HTMLDialogElement) {
+        this.open = false;
+        this.dispatchEvent(new Event('close'));
+    };
+}
+
 // `document.cookie` is read by the HTTP client for the CSRF token.
 beforeEach(() => {
     document.cookie = '';

@@ -69,7 +69,7 @@ base de código monolítica sin costuras.
 
 Los detalles operativos están en [DEVELOPMENT.md](DEVELOPMENT.md).
 
-## 3. Backend y frontend: mismo repositorio,Separación estricta
+## 3. Backend y frontend: mismo repositorio, separación estricta
 
 El backend y el frontend viven en el mismo repositorio pero **no se mezclan**:
 
@@ -154,7 +154,7 @@ Reglas que el código respeta:
 
 ## 5. A01: estructura de dominios
 
-Durante A01 existen tres dominios, que son los que necesitan los módulos
+Durante A01 existen estos dominios, que son los que necesitan los módulos
 posteriores:
 
 | Dominio | Responsabilidad |
@@ -170,30 +170,69 @@ comparación de contraseña con Constant-time, rechazo de cuentas inactivas,
 regeneración del identificador de sesión, registro del último acceso y emisión
 de eventos. El controlador solo traduce la petición.
 
-## 6. Cómo se organizarán los dominios futuros
+## 6. A02: estructura de dominios
 
-Cada módulo de negocio ocupará un directorio bajo `app/Domain/`. Tomando A02
-(clientes, empresas, afiliaciones) como ejemplo, la forma que se busca es:
+A02 añade cuatro dominios más a los de A01:
+
+| Dominio | Responsabilidad |
+| --- | --- |
+| `Domain/Clients` | Alta, edición y estado del cliente; documento y contacto |
+| `Domain/Companies` | Alta, edición y estado de la empresa; NIT |
+| `Domain/Affiliations` | Relaciones históricas con empresas y afiliaciones |
+| `Domain/DataQuality` | Comprobaciones del portafolio y sus contadores |
+| `Domain/Shared` | `RecordStatus`, que comparten los tres tipos de registro |
+
+La forma que acabó teniendo:
 
 ```
-app/Domain/Clients/
-├── Models/           Client.php
-├── Actions/          RegisterClient.php, DeactivateClient.php
-├── Events/           ClientRegistered.php
-├── Policies/         ClientPolicy.php
-└── Support/          ClientSearch.php        (consultas reutilizables)
+app/Domain/Affiliations/
+├── ManageClientCompanies.php     vincular, cerrar, transferir
+├── ManageAffiliations.php        registrar, cerrar, cambiar de entidad
+├── ArlRiskClass.php              nivel de riesgo y sus etiquetas
+└── ParallelRelationshipNotAllowed.php
+
+app/Domain/DataQuality/
+├── DataQualityCode.php           los nueve códigos y su severidad
+├── DataQualityFinding.php
+├── DataQualityInspector.php      las comprobaciones
+├── DataQualitySeverity.php
+└── PortfolioMetrics.php          los contadores del panel
 ```
 
-Criterios:
+Criterios que sí se aplicaron, y por qué:
 
-- **Los modelos viven en el módulo que los posee**, no en un `Models/` global.
-  Cuando `Client` sea real, `app/Models` quedará sólo para lo que A01 ya
-  foundation ha establecido y siga siendo transversal.
-- **Una acción por operación de negocio.** Si un método hace falta en tres
-  sitios, es una acción; si sólo en uno, puede ser un método del modelo.
-- **Las consultas de lectura complexas van en `Support/`**, con pruebas
-  propias, para que la lógica de filtro no se disperse en controladores.
-- **Las políticas se registran por modelo** y se prueban por rol.
+- **Los modelos viven en `app/Models`, no en el módulo que los posee.** Se
+  consideró lo contrario y se descartó: `Client`, `Company`, `User` y
+  `AuditEvent` se consultan desde peticiones, recursos y relaciones de todo el
+  sistema, así que un modelo encerrado en el módulo obliga a importar el módulo
+  entero para obtenerlo. El módulo conserva lo que no es modelo: acciones,
+  eventos, excepciones y enums.
+- **Una acción por operación de negocio.** `ManageClientCompanies` concentra
+  vincular, cerrar y transferir, que comparten bloqueo de fila y reglas de
+  fechas; un método de modelo repetiría el bloque tres veces.
+- **Cada regla que puede romperse tiene su propia excepción.** Además del
+  mensaje para la persona, `ParallelRelationshipNotAllowed` lleva los datos que
+  la interfaz necesita para ofrecer sus tres salidas. Un `422` con texto no
+  alcanza para eso.
+- **La autorización se comprueba por permiso y por rol, con pruebas para cada
+  combinación.** Las rutas declaran el permiso; `AuthorizationTest` recorre los
+  cinco roles.
+
+### 6.1 El modelo histórico
+
+Las relaciones con empresas y las afiliaciones no se actualizan: se cierran. Un
+cierre marca la fila anterior con su fecha de fin y abre una fila nueva, y un
+cambio de entidad hace las dos cosas. De ahí salen tres detalles que conviene
+tener presentes:
+
+- Las restricciones de unicidad de esas dos tablas son **parciales** (`WHERE
+  ended_on IS NULL`): sólo hay una fila abierta por cliente y empresa, o por
+  cliente y tipo. Las filas cerradas pueden repetirse sin límite.
+- Las claves foráneas de las filas históricas **no se borran en cascada**: un
+  borrado en el maestro destruiría el periodo registrado.
+- `audit_events` recibe `subject_type` y `subject_id` para podereboquear las
+  acciones de cliente, de vínculo y de afiliación en la misma ficha sin un
+  registro de cambios escrito a mano.
 
 ## 7. Base de datos
 

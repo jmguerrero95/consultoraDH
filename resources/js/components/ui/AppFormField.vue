@@ -21,6 +21,16 @@ const props = withDefaults(
         hint?: string | null;
         error?: string | null;
         inputmode?: 'text' | 'email' | 'tel' | 'url' | 'numeric' | 'search' | 'decimal' | null;
+        /**
+         * Choices, which turn the control into a select.
+         *
+         * The label, hint, error and aria wiring stay identical either way, which
+         * is the reason for keeping one component: a page that assembled its own
+         * select would have to remember all of it.
+         */
+        options?: { value: string; label: string }[];
+        /** Value used when nothing should be shown as a real choice. */
+        emptyLabel?: string | null;
     }>(),
     {
         type: 'text',
@@ -31,6 +41,8 @@ const props = withDefaults(
         hint: null,
         error: null,
         inputmode: null,
+        options: undefined,
+        emptyLabel: null,
     },
 );
 
@@ -56,7 +68,28 @@ const describedBy = computed(() => {
             <span v-if="required" class="cdh-visually-hidden">(obligatorio)</span>
         </label>
 
+        <select
+            v-if="options !== undefined"
+            :id="controlId"
+            class="form-control form-control-sm"
+            :class="{ 'is-invalid': Boolean(error) }"
+            :name="name"
+            :required="required"
+            :disabled="disabled"
+            :value="modelValue"
+            :aria-describedby="describedBy"
+            :aria-invalid="error ? 'true' : undefined"
+            :aria-required="required ? 'true' : undefined"
+            @change="emit('update:modelValue', ($event.target as HTMLSelectElement).value)"
+        >
+            <option v-if="emptyLabel !== null" value="">{{ emptyLabel }}</option>
+            <option v-for="option in options" :key="option.value" :value="option.value">
+                {{ option.label }}
+            </option>
+        </select>
+
         <input
+            v-else
             :id="controlId"
             class="form-control form-control-sm"
             :class="{ 'is-invalid': Boolean(error) }"

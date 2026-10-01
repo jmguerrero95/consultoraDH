@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { RouterLink } from 'vue-router';
 
 import AppButton from '@/components/ui/AppButton.vue';
 
@@ -23,8 +22,6 @@ import AppButton from '@/components/ui/AppButton.vue';
             error, solicite a un administrador de la plataforma que revise sus roles.
         </p>
 
-        <RouterLink to="/">
-            <AppButton variant="primary" icon="bi-house-door">Ir al inicio</AppButton>
-        </RouterLink>
+        <AppButton variant="primary" icon="bi-house-door" to="/">Ir al inicio</AppButton>
     </div>
 </template>

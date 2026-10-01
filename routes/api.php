@@ -3,9 +3,12 @@
 declare(strict_types=1);
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\ClientController;
+use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\ProfileController;
 use App\Http\Controllers\Api\SettingsController;
+use App\Http\Controllers\Api\SocialSecurityEntityController;
 use App\Http\Controllers\HealthController;
 use Illuminate\Support\Facades\Route;
 
@@ -19,9 +22,10 @@ use Illuminate\Support\Facades\Route;
 | authentication and CSRF verification work for the single page application.
 | See bootstrap/app.php and docs/SECURITY.md.
 |
-| Authorisation is enforced on the server with the `auth` middleware and, for
-| the settings endpoint, with a permission check. The interface hides links the
-| user cannot open, but that is presentation only: the server never relies on it.
+| Authorisation is enforced on the server. Each A02 route names the permission it
+| needs, in the `can:` middleware, so the rule sits next to the route it protects
+| rather than in a controller. The interface hides what the user cannot open;
+| that is presentation only.
 |
 */
 
@@ -74,4 +78,108 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:'.SettingsController::PERMISSION)
         ->get('/settings', SettingsController::class)
         ->name('api.settings');
+
+    // --- A02: clients -------------------------------------------------------
+    //
+    // Read and write are separate permissions. A role may consult the portfolio
+    // without being able to change it, which is the normal arrangement for
+    // support and collections work.
+    Route::middleware('can:clients.view')->group(function (): void {
+        Route::get('/clients', [ClientController::class, 'index'])->name('api.clients.index');
+        Route::get('/clients/{client}', [ClientController::class, 'show'])->name('api.clients.show');
+
+        Route::get('/clients/{client}/companies', [ClientController::class, 'companies'])
+            ->name('api.clients.companies');
+    });
+
+    // Affiliations are their own permission. A role that may read the client
+    // record is not automatically entitled to the person's health and pension
+    // affiliations, which is why this is a separate gate rather than being
+    // folded into `clients.view`.
+    Route::middleware('can:affiliations.view')
+        ->get('/clients/{client}/affiliations', [ClientController::class, 'affiliations'])
+        ->name('api.clients.affiliations');
+
+    Route::middleware('can:clients.create')->post('/clients', [ClientController::class, 'store'])
+        ->name('api.clients.store');
+
+    Route::middleware('can:clients.update')->patch('/clients/{client}', [ClientController::class, 'update'])
+        ->name('api.clients.update');
+
+    // Activation and deactivation are their own operation with their own
+    // permission: making somebody inactive is a different decision from editing
+    // their phone number.
+    Route::middleware('can:clients.change_status')
+        ->post('/clients/{client}/status', [ClientController::class, 'changeStatus'])
+        ->name('api.clients.change-status');
+
+    // --- A02: companies -----------------------------------------------------
+    Route::middleware('can:companies.view')->group(function (): void {
+        Route::get('/companies', [CompanyController::class, 'index'])->name('api.companies.index');
+        Route::get('/companies/{company}', [CompanyController::class, 'show'])->name('api.companies.show');
+    });
+
+    Route::middleware('can:companies.create')->post('/companies', [CompanyController::class, 'store'])
+        ->name('api.companies.store');
+
+    Route::middleware('can:companies.update')->patch('/companies/{company}', [CompanyController::class, 'update'])
+        ->name('api.companies.update');
+
+    Route::middleware('can:companies.change_status')
+        ->post('/companies/{company}/status', [CompanyController::class, 'changeStatus'])
+        ->name('api.companies.change-status');
+
+    // The company picker, for the client relationship form.
+    Route::middleware('can:companies.view')
+        ->get('/company-options', [ClientController::class, 'companyOptions'])
+        ->name('api.company-options');
+
+    // --- A02: relationships -------------------------------------------------
+    //
+    // There is no generic "edit this history row" endpoint. The rows are history,
+    // and history is changed by closing one and opening another, so the only
+    // operations exposed are those three.
+    //
+    // No read route for a single history row: the client's own endpoint returns
+    // its relationships already, and a separate route for one row would invite
+    // the interface to stitch two sources of truth together.
+    Route::middleware('can:relationships.manage')->group(function (): void {
+        Route::post('/clients/{client}/companies', [ClientController::class, 'linkCompany'])
+            ->name('api.clients.companies.store');
+
+        Route::post('/client-company-assignments/{assignment}/close', [ClientController::class, 'closeRelationship'])
+            ->name('api.assignments.close');
+
+        Route::post('/client-company-assignments/{assignment}/transfer', [ClientController::class, 'transfer'])
+            ->name('api.assignments.transfer');
+    });
+
+    // --- A02: affiliations --------------------------------------------------
+    Route::middleware('can:affiliations.manage')->group(function (): void {
+        Route::post('/clients/{client}/affiliations', [ClientController::class, 'storeAffiliation'])
+            ->name('api.clients.affiliations.store');
+
+        Route::post('/client-affiliations/{affiliation}/close', [ClientController::class, 'closeAffiliation'])
+            ->name('api.affiliations.close');
+
+        Route::post('/client-affiliations/{affiliation}/change', [ClientController::class, 'changeAffiliationEntity'])
+            ->name('api.affiliations.change');
+    });
+
+    // --- A02: social security entity catalogue ------------------------------
+    Route::middleware('can:social_security_entities.view')->group(function (): void {
+        Route::get('/social-security-entities', [SocialSecurityEntityController::class, 'index'])
+            ->name('api.entities.index');
+        Route::get('/social-security-entities/{entity}', [SocialSecurityEntityController::class, 'show'])
+            ->name('api.entities.show');
+    });
+
+    Route::middleware('can:social_security_entities.manage')->group(function (): void {
+        Route::post('/social-security-entities', [SocialSecurityEntityController::class, 'store'])
+            ->name('api.entities.store');
+        Route::patch('/social-security-entities/{entity}', [SocialSecurityEntityController::class, 'update'])
+            ->name('api.entities.update');
+        Route::post('/social-security-entities/{entity}/deactivate', [SocialSecurityEntityController::class, 'deactivate'])
+            ->name('api.entities.deactivate');
+    });
 });

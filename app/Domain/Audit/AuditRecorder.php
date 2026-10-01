@@ -6,6 +6,7 @@ namespace App\Domain\Audit;
 
 use App\Models\AuditEvent;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 
 /**
@@ -23,18 +24,22 @@ final class AuditRecorder
 
     /**
      * @param  array<string, mixed>  $metadata
+     * @param  Model|null  $subject  the business record the action is about
      */
     public function record(
         AuditAction $action,
         ?Authenticatable $actor = null,
         array $metadata = [],
         ?Request $request = null,
+        ?Model $subject = null,
     ): ?AuditEvent {
         $request ??= $this->currentRequest();
 
         try {
             return AuditEvent::query()->create([
                 'user_id' => $actor?->getAuthIdentifier(),
+                'subject_type' => $subject === null ? null : $subject->getMorphClass(),
+                'subject_id' => $subject?->getKey(),
                 'action' => $action->value,
                 'ip_address' => $request?->ip(),
                 'user_agent' => $this->truncateUserAgent($request?->userAgent()),

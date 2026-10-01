@@ -1303,3 +1303,412 @@ pre {
         display: none;
     }
 }
+
+/* --- A02: filters, tables and detail ---------------------------------------- */
+/*
+ | A01 had no lists, so this block is new with A02. Three decisions:
+ |
+ |  - Tables become stacked cards below 768px rather than scrolling sideways. A
+ |    horizontal scroll on a phone hides the columns that matter behind a swipe
+ |    nobody discovers, and the labels come from the `data-label` attribute each
+ |    cell carries, so the same markup serves both layouts.
+ |  - The filter bar collapses to one column, because four fields side by side
+ |    are unusable at 412px.
+ |  - Long values wrap rather than truncate. A person's name has no natural
+ |    length, and truncating it hides the thing being compared.
+ */
+
+.cdh-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 1rem;
+    background: var(--cdh-surface, #fff);
+    border: 1px solid var(--cdh-border, #e6e8ec);
+    border-radius: 0.5rem;
+}
+
+.cdh-filters__field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 9rem;
+}
+
+.cdh-filters__field--grow {
+    flex: 1 1 16rem;
+}
+
+.cdh-filters .cdh-form-label {
+    margin: 0;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--cdh-text-muted, #5b6472);
+}
+
+.cdh-link {
+    color: var(--cdh-primary, #1f5f8b);
+    text-decoration: none;
+}
+
+/* Used both on anchors and on <button> elements inside table rows. A button
+   carries a border and a background by default, which made an action look like a
+   small boxed control rather than part of the row's text. */
+button.cdh-link {
+    padding: 0;
+    font: inherit;
+    background: none;
+    border: none;
+    cursor: pointer;
+}
+
+.cdh-link:hover,
+.cdh-link:focus-visible {
+    text-decoration: underline;
+}
+
+.cdh-table-wrap {
+    overflow-x: auto;
+    background: var(--cdh-surface, #fff);
+    border: 1px solid var(--cdh-border, #e6e8ec);
+    border-radius: 0.5rem;
+}
+
+.cdh-table {
+    width: 100%;
+    margin: 0;
+    border-collapse: collapse;
+}
+
+.cdh-table th,
+.cdh-table td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--cdh-border, #e6e8ec);
+}
+
+.cdh-table thead th {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--cdh-text-muted, #5b6472);
+    background: var(--cdh-surface-alt, #f7f8fa);
+    white-space: nowrap;
+}
+
+.cdh-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.cdh-table tbody tr:hover {
+    background: var(--cdh-surface-alt, #f7f8fa);
+}
+
+.cdh-table__link {
+    font-weight: 600;
+    color: var(--cdh-text, #1c2430);
+    text-decoration: none;
+}
+
+.cdh-table__link:hover,
+.cdh-table__link:focus-visible {
+    color: var(--cdh-primary, #1f5f8b);
+    text-decoration: underline;
+}
+
+/* Tabular figures so a column of numbers lines up. */
+.cdh-table__primary,
+.cdh-table__numeric {
+    font-variant-numeric: tabular-nums;
+}
+
+/*
+ | Only short codes are held on one line. A document number or a NIT should never
+ | break; a name must, because a company name has no natural length and forcing
+ | it onto one line pushes the whole page into a horizontal scroll.
+ */
+.cdh-table__numeric {
+    white-space: nowrap;
+}
+
+.cdh-table__secondary {
+    display: block;
+    font-size: 0.8125rem;
+    color: var(--cdh-text-muted, #5b6472);
+}
+
+.cdh-table__contact span {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.cdh-table__actions {
+    /* Flex with a gap, not just a right alignment: two link buttons on one line
+       with nothing between them read as a single word, "TransferirCerrar". */
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 1rem;
+    white-space: nowrap;
+}
+
+.cdh-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.cdh-pagination__label {
+    font-size: 0.875rem;
+    color: var(--cdh-text-muted, #5b6472);
+}
+
+/* --- Tabs ------------------------------------------------------------------- */
+
+.cdh-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--cdh-border, #e6e8ec);
+}
+
+.cdh-tab {
+    padding: 0.625rem 1rem;
+    font: inherit;
+    color: var(--cdh-text-muted, #5b6472);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+}
+
+.cdh-tab:hover {
+    color: var(--cdh-text, #1c2430);
+}
+
+.cdh-tab[aria-selected='true'] {
+    color: var(--cdh-primary, #1f5f8b);
+    border-bottom-color: var(--cdh-primary, #1f5f8b);
+    font-weight: 600;
+}
+
+/* --- Record timeline -------------------------------------------------------- */
+
+.cdh-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.cdh-timeline__item {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--cdh-border, #e6e8ec);
+}
+
+.cdh-timeline__item:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.cdh-timeline__action {
+    font-weight: 600;
+}
+
+.cdh-timeline__meta {
+    margin-left: auto;
+    font-size: 0.8125rem;
+    color: var(--cdh-text-muted, #5b6472);
+    white-space: nowrap;
+}
+
+.cdh-timeline__detail {
+    flex-basis: 100%;
+    font-size: 0.8125rem;
+    color: var(--cdh-text-muted, #5b6472);
+}
+
+/* --- Record header ---------------------------------------------------------- */
+
+.cdh-record-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+}
+
+.cdh-record-header__identity {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.cdh-record-header__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    font-size: 0.875rem;
+    color: var(--cdh-text-muted, #5b6472);
+}
+
+/* --- Warnings list ---------------------------------------------------------- */
+
+.cdh-warnings {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.cdh-warning {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    padding: 0.625rem 0.75rem;
+    border-left: 3px solid var(--cdh-border, #e6e8ec);
+    background: var(--cdh-surface-alt, #f7f8fa);
+    border-radius: 0.25rem;
+}
+
+.cdh-warning--error { border-left-color: var(--cdh-danger, #b42318); }
+.cdh-warning--warning { border-left-color: var(--cdh-warning, #b54708); }
+.cdh-warning--notice { border-left-color: var(--cdh-info, #175cd3); }
+
+.cdh-warning__message { font-weight: 500; }
+
+.cdh-warning__suggestion {
+    font-size: 0.8125rem;
+    color: var(--cdh-text-muted, #5b6472);
+}
+
+/* --- Responsive: cards instead of a wide table ------------------------------ */
+
+/*
+ | 991.98px, not 768px: six columns of real content do not fit at 820px, and the
+ | sidebar collapses at that same width, so this is the point where the content
+ | gains the room it needs. Below it each record becomes a card, because a
+ | horizontally scrolling table hides the columns that matter behind a swipe
+ | nobody discovers.
+ */
+
+@media (max-width: 991.98px) {
+    .cdh-filters {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .cdh-filters__field,
+    .cdh-filters__field--grow {
+        min-width: 0;
+        width: 100%;
+        /* On a column flex container the grow basis becomes a HEIGHT, which
+           would stretch the search field into a tall empty box. */
+        flex: 0 0 auto;
+    }
+
+    .cdh-table-wrap {
+        border: none;
+        background: none;
+        overflow-x: visible;
+    }
+
+    .cdh-table thead {
+        /* The column headings become the cell labels, so the header is noise. */
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+
+    .cdh-table,
+    .cdh-table tbody,
+    .cdh-table tr,
+    .cdh-table td {
+        display: block;
+        width: 100%;
+    }
+
+    .cdh-table tr {
+        margin-bottom: 0.75rem;
+        padding: 0.25rem 0.75rem;
+        background: var(--cdh-surface, #fff);
+        border: 1px solid var(--cdh-border, #e6e8ec);
+        border-radius: 0.5rem;
+    }
+
+    .cdh-table td {
+        display: grid;
+        grid-template-columns: minmax(7rem, 34%) 1fr;
+        gap: 0.5rem;
+        align-items: baseline;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid var(--cdh-border, #e6e8ec);
+    }
+
+    .cdh-table td::before {
+        content: attr(data-label);
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--cdh-text-muted, #5b6472);
+    }
+
+    /* The cell is a grid, so a block level badge would span the whole column. */
+    .cdh-table td .cdh-badge {
+        justify-self: start;
+    }
+
+    /* Row actions sit side by side rather than each dropping to its own line. */
+    .cdh-table__actions {
+        justify-content: flex-start;
+        gap: 0.75rem;
+    }
+
+    .cdh-pagination {
+        flex-direction: column;
+        align-items: stretch;
+        text-align: center;
+    }
+
+    .cdh-timeline__meta {
+        margin-left: 0;
+        flex-basis: 100%;
+    }
+}
+
+/* A stat that is also a link. Same card, with the affordance made explicit so it
+   does not read as a decorative variation. */
+.cdh-stat--link {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+    transition: border-color 0.15s ease;
+}
+
+.cdh-stat--link:hover,
+.cdh-stat--link:focus-visible {
+    border-color: var(--cdh-primary, #1f5f8b);
+}

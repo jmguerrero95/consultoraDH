@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Http\Controllers\Api\SettingsController;
+use Illuminate\Contracts\Http\Kernel;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
 
@@ -60,15 +61,51 @@ it('answers through the gate as well as the middleware', function (): void {
 it('reports the permissions of the signed in user without leaking anything else', function (): void {
     $user = userWithRole('Administrator');
 
-    $this->actingAs($user)->getJson('/api/auth/me')
-        ->assertOk()
-        ->assertJsonPath('user.permissions', ['settings.view'])
-        ->assertJsonMissingPath('user.password')
+    $response = $this->actingAs($user)->getJson('/api/auth/me')->assertOk();
+
+    $response->assertJsonMissingPath('user.password')
         ->assertJsonMissingPath('user.remember_token');
+
+    // A02 added its own permissions, so this asserts the user's whole set rather
+    // than the single one that used to be the only one. Both sides are sorted
+    // because the order the interface receives them in is not the contract.
+    $reported = collect($response->json('user.permissions'))->sort()->values()->all();
+    $granted = Permission::query()->pluck('name')->sort()->values()->all();
+
+    expect($reported)->toBe($granted)
+        ->and($granted)->toContain('settings.view', 'clients.view', 'affiliations.view');
 });
 
-it('creates no business permissions ahead of the modules that use them', function (): void {
-    // Only the permission A01 actually enforces exists. Business permissions
-    // arrive with their modules.
-    expect(Permission::query()->pluck('name')->all())->toBe(['settings.view']);
+it('creates no permission ahead of the module that enforces it', function (): void {
+    // Every permission in the catalogue is enforced by a route that exists. A
+    // permission nobody can reach is either a mistake or an invitation to trust
+    // something that was never wired up, and both are worth failing over.
+    $declared = Permission::query()->pluck('name')->all();
+
+    $middleware = collect(app(Kernel::class)
+        ->getGlobalMiddleware())
+        ->merge(collect(app('router')->getRoutes())->flatMap(fn ($route) => $route->gatherMiddleware()));
+
+    $guarded = $middleware
+        ->filter(fn (string $m): bool => str_starts_with($m, 'can:'))
+        ->map(fn (string $m): string => substr($m, 4))
+        ->unique()
+        ->values()
+        ->all();
+
+    // Every guarded permission exists, which is the direction that would fail
+    // closed if somebody typed a permission name wrongly.
+    expect(array_diff($guarded, $declared))->toBe([]);
+
+    // And the catalogue holds nothing that is neither A01's nor A02's.
+    $expected = ['settings.view'];
+    $expected = array_merge($expected, [
+        'clients.view', 'clients.create', 'clients.update', 'clients.change_status',
+        'companies.view', 'companies.create', 'companies.update', 'companies.change_status',
+        'relationships.view', 'relationships.manage',
+        'affiliations.view', 'affiliations.manage',
+        'social_security_entities.view', 'social_security_entities.manage',
+    ]);
+
+    expect($declared)->toEqualCanonicalizing($expected);
 });

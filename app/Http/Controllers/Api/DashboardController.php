@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\DataQuality\PortfolioMetrics;
 use App\Http\Controllers\Controller;
+use Illuminate\Contracts\Auth\Access\Authorizable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -12,14 +14,24 @@ use Illuminate\Support\Facades\Redis;
 use Throwable;
 
 /**
- * A01 dashboard payload.
+ * The dashboard payload: infrastructure health plus the A02 portfolio counts.
  *
  * Reports only facts that are safe to show to a signed in administrator:
- * connectivity and versions. It never exposes credentials, hosts, connection
- * strings, filesystem paths or tokens.
+ * connectivity, versions, and counts computed from the tables. It never exposes
+ * credentials, hosts, connection strings, filesystem paths or tokens.
+ *
+ * The portfolio counts are the honest kind: each is one aggregate query. An empty
+ * database reports zeroes rather than a placeholder, and a role without the
+ * matching view permission gets no portfolio section at all rather than a
+ * section that happens to be empty, because "you cannot see this" and "there is
+ * nothing here" are different statements.
  */
 final class DashboardController extends Controller
 {
+    public function __construct(
+        private readonly PortfolioMetrics $metrics,
+    ) {}
+
     public function __invoke(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -48,7 +60,45 @@ final class DashboardController extends Controller
                 'database' => $this->databaseStatus(),
                 'redis' => $this->redisStatus(),
             ],
+            'portfolio' => $this->portfolioFor($user),
         ]);
+    }
+
+    /**
+     * The A02 counts, for the roles that may see them.
+     *
+     * @return array<string, mixed>
+     */
+    private function portfolioFor(mixed $user): array
+    {
+        $can = $user instanceof Authorizable && method_exists($user, 'can')
+            ? $user
+            : null;
+
+        if ($can === null) {
+            return ['visible' => false];
+        }
+
+        if (! $can->can('clients.view')) {
+            return ['visible' => false];
+        }
+
+        $counts = $this->metrics->counts();
+
+        return [
+            'visible' => true,
+            'counts' => [
+                'active_clients' => $counts['active_clients'],
+                'inactive_clients' => $counts['inactive_clients'],
+                'active_companies' => $counts['active_companies'],
+                'active_relationships' => $counts['active_relationships'],
+                'active_affiliations' => $counts['active_affiliations'],
+                'catalogue_entities' => $counts['catalogue_entities'],
+                'data_quality_issues' => $counts['data_quality_issues'],
+                'data_quality_warnings' => $counts['data_quality_warnings'],
+            ],
+            'multiple_companies' => $this->metrics->clientsWithMultipleCompanies(),
+        ];
     }
 
     /**

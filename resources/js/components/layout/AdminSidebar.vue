@@ -20,8 +20,6 @@ const route = useRoute();
 // has no hidden dependency on how the application was bootstrapped.
 const router = useRouter();
 
-const SETTINGS_PERMISSION = 'settings.view';
-
 const appVersion = computed(
     () => document.querySelector<HTMLMetaElement>('meta[name="app-version"]')?.content ?? '0.0.0',
 );
@@ -45,7 +43,11 @@ const entries = computed(() => {
 
     return children
         .filter((record) => record.meta.nav !== undefined)
-        .filter((record) => (record.name === 'settings' ? auth.can(SETTINGS_PERMISSION) : true))
+        // Every entry declares the permission it needs, so a new screen appears
+        // in the menu by adding its route record and nothing else.
+        .filter((record) =>
+            record.meta.permission === undefined ? true : auth.can(record.meta.permission),
+        )
         .sort((a, b) => (a.meta.nav?.order ?? 0) - (b.meta.nav?.order ?? 0));
 });
 

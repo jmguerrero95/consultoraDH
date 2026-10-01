@@ -46,6 +46,9 @@
 *.zip
 
 # --- Test and analysis artefacts -------------------------------------------
+# Screenshots taken while inspecting the interface are local evidence, not
+# project files, and they contain real screen contents.
+/tests/e2e/.artifacts
 /.phpunit.result.cache
 /.phpunit.cache
 /coverage

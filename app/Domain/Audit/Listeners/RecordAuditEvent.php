@@ -6,6 +6,7 @@ namespace App\Domain\Audit\Listeners;
 
 use App\Domain\Audit\AuditableEvent;
 use App\Domain\Audit\AuditRecorder;
+use App\Domain\Audit\SubjectAware;
 
 /**
  * Persists every auditable domain event.
@@ -25,6 +26,9 @@ final class RecordAuditEvent
             $event->auditAction(),
             $event->auditActor(),
             $event->auditMetadata(),
+            // Null unless the event says which business record it concerns, so
+            // the security events of A01 keep behaving exactly as before.
+            subject: $event instanceof SubjectAware ? $event->auditSubject() : null,
         );
     }
 }
