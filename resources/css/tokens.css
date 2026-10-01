@@ -1,0 +1,140 @@
+/* ==========================================================================
+   Consultora DH - design tokens
+   --------------------------------------------------------------------------
+   Single source of truth for the visual identity. Components must reference
+   these variables and never hardcode a colour, radius or shadow, so that the
+   brand can be refined in one place.
+   ========================================================================== */
+
+:root {
+    /* --- Brand palette ------------------------------------------------- */
+    /* A restrained navy/teal: trustworthy, professional, and legible in long
+       administrative sessions. */
+    --cdh-primary: #123a5e;
+    --cdh-primary-hover: #0d2c48;
+    --cdh-primary-active: #0a2238;
+    --cdh-primary-subtle: #e8f0f7;
+    --cdh-primary-border: #c3d7e8;
+
+    --cdh-accent: #0f766e;
+    --cdh-accent-hover: #0b5f59;
+
+    --cdh-secondary: #4a5a6a;
+    --cdh-secondary-hover: #3d4b58;
+
+    /* --- Neutrals ------------------------------------------------------- */
+    --cdh-background: #f4f6f9;
+    --cdh-surface: #ffffff;
+    --cdh-surface-muted: #f8fafc;
+    --cdh-surface-sunken: #eef2f6;
+
+    --cdh-border: #dde3ea;
+    --cdh-border-strong: #c3ccd6;
+
+    --cdh-text: #1c2833;
+    --cdh-text-muted: #5b6b7a;
+    --cdh-text-subtle: #8494a3;
+    --cdh-text-inverse: #ffffff;
+
+    /* --- Status --------------------------------------------------------- */
+    --cdh-success: #157347;
+    --cdh-success-subtle: #e6f4ec;
+    --cdh-warning: #9a6700;
+    --cdh-warning-subtle: #fdf6e3;
+    --cdh-danger: #b42318;
+    --cdh-danger-hover: #96201a;
+    --cdh-danger-subtle: #fdecea;
+    --cdh-info: #0b6b9a;
+    --cdh-info-subtle: #e7f2f8;
+
+    /* --- Typography ----------------------------------------------------- */
+    --cdh-font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system,
+        'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --cdh-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+        'Liberation Mono', monospace;
+
+    --cdh-font-size-xs: 0.75rem;
+    --cdh-font-size-sm: 0.8125rem;
+    --cdh-font-size-base: 0.875rem;
+    --cdh-font-size-md: 0.9375rem;
+    --cdh-font-size-lg: 1.0625rem;
+    --cdh-font-size-xl: 1.25rem;
+    --cdh-font-size-2xl: 1.5rem;
+
+    --cdh-line-height-tight: 1.25;
+    --cdh-line-height: 1.5;
+
+    --cdh-font-weight-normal: 400;
+    --cdh-font-weight-medium: 500;
+    --cdh-font-weight-semibold: 600;
+
+    /* --- Spacing (4px base) --------------------------------------------- */
+    --cdh-space-0: 0;
+    --cdh-space-1: 0.25rem;
+    --cdh-space-2: 0.5rem;
+    --cdh-space-3: 0.75rem;
+    --cdh-space-4: 1rem;
+    --cdh-space-5: 1.25rem;
+    --cdh-space-6: 1.5rem;
+    --cdh-space-8: 2rem;
+    --cdh-space-10: 2.5rem;
+    --cdh-space-12: 3rem;
+
+    /* --- Radius ---------------------------------------------------------- */
+    --cdh-radius-sm: 3px;
+    --cdh-radius: 5px;
+    --cdh-radius-lg: 8px;
+    --cdh-radius-pill: 999px;
+
+    /* --- Shadows (subtle: an admin tool, not a landing page) ------------- */
+    --cdh-shadow-xs: 0 1px 2px rgba(16, 32, 48, 0.06);
+    --cdh-shadow-sm: 0 1px 3px rgba(16, 32, 48, 0.08), 0 1px 2px rgba(16, 32, 48, 0.04);
+    --cdh-shadow: 0 2px 6px rgba(16, 32, 48, 0.08), 0 1px 2px rgba(16, 32, 48, 0.04);
+    --cdh-shadow-lg: 0 8px 24px rgba(16, 32, 48, 0.12);
+
+    /* --- Layout ---------------------------------------------------------- */
+    --cdh-sidebar-width: 15.5rem;
+    --cdh-topbar-height: 3.5rem;
+    --cdh-content-max-width: 84rem;
+
+    /* --- Focus ----------------------------------------------------------- */
+    --cdh-focus-ring: 0 0 0 3px rgba(18, 58, 94, 0.35);
+    --cdh-focus-ring-danger: 0 0 0 3px rgba(180, 35, 24, 0.3);
+
+    /* --- Motion ---------------------------------------------------------- */
+    --cdh-transition-fast: 120ms ease-in-out;
+    --cdh-transition: 180ms ease-in-out;
+
+    /* --- Bootstrap bridge -------------------------------------------------
+       Maps the tokens above onto Bootstrap's own custom properties, so the
+       framework components inherit the identity without `!important` fights.
+       ------------------------------------------------------------------- */
+    --bs-primary: var(--cdh-primary);
+    --bs-primary-rgb: 18, 58, 94;
+    --bs-secondary: var(--cdh-secondary);
+    --bs-secondary-rgb: 74, 90, 106;
+    --bs-success: var(--cdh-success);
+    --bs-success-rgb: 21, 115, 71;
+    --bs-danger: var(--cdh-danger);
+    --bs-danger-rgb: 180, 35, 24;
+    --bs-warning: var(--cdh-warning);
+    --bs-warning-rgb: 154, 103, 0;
+    --bs-info: var(--cdh-info);
+    --bs-info-rgb: 11, 107, 154;
+    --bs-body-bg: var(--cdh-background);
+    --bs-body-color: var(--cdh-text);
+    --bs-border-color: var(--cdh-border);
+    --bs-border-radius: var(--cdh-radius);
+    --bs-border-radius-sm: var(--cdh-radius-sm);
+    --bs-border-radius-lg: var(--cdh-radius-lg);
+    --bs-font-sans-serif: var(--cdh-font-sans);
+    --bs-body-font-size: var(--cdh-font-size-base);
+    --bs-emphasis-color: var(--cdh-text);
+    --bs-secondary-color: var(--cdh-text-muted);
+    --bs-link-color: var(--cdh-primary);
+    --bs-link-hover-color: var(--cdh-primary-hover);
+    --bs-emphasis-color-rgb: 28, 40, 51;
+    --bs-secondary-color-rgb: 91, 107, 122;
+
+    color-scheme: light;
+}

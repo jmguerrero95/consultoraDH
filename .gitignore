@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# Consultora DH - ignore rules
+#
+# Secrets, dependencies, build output, caches and test artefacts must never
+# reach the repository.
+# ---------------------------------------------------------------------------
+
+# --- Secrets and local configuration ---------------------------------------
+.env
+.env.backup
+.env.production
+.env.*.local
+/auth.json
+/storage/*.key
+
+# --- Dependencies ----------------------------------------------------------
+/vendor
+/node_modules
+
+# --- Compiled assets -------------------------------------------------------
+# Both are generated: `public/hot` while the Vite development server runs,
+# `public/build` for a production build.
+/public/build
+/public/hot
+/public/storage
+
+# --- Logs and runtime state ------------------------------------------------
+*.log
+/storage/pail
+/storage/*.sqlite
+
+# Runtime state is also ignored by the .gitignore inside each directory, but
+# those files hold real user sessions, so the rules are repeated here: a
+# session cookie store must never be committed even if the nested file is
+# removed or a directory is created by hand.
+/storage/framework/cache/*
+/storage/framework/sessions/*
+/storage/framework/testing/*
+/storage/framework/views/*
+/storage/app/private/*
+/storage/app/public/*
+
+# --- Local archives ----------------------------------------------------------
+# A full project snapshot (including node_modules and build output) must never
+# enter the repository.
+*.zip
+
+# --- Test and analysis artefacts -------------------------------------------
+/.phpunit.result.cache
+/.phpunit.cache
+/coverage
+/playwright-report
+/blob-report
+/test-results
+/playwright/.cache
+
+# --- Editor and operating system -------------------------------------------
+.DS_Store
+Thumbs.db
+/.idea
+/.vscode
+/.zed
+/.nova
+/.cursor/
+/.codex
+/.phpactor.json
+_ide_helper.php
+Homestead.json
+Homestead.yaml
