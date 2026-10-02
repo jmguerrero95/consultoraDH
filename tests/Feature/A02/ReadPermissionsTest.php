@@ -9,6 +9,7 @@ use App\Models\ClientAffiliation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
 use App\Models\SocialSecurityEntity;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Read permissions that are real.
@@ -772,4 +773,136 @@ it('lets a full reader see everything, so the sweep above is not passing on empt
             ->assertOk()
             ->json('company'))
         ->toHaveKey('total_clients_count');
+});
+
+// --- The filter must not answer whether a company exists --------------------
+
+it('refuses the company filter to a role without relationships.view, existing id or not', function (): void {
+    $client = portfolioForPermissions();
+    $existing = $client->companyAssignments->first()->company_id;
+
+    // An identifier that cannot exist. The whole point is that the two requests are
+    // refused identically: if only one of them were a 403, the other being a 422
+    // would tell the caller which companies are real, through a filter they are not
+    // allowed to use at all.
+    $absent = $existing + 1_000_000;
+
+    foreach ([$existing, $absent] as $companyId) {
+        $this->actingAs(userWithPermissions(['clients.view']))
+            ->getJson("/api/clients?company_id={$companyId}")
+            ->assertForbidden();
+    }
+});
+
+it('refuses the filter even when the identifier is not a number', function (): void {
+    // Validation would have rejected this with a 422 on the integer rule. It must not
+    // get that far, because "not a number" and "a number that does not exist" would
+    // then be two different answers.
+    $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson('/api/clients?company_id=not-a-number')
+        ->assertForbidden();
+});
+
+it('does not query the company table while refusing the filter', function (): void {
+    // The status code is the visible half. This is the half that makes it a real
+    // guarantee rather than a coincidence of ordering: nothing is looked up, so there
+    // is nothing to infer from a timing or an error.
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        if (str_contains(strtolower($query->sql), 'from "companies"')) {
+            $queries[] = $query->sql;
+        }
+    });
+
+    $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson('/api/clients?company_id=987654321')
+        ->assertForbidden();
+
+    expect($queries)->toBeEmpty();
+});
+
+it('leaves a blank filter as ordinary access', function (): void {
+    // An empty select is not a filter, and asking for the whole list is not asking
+    // about anybody's employment.
+    foreach (['', 'company_id='] as $query) {
+        $this->actingAs(userWithPermissions(['clients.view']))
+            ->getJson("/api/clients?{$query}")
+            ->assertOk();
+    }
+});
+
+it('validates the filter normally for a role that may read relationships', function (): void {
+    $client = portfolioForPermissions();
+    $existing = $client->companyAssignments->first()->company_id;
+    $absent = $existing + 1_000_000;
+
+    // Now the two answers differ, and legitimately: this role is allowed to know
+    // which companies exist, so `exists` is an answer it is entitled to.
+    $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson("/api/clients?company_id={$existing}")
+        ->assertOk()
+        ->assertJsonPath('pagination.total', 1);
+
+    $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson("/api/clients?company_id={$absent}")
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('company_id');
+});
+
+// --- The queries behind a response it is going to discard ------------------
+
+it('does not load the relationship rows a clients-only role cannot see', function (): void {
+    portfolioForPermissions();
+
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        $queries[] = $query->sql;
+    });
+
+    $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson('/api/clients')
+        ->assertOk()
+        ->assertJsonMissingPath('clients.0.companies');
+
+    // The list has to load the clients. It has no reason to touch the assignments,
+    // and the response contains none of them.
+    expect(collect($queries)->filter(fn ($sql): bool => str_contains($sql, 'client_company_assignments')))->toBeEmpty();
+});
+
+it('does not count affiliations for a role that may not read them', function (): void {
+    portfolioForPermissions();
+
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        $queries[] = $query->sql;
+    });
+
+    $this->actingAs(userWithPermissions(['social_security_entities.view']))
+        ->getJson('/api/social-security-entities')
+        ->assertOk()
+        ->assertJsonMissingPath('entities.0.affiliations_count');
+
+    expect(collect($queries)->filter(fn ($sql): bool => str_contains($sql, 'from "client_affiliations"')))->toBeEmpty();
+});
+
+it('still loads them for a role that may', function (): void {
+    portfolioForPermissions();
+
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        $queries[] = $query->sql;
+    });
+
+    $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson('/api/clients')
+        ->assertOk()
+        ->assertJsonStructure(['clients' => [['companies']]]);
+
+    // The other half: the guard has not removed the data from the roles that do get
+    // it, which is what would make the previous two tests pass for the wrong reason.
+    expect(collect($queries)->filter(fn ($sql): bool => str_contains($sql, 'client_company_assignments')))->not->toBeEmpty();
 });

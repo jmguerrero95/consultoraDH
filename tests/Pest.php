@@ -32,6 +32,23 @@ pest()->extend(TestCase::class)->in('Unit');
 | configuration says. Losing a developer's local data to a test run would be
 | far worse than a failing build.
 |
+| ## What this does and does not protect
+|
+| This runs inside `beforeEach`, so it only executes when **Pest** starts a test.
+| It is a guard on the test suite and nothing else.
+|
+| It does **not** protect against an Artisan command typed by hand. `php artisan
+| migrate:fresh --env=testing` never passes through here, and `--env=testing`
+| does not select the testing connection in this project: there is no
+| `.env.testing`, so Laravel reads `.env`, the default connection stays `pgsql`
+| and the command runs against the development database. That has already
+| destroyed local data here twice.
+|
+| The destructive reset of the test database therefore does not live here. It is
+| `scripts/reset-test-db.sh`, which checks the *resolved* configuration and the
+| database the connection actually reports before it migrates anything. Use that
+| script, never `migrate:fresh --env=testing`.
+|
 */
 
 beforeEach(function (): void {

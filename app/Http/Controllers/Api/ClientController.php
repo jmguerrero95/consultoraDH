@@ -75,10 +75,18 @@ final class ClientController extends Controller
         $status = $request->statusFilter();
         $companyId = $request->companyFilter();
 
-        $query = Client::query()
-            // The list shows the open relationships on each row, so both sides are
-            // loaded in two queries rather than one per client.
-            ->with(['companyAssignments' => fn ($q) => $q->whereNull('ended_on')->with('company')]);
+        $query = Client::query();
+
+        // The list shows the open relationships on each row, so both sides are loaded
+        // in two queries rather than one per client.
+        //
+        // Only when the caller may read them. `ClientListResource` omits the keys
+        // entirely without `relationships.view`, so for that role these two queries
+        // would have produced data the response is guaranteed to discard: the cost of
+        // a page of joins paid for an answer that is not in the payload.
+        if ($request->user()?->can('relationships.view')) {
+            $query->with(['companyAssignments' => fn ($q) => $q->whereNull('ended_on')->with('company')]);
+        }
 
         if ($pattern !== null) {
             // People type a document the way it is written, with separators, and
@@ -362,6 +370,9 @@ final class ClientController extends Controller
                 'company_id' => $e->company->id,
                 'open_assignment_id' => $e->openAssignmentId,
             ], 422);
+        } catch (QueryException $e) {
+            return $this->duplicateOpenRelationshipFromIndex($e, $company)
+                ?? throw $e;
         } catch (\DomainException $e) {
             return response()->json([
                 'message' => $e->getMessage(),
@@ -423,6 +434,9 @@ final class ClientController extends Controller
                 'company_id' => $e->company->id,
                 'open_assignment_id' => $e->openAssignmentId,
             ], 422);
+        } catch (QueryException $e) {
+            return $this->duplicateOpenRelationshipFromIndex($e, $to)
+                ?? throw $e;
         } catch (\DomainException $e) {
             return response()->json([
                 'message' => $e->getMessage(),
@@ -658,5 +672,38 @@ final class ClientController extends Controller
         }
 
         return str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], trim($value));
+    }
+
+    /**
+     * The database refused a second open relationship for the same client and company.
+     *
+     * The domain refuses this first, so reaching here means something got past it:
+     * two concurrent requests, both of which read nothing open, both of which
+     * inserted. The partial unique index is the authority that holds the line, and
+     * this turns its violation into the same answer the domain gives, so the two
+     * paths a caller can take do not produce two different experiences.
+     *
+     * Without this the caller receives a 500 for something the domain already
+     * described perfectly well a moment earlier.
+     *
+     * Only this one index is translated. `UniqueViolation::isFor()` matches the
+     * constraint name, so an unrelated violation is re-thrown untouched rather than
+     * being dressed up as a duplicate the caller did not cause.
+     */
+    private function duplicateOpenRelationshipFromIndex(QueryException $e, Company $company): ?JsonResponse
+    {
+        if (! UniqueViolation::isFor($e, SchemaConstraint::ASSIGNMENT_OPEN_PER_COMPANY)) {
+            return null;
+        }
+
+        return response()->json([
+            'message' => sprintf(
+                'El cliente ya tiene una relación abierta con esta empresa (%s). '
+                .'No se pueden abrir dos relaciones con la misma empresa al mismo tiempo.',
+                $company->displayName(),
+            ),
+            'code' => 'duplicate_open_relationship',
+            'company_id' => $company->id,
+        ], 422);
     }
 }

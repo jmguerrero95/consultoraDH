@@ -2,6 +2,9 @@
 
 declare(strict_types=1);
 
+use App\Domain\Companies\Actions\CreateCompany;
+use App\Domain\Companies\Actions\UpdateCompany;
+use App\Domain\Companies\InvalidTaxId;
 use App\Models\AuditEvent;
 use App\Models\Company;
 
@@ -280,4 +283,127 @@ it('behaves the same way for a company that does not exist yet', function (): vo
 
     expect($existing->fresh()->tax_id)->toBe('800111222')
         ->and($existing->fresh()->verification_digit)->toBe('2');
+});
+
+// --- The domain refuses on its own, not only through the form request -------
+
+it('refuses a malformed tax id when the domain action is called directly', function (string $value): void {
+    // No form request, no validation, no HTTP. This is how the importer, the
+    // assistant and a maintenance command will reach the same code, and the point
+    // is that the refusal does not depend on the caller having checked first.
+    expect(fn () => app(CreateCompany::class)->execute(
+        ['legal_name' => 'Empresa directa S.A.S.', 'tax_id' => $value],
+        actingAsRole(),
+    ))->toThrow(InvalidTaxId::class);
+
+    // Nothing was written, and certainly not a repaired version of the input.
+    expect(Company::query()->count())->toBe(0);
+})->with([
+    'leading hyphen' => '-900123456-3',
+    'trailing hyphen' => '900123456-3-',
+    'two leading hyphens' => '--900123456-3',
+    'trailing double hyphen' => '900123456--',
+    'double hyphen inside' => '900123-456-3',
+    'a padded digit' => '900123456-03',
+    'letters' => 'ABC123',
+]);
+
+it('refuses a malformed tax id on update too, through the domain action', function (): void {
+    $company = companyWithDigit('800111222', '2');
+
+    expect(fn () => app(UpdateCompany::class)->execute(
+        $company,
+        ['tax_id' => '800111222--'],
+        actingAsRole(),
+    ))->toThrow(InvalidTaxId::class);
+
+    // The stored NIT and digit are what they were.
+    expect($company->fresh()->tax_id)->toBe('800111222')
+        ->and($company->fresh()->verification_digit)->toBe('2');
+});
+
+it('never turns a malformed value into a different tax id', function (): void {
+    // The failure mode this replaces: `-900123456-3` repaired into `900123456` with a
+    // digit, stored, and reported as accepted. Every one of these would have become a
+    // valid, different NIT under the tolerant parser.
+    foreach (['-900123456-3', '900123456-3-', '900123456--', '--900123456-3'] as $value) {
+        try {
+            app(CreateCompany::class)->execute(
+                ['legal_name' => 'Reparada S.A.S.', 'tax_id' => $value],
+                actingAsRole(),
+            );
+        } catch (InvalidTaxId) {
+            // Expected.
+        }
+    }
+
+    expect(Company::query()->pluck('tax_id')->filter()->all())->toBe([]);
+});
+
+it('accepts the spellings the strict parser describes when called directly', function (): void {
+    $company = app(CreateCompany::class)->execute(
+        ['legal_name' => 'Directa S.A.S.', 'tax_id' => '900.123.456-3'],
+        actingAsRole(),
+    );
+
+    expect($company->tax_id)->toBe('900123456')
+        ->and($company->verification_digit)->toBe('3');
+});
+
+// --- A verification digit with no NIT ----------------------------------------
+
+it('refuses a verification digit without a tax id on create', function (): void {
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload([
+            'tax_id' => null,
+            'verification_digit' => '3',
+        ]))
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'invalid_tax_id')
+        ->assertJsonValidationErrors('tax_id');
+
+    // The digit was never silently dropped on the way to a success response.
+    expect(Company::query()->count())->toBe(0);
+});
+
+it('refuses an orphan digit through the domain action as well', function (): void {
+    expect(fn () => app(CreateCompany::class)->execute(
+        ['legal_name' => 'Huerfana S.A.S.', 'verification_digit' => '3'],
+        actingAsRole(),
+    ))->toThrow(InvalidTaxId::class, 'dígito de verificación');
+
+    expect(Company::query()->count())->toBe(0);
+});
+
+it('accepts a company with no tax id at all', function (): void {
+    // The distinction that matters: no NIT and no digit is an honest record of an
+    // unknown tax identity, which the data quality layer reports. A digit without a
+    // NIT is not that.
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload(['tax_id' => null]))
+        ->assertCreated()
+        ->assertJsonPath('company.tax_id', null)
+        ->assertJsonPath('company.verification_digit', null);
+});
+
+it('still allows a digit alone on update, because that is the correction it exists for', function (): void {
+    $company = companyWithDigit('800111222', '2');
+
+    // The company already has a NIT, so the digit being sent alone is the whole point
+    // of the operation: correcting the digit recorded against it.
+    $this->actingAs(actingAsRole())
+        ->patchJson("/api/companies/{$company->id}", ['verification_digit' => '7'])
+        ->assertOk()
+        ->assertJsonPath('company.tax_id', '800111222')
+        ->assertJsonPath('company.verification_digit', '7');
+});
+
+it('still allows removing the digit on update', function (): void {
+    $company = companyWithDigit('800111222', '2');
+
+    $this->actingAs(actingAsRole())
+        ->patchJson("/api/companies/{$company->id}", ['verification_digit' => null])
+        ->assertOk()
+        ->assertJsonPath('company.tax_id', '800111222')
+        ->assertJsonPath('company.verification_digit', null);
 });

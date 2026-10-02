@@ -8,10 +8,12 @@ use App\Domain\Affiliations\ParallelRelationshipNotAllowed;
 use App\Domain\DataQuality\DataQualityCode;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\DataQuality\DataQualitySeverity;
+use App\Http\Controllers\Api\ClientController;
 use App\Models\AuditEvent;
 use App\Models\Client;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
+use App\Support\Database\SchemaConstraint;
 use Illuminate\Database\QueryException;
 
 /**
@@ -1304,4 +1306,108 @@ it('answers the same way on the transfer endpoint', function (): void {
             ->where('client_id', $client->id)
             ->whereNull('ended_on')
             ->count())->toBe(2);
+});
+
+// --- The index is the authority, and it speaks the same language -----------
+
+/**
+ * Ask the controller what it makes of a database error.
+ *
+ * Two concurrent requests really cannot be simulated on one connection, and this is
+ * the decision that turns the index into an answer rather than a 500. It is private
+ * because nothing else has any business calling it, so it is reached by reflection
+ * rather than by widening the controller's surface for the sake of a test.
+ */
+function translationFor(QueryException $e, Company $company): mixed
+{
+    // Resolved from the container, not constructed by hand: the controller takes six
+    // collaborators, and building one here would be a second, divergent wiring.
+    $controller = app(ClientController::class);
+
+    $method = new ReflectionMethod($controller, 'duplicateOpenRelationshipFromIndex');
+    $method->setAccessible(true);
+
+    return $method->invoke($controller, $e, $company);
+}
+
+it('translates a violation of the open relationship index into the domain answer', function (): void {
+    // The domain refuses a duplicate first, so on a single connection the index can
+    // only be provoked by writing the row directly. That is exactly the shape of the
+    // race it exists for: two requests that both read nothing open and both insert.
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+
+    ClientCompanyAssignment::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => $company->id,
+        'ended_on' => null,
+    ]);
+
+    $refused = null;
+
+    $this->withoutExceptionHandling();
+
+    try {
+        ClientCompanyAssignment::query()->create([
+            'client_id' => $client->id,
+            'company_id' => $company->id,
+            'started_on' => '2024-01-01',
+            'status' => 'active',
+        ]);
+    } catch (QueryException $e) {
+        $refused = $e;
+    }
+
+    expect($refused)->toBeInstanceOf(QueryException::class)
+        ->and($refused->getMessage())->toContain(SchemaConstraint::ASSIGNMENT_OPEN_PER_COMPANY);
+
+    $response = translationFor($refused, $company);
+
+    // The same status and the same code the domain path produces, so a caller cannot
+    // tell which of the two caught it.
+    expect($response)->not->toBeNull()
+        ->and($response->getStatusCode())->toBe(422)
+        ->and(json_decode($response->getContent(), true)['code'])->toBe('duplicate_open_relationship')
+        ->and(json_decode($response->getContent(), true)['company_id'])->toBe($company->id);
+});
+
+it('leaves an unrelated database error alone', function (): void {
+    $company = Company::factory()->create();
+
+    // A different constraint. Dressing this up as a duplicate would tell the caller
+    // their duplicate was handled while the real problem was untouched, so the
+    // translation has to decline.
+    $unrelated = new QueryException(
+        'pgsql',
+        'insert into "client_company_assignments" ("client_id") values ($1)',
+        [],
+        new PDOException('SQLSTATE[23503]: Foreign key violation: client_company_assignments_client_id_foreign'),
+    );
+
+    expect(translationFor($unrelated, $company))->toBeNull();
+});
+
+it('still refuses a duplicate through the endpoint, whatever caught it', function (): void {
+    // The end of the chain, through HTTP: a duplicate is a 422 with a code the caller
+    // can branch on, never a 500.
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", [
+            'company_id' => $company->id,
+            'started_on' => '2024-01-01',
+            'resolution' => ManageClientCompanies::RESOLUTION_ONLY_IF_NONE,
+        ])
+        ->assertCreated();
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", [
+            'company_id' => $company->id,
+            'started_on' => '2024-06-01',
+            'resolution' => ManageClientCompanies::RESOLUTION_PARALLEL,
+            'parallel_reason' => 'Intento duplicado.',
+        ])
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'duplicate_open_relationship');
 });

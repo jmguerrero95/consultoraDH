@@ -110,14 +110,27 @@ final class ManageAffiliations
             if ($current !== null && $closeCurrent) {
                 $endedOn = $closeCurrentOn ?? $startedOn ?? new \DateTimeImmutable('today');
 
-                if ($current->started_on !== null
-                    && $endedOn->format('Y-m-d') < $current->started_on->format('Y-m-d')) {
+                // The row is locked and re-read, and every decision comes from that
+                // copy. `$current` was read under the client lock a moment ago, so it
+                // is already fresh; the lock on the row itself is what keeps another
+                // operation from closing it between the check and the write, and what
+                // makes a replacement refuse a row that somebody else closed rather
+                // than rewrite its closing date.
+                $locked = $this->locked($current);
+
+                if (! $locked->isActive()) {
+                    throw new DomainException(
+                        'La afiliación que se iba a reemplazar ya no está abierta: '
+                        .'cerrarla de nuevo reescribiría una fecha de cierre ya registrada.'
+                    );
+                }
+
+                if ($locked->started_on !== null
+                    && $endedOn->format('Y-m-d') < $locked->started_on->format('Y-m-d')) {
                     throw new DomainException(
                         'La fecha de cierre no puede ser anterior al inicio de la afiliación actual.'
                     );
                 }
-
-                $locked = $this->locked($current);
 
                 $locked->forceFill(['ended_on' => $endedOn->format('Y-m-d')])->save();
 
@@ -237,7 +250,22 @@ final class ManageAffiliations
     }
 
     /**
-     * Close an open affiliation, keeping the row.
+     * Close an open affiliation on a given date, keeping the row.
+     *
+     * The row is closed; nothing is deleted and nothing is overwritten. That is why
+     * the decision has to be taken from the row read under its own lock and not from
+     * the instance the caller was handed: a copy taken while the row was open says
+     * `ended_on = NULL`, and writing to it after somebody else recorded a real
+     * closing date replaced that date with this one. The history stopped being a
+     * record of what happened and became a record of whichever request arrived last.
+     *
+     * The order is the documented one: client, then the history row. The client lock
+     * is taken first so that every affiliation write for one client serialises, so
+     * `create`, `changeEntity` and `close` cannot interleave over the same rows.
+     *
+     * The date is validated against the locked row as well, for the same reason: an
+     * end date before a start date recorded by a later operation is not a fact about
+     * the past, it is a contradiction.
      */
     public function close(
         ClientAffiliation $affiliation,
@@ -245,24 +273,29 @@ final class ManageAffiliations
         \DateTimeInterface $endedOn,
         string $reason = 'Cierre manual',
     ): ClientAffiliation {
-        if (! $affiliation->isActive()) {
-            throw new DomainException('La afiliación ya estaba cerrada.');
-        }
+        return DB::transaction(function () use ($affiliation, $actor, $endedOn, $reason): ClientAffiliation {
+            $this->lockClient($affiliation->client);
 
-        if ($affiliation->started_on !== null
-            && $endedOn->format('Y-m-d') < $affiliation->started_on->format('Y-m-d')) {
-            throw new DomainException('La fecha de cierre no puede ser anterior al inicio de la afiliación.');
-        }
-
-        DB::transaction(function () use ($affiliation, $actor, $endedOn, $reason): void {
             $locked = $this->locked($affiliation);
+
+            // Read under the lock, which is the whole point. The caller's copy may
+            // have been taken before this transaction waited, and its answer to
+            // "is this still open?" is not evidence.
+            if (! $locked->isActive()) {
+                throw new DomainException('La afiliación ya estaba cerrada.');
+            }
+
+            if ($locked->started_on !== null
+                && $endedOn->format('Y-m-d') < $locked->started_on->format('Y-m-d')) {
+                throw new DomainException('La fecha de cierre no puede ser anterior al inicio de la afiliación.');
+            }
 
             $locked->forceFill(['ended_on' => $endedOn->format('Y-m-d')])->save();
 
             event(new AffiliationClosed($locked->refresh(), $actor, $reason));
-        });
 
-        return $affiliation->refresh();
+            return $locked->refresh();
+        });
     }
 
     /**

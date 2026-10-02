@@ -9,6 +9,7 @@ use App\Domain\Companies\Actions\CreateCompany;
 use App\Domain\Companies\Actions\SetCompanyStatus;
 use App\Domain\Companies\Actions\UpdateCompany;
 use App\Domain\Companies\ConflictingVerificationDigit;
+use App\Domain\Companies\InvalidTaxId;
 use App\Domain\Companies\TaxId;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\Shared\RecordStatus;
@@ -111,6 +112,8 @@ final class CompanyController extends Controller
     {
         try {
             $company = $this->createCompany->execute($request->validated(), $request->user());
+        } catch (InvalidTaxId $e) {
+            return $this->invalidTaxIdResponse($e);
         } catch (ConflictingVerificationDigit $e) {
             // The same refusal the update path makes. Two answers to the same
             // question in one request is not something this system decides for the
@@ -150,15 +153,18 @@ final class CompanyController extends Controller
         $maySeeClients = (bool) ($request->user()?->can('clients.view'))
             && (bool) ($request->user()?->can('relationships.view'));
 
-        $company->load([
-            'assignments' => fn ($q) => $q->with('client')->orderByDesc('started_on'),
-        ]);
-
-        // The counts are part of the record the resource describes, so they are
-        // loaded here too rather than left null on a detail response that otherwise
-        // carries them. And they are workforce information, so they are loaded only
-        // for a viewer who may read relationships.
+        // Every assignment row, with the client behind it, exists only to fill the
+        // `clients` section. Loaded only when that section will be sent: for any other
+        // role this is a join over the whole employment history of the company, and
+        // the response discards all of it.
         if ($maySeeClients) {
+            $company->load([
+                'assignments' => fn ($q) => $q->with('client')->orderByDesc('started_on'),
+            ]);
+
+            // The counts are part of the record the resource describes, so they are
+            // loaded here too rather than left null on a detail response that
+            // otherwise carries them.
             $company->loadCount([
                 'assignments as total_clients_count',
                 'activeAssignments as active_clients_count',
@@ -263,6 +269,25 @@ final class CompanyController extends Controller
             'code' => 'conflicting_verification_digit',
             'errors' => [
                 'verification_digit' => [$e->getMessage()],
+            ],
+        ], 422);
+    }
+
+    /**
+     * A NIT that is not one.
+     *
+     * The form request already refuses a malformed NIT with a validation message, so
+     * this only fires for a value that arrived another way. It answers 422 with the
+     * same shape, because from the caller's point of view it is the same problem and
+     * there is nothing to be gained by answering it differently.
+     */
+    private function invalidTaxIdResponse(InvalidTaxId $e): JsonResponse
+    {
+        return response()->json([
+            'message' => $e->getMessage(),
+            'code' => 'invalid_tax_id',
+            'errors' => [
+                'tax_id' => [$e->getMessage()],
             ],
         ], 422);
     }

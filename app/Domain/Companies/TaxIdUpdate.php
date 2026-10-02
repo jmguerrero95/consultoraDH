@@ -89,13 +89,30 @@ final class TaxIdUpdate
     /**
      * The digit written inside the number, if there is one.
      */
+    /**
+     * The digit written inside a NIT, for an update that carries one.
+     *
+     * `TaxIdSyntax::parse()` and not `TaxId::split()`. This reads a value that is
+     * about to be written, and the tolerant parser turns `900123456--` into the digit
+     * of a NIT nobody sent. The caller has already validated the value, so the strict
+     * parser is expected to succeed; `InvalidTaxId` is what happens if it does not,
+     * rather than a fallback that quietly accepts a repaired value.
+     *
+     * @throws InvalidTaxId
+     */
     private static function digitInside(mixed $raw): ?string
     {
         if (! is_string($raw) || trim($raw) === '') {
             return null;
         }
 
-        return TaxId::split($raw)['verification_digit'];
+        $parts = TaxIdSyntax::parse(trim($raw));
+
+        if ($parts === null) {
+            throw InvalidTaxId::malformed(trim($raw));
+        }
+
+        return $parts['verification_digit'];
     }
 
     /**

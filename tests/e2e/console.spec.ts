@@ -28,6 +28,16 @@ import { emailField, passwordField } from './support/forms';
 const email = process.env.E2E_EMAIL;
 const password = process.env.E2E_PASSWORD;
 
+/**
+ * The run identifier, shared with the other specs.
+ *
+ * Every record a run creates carries it, and `consultora-dh:e2e-cleanup` finds the
+ * run's records by exactly this stamp. A record created here without it would stay
+ * in the development database for ever, because nothing would recognise it as
+ * belonging to a run.
+ */
+const stamp = process.env.E2E_STAMP ?? String(Date.now()).slice(-8);
+
 test.skip(!email || !password, 'E2E credentials were not provided; run scripts/run-e2e.sh');
 
 /**
@@ -122,7 +132,7 @@ test.describe('the browser console', () => {
             headers: token === undefined ? {} : { 'X-XSRF-TOKEN': decodeURIComponent(token) },
             data: {
                 document_type: 'CC',
-                document_number: `9${Date.now()}`.slice(0, 10),
+                document_number: `9${stamp}`,
                 first_names: 'Consola',
                 last_names: 'E2E',
             },

@@ -33,6 +33,18 @@ final class CreateCompany
         $taxId = $parts['tax_id'];
         $digit = $parts['verification_digit'];
 
+        // A digit with no NIT is refused here rather than stored as nothing. On create
+        // there is no existing NIT for it to belong to, so the only reading left is
+        // that the caller sent a field the system would drop: which is a mistake worth
+        // reporting, not one to absorb silently. UpdateCompany has no such check,
+        // because correcting the digit of a company that already has a NIT is exactly
+        // what that field is for.
+        if ($taxId === null) {
+            TaxIdParts::refuseOrphanDigit(
+                is_string($attributes['verification_digit'] ?? null) ? $attributes['verification_digit'] : null
+            );
+        }
+
         return DB::transaction(function () use ($attributes, $actor, $taxId, $digit): Company {
             $company = Company::query()->create([
                 'legal_name' => $attributes['legal_name'],

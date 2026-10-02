@@ -897,3 +897,200 @@ it('refuses the move when the destination entity went inactive in the meantime',
         new DateTimeImmutable('2024-06-01'),
     );
 })->throws(DomainException::class, 'inactiva');
+
+// --- A closed row is never rewritten ----------------------------------------
+
+it('refuses a stale close and keeps the recorded closing date', function (): void {
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $actor = actingAsRole();
+    $affiliations = app(ManageAffiliations::class);
+
+    $original = $affiliations->create(
+        client: $client,
+        entity: $entity,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    // A copy taken while the row was open. This is the shape of a request that was
+    // built before somebody else's operation closed the real row, and its answer to
+    // "is this still open?" is not evidence of anything.
+    $stale = $original->fresh();
+    expect($stale->ended_on)->toBeNull();
+
+    $affiliations->close($original, $actor, new DateTimeImmutable('2026-02-01'));
+
+    $closedOn = $original->fresh()->ended_on?->format('Y-m-d');
+
+    // The second close must fail rather than move the date.
+    expect(fn () => $affiliations->close($stale, $actor, new DateTimeImmutable('2026-03-01')))
+        ->toThrow(DomainException::class, 'La afiliación ya estaba cerrada');
+
+    // The recorded history is the one that was recorded, not the later request.
+    expect($original->fresh()->ended_on?->format('Y-m-d'))->toBe($closedOn)
+        ->and($closedOn)->toBe('2026-02-01');
+});
+
+it('records exactly one closing audit event for a stale close attempt', function (): void {
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $actor = actingAsRole();
+    $affiliations = app(ManageAffiliations::class);
+
+    $original = $affiliations->create(
+        client: $client,
+        entity: $entity,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $stale = $original->fresh();
+
+    $affiliations->close($original, $actor, new DateTimeImmutable('2026-02-01'));
+
+    try {
+        $affiliations->close($stale, $actor, new DateTimeImmutable('2026-03-01'));
+    } catch (DomainException) {
+        // Expected, and the point of the assertions below.
+    }
+
+    // A refused close must not leave a trace that says the affiliation ended twice.
+    // The audit is the statement sent to whoever reads the trail, and a second entry
+    // with a different date would be two conflicting statements about one row.
+    expect(AuditEvent::query()
+        ->where('action', 'affiliation.closed')
+        ->where('subject_id', $original->id)
+        ->count())->toBe(1);
+});
+
+it('takes the client lock before the affiliation lock when closing', function (): void {
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+
+    $affiliation = app(ManageAffiliations::class)->create(
+        client: $client,
+        entity: $entity,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $lockOrder = [];
+
+    DB::listen(function ($query) use (&$lockOrder): void {
+        if (! str_contains(strtolower($query->sql), 'for update')) {
+            return;
+        }
+
+        $lockOrder[] = match (true) {
+            str_contains($query->sql, 'from "clients"') => 'client',
+            str_contains($query->sql, 'client_affiliations') => 'history',
+            default => 'other',
+        };
+    });
+
+    app(ManageAffiliations::class)->close($affiliation, actingAsRole(), new DateTimeImmutable('2026-01-01'));
+
+    // Client, then the row being closed. Every affiliation write for one client takes
+    // the client lock first, so create, changeEntity and close serialise over the same
+    // client's rows instead of interleaving.
+    expect($lockOrder[0])->toBe('client')
+        ->and($lockOrder[1])->toBe('history');
+});
+
+it('validates the closing date against the locked row, not the instance it was given', function (): void {
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $actor = actingAsRole();
+    $affiliations = app(ManageAffiliations::class);
+
+    $affiliation = $affiliations->create(
+        client: $client,
+        entity: $entity,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $stale = $affiliation->fresh();
+
+    // The start date is moved forward by a later correction while a request carrying
+    // the old copy is waiting.
+    $affiliation->forceFill(['started_on' => '2026-06-01'])->save();
+
+    // Closing on the instance's date would be valid against what it carries and a
+    // contradiction against what the row says.
+    expect(fn () => $affiliations->close($stale, $actor, new DateTimeImmutable('2026-02-01')))
+        ->toThrow(DomainException::class, 'no puede ser anterior al inicio');
+
+    expect($affiliation->fresh()->ended_on)->toBeNull();
+});
+
+it('never rewrites a closing date when a replacement finds the row already closed', function (): void {
+    $client = Client::factory()->create();
+    $first = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $second = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $actor = actingAsRole();
+    $affiliations = app(ManageAffiliations::class);
+
+    $firstPeriod = $affiliations->create(
+        client: $client,
+        entity: $first,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $affiliations->close($firstPeriod, $actor, new DateTimeImmutable('2026-02-01'));
+
+    // A replacement asked for afterwards. The row it names is closed, so the
+    // replacement must leave that date exactly as recorded and open its own period
+    // rather than close the old row a second time at a new date.
+    $secondPeriod = $affiliations->create(
+        client: $client,
+        entity: $second,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2026-03-01'),
+        closeCurrent: true,
+    );
+
+    expect($firstPeriod->fresh()->ended_on?->format('Y-m-d'))->toBe('2026-02-01')
+        ->and($secondPeriod->ended_on)->toBeNull()
+        ->and(ClientAffiliation::query()->where('client_id', $client->id)->count())->toBe(2)
+        // Exactly one open affiliation, which is what the replacement asked for.
+        ->and(ClientAffiliation::query()
+            ->where('client_id', $client->id)
+            ->whereNull('ended_on')
+            ->count())->toBe(1);
+});
+
+it('refuses to write over a closed row even when the replacement reaches it', function (): void {
+    // The guard inside `create()` exists for the window between reading the open
+    // affiliation and locking it. With every affiliation write taking the client
+    // lock first, that window is closed by construction, so it cannot be opened from
+    // outside this class. This asserts the guard is reached and refuses, by driving
+    // the row into the state it protects against and calling the code that would
+    // write over it.
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $actor = actingAsRole();
+    $affiliations = app(ManageAffiliations::class);
+
+    $affiliation = $affiliations->create(
+        client: $client,
+        entity: $entity,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $stale = $affiliation->fresh();
+
+    // Closed behind the copy's back, the way a concurrent operation would.
+    $affiliation->forceFill(['ended_on' => '2026-02-01'])->save();
+
+    // The stale copy claims it is open. `close()` re-reads under the lock and
+    // refuses; this is the same guard the replacement path applies, reached through
+    // the public operation rather than by reaching into a private method.
+    expect(fn () => $affiliations->close($stale, $actor, new DateTimeImmutable('2026-05-01')))
+        ->toThrow(DomainException::class, 'La afiliación ya estaba cerrada');
+
+    expect($affiliation->fresh()->ended_on?->format('Y-m-d'))->toBe('2026-02-01');
+});

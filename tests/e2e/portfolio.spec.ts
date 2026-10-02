@@ -144,8 +144,11 @@ test.describe('A02: clients, companies and affiliation history', () => {
 
         await expect(page.getByRole('heading', { name: clientName })).toBeVisible();
 
-        // Remembered from the URL, because every run of this flow leaves a client
-        // with the same name behind and the list cannot tell them apart.
+        // Remembered from the URL. The name is the same on every run by design, so it
+        // identifies nothing; what identifies the record of *this* run is the document
+        // number, which carries the run stamp. That stamp is also what
+        // `consultora-dh:e2e-cleanup` uses to remove the record afterwards, so the
+        // development database is left exactly as the suite found it.
         const clientUrl = new URL(page.url()).pathname;
         // The document is stored normalised, and shown the way it is read.
         await expect(

@@ -118,10 +118,15 @@ final class SocialSecurityEntityController extends Controller
 
     public function show(Request $request, SocialSecurityEntity $entity): JsonResponse
     {
-        $entity->loadCount([
-            'affiliations as affiliations_count',
-            'activeAffiliations as active_affiliations_count',
-        ]);
+        // Affiliation counts, counted only for a role that may read affiliations.
+        // Without the permission the resource omits both keys, so these two aggregate
+        // queries would have produced figures the response throws away.
+        if ($request->user()?->can('affiliations.view')) {
+            $entity->loadCount([
+                'affiliations as affiliations_count',
+                'activeAffiliations as active_affiliations_count',
+            ]);
+        }
 
         return response()->json([
             'entity' => new SocialSecurityEntityResource($entity),

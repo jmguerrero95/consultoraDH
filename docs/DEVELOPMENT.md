@@ -118,8 +118,14 @@ docker compose exec app php artisan migrate --force
 docker compose exec app php artisan migrate:status
 docker compose exec app php artisan migrate:rollback --step=1
 docker compose exec app php artisan db:seed --force
-docker compose exec app php artisan migrate:fresh --seed   # ⚠ borra la base
+docker compose exec app php artisan migrate:fresh --seed   # ⚠ borra la base de DESARROLLO
 ```
+
+> `migrate:fresh` borra todas las tablas y reconstruye el esquema. El comando de
+> arriba apunta a la base de **desarrollo** y solo es aceptable en una máquina de
+> trabajo cuyo estado se pueda reconstruir. No tiene nada que ver con la base de
+> pruebas: para esa existe `scripts/reset-test-db.sh` (sección 8.1), que es el
+> único mecanismo previsto para destruirla.
 
 `db:seed` crea los roles y la matriz de permisos, y **revoca** cualquier permiso
 que no esté en su lista. Es la autoridad: si se añade un permiso al código y no al
@@ -249,11 +255,30 @@ docker compose exec app vendor/bin/pest --testsuite=Unit
 conexión `testing`, que apunta a `consultora_dh_test`. `tests/Pest.php` aborta
 la ejecución si esa base de datos coincide con la de desarrollo.
 
-Para reconstruir la base de pruebas desde cero:
+> **Ese resguardo protege a Pest, y solo a Pest.** `tests/Pest.php` se ejecuta
+> cuando arranca la suite. Un `php artisan` lanzado a mano no lo atraviesa, y
+> `--env=testing` **no** selecciona la conexión de pruebas: en este proyecto no
+> existe un `.env.testing`, así que Laravel sigue leyendo `.env`, la conexión
+> por defecto continúa siendo `pgsql` y el comando opera sobre la base de
+> **desarrollo**. Ya ha destruido datos dos veces.
+>
+> Nunca use `migrate:fresh --env=testing`. No es una forma segura de reiniciar
+> la base de pruebas; es una forma de borrar la de desarrollo.
+
+Para reconstruir la base de pruebas desde cero, use el único comando que
+comprueba a dónde va a conectarse antes de escribir nada:
 
 ```bash
-docker compose exec app php artisan migrate:fresh --env=testing --force
+./scripts/reset-test-db.sh           # reconstruye la base de pruebas
+./scripts/reset-test-db.sh --seed    # y además carga el seeder
 ```
+
+El script es *fail-closed*: resuelve la configuración de Laravel, exige que
+`database.default` sea `testing`, exige que la base resuelta no sea la de
+desarrollo, exige el nombre esperado (`DB_TEST_DATABASE`, por defecto
+`consultora_dh_test`) y confirma con `current_database()` de PostgreSQL que la
+conexión abierta es esa. Si cualquiera de esas comprobaciones falla, se detiene
+**antes** de migrar e informa cuál falló, sin imprimir credenciales.
 
 ### 8.2 Frontend (Vitest)
 

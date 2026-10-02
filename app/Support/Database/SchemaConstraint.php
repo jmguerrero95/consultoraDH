@@ -14,9 +14,21 @@ namespace App\Support\Database;
  * duplicate reported as something else, which is the failure mode A02-R1 exists to
  * remove.
  *
- * There is deliberately no entry for the open company relationships: a client may
- * legitimately have more than one, so no unique index holds them and there is
- * nothing to translate.
+ * ## Why there are two relationship constraints' worth of rules in one place
+ *
+ * A client may be employed by more than one company, and that is legitimate: the
+ * parallel resolution exists for it, it requires a reason, and the quality layer
+ * warns about an overlap that nobody authorised. So there is no uniqueness rule over
+ * a client's open relationships as a whole.
+ *
+ * What *is* forbidden is narrower and was added in A02-R3: the same client cannot be
+ * open with the same company twice. A person cannot hold two employments at one
+ * employer on overlapping dates, and a duplicate row inflates every count that
+ * matters while looking correct in isolation.
+ *
+ * The two rules are easy to confuse, which is how this comment came to be wrong. It
+ * used to say that no index held the open relationships and that there was therefore
+ * nothing to translate. That was true of the set and false of the pair.
  */
 final class SchemaConstraint
 {
@@ -33,6 +45,16 @@ final class SchemaConstraint
     public const AFFILIATION_OPEN_PER_TYPE = 'affiliations_one_open_per_type_unique';
 
     /**
+     * One open relationship per client *and company*.
+     *
+     * A partial unique index over `(client_id, company_id) WHERE ended_on IS NULL`.
+     * Not a rule about a client's open relationships in general: several different
+     * companies at once is allowed. This is about the same company twice while both
+     * rows are open, and a closed row for the same pair is ordinary history.
+     */
+    public const ASSIGNMENT_OPEN_PER_COMPANY = 'assignments_one_open_client_company_unique';
+
+    /**
      * Every one of them, for the tests that assert the schema matches this list.
      *
      * @return list<string>
@@ -44,6 +66,7 @@ final class SchemaConstraint
             self::COMPANY_TAX_ID,
             self::ENTITY_NAME_PER_TYPE,
             self::AFFILIATION_OPEN_PER_TYPE,
+            self::ASSIGNMENT_OPEN_PER_COMPANY,
         ];
     }
 }
