@@ -31,6 +31,10 @@ const router = useRouter();
 const auth = useAuthStore();
 
 const canCreate = computed(() => auth.can('clients.create'));
+// The companies column and the company filter describe relationships. A role that
+// may read clients but not relationships sees neither, because both would answer a
+// question the server has already refused to answer.
+const canSeeCompanies = computed(() => auth.can('relationships.view'));
 
 // --- Filters -----------------------------------------------------------------
 const search = ref('');
@@ -104,7 +108,9 @@ watch(page, () => void load());
 
 async function loadCompanies(): Promise<void> {
     try {
-        companies.value = (await businessApi.clients.companyOptions()).companies;
+        // `?? []` for the same reason as the affiliation picker: an unexpected body
+        // must leave an empty select, not put `undefined` where a list is read.
+        companies.value = (await businessApi.clients.companyOptions()).companies ?? [];
     } catch {
         // The filter is a convenience: if it cannot be filled the list still
         // works, and failing the whole screen over an empty select would be
@@ -145,11 +151,15 @@ const rangeLabel = computed(() => {
  * empty when the server did not send the relations.
  */
 function companyNames(client: ClientListItem): string {
-    if (client.companies.length > 0) {
+    if (client.companies && client.companies.length > 0) {
         return client.companies.map((company) => company.display_name).join(', ');
     }
 
-    return client.companies_count === null ? '—' : `${client.companies_count}`;
+    if (client.companies_count === undefined || client.companies_count === null) {
+        return '—';
+    }
+
+    return `${client.companies_count}`;
 }
 </script>
 
@@ -194,7 +204,7 @@ Nuevo cliente
                 </select>
             </div>
 
-            <div class="cdh-filters__field">
+            <div v-if="canSeeCompanies" class="cdh-filters__field">
                 <label class="cdh-form-label" for="clients-company">Empresa</label>
                 <select id="clients-company" v-model="companyId" class="form-control form-control-sm">
                     <option value="">Todas</option>
@@ -253,7 +263,9 @@ Nuevo cliente
                         <tr>
                             <th scope="col">Documento</th>
                             <th scope="col">Cliente</th>
-                            <th scope="col" class="cdh-table__wide">Empresa(s) activa(s)</th>
+                            <th v-if="canSeeCompanies" scope="col" class="cdh-table__wide">
+                                Empresa(s) activa(s)
+                            </th>
                             <th scope="col">Contacto</th>
                             <th scope="col">Estado</th>
                             <th scope="col"><span class="cdh-visually-hidden">Acciones</span></th>
@@ -272,7 +284,7 @@ Nuevo cliente
                                     {{ client.full_name }}
                                 </RouterLink>
                             </td>
-                            <td data-label="Empresa(s) activa(s)" class="cdh-table__wide">
+                            <td v-if="canSeeCompanies" data-label="Empresa(s) activa(s)" class="cdh-table__wide">
                                 {{ companyNames(client) }}
                             </td>
                             <td data-label="Contacto" class="cdh-table__contact">

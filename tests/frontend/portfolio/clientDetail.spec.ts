@@ -34,8 +34,29 @@ function jsonResponse(body: unknown, status = 200): Response {
  * A Response body can only be read once, so returning one shared instance breaks
  * as soon as the page makes a second request. Each call gets a fresh one.
  */
+/**
+ * Answer every request with the same body, except the two picker endpoints.
+ *
+ * Those two have their own shapes, and answering them with the detail payload left
+ * `companies` holding an object where a list was about to be rendered, which threw
+ * during the update and surfaced as an unhandled rejection rather than as a failed
+ * assertion. A suite that passes while three of its components crashed is not
+ * reporting on itself honestly.
+ */
 function alwaysRespond(body: unknown, status = 200): void {
-    vi.mocked(fetch).mockImplementation(async () => jsonResponse(body, status));
+    vi.mocked(fetch).mockImplementation(async (input) => {
+        const url = String(input);
+
+        if (url.includes('/api/company-options')) {
+            return jsonResponse({ companies: [] });
+        }
+
+        if (url.includes('/api/social-security-entities')) {
+            return jsonResponse({ entities: [] });
+        }
+
+        return jsonResponse(body, status);
+    });
 }
 
 function detail(overrides: Partial<ClientDetailPayload> = {}): ClientDetailPayload {
@@ -222,6 +243,12 @@ describe('the ARL risk level', () => {
     it('only offers entities of the selected type', async () => {
         vi.mocked(fetch).mockImplementation(async (input) => {
             const url = String(input);
+
+            // The picker endpoint has its own shape; answering it with the detail
+            // payload put an object where the link dialog renders a list.
+            if (url.includes('/api/company-options')) {
+                return jsonResponse({ companies: [] });
+            }
 
             if (url.includes('/api/social-security-entities')) {
                 return jsonResponse({
@@ -520,6 +547,15 @@ describe('failures', () => {
     it('reports a rejected validation with the server message', async () => {
         vi.mocked(fetch).mockImplementation(async (input) => {
             const url = String(input);
+
+            // Same as above: the picker endpoints answer with lists of their own.
+            if (url.includes('/api/company-options')) {
+                return jsonResponse({ companies: [] });
+            }
+
+            if (url.includes('/api/social-security-entities')) {
+                return jsonResponse({ entities: [] });
+            }
 
             if (url.includes('/api/clients/1') && (url.endsWith('/companies'))) {
                 return jsonResponse(

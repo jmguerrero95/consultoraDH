@@ -16,6 +16,15 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * columns on the screen is short enough that the extra payload would be pure
  * weight.
  *
+ * ## What is not here unless the viewer may read it
+ *
+ * `companies` and `companies_count` are relationship information. Reading a client
+ * says nothing about which companies the person works for, so a role with
+ * `clients.view` and without `relationships.view` receives the identity and the
+ * contact details and no employment data at all. The keys are absent rather than
+ * empty: "no companies" and "not allowed to see them" are different answers, and
+ * only one of them would be true.
+ *
  * @mixin Client
  */
 final class ClientListResource extends JsonResource
@@ -28,7 +37,7 @@ final class ClientListResource extends JsonResource
         /** @var Client $client */
         $client = $this->resource;
 
-        return [
+        $identity = [
             'id' => $client->id,
             'document_type' => $client->document_type->value,
             'document_type_short' => $client->document_type->shortLabel(),
@@ -41,15 +50,24 @@ final class ClientListResource extends JsonResource
             'phone' => $client->phone,
             'status' => $client->status->value,
             'status_label' => $client->status->label(),
-            // Eager loaded by the controller when the list is not filtered by
-            // company, so a client in three companies still costs one query.
+        ];
+
+        if (! $request->user()?->can('relationships.view')) {
+            return $identity;
+        }
+
+        // Eager loaded by the controller, so a client in three companies still costs
+        // one query for the whole page.
+        return $identity + [
             'companies_count' => $client->companies_count ?? null,
-            'companies' => CompanySummaryResource::collection($client->relationLoaded('companyAssignments')
-                ? $client->companyAssignments
-                    ->whereNull('ended_on')
-                    ->map(fn ($a) => $a->company)
-                    ->filter()
-                : collect()),
+            'companies' => $client->relationLoaded('companyAssignments')
+                ? CompanySummaryResource::collection(
+                    $client->companyAssignments
+                        ->whereNull('ended_on')
+                        ->map(fn ($assignment) => $assignment->company)
+                        ->filter()
+                )->resolve()
+                : [],
         ];
     }
 }

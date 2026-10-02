@@ -84,10 +84,6 @@ final class ManageClientCompanies
         string $resolution = self::RESOLUTION_ONLY_IF_NONE,
         ?string $parallelReason = null,
     ): ClientCompanyAssignment {
-        if (! $company->isActive()) {
-            throw new DomainException('No se puede vincular un cliente a una empresa inactiva.');
-        }
-
         return DB::transaction(function () use (
             $client, $company, $actor, $startedOn, $jobTitle, $notes,
             $resolution, $parallelReason
@@ -98,12 +94,28 @@ final class ManageClientCompanies
             // zero open rows, lock zero rows, and both insert.
             $client = $this->lockClient($client);
 
+            // Then the company, in that order. A link makes two master rows true at
+            // once, so the company is a participant and its status has to be read
+            // under the same lock that deactivation takes. Checked before the
+            // transaction it was checked against a stale copy: a company deactivated
+            // in between could still collect a relationship.
+            $company = $this->lockCompany($company);
+
             if (! $client->isActive()) {
                 throw new DomainException('No se puede vincular un cliente inactivo a una empresa.');
             }
 
-            // Read after the lock, never before it.
+            if (! $company->isActive()) {
+                throw new DomainException('No se puede vincular un cliente a una empresa inactiva.');
+            }
+
+            // Read after the locks, never before them.
             $open = $this->openAssignments($client);
+
+            // Whatever the resolution, this link would make a second row open
+            // between the same client and the same company, and that is not a
+            // portfolio question but an impossibility.
+            $this->refuseSecondOpenToSameCompany($client, $company, $open);
 
             return match ($resolution) {
                 self::RESOLUTION_ONLY_IF_NONE => $open->isEmpty()
@@ -181,10 +193,6 @@ final class ManageClientCompanies
         ?string $jobTitle = null,
         ?string $notes = null,
     ): ClientCompanyAssignment {
-        if (! $to->isActive()) {
-            throw new DomainException('No se puede transferir a una empresa inactiva.');
-        }
-
         if ($current->company_id === $to->id) {
             throw new DomainException('El cliente ya está vinculado a esa empresa.');
         }
@@ -196,13 +204,19 @@ final class ManageClientCompanies
         }
 
         return DB::transaction(function () use ($current, $to, $actor, $effectiveOn, $jobTitle, $notes) {
-            // Everything the decision needs is read under the locks taken below, not
-            // from the copy the caller was holding.
-            // Client first, then the relationship being moved, then everything the
-            // decision depends on is read again from under those locks. The two rows
-            // keep their own names: they are different rows with different keys, and
-            // conflating them reads an assignment that happens to share an id.
+            // Client, then destination company, then the relationship being moved.
+            // The two keep their own names: they are different rows with different
+            // keys, and conflating them reads an assignment that happens to share an
+            // id with the client.
             $client = $this->lockClient($current->client);
+
+            // Re-checked under the lock, for the same reason as in `link()`: the
+            // destination company is a second participant in the relationship.
+            $to = $this->lockCompany($to);
+
+            if (! $to->isActive()) {
+                throw new DomainException('No se puede transferir a una empresa inactiva.');
+            }
 
             $closed = ClientCompanyAssignment::query()
                 ->whereKey($current->getKey())
@@ -230,6 +244,16 @@ final class ManageClientCompanies
                 ->whereKeyNot($closed->getKey())
                 ->lockForUpdate()
                 ->get();
+
+            // Moving somebody to a company they are already employed by is either a
+            // mistake or a return that was never closed, and both must be recorded
+            // explicitly rather than produced by a transfer. Checked here, under the
+            // client and company locks, where the rows that decide it are pinned.
+            $this->refuseSecondOpenToSameCompany(
+                $closed->client,
+                $to,
+                $closed->company_id === $to->id ? $stillOpen->push($closed) : $stillOpen,
+            );
 
             $needsAuthorisation = $closed->isAuthorisedParallel() && $stillOpen->isNotEmpty();
 
@@ -285,6 +309,30 @@ final class ManageClientCompanies
      *
      * @return \Illuminate\Database\Eloquent\Collection<int, ClientCompanyAssignment>
      */
+    /**
+     * Refuse a second open relationship between one client and one company.
+     *
+     * The client may be employed by several companies at once, which is what the
+     * parallel resolution is for, but never by the *same* one twice: a person
+     * cannot hold two employments at a single employer on overlapping dates, and a
+     * duplicate row inflates every count and every report without looking wrong in
+     * isolation.
+     *
+     * A closed row for the same company is fine, and this is why: a client who left
+     * and came back is recorded as two periods, which is exactly what the history is
+     * for.
+     *
+     * @param  Collection<int, ClientCompanyAssignment>  $open
+     */
+    private function refuseSecondOpenToSameCompany(Client $client, Company $company, $open): void
+    {
+        $existing = $open->firstWhere('company_id', $company->id);
+
+        if ($existing !== null) {
+            throw DuplicateOpenRelationship::forCompany($client, $company, $existing->id);
+        }
+    }
+
     private function lockedOpenAssignments(Client $client)
     {
         return ClientCompanyAssignment::query()
@@ -323,6 +371,12 @@ final class ManageClientCompanies
 
         // A single open relationship is the case this flow is for.
         $current = $open->first();
+
+        // `link()` has already refused a destination company that is open for this
+        // client, so the company in this row is necessarily a different one. Kept
+        // explicit anyway: this method closes a row and opens another, and it is
+        // reachable only through `link()` today, which is a fact about the call
+        // graph rather than a guarantee the method can make for itself.
 
         if ($startedOn->format('Y-m-d') < $current->started_on->format('Y-m-d')) {
             throw new DomainException('La fecha de inicio no puede ser anterior al inicio de la relación abierta.');

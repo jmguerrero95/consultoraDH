@@ -193,3 +193,91 @@ it('refuses the same malformed values on update, not only on create', function (
     'two digits after the separator' => '900123456-33',
     'punctuation' => '900.123.456-3-4',
 ]);
+
+// --- Strict parsing, not a tolerant repair -----------------------------------
+
+it('refuses a NIT whose hyphens are misplaced or repeated', function (string $value): void {
+    // Each of these is transformed into something valid by the tolerant parser the
+    // value must not travel through, which is how a malformed request used to be
+    // accepted and stored as a different NIT than the one that was sent.
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload(['tax_id' => $value]))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('tax_id');
+
+    expect(Company::query()->count())->toBe(0);
+})->with([
+    'leading hyphen' => '-900123456-3',
+    'trailing hyphen' => '900123456-3-',
+    'two leading hyphens' => '--900123456-3',
+    'trailing double hyphen' => '900123456--',
+    'double hyphen in the middle' => '900123-456-3',
+    'a padded digit' => '900123456-03',
+    'a hyphen between every digit' => '9-0-0-1-2-3-4-5-6',
+]);
+
+it('accepts the spellings the strict parser describes', function (string $value, string $base, ?string $digit): void {
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload(['tax_id' => $value]))
+        ->assertCreated()
+        ->assertJsonPath('company.tax_id', $base)
+        ->assertJsonPath('company.verification_digit', $digit);
+})->with([
+    'digits only' => ['900123456', '900123456', null],
+    'with periods' => ['900.123.456', '900123456', null],
+    'with spaces' => ['900 123 456', '900123456', null],
+    'digits and digit' => ['900123456-3', '900123456', '3'],
+    'periods and digit' => ['900.123.456-3', '900123456', '3'],
+    'surrounded by spaces' => ['  900123456-3  ', '900123456', '3'],
+]);
+
+// --- One rule for create and edit --------------------------------------------
+
+it('refuses two contradictory digits on create as well as on update', function (): void {
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload([
+            'tax_id' => '900123456-4',
+            'verification_digit' => '5',
+        ]))
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'conflicting_verification_digit')
+        ->assertJsonValidationErrors('verification_digit');
+
+    // Nothing was created, so the refusal happened before the write.
+    expect(Company::query()->count())->toBe(0);
+});
+
+it('accepts the same digit written in both places on create', function (): void {
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload([
+            'tax_id' => '900123456-4',
+            'verification_digit' => '4',
+        ]))
+        ->assertCreated()
+        ->assertJsonPath('company.tax_id', '900123456')
+        ->assertJsonPath('company.verification_digit', '4');
+});
+
+it('behaves the same way for a company that does not exist yet', function (): void {
+    // The same input, once on create and once on update of an existing company,
+    // answered identically. Two behaviours for one input would depend on whether
+    // the company happened to be there already.
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload([
+            'tax_id' => '900123456-4',
+            'verification_digit' => '5',
+        ]))
+        ->assertStatus(422);
+
+    $existing = companyWithDigit('800111222', '2');
+
+    $this->actingAs(actingAsRole())
+        ->patchJson("/api/companies/{$existing->id}", [
+            'tax_id' => '800111222-4',
+            'verification_digit' => '5',
+        ])
+        ->assertStatus(422);
+
+    expect($existing->fresh()->tax_id)->toBe('800111222')
+        ->and($existing->fresh()->verification_digit)->toBe('2');
+});

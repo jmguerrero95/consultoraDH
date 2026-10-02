@@ -6,11 +6,13 @@ use App\Domain\Affiliations\ArlRiskClass;
 use App\Domain\Affiliations\ManageAffiliations;
 use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\DataQuality\DataQualityInspector;
+use App\Domain\Shared\RecordStatus;
 use App\Models\AuditEvent;
 use App\Models\Client;
 use App\Models\ClientAffiliation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
+use App\Models\SocialSecurityEntity;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
@@ -776,3 +778,122 @@ it('keeps historical rows readable whatever the client state', function (): void
     expect(ClientAffiliation::query()->find($affiliation->id)->ended_on?->toDateString())
         ->toBe('2025-12-31');
 });
+
+// --- The lock the entity takes ------------------------------------------------
+
+it('locks the client and then the entity when an affiliation is opened', function (): void {
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create([
+        'type' => SocialSecurityEntityType::Eps,
+    ]);
+
+    $lockOrder = [];
+
+    DB::listen(function ($query) use (&$lockOrder): void {
+        if (! str_contains(strtolower($query->sql), 'for update')) {
+            return;
+        }
+
+        $lockOrder[] = match (true) {
+            str_contains($query->sql, 'from "clients"') => 'client',
+            str_contains($query->sql, 'social_security_entities') => 'entity',
+            default => 'history',
+        };
+    });
+
+    app(ManageAffiliations::class)->create(
+        client: $client,
+        entity: $entity,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    // The order documented in `LocksRow`. An entity is a participant in an
+    // affiliation, so its status has to be read under the same lock that
+    // deactivation takes, and taking it after the client is what keeps the two
+    // operations from waiting on each other.
+    expect($lockOrder)->toBe(['client', 'entity']);
+});
+
+it('refuses an affiliation to an entity deactivated after the request was built', function (): void {
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create([
+        'type' => SocialSecurityEntityType::Eps,
+    ]);
+
+    $stale = $entity->fresh();
+    expect($stale->status)->toBe(RecordStatus::Active);
+
+    $entity->forceFill(['status' => RecordStatus::Inactive->value])->save();
+
+    expect($stale->status)->toBe(RecordStatus::Active);
+
+    app(ManageAffiliations::class)->create(
+        client: $client,
+        entity: $entity,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+})->throws(DomainException::class, 'inactiva');
+
+it('locks the entity when an affiliation is moved to another one', function (): void {
+    $client = Client::factory()->create();
+    $from = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $to = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+
+    $affiliation = app(ManageAffiliations::class)->create(
+        client: $client,
+        entity: $from,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $lockOrder = [];
+
+    DB::listen(function ($query) use (&$lockOrder): void {
+        if (! str_contains(strtolower($query->sql), 'for update')) {
+            return;
+        }
+
+        $lockOrder[] = match (true) {
+            str_contains($query->sql, 'from "clients"') => 'client',
+            str_contains($query->sql, 'social_security_entities') => 'entity',
+            default => 'history',
+        };
+    });
+
+    app(ManageAffiliations::class)->changeEntity(
+        $affiliation,
+        $to,
+        actingAsRole(),
+        new DateTimeImmutable('2024-06-01'),
+    );
+
+    expect($lockOrder[0])->toBe('client')
+        ->and($lockOrder[1])->toBe('entity');
+});
+
+it('refuses the move when the destination entity went inactive in the meantime', function (): void {
+    $client = Client::factory()->create();
+    $from = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $to = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+
+    $affiliation = app(ManageAffiliations::class)->create(
+        client: $client,
+        entity: $from,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $stale = $to->fresh();
+    expect($stale->status)->toBe(RecordStatus::Active);
+
+    $to->forceFill(['status' => RecordStatus::Inactive->value])->save();
+
+    app(ManageAffiliations::class)->changeEntity(
+        $affiliation,
+        $stale,
+        actingAsRole(),
+        new DateTimeImmutable('2024-06-01'),
+    );
+})->throws(DomainException::class, 'inactiva');

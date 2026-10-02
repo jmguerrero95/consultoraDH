@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
+use App\Domain\Affiliations\Actions\EntityHasOpenAffiliations;
+use App\Domain\Affiliations\Actions\ManageCatalogueEntities;
 use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\Shared\RecordStatus;
 use App\Models\AuditEvent;
+use App\Models\Client;
 use App\Models\ClientAffiliation;
 use App\Models\SocialSecurityEntity;
 use Illuminate\Database\QueryException;
@@ -351,3 +354,81 @@ it('records catalogue changes in the audit trail', function (): void {
     expect(AuditEvent::query()->where('action', 'social_security_entity.created')->firstOrFail()->subject_type)
         ->toBe(SocialSecurityEntity::class);
 });
+
+// --- The lock the deactivation takes -----------------------------------------
+
+it('locks the entity before counting its open affiliations', function (): void {
+    $entity = SocialSecurityEntity::factory()->create();
+
+    $lockedTables = [];
+
+    DB::listen(function ($query) use (&$lockedTables): void {
+        if (str_contains(strtolower($query->sql), 'for update')) {
+            $lockedTables[] = $query->sql;
+        }
+    });
+
+    app(ManageCatalogueEntities::class)->deactivate($entity, actingAsRole());
+
+    $entityLock = collect($lockedTables)->search(fn ($sql): bool => str_contains($sql, 'social_security_entities'));
+    $historyLock = collect($lockedTables)->search(fn ($sql): bool => str_contains($sql, 'client_affiliations'));
+
+    // The entity row comes first. Counting before the transaction is what the audit
+    // found: the figure was read outside it, so an affiliation opened in between
+    // was invisible and the entity went inactive with somebody affiliated to it.
+    expect($entityLock)->toBeInt()
+        ->and($historyLock)->toBeInt()
+        ->and($entityLock)->toBeLessThan($historyLock);
+
+    // And the rows that decide the answer are pinned, not merely counted. This is
+    // why the implementation fetches and counts in PHP: PostgreSQL refuses
+    // `FOR UPDATE` next to `count()`.
+    expect(collect($lockedTables)->first(fn ($sql): bool => str_contains($sql, 'client_affiliations')))
+        ->not->toContain('count(');
+});
+
+it('decides deactivation against the entity read under the lock', function (): void {
+    $entity = SocialSecurityEntity::factory()->create();
+
+    // A copy taken while it was active, deactivated by somebody else afterwards.
+    // This is the shape of a request that queued behind another one.
+    $stale = $entity->fresh();
+    expect($stale->status)->toBe(RecordStatus::Active);
+
+    $entity->forceFill(['status' => RecordStatus::Inactive->value])->save();
+
+    // Already inactive, so there is nothing to refuse and no affiliation to count.
+    // What matters is that it returns without trying to deactivate twice.
+    $result = app(ManageCatalogueEntities::class)->deactivate($stale, actingAsRole());
+
+    expect($result->status)->toBe(RecordStatus::Inactive);
+});
+
+it('refuses deactivation for an affiliation opened after the request was built', function (): void {
+    $entity = SocialSecurityEntity::factory()->create();
+    $client = Client::factory()->create();
+    $catalogue = app(ManageCatalogueEntities::class);
+
+    // The entity read the request carries, taken while it was active and while
+    // nobody was affiliated to it.
+    $stale = $entity->fresh();
+    expect($stale->activeAffiliations()->count())->toBe(0);
+
+    // Meanwhile: an affiliation appears, and the entity is deactivated and
+    // reactivated by somebody else in between.
+    ClientAffiliation::factory()->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => $entity->id,
+        'type' => SocialSecurityEntityType::Arl,
+        'ended_on' => null,
+    ]);
+
+    $entity->forceFill(['status' => RecordStatus::Inactive->value])->save();
+    $entity->forceFill(['status' => RecordStatus::Active->value])->save();
+
+    // The instance the request carries says active and countless. Both facts are
+    // stale, and the refusal has to come from what the locked rows say.
+    expect($stale->status)->toBe(RecordStatus::Active);
+
+    $catalogue->deactivate($stale, actingAsRole());
+})->throws(EntityHasOpenAffiliations::class);

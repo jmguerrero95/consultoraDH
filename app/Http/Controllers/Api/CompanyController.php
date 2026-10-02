@@ -48,10 +48,17 @@ final class CompanyController extends Controller
         $pattern = $request->searchPattern();
         $status = $request->statusFilter();
 
-        $query = Company::query()->withCount([
-            'assignments as total_clients_count',
-            'activeAssignments as active_clients_count',
-        ]);
+        $query = Company::query();
+
+        // Counting the workforce is reading relationships. The resource omits the
+        // keys without the permission, and not counting at all keeps the list
+        // honest and the query cheap for the roles that may not look.
+        if ($request->user()?->can('relationships.view')) {
+            $query->withCount([
+                'assignments as total_clients_count',
+                'activeAssignments as active_clients_count',
+            ]);
+        }
 
         if ($pattern !== null) {
             // A NIT is written with thousand separators and typed with them:
@@ -104,6 +111,12 @@ final class CompanyController extends Controller
     {
         try {
             $company = $this->createCompany->execute($request->validated(), $request->user());
+        } catch (ConflictingVerificationDigit $e) {
+            // The same refusal the update path makes. Two answers to the same
+            // question in one request is not something this system decides for the
+            // operator, and it must not decide it differently depending on whether
+            // the company already exists.
+            return $this->conflictingDigitResponse($e);
         } catch (QueryException $e) {
             if (! UniqueViolation::isFor($e, SchemaConstraint::COMPANY_TAX_ID)) {
                 throw $e;
@@ -140,6 +153,17 @@ final class CompanyController extends Controller
         $company->load([
             'assignments' => fn ($q) => $q->with('client')->orderByDesc('started_on'),
         ]);
+
+        // The counts are part of the record the resource describes, so they are
+        // loaded here too rather than left null on a detail response that otherwise
+        // carries them. And they are workforce information, so they are loaded only
+        // for a viewer who may read relationships.
+        if ($maySeeClients) {
+            $company->loadCount([
+                'assignments as total_clients_count',
+                'activeAssignments as active_clients_count',
+            ]);
+        }
 
         $active = $company->assignments->whereNull('ended_on');
         $history = $company->assignments->whereNotNull('ended_on');
@@ -223,5 +247,23 @@ final class CompanyController extends Controller
                 : 'La empresa fue desactivada correctamente.',
             'company' => new CompanyResource($updated),
         ]);
+    }
+
+    /**
+     * Two contradictory verification digits in one request.
+     *
+     * One response for both write paths, because the rule is one rule. A difference
+     * in behaviour between creating and editing the same company would be a
+     * difference nobody could explain.
+     */
+    private function conflictingDigitResponse(ConflictingVerificationDigit $e): JsonResponse
+    {
+        return response()->json([
+            'message' => $e->getMessage(),
+            'code' => 'conflicting_verification_digit',
+            'errors' => [
+                'verification_digit' => [$e->getMessage()],
+            ],
+        ], 422);
     }
 }

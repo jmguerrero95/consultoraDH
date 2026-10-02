@@ -61,17 +61,7 @@ final class ManageAffiliations
         bool $closeCurrent = false,
         ?\DateTimeInterface $closeCurrentOn = null,
     ): ClientAffiliation {
-        $type = $entity->type;
-
-        if (! $entity->isActive()) {
-            throw new DomainException(sprintf(
-                'No se puede registrar una afiliación con la entidad %s porque está inactiva.',
-                $entity->name,
-            ));
-        }
-
-        $this->assertTypeMatches($type, $entity);
-        $this->assertRiskAllowed($type, $riskClass);
+        $this->assertRiskAllowed($entity->type, $riskClass);
 
         if ($underAssignment !== null && $underAssignment->client_id !== $client->id) {
             throw new DomainException('La relación indicada pertenece a otro cliente.');
@@ -79,7 +69,7 @@ final class ManageAffiliations
 
         return DB::transaction(function () use (
             $client, $entity, $actor, $startedOn, $riskClass, $underAssignment, $notes,
-            $closeCurrent, $closeCurrentOn, $type
+            $closeCurrent, $closeCurrentOn
         ): ClientAffiliation {
             // The client row is locked and re-read, in the documented order, and the
             // status decision is taken from the copy read under the lock. Checking
@@ -87,9 +77,27 @@ final class ManageAffiliations
             // moment ago could still be given a new open affiliation.
             $client = $this->lockClient($client);
 
+            // Then the entity, which is the second participant in an affiliation for
+            // the same reason the company is locked when a relationship is opened.
+            // Its status and its type both decide what happens here, and both were
+            // being read from a copy that could already be stale.
+            $entity = $this->lockEntity($entity);
+
             if (! $client->isActive()) {
                 throw new DomainException('No se puede registrar una afiliación para un cliente inactivo.');
             }
+
+            if (! $entity->isActive()) {
+                throw new DomainException(sprintf(
+                    'No se puede registrar una afiliación con la entidad %s porque está inactiva.',
+                    $entity->name,
+                ));
+            }
+
+            $type = $entity->type;
+
+            $this->assertTypeMatches($type, $entity);
+            $this->assertRiskAllowed($type, $riskClass);
 
             $current = $this->currentAffiliation($client, $type);
 
@@ -168,18 +176,6 @@ final class ManageAffiliations
             ));
         }
 
-        // The destination has to be usable now. Moving somebody to an entity that
-        // has been deactivated would record an affiliation nobody can maintain.
-        if (! $to->isActive()) {
-            throw new DomainException(sprintf(
-                'No se puede cambiar la afiliación a la entidad %s porque está inactiva.',
-                $to->name,
-            ));
-        }
-
-        $this->assertTypeMatches($to->type, $to);
-        $this->assertRiskAllowed($to->type, $riskClass);
-
         if ($to->id === $current->social_security_entity_id) {
             throw new DomainException('El cliente ya está afiliado a esa entidad.');
         }
@@ -199,6 +195,21 @@ final class ManageAffiliations
             if (! $client->isActive()) {
                 throw new DomainException('No se puede cambiar una afiliación de un cliente inactivo.');
             }
+
+            // Then the destination entity, in the documented order. "Usable now" has
+            // to mean under this lock: moving somebody to an entity deactivated a
+            // moment ago would record an affiliation nobody can maintain.
+            $to = $this->lockEntity($to);
+
+            if (! $to->isActive()) {
+                throw new DomainException(sprintf(
+                    'No se puede cambiar la afiliación a la entidad %s porque está inactiva.',
+                    $to->name,
+                ));
+            }
+
+            $this->assertTypeMatches($to->type, $to);
+            $this->assertRiskAllowed($to->type, $riskClass);
 
             $closed = $this->locked($current);
 

@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
+use App\Domain\Affiliations\DuplicateOpenRelationship;
 use App\Domain\Affiliations\ManageClientCompanies;
+use App\Domain\Affiliations\ParallelRelationshipNotAllowed;
 use App\Domain\DataQuality\DataQualityCode;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\DataQuality\DataQualitySeverity;
@@ -718,25 +720,37 @@ it('takes the client row lock before reading the relationships', function (): vo
         resolution: ManageClientCompanies::RESOLUTION_ONLY_IF_NONE,
     );
 
-    // Exactly one lock, and it is on the client row. Locking the open
+    // The two master rows, client first and company second. Locking the open
     // relationships instead would lock nothing on the first relationship, which is
-    // the case the audit found.
-    expect($lockOrder)->toHaveCount(1)
+    // the case the audit found; locking the company is what makes a link against a
+    // company that was deactivated in the meantime impossible.
+    expect($lockOrder)->toHaveCount(2)
         ->and($lockOrder[0])->toContain('from "clients"')
-        ->and(strtolower($lockOrder[0]))->toContain('for update');
+        ->and($lockOrder[1])->toContain('from "companies"')
+        ->and($lockOrder[2] ?? '')->not->toContain('assignments');
 });
 
 // --- One lock order, and decisions taken under it ---------------------------
 
-it('takes the client lock before the relationship lock, in every operation', function (): void {
+it('takes the master locks before the history locks, in every operation', function (): void {
     $order = [];
 
+    // A single connection cannot demonstrate a deadlock, so what is asserted here is
+    // the shape of the queries: which rows are locked and in what order. That is
+    // what determines whether two operators doing this at once can wait on each
+    // other, and it is observable; the blocking itself is not.
     DB::listen(function ($query) use (&$order): void {
         if (! str_contains(strtolower($query->sql), 'for update')) {
             return;
         }
 
-        $order[] = str_contains($query->sql, '"clients"') ? 'client' : 'relationship';
+        $sql = $query->sql;
+
+        $order[] = match (true) {
+            str_contains($sql, 'from "clients"') => 'client',
+            str_contains($sql, 'from "companies"') => 'company',
+            default => 'history',
+        };
     });
 
     $client = Client::factory()->create();
@@ -754,11 +768,11 @@ it('takes the client lock before the relationship lock, in every operation', fun
         actor: $actor,
         startedOn: new DateTimeImmutable('2024-01-01'),
     );
-    expect($order)->toBe(['client']);
+    expect($order)->toBe(['client', 'company']);
 
     $order = [];
     $relationships->close($created, $actor, new DateTimeImmutable('2025-01-01'));
-    expect($order)->toBe(['client', 'relationship']);
+    expect($order)->toBe(['client', 'history']);
 
     $order = [];
     $second_linked = $relationships->link(
@@ -1005,4 +1019,289 @@ it('makes the destination the base when the transferred relationship was the bas
     expect($open)->toHaveCount(2)
         ->and($open->whereNull('parallel_authorized_at')->pluck('company_id')->all())->toBe([$destination->id])
         ->and($open->whereNotNull('parallel_authorized_at')->pluck('company_id')->all())->toBe([$parallel->id]);
+});
+
+// --- One open relationship per client and company ---------------------------
+
+it('refuses a parallel relationship to a company that is already open', function (): void {
+    $client = Client::factory()->create();
+    $alpha = Company::factory()->create();
+    $beta = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    $relationships->link(
+        client: $client,
+        company: $alpha,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    // Two companies at once is ordinary and stays allowed.
+    $relationships->link(
+        client: $client,
+        company: $beta,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-02-01'),
+        resolution: ManageClientCompanies::RESOLUTION_PARALLEL,
+        parallelReason: 'Trabaja para ambas empresas.',
+    );
+
+    // The same company twice is not, and `parallel` was the resolution that let it
+    // through.
+    $relationships->link(
+        client: $client,
+        company: $alpha,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-03-01'),
+        resolution: ManageClientCompanies::RESOLUTION_PARALLEL,
+        parallelReason: 'Intento duplicado.',
+    );
+})->throws(DuplicateOpenRelationship::class);
+
+it('refuses an ordinary link to a company that is already open', function (): void {
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    $relationships->link(
+        client: $client,
+        company: $company,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    // `only_if_none` refuses this either way, and the more specific refusal is the
+    // one that arrives: "you already work there" tells the operator what to do,
+    // where "there is another relationship open" asks them a question whose answer
+    // is already known.
+    expect(fn () => $relationships->link(
+        client: $client,
+        company: $company,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-06-01'),
+        resolution: ManageClientCompanies::RESOLUTION_ONLY_IF_NONE,
+    ))->toThrow(DuplicateOpenRelationship::class);
+
+    expect(ClientCompanyAssignment::query()->where('client_id', $client->id)->count())->toBe(1);
+});
+
+it('still reports the general conflict when the company is a different one', function (): void {
+    $client = Client::factory()->create();
+    $alpha = Company::factory()->create();
+    $beta = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    $relationships->link(
+        client: $client,
+        company: $alpha,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    // A different company is not a duplicate, so this keeps the refusal it always
+    // had, with the open relationships attached so the interface can ask which one
+    // the operator meant.
+    expect(fn () => $relationships->link(
+        client: $client,
+        company: $beta,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-06-01'),
+        resolution: ManageClientCompanies::RESOLUTION_ONLY_IF_NONE,
+    ))->toThrow(ParallelRelationshipNotAllowed::class);
+});
+
+it('allows a client to return to a company after the relationship was closed', function (): void {
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    $first = $relationships->link(
+        client: $client,
+        company: $company,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $relationships->close($first, $actor, new DateTimeImmutable('2024-06-30'));
+
+    // Two rows for the same company are ordinary history when they do not overlap.
+    $second = $relationships->link(
+        client: $client,
+        company: $company,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-07-01'),
+    );
+
+    expect($second->id)->not->toBe($first->id)
+        ->and(ClientCompanyAssignment::query()
+            ->where('client_id', $client->id)
+            ->where('company_id', $company->id)
+            ->count())->toBe(2)
+        // And the client has exactly one open relationship, which is the claim the
+        // index makes.
+        ->and(ClientCompanyAssignment::query()
+            ->where('client_id', $client->id)
+            ->whereNull('ended_on')
+            ->count())->toBe(1);
+});
+
+it('refuses a transfer to the company the client is already with', function (): void {
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    $assignment = $relationships->link(
+        client: $client,
+        company: $company,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $relationships->transfer($assignment, $company, $actor, new DateTimeImmutable('2024-06-01'));
+})->throws(DomainException::class, 'El cliente ya está vinculado a esa empresa');
+
+it('refuses a transfer to a company that has another open relationship', function (): void {
+    $client = Client::factory()->create();
+    $alpha = Company::factory()->create();
+    $beta = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    $at_alpha = $relationships->link(
+        client: $client,
+        company: $alpha,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $relationships->link(
+        client: $client,
+        company: $beta,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-02-01'),
+        resolution: ManageClientCompanies::RESOLUTION_PARALLEL,
+        parallelReason: 'Trabaja para ambas empresas.',
+    );
+
+    // Moving to `beta`, which is already open, would leave two open rows with the
+    // same company, which is the thing this rule exists to prevent.
+    $relationships->transfer($at_alpha, $beta, $actor, new DateTimeImmutable('2024-06-01'));
+})->throws(DuplicateOpenRelationship::class);
+
+it('holds the rule in the database and not only in the domain', function (): void {
+    // The domain check reads what is committed, so two concurrent requests can both
+    // see nothing open. The index is what actually refuses the second insert, and
+    // this is the only way to show that without two connections racing.
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+
+    ClientCompanyAssignment::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => $company->id,
+        'ended_on' => null,
+    ]);
+
+    // PostgreSQL refuses every statement in a transaction whose statement failed,
+    // so the failed insert goes into a nested transaction: it becomes a savepoint
+    // that is rolled back on its own, leaving the surrounding one usable.
+    $refused = null;
+
+    try {
+        DB::transaction(function () use ($client, $company): void {
+            ClientCompanyAssignment::query()->create([
+                'client_id' => $client->id,
+                'company_id' => $company->id,
+                'started_on' => '2024-01-01',
+                'status' => 'active',
+            ]);
+        });
+    } catch (QueryException $e) {
+        $refused = $e;
+    }
+
+    expect($refused)->toBeInstanceOf(QueryException::class)
+        // The index, and not a constraint that happened to be checked first.
+        ->and($refused->getMessage())->toContain('assignments_one_open_client_company_unique');
+
+    // A closed row for the same pair is not a conflict, which is what makes the
+    // index partial rather than a plain unique constraint.
+    $closed = ClientCompanyAssignment::query()->create([
+        'client_id' => $client->id,
+        'company_id' => $company->id,
+        'started_on' => '2023-01-01',
+        'ended_on' => '2023-12-31',
+        'status' => 'active',
+    ]);
+
+    expect($closed->id)->toBeInt();
+});
+
+// --- The refusal as the interface receives it --------------------------------
+
+it('answers the duplicate refusal with a message and not a crash', function (): void {
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+
+    app(ManageClientCompanies::class)->link(
+        client: $client,
+        company: $company,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", [
+            'company_id' => $company->id,
+            'started_on' => '2024-06-01',
+            'resolution' => ManageClientCompanies::RESOLUTION_PARALLEL,
+            'parallel_reason' => 'Intento duplicado.',
+        ])
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'duplicate_open_relationship')
+        ->assertJsonPath('company_id', $company->id)
+        ->assertJsonStructure(['message', 'code', 'company_id', 'open_assignment_id']);
+});
+
+it('answers the same way on the transfer endpoint', function (): void {
+    $client = Client::factory()->create();
+    $alpha = Company::factory()->create();
+    $beta = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    $at_alpha = $relationships->link(
+        client: $client,
+        company: $alpha,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $relationships->link(
+        client: $client,
+        company: $beta,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-02-01'),
+        resolution: ManageClientCompanies::RESOLUTION_PARALLEL,
+        parallelReason: 'Trabaja para ambas empresas.',
+    );
+
+    $this->actingAs($actor)
+        ->postJson("/api/client-company-assignments/{$at_alpha->id}/transfer", [
+            'to_company_id' => $beta->id,
+            'effective_on' => '2024-06-01',
+        ])
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'duplicate_open_relationship');
+
+    // Nothing moved.
+    expect($at_alpha->fresh()->ended_on)->toBeNull()
+        ->and(ClientCompanyAssignment::query()
+            ->where('client_id', $client->id)
+            ->whereNull('ended_on')
+            ->count())->toBe(2);
 });

@@ -147,6 +147,7 @@ onMounted(load);
                 <div class="cdh-card__body">
                     <div class="cdh-grid-stats">
                         <RouterLink
+                            v-if="data.portfolio.counts.active_clients !== undefined"
                             :to="{ name: 'clients' }"
                             class="cdh-stat cdh-stat--link"
                             aria-label="Ver clientes"
@@ -156,12 +157,13 @@ onMounted(load);
                                 <span>Clientes activos</span>
                             </p>
                             <p class="cdh-stat__value">{{ data.portfolio.counts.active_clients }}</p>
-                            <p class="cdh-stat__hint">
+                            <p v-if="data.portfolio.counts.inactive_clients !== undefined" class="cdh-stat__hint">
                                 {{ data.portfolio.counts.inactive_clients }} inactivos
                             </p>
                         </RouterLink>
 
                         <RouterLink
+                            v-if="data.portfolio.counts.active_companies !== undefined"
                             :to="{ name: 'companies' }"
                             class="cdh-stat cdh-stat--link"
                             aria-label="Ver empresas"
@@ -177,11 +179,14 @@ onMounted(load);
                         </RouterLink>
 
                         <!--
-                            Each of these three figures is withheld by the server from
-                            roles that may not read the section it describes, so a card
-                            is drawn only when the figure is actually there. Rendering a
-                            zero instead would state something about the portfolio that
-                            the role is not entitled to know.
+                            Every figure on this dashboard is withheld by the server
+                            from roles that may not read the section it describes, so a
+                            card is drawn only when its figure is actually there.
+                            Rendering a zero instead would state something about the
+                            portfolio that the role is not entitled to know, and an
+                            absent `active_clients` would be reported as "0 clientes
+                            activos", which is a false statement rather than an empty
+                            card.
                         -->
                         <article v-if="data.portfolio.counts.active_relationships !== undefined" class="cdh-stat">
                             <p class="cdh-stat__label">
@@ -203,7 +208,10 @@ onMounted(load);
                             <p class="cdh-stat__hint">EPS, AFP, ARL y Cajas</p>
                         </article>
 
-                        <article class="cdh-stat">
+                        <article
+                            v-if="data.portfolio.counts.data_quality_issues !== undefined"
+                            class="cdh-stat"
+                        >
                             <p class="cdh-stat__label">
                                 <i class="bi bi-exclamation-triangle" aria-hidden="true" />
                                 <span>Alertas de calidad</span>
@@ -211,7 +219,10 @@ onMounted(load);
                             <p class="cdh-stat__value">
                                 {{ data.portfolio.counts.data_quality_issues }}
                             </p>
-                            <p class="cdh-stat__hint">
+                            <p
+                                v-if="data.portfolio.counts.data_quality_warnings !== undefined"
+                                class="cdh-stat__hint"
+                            >
                                 {{ data.portfolio.counts.data_quality_warnings }} advertencias
                             </p>
                         </article>

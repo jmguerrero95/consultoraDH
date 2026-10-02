@@ -31,6 +31,42 @@ function jsonResponse(body: unknown): Response {
     });
 }
 
+/**
+ * What the server sends to a role without `relationships.view`.
+ *
+ * No `companies` and no `companies_count`: the keys are absent, which is the whole
+ * difference from a client who works for nobody.
+ */
+function payloadWithoutRelationships(): ClientListPayload {
+    return {
+        clients: [
+            {
+                id: 1,
+                document_type: 'CC',
+                document_type_short: 'C.C.',
+                document_number: '12345678',
+                document_label: 'CC 12.345.678',
+                full_name: 'Ana María Restrepo',
+                first_names: 'Ana María',
+                last_names: 'Restrepo',
+                email: 'ana@consultora-dh.test',
+                phone: '3001234567',
+                status: 'active',
+                status_label: 'Activo',
+            },
+        ],
+        pagination: {
+            total: 1,
+            per_page: 25,
+            current_page: 1,
+            last_page: 1,
+            from: 1,
+            to: 1,
+        },
+        filters: { search: null, status: null, company_id: null },
+    };
+}
+
 function payload(overrides: Partial<ClientListPayload> = {}): ClientListPayload {
     return {
         clients: [
@@ -295,6 +331,48 @@ describe('ClientListPage', () => {
         const labels = wrapper.findAll('button').map((button) => button.text());
 
         expect(labels.some((label) => label.includes('Nuevo cliente'))).toBe(false);
+    });
+
+    it('shows no company column to a role that may not read relationships', async () => {
+        vi.mocked(fetch).mockResolvedValue(jsonResponse(payloadWithoutRelationships()));
+
+        const { wrapper, auth } = mountPage();
+
+        actingWith(auth, ['clients.view']);
+
+        await flushPromises();
+
+        // The client is still listed. What is missing is only the employment data,
+        // which is what the role is not entitled to.
+        expect(wrapper.findAll('tbody tr')).toHaveLength(1);
+        expect(wrapper.text()).toContain('Ana María Restrepo');
+        expect(wrapper.text()).not.toContain('Empresa(s) activa(s)');
+    });
+
+    it('offers no company filter to a role that may not read relationships', async () => {
+        vi.mocked(fetch).mockResolvedValue(jsonResponse(payloadWithoutRelationships()));
+
+        const { wrapper, auth } = mountPage();
+
+        actingWith(auth, ['clients.view']);
+
+        await flushPromises();
+
+        // Sending it anyway would only earn a 403.
+        expect(wrapper.find('#clients-company').exists()).toBe(false);
+    });
+
+    it('shows the company column to a role that may read relationships', async () => {
+        vi.mocked(fetch).mockResolvedValue(jsonResponse(payload()));
+
+        const { wrapper, auth } = mountPage();
+
+        actingWith(auth, ['clients.view', 'relationships.view']);
+
+        await flushPromises();
+
+        expect(wrapper.text()).toContain('Empresa(s) activa(s)');
+        expect(wrapper.find('#clients-company').exists()).toBe(true);
     });
 
     it('labels every column for the stacked layout used on small screens', async () => {

@@ -532,3 +532,244 @@ it('does not let hidden problems move the totals of a role that may read only co
         ->and($after['counts']['data_quality_warnings'])->toBe($before['counts']['data_quality_warnings'] ?? 0)
         ->and($after['counts']['data_quality_issues'])->toBe($before['counts']['data_quality_issues'] ?? 0);
 });
+
+// --- The list, which is not the client record --------------------------------
+
+it('keeps the companies off the client list for a role without relationships.view', function (): void {
+    $client = portfolioForPermissions();
+
+    $row = collect(
+        $this->actingAs(userWithPermissions(['clients.view']))
+            ->getJson("/api/clients?search={$client->document_number}")
+            ->assertOk()
+            ->json('clients')
+    )->firstWhere('id', $client->id);
+
+    expect($row)->not->toBeNull();
+
+    // Absent, not null and not empty. "No companies" would be a false answer here,
+    // and the difference is exactly what the key not existing expresses.
+    expect($row)->not->toHaveKey('companies')
+        ->and($row)->not->toHaveKey('companies_count')
+        // The identity itself is still there, or the list could not be used.
+        ->and($row['full_name'])->toBe($client->fullName());
+});
+
+it('still shows the companies on the list for a role that may read them', function (): void {
+    $client = portfolioForPermissions();
+    $company = $client->companyAssignments->first()->company;
+
+    $row = collect(
+        $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+            ->getJson("/api/clients?search={$client->document_number}")
+            ->assertOk()
+            ->json('clients')
+    )->firstWhere('id', $client->id);
+
+    expect($row)->toHaveKey('companies')
+        ->and($row)->toHaveKey('companies_count')
+        ->and($row['companies'])->toHaveCount(1)
+        ->and($row['companies'][0]['legal_name'])->toBe($company->legal_name);
+});
+
+it('refuses the company filter to a role without relationships.view', function (): void {
+    $client = portfolioForPermissions();
+    $companyId = $client->companyAssignments->first()->company_id;
+
+    // The filter is itself relationship information: which clients work somewhere.
+    // Ignoring it silently would answer the wrong question with a plausible list.
+    $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson("/api/clients?company_id={$companyId}")
+        ->assertForbidden();
+
+    $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson("/api/clients?company_id={$companyId}")
+        ->assertOk()
+        ->assertJsonPath('pagination.total', 1)
+        ->assertJsonPath('filters.company_id', $companyId);
+});
+
+// --- Counts on the company and the catalogue ---------------------------------
+
+it('keeps the client counts off a company for a role without relationships.view', function (): void {
+    $company = portfolioForPermissions()->companyAssignments->first()->company;
+
+    $without = collect(
+        $this->actingAs(userWithPermissions(['companies.view']))
+            ->getJson("/api/companies?search={$company->tax_id}")
+            ->assertOk()
+            ->json('companies')
+    )->firstWhere('id', $company->id);
+
+    expect($without)->not->toBeNull()
+        ->and($without)->not->toHaveKey('active_clients_count')
+        ->and($without)->not->toHaveKey('total_clients_count');
+
+    $with = collect(
+        $this->actingAs(userWithPermissions(['companies.view', 'relationships.view']))
+            ->getJson("/api/companies?search={$company->tax_id}")
+            ->assertOk()
+            ->json('companies')
+    )->firstWhere('id', $company->id);
+
+    expect($with)->toHaveKey('active_clients_count')
+        ->and($with)->toHaveKey('total_clients_count')
+        ->and($with['total_clients_count'])->toBe(1);
+});
+
+it('keeps the affiliation counts off an entity for a role without affiliations.view', function (): void {
+    $entity = portfolioForPermissions()->affiliations->first()->entity;
+
+    $without = collect(
+        $this->actingAs(userWithPermissions(['social_security_entities.view']))
+            ->getJson('/api/social-security-entities?search='.urlencode($entity->name))
+            ->assertOk()
+            ->json('entities')
+    )->firstWhere('id', $entity->id);
+
+    expect($without)->not->toBeNull()
+        ->and($without)->not->toHaveKey('affiliations_count')
+        ->and($without)->not->toHaveKey('active_affiliations_count');
+
+    $with = collect(
+        $this->actingAs(userWithPermissions(['social_security_entities.view', 'affiliations.view']))
+            ->getJson('/api/social-security-entities?search='.urlencode($entity->name))
+            ->assertOk()
+            ->json('entities')
+    )->firstWhere('id', $entity->id);
+
+    expect($with)->toHaveKey('affiliations_count')
+        ->and($with)->toHaveKey('active_affiliations_count')
+        ->and($with['affiliations_count'])->toBe(1);
+});
+
+// --- A sweep of every endpoint, so the next one added cannot be forgotten ----
+
+it('exposes no relationship or affiliation data to a clients-only role anywhere', function (): void {
+    $client = portfolioForPermissions();
+    $company = $client->companyAssignments->first()->company;
+    $entity = $client->affiliations->first()->entity;
+    $viewer = userWithPermissions(['clients.view']);
+
+    $reader = userWithPermissions([
+        'clients.view',
+        'companies.view',
+        'social_security_entities.view',
+    ]);
+
+    // Every endpoint that can be reached by reading clients, companies or the
+    // catalogue. Written out rather than derived from the route table, because a
+    // sweep built from the routes can only prove the routes it already knows about.
+    $requests = [
+        ['get', '/api/clients'],
+        ['get', "/api/clients/{$client->id}"],
+        ['get', "/api/clients/{$client->id}/companies"],
+        ['get', "/api/clients/{$client->id}/affiliations"],
+        ['get', '/api/companies'],
+        ['get', "/api/companies/{$company->id}"],
+        ['get', '/api/social-security-entities'],
+        ['get', "/api/social-security-entities/{$entity->id}"],
+    ];
+
+    foreach ($requests as [$method, $uri]) {
+        // The client record itself is what `clients.view` is for, and it is served
+        // with the two sections withheld rather than refused.
+        $own = str_contains($uri, '/companies') || str_contains($uri, '/affiliations')
+            || str_starts_with($uri, '/api/companies')
+            || str_contains($uri, 'social-security-entities');
+
+        $this->actingAs($viewer)->json($method, $uri)->assertStatus($own ? 403 : 200);
+    }
+
+    // With the reading permissions but neither section permission, the responses
+    // are 200 and still say nothing about employment or affiliations. This is the
+    // part that a status-code assertion alone would miss: refusing everything is
+    // not the goal, hiding the two sections is.
+    // The keys that carry derived relationship or affiliation figures. Named per
+    // endpoint family, because `/api/companies` has a `companies` key of its own
+    // that means the list of companies and not a client's employment.
+    $derivedKeys = [
+        'client record' => ['active_clients_count', 'total_clients_count', 'affiliations_count'],
+        'company list' => ['active_clients_count', 'total_clients_count'],
+        'company record' => ['active_clients_count', 'total_clients_count'],
+        'entity list' => ['affiliations_count', 'active_affiliations_count'],
+        'entity record' => ['affiliations_count', 'active_affiliations_count'],
+    ];
+
+    foreach ($requests as [$method, $uri]) {
+        $body = $this->actingAs($reader)->json($method, $uri)->json();
+
+        $family = match (true) {
+            $uri === "/api/clients/{$client->id}" => 'client record',
+            $uri === '/api/clients' => 'client list',
+            $uri === '/api/companies' => 'company list',
+            $uri === "/api/companies/{$company->id}" => 'company record',
+            str_contains($uri, 'social-security-entities') && str_contains($uri, '/') => 'entity record',
+            str_contains($uri, 'social-security-entities') => 'entity list',
+            default => null,
+        };
+
+        foreach ($derivedKeys[$family] ?? [] as $key) {
+            expect($body)->not->toHaveKey($key);
+        }
+
+        // And on a client record the sections are named and marked unreadable,
+        // rather than absent: the interface has to know they exist to say so.
+        if ($family === 'client record') {
+            expect($body['companies'])->toBe(['visible' => false])
+                ->and($body['affiliations'])->toBe(['visible' => false]);
+        }
+
+        // The client list and the client record legitimately name the client. What
+        // may not appear anywhere in them is any *other* record of the portfolio:
+        // a company document number or an entity name reached through the client.
+        if (str_starts_with($uri, '/api/clients')) {
+            expect(json_encode($body))->not->toContain($company->tax_id)
+                ->and(json_encode($body))->not->toContain($entity->name);
+        }
+
+        // And the reverse: reading a company or an entity must not disclose who
+        // works there or who belongs to it.
+        if (str_starts_with($uri, '/api/companies') || str_contains($uri, 'social-security-entities')) {
+            expect(json_encode($body))->not->toContain($client->document_number);
+        }
+    }
+
+    // And the client payload names no company at all.
+    $clientBody = $this->actingAs($reader)->getJson("/api/clients/{$client->id}")->json();
+
+    expect(json_encode($clientBody))->not->toContain($company->legal_name);
+});
+
+it('lets a full reader see everything, so the sweep above is not passing on emptiness', function (): void {
+    $client = portfolioForPermissions();
+    $company = $client->companyAssignments->first()->company;
+
+    $reader = userWithPermissions([
+        'clients.view',
+        'companies.view',
+        'social_security_entities.view',
+        'relationships.view',
+        'affiliations.view',
+    ]);
+
+    $body = $this->actingAs($reader)->getJson("/api/clients/{$client->id}")->json();
+
+    expect($body['companies']['visible'])->toBeTrue()
+        ->and($body['companies']['active'])->toHaveCount(1)
+        ->and($body['affiliations']['visible'])->toBeTrue()
+        ->and($body['affiliations']['active'])->toHaveCount(1)
+        // And the company record carries the counts the restricted reader did not
+        // get, which is what proves those keys are withheld rather than absent from
+        // the resource altogether.
+        ->and($this->actingAs($reader)
+            ->getJson("/api/companies/{$company->id}")
+            ->assertOk()
+            ->json('company'))
+        ->toHaveKey('active_clients_count')
+        ->and($this->actingAs($reader)
+            ->getJson("/api/companies/{$company->id}")
+            ->assertOk()
+            ->json('company'))
+        ->toHaveKey('total_clients_count');
+});

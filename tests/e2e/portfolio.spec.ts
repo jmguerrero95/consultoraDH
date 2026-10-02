@@ -331,6 +331,84 @@ test.describe('A02: clients, companies and affiliation history', () => {
         expect(after.history).toEqual(before.history);
     });
 
+    // A02-R3: the running application, through its own HTTP stack, including the
+    // CSRF handling that an in-process probe cannot reproduce.
+    test('refuses two open relationships to the same company', async ({ page }) => {
+        await signIn(page);
+
+        const company = await created<Company>(page, '/api/companies', {
+            legal_name: `Unica ${stamp}`,
+            tax_id: `905${stamp.slice(-6)}-1`,
+        }, 'company');
+
+        const client = await created<Client>(page, '/api/clients', {
+            document_type: 'CC',
+            document_number: `4${stamp}`,
+            first_names: 'Unico',
+            last_names: 'E2E',
+        }, 'client');
+
+        await apiWrite(page, `/api/clients/${client.id}/companies`, {
+            company_id: company.id,
+            started_on: '2024-01-01',
+            resolution: 'only_if_none',
+        });
+
+        // The same company again, asking for a parallel relationship: the
+        // resolution that used to let a duplicate through.
+        const parallel = await apiWrite(page, `/api/clients/${client.id}/companies`, {
+            company_id: company.id,
+            started_on: '2024-06-01',
+            resolution: 'parallel',
+            parallel_reason: 'Intento duplicado.',
+        });
+
+        expect(parallel.status(), await parallel.text()).toBe(422);
+        expect((await parallel.json()).message).toContain('ya tiene una relación abierta');
+
+        // The ordinary resolution is refused too, and with the more specific
+        // reason: the operator asked for a company they are already with.
+        const ordinary = await apiWrite(page, `/api/clients/${client.id}/companies`, {
+            company_id: company.id,
+            started_on: '2024-06-01',
+        });
+
+        expect(ordinary.status(), await ordinary.text()).toBe(422);
+
+        // One open relationship, and one only.
+        const after = await relationships(page, client.id);
+
+        expect(after.active).toHaveLength(1);
+        expect(after.history).toHaveLength(0);
+    });
+
+    test('refuses a malformed tax id and two contradictory verification digits', async ({ page }) => {
+        await signIn(page);
+
+        // A tolerant parser used to repair each of these into a valid NIT and store
+        // something the operator never typed.
+        for (const malformed of ['-900123456-3', '900123456-3-', '900123456--']) {
+            const response = await apiWrite(page, '/api/companies', {
+                legal_name: `Malformada ${stamp} ${malformed}`,
+                tax_id: malformed,
+            });
+
+            expect(response.status(), `${malformed} should be refused`).toBe(422);
+            expect((await response.json()).errors.tax_id).toBeDefined();
+        }
+
+        // Two different answers to the same question in one request.
+        const conflicting = await apiWrite(page, '/api/companies', {
+            legal_name: `Cifras ${stamp}`,
+            email: `cifras${stamp}@consultora-dh.test`,
+            tax_id: `906${stamp.slice(-6)}-4`,
+            verification_digit: '5',
+        });
+
+        expect(conflicting.status(), await conflicting.text()).toBe(422);
+        expect((await conflicting.json()).code).toBe('conflicting_verification_digit');
+    });
+
     test('lets a read only role see the portfolio and change nothing', async ({ browser }) => {
         const readerEmail = process.env.E2E_READER_EMAIL;
         const readerPassword = process.env.E2E_READER_PASSWORD;

@@ -2,12 +2,16 @@
 
 declare(strict_types=1);
 
+use App\Domain\Affiliations\ManageClientCompanies;
+use App\Domain\Companies\Actions\CompanyHasActiveClients;
+use App\Domain\Companies\Actions\SetCompanyStatus;
 use App\Domain\Shared\RecordStatus;
 use App\Models\AuditEvent;
 use App\Models\Client;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 beforeEach(function (): void {
@@ -318,4 +322,88 @@ it('records company changes in the audit trail', function (): void {
         ->and(AuditEvent::query()->where('action', 'company.deactivated')->count())->toBe(1)
         ->and(AuditEvent::query()->where('action', 'company.deactivated')->firstOrFail()->subject_id)
         ->toBe($company->id);
+});
+
+// --- The lock the status change takes ----------------------------------------
+
+it('locks the company before counting the open relationships', function (): void {
+    $company = Company::factory()->create();
+
+    $lockedTables = [];
+
+    DB::listen(function ($query) use (&$lockedTables): void {
+        if (str_contains(strtolower($query->sql), 'for update')) {
+            $lockedTables[] = $query->sql;
+        }
+    });
+
+    app(SetCompanyStatus::class)->execute($company, RecordStatus::Inactive, actingAsRole());
+
+    $companyLock = collect($lockedTables)->search(fn ($sql): bool => str_contains($sql, 'from "companies"'));
+    $historyLock = collect($lockedTables)->search(fn ($sql): bool => str_contains($sql, 'client_company_assignments'));
+
+    expect($companyLock)->toBeInt()
+        ->and($historyLock)->toBeInt()
+        ->and($companyLock)->toBeLessThan($historyLock);
+
+    // The rows are pinned and then counted rather than counted with SQL, because
+    // PostgreSQL refuses `FOR UPDATE` beside `count()`.
+    expect(collect($lockedTables)->first(fn ($sql): bool => str_contains($sql, 'client_company_assignments')))
+        ->not->toContain('count(');
+});
+
+it('refuses deactivation for a relationship opened after the request was built', function (): void {
+    $company = Company::factory()->create();
+    $client = Client::factory()->create();
+    $relationships = app(ManageClientCompanies::class);
+
+    // The company as the request carries it: active, with nobody attached.
+    $stale = $company->fresh();
+    expect($stale->activeAssignments()->count())->toBe(0);
+
+    // Meanwhile a relationship appears, and the company is deactivated and
+    // reactivated by somebody else in between.
+    $relationships->link(
+        client: $client,
+        company: $company,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $company->forceFill(['status' => RecordStatus::Inactive->value])->save();
+    $company->forceFill(['status' => RecordStatus::Active->value])->save();
+
+    // The instance the request carries says active and countless. The refusal has
+    // to come from the rows read under the lock.
+    expect($stale->status)->toBe(RecordStatus::Active);
+
+    app(SetCompanyStatus::class)->execute($stale, RecordStatus::Inactive, actingAsRole());
+})->throws(CompanyHasActiveClients::class);
+
+it('deactivates on the locked count even when the request carries a higher one', function (): void {
+    $company = Company::factory()->create();
+    $client = Client::factory()->create();
+    $relationships = app(ManageClientCompanies::class);
+
+    $assignment = $relationships->link(
+        client: $client,
+        company: $company,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    $stale = $company->fresh();
+    expect($stale->activeAssignments()->count())->toBe(1);
+
+    // The relationship is closed by somebody else before this transaction reads it.
+    $relationships->close($assignment, actingAsRole(), new DateTimeImmutable('2024-06-30'));
+
+    $result = app(SetCompanyStatus::class)->execute($stale, RecordStatus::Inactive, actingAsRole());
+
+    // Allowed, and this is the point: the decision comes from the rows read under
+    // the lock, so a count the request carried and nobody re-read cannot refuse an
+    // operation that is in fact allowed. Refusing here would have been the stale
+    // read, in the other direction.
+    expect($result->status)->toBe(RecordStatus::Inactive)
+        ->and($company->fresh()->status)->toBe(RecordStatus::Inactive);
 });

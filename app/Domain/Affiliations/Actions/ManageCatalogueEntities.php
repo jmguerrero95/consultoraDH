@@ -95,26 +95,48 @@ final class ManageCatalogueEntities
      * alternative is either leaving a dangling current affiliation or closing
      * somebody's EPS behind their back.
      */
+    /**
+     * Deactivates a catalogue entry.
+     *
+     * The count of open affiliations happens inside the transaction, after the
+     * entity row is locked and re-read. Counting first left the decision stale: an
+     * affiliation opened by another request in between was invisible here, so the
+     * entity was deactivated while somebody was affiliated to it. That is the same
+     * mistake the client and company sides had, and it is now the same fix.
+     *
+     * The lock order matches the one that opens an affiliation: client, entity,
+     * history. This transaction only ever takes the entity, so it cannot deadlock
+     * against an operation that takes it second.
+     */
     public function deactivate(SocialSecurityEntity $entity, User $actor): SocialSecurityEntity
     {
-        if ($entity->status === RecordStatus::Inactive) {
-            return $entity;
-        }
-
-        $open = $entity->activeAffiliations()->count();
-
-        if ($open > 0) {
-            throw new EntityHasOpenAffiliations($open);
-        }
-
         return DB::transaction(function () use ($entity, $actor): SocialSecurityEntity {
-            $from = $entity->status->value;
+            $locked = SocialSecurityEntity::query()->lockForUpdate()->findOrFail($entity->id);
 
-            $entity->forceFill(['status' => RecordStatus::Inactive->value])->save();
+            if ($locked->status === RecordStatus::Inactive) {
+                return $locked;
+            }
 
-            event(SocialSecurityEntityChanged::deactivated($entity->refresh(), $actor, $from, RecordStatus::Inactive->value));
+            // Rows pinned and then counted: PostgreSQL refuses `FOR UPDATE` next to
+            // `count()`, and holding the entity lock already serialises the
+            // inserts that could change this number, since every one of them takes
+            // that lock first.
+            $open = $locked->activeAffiliations()
+                ->lockForUpdate()
+                ->get()
+                ->count();
 
-            return $entity->refresh();
+            if ($open > 0) {
+                throw new EntityHasOpenAffiliations($open);
+            }
+
+            $from = $locked->status->value;
+
+            $locked->forceFill(['status' => RecordStatus::Inactive->value])->save();
+
+            event(SocialSecurityEntityChanged::deactivated($locked->refresh(), $actor, $from, RecordStatus::Inactive->value));
+
+            return $locked->refresh();
         });
     }
 

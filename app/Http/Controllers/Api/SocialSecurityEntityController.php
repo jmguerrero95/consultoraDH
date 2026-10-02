@@ -37,10 +37,16 @@ final class SocialSecurityEntityController extends Controller
         $status = $request->statusFilter();
         $type = $request->typeFilter();
 
-        $query = SocialSecurityEntity::query()->withCount([
-            'affiliations as affiliations_count',
-            'activeAffiliations as active_affiliations_count',
-        ]);
+        $query = SocialSecurityEntity::query();
+
+        // Same reasoning as the client counts: how many people are affiliated to an
+        // entity is affiliation information, not catalogue information.
+        if ($request->user()?->can('affiliations.view')) {
+            $query->withCount([
+                'affiliations as affiliations_count',
+                'activeAffiliations as active_affiliations_count',
+            ]);
+        }
 
         if ($pattern !== null) {
             $query->where(function ($q) use ($pattern): void {

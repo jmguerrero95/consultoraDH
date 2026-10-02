@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api;
 
 use App\Domain\Affiliations\AffiliationAlreadyExists;
+use App\Domain\Affiliations\DuplicateOpenRelationship;
 use App\Domain\Affiliations\ManageAffiliations;
 use App\Domain\Affiliations\ManageClientCompanies;
 use App\Domain\Affiliations\ParallelRelationshipNotAllowed;
@@ -351,6 +352,16 @@ final class ClientController extends Controller
                 'open_assignments' => $e->openAssignmentIds,
                 'options' => $e->options(),
             ], 409);
+        } catch (DuplicateOpenRelationship $e) {
+            // A refusal the operator can act on, not a crash. The two companies are
+            // the same here, so there is nothing to choose between and no list of
+            // options to offer; the message names the relationship already open.
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => 'duplicate_open_relationship',
+                'company_id' => $e->company->id,
+                'open_assignment_id' => $e->openAssignmentId,
+            ], 422);
         } catch (\DomainException $e) {
             return response()->json([
                 'message' => $e->getMessage(),
@@ -403,6 +414,15 @@ final class ClientController extends Controller
                 $request->validated('job_title'),
                 $request->validated('notes'),
             );
+        } catch (DuplicateOpenRelationship $e) {
+            // Moving somebody to a company they are already with, or to one they are
+            // already employed by, is refused with the same answer the link gives.
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => 'duplicate_open_relationship',
+                'company_id' => $e->company->id,
+                'open_assignment_id' => $e->openAssignmentId,
+            ], 422);
         } catch (\DomainException $e) {
             return response()->json([
                 'message' => $e->getMessage(),

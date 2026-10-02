@@ -31,6 +31,9 @@ const auth = useAuthStore();
 const toast = useToastStore();
 
 const canManage = computed(() => auth.can('social_security_entities.manage'));
+// Same reasoning as the client counts: how many people are affiliated to an entity
+// is affiliation data, so the column exists only for a role that may read it.
+const canSeeAffiliations = computed(() => auth.can('affiliations.view'));
 
 const TYPES: { value: SocialSecurityType; label: string }[] = [
     { value: 'EPS', label: 'EPS' },
@@ -329,7 +332,7 @@ async function confirmDeactivate(): Promise<void> {
                             <th scope="col">Tipo</th>
                             <th scope="col">Nombre</th>
                             <th scope="col">Código</th>
-                            <th scope="col">Afiliaciones activas</th>
+                            <th v-if="canSeeAffiliations" scope="col">Afiliaciones activas</th>
                             <th scope="col">Estado</th>
                             <th scope="col"><span class="cdh-visually-hidden">Acciones</span></th>
                         </tr>
@@ -341,7 +344,7 @@ async function confirmDeactivate(): Promise<void> {
                             </td>
                             <td data-label="Nombre" class="cdh-table__primary">{{ entity.name }}</td>
                             <td data-label="Código">{{ entity.code ?? '—' }}</td>
-                            <td data-label="Afiliaciones activas">
+                            <td v-if="canSeeAffiliations" data-label="Afiliaciones activas">
                                 {{ entity.active_affiliations_count ?? 0 }}
                             </td>
                             <td data-label="Estado">

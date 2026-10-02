@@ -43,11 +43,11 @@ export interface ServiceCheck {
  * behalf.
  */
 export interface PortfolioCounts {
-    active_clients: number;
-    inactive_clients: number;
-    active_companies: number;
-    data_quality_issues: number;
-    data_quality_warnings: number;
+    active_clients?: number;
+    inactive_clients?: number;
+    active_companies?: number;
+    data_quality_issues?: number;
+    data_quality_warnings?: number;
     active_relationships?: number;
     active_affiliations?: number;
     catalogue_entities?: number;
@@ -195,8 +195,13 @@ export interface ClientListItem {
     phone: string | null;
     status: RecordStatus;
     status_label: string;
-    companies_count: number | null;
-    companies: CompanySummary[];
+    /**
+     * Absent, not null, for a role that may read clients but not relationships.
+     * "No companies" and "not allowed to see them" are different answers, so the
+     * column hides itself instead of claiming one of them.
+     */
+    companies_count?: number | null;
+    companies?: CompanySummary[];
 }
 
 export interface Client extends ClientListItem {
@@ -216,8 +221,9 @@ export interface Company extends CompanySummary {
     address: string | null;
     city: string | null;
     department: string | null;
-    active_clients_count: number | null;
-    total_clients_count: number | null;
+    /** Absent unless the viewer may read relationships: it is relationship data. */
+    active_clients_count?: number | null;
+    total_clients_count?: number | null;
     created_at: string | null;
     updated_at: string | null;
 }
@@ -270,8 +276,9 @@ export interface Affiliation {
 export interface SocialSecurityEntity extends EntitySummary {
     type_full_label: string;
     tax_id: string | null;
-    affiliations_count: number | null;
-    active_affiliations_count: number | null;
+    /** Absent unless the viewer may read affiliations: it is affiliation data. */
+    affiliations_count?: number | null;
+    active_affiliations_count?: number | null;
     created_at: string | null;
     updated_at: string | null;
 }

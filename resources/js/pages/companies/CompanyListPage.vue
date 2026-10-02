@@ -25,6 +25,10 @@ const router = useRouter();
 
 const auth = useAuthStore();
 const canCreate = computed(() => auth.can('companies.create'));
+// The client count is relationship data. The server omits the key for a role that
+// may not read it, and the column is hidden for the same reason: a `?? 0` here
+// would state that the company employs nobody.
+const canSeeClients = computed(() => auth.can('relationships.view'));
 
 const search = ref('');
 const status = ref('');
@@ -181,7 +185,7 @@ Nueva empresa
                             <th scope="col">Razón social</th>
                             <th scope="col">NIT</th>
                             <th scope="col" class="cdh-table__wide">Contacto</th>
-                            <th scope="col">Clientes activos</th>
+                            <th v-if="canSeeClients" scope="col">Clientes activos</th>
                             <th scope="col">Estado</th>
                             <th scope="col"><span class="cdh-visually-hidden">Acciones</span></th>
                         </tr>
@@ -207,7 +211,9 @@ Nueva empresa
                                 <span v-if="company.phone" class="cdh-table__secondary">{{ company.phone }}</span>
                                 <span v-if="!company.email && !company.phone" class="cdh-table__secondary">—</span>
                             </td>
-                            <td data-label="Clientes activos">{{ company.active_clients_count ?? 0 }}</td>
+                            <td v-if="canSeeClients" data-label="Clientes activos">
+                                {{ company.active_clients_count ?? 0 }}
+                            </td>
                             <td data-label="Estado">
                                 <span
                                     class="cdh-badge"

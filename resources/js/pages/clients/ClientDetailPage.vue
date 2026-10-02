@@ -216,9 +216,11 @@ async function loadCompanies(): Promise<void> {
     const search = debouncedCompanySearch.value.trim();
 
     try {
+        // `?? []` for the same reason as the affiliation picker: an unexpected body
+        // must leave an empty picker, not put `undefined` where a list is rendered.
         companies.value = (
             await businessApi.clients.companyOptions(search === '' ? undefined : search)
-        ).companies;
+        ).companies ?? [];
     } catch {
         companies.value = [];
     }
@@ -435,7 +437,11 @@ async function loadEntities(): Promise<void> {
     try {
         const list = await businessApi.entities.list({ per_page: 100, status: 'active' });
 
-        entityOptions.value = list.entities;
+        // Guarded: a response that is not the list this expects (an error body, or a
+        // role that may not read the catalogue) would otherwise put `undefined` in
+        // the ref, and the computed below would throw while rendering. An empty
+        // picker is a screen with nothing to choose; a thrown render is a broken one.
+        entityOptions.value = list.entities ?? [];
     } catch {
         entityOptions.value = [];
     }

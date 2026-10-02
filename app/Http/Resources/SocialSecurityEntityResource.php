@@ -23,7 +23,7 @@ final class SocialSecurityEntityResource extends JsonResource
         /** @var SocialSecurityEntity $entity */
         $entity = $this->resource;
 
-        return [
+        $details = [
             'id' => $entity->id,
             'type' => $entity->type->value,
             'type_label' => $entity->type->shortLabel(),
@@ -33,10 +33,19 @@ final class SocialSecurityEntityResource extends JsonResource
             'tax_id' => $entity->tax_id,
             'status' => $entity->status->value,
             'status_label' => $entity->status->label(),
-            'affiliations_count' => $entity->affiliations_count ?? null,
-            'active_affiliations_count' => $entity->active_affiliations_count ?? null,
             'created_at' => $entity->created_at?->toIso8601String(),
             'updated_at' => $entity->updated_at?->toIso8601String(),
+        ];
+
+        if (! $request->user()?->can('affiliations.view')) {
+            return $details;
+        }
+
+        // How many people are affiliated to this entity is affiliation
+        // information, not catalogue information.
+        return $details + [
+            'affiliations_count' => $entity->affiliations_count ?? null,
+            'active_affiliations_count' => $entity->active_affiliations_count ?? null,
         ];
     }
 }
