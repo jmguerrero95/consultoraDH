@@ -274,6 +274,20 @@ async function submitLink(): Promise<void> {
         await load();
     } catch (cause) {
         if (cause instanceof ApiError && cause.status === 409) {
+            const payload = cause.payload as { code?: string; message?: string; options?: ConflictPayload['options'] };
+
+            if (payload?.code === 'transfer_source_required') {
+                // Several open relationships: the server will not choose one. Say so
+                // and point at the action that does, on the row itself.
+                linkOpen.value = false;
+                toast.error(
+                    payload.message ??
+                        'El cliente tiene varias relaciones abiertas. Elija en la lista cuál transfiere.',
+                );
+                await load();
+                return;
+            }
+
             linkConflict.value = cause.payload as ConflictPayload;
         } else {
             toast.error(cause instanceof ApiError ? cause.message : 'No fue posible registrar la relación.');
@@ -523,10 +537,34 @@ const warnings = computed<DataQualityFinding[]>(() => payload.value?.data_qualit
 
 const activeAffiliations = computed<Affiliation[]>(() => payload.value?.affiliations.active ?? []);
 const historyAffiliations = computed<Affiliation[]>(() => payload.value?.affiliations.history ?? []);
+const maySeeCompanies = computed(() => payload.value?.companies.visible === true);
+const maySeeAffiliations = computed(() => payload.value?.affiliations.visible === true);
+
+/**
+ * The sections this role may read.
+ *
+ * A tab for a section the role cannot read would open onto an answer the server
+ * refuses to give, so the tab is not offered. The permission is the server's; this
+ * only avoids sending somebody to a screen that says "you cannot see this".
+ */
+const visibleTabs = computed(() =>
+    TABS.filter((entry) => {
+        if (entry.id === 'empresas') {
+            return maySeeCompanies.value;
+        }
+
+        if (entry.id === 'afiliaciones') {
+            return maySeeAffiliations.value;
+        }
+
+        return true;
+    }),
+);
+
 const activeCompanies = computed<Assignment[]>(() => payload.value?.companies.active ?? []);
 const historyCompanies = computed<Assignment[]>(() => payload.value?.companies.history ?? []);
 
-const affiliationsVisible = computed(() => payload.value?.affiliations.visible === true);
+
 </script>
 
 <template>
@@ -576,7 +614,7 @@ Editar
 
             <div class="cdh-tabs" role="tablist" aria-label="Secciones de la ficha">
                 <button
-                    v-for="entry in TABS"
+                    v-for="entry in visibleTabs"
                     :id="`tab-${entry.id}`"
                     :key="entry.id"
                     type="button"
@@ -621,7 +659,7 @@ Editar
                         </div>
                     </article>
 
-                    <article class="cdh-card">
+                    <article v-if="maySeeCompanies" class="cdh-card">
                         <h2 class="cdh-card__title">Empresas actuales</h2>
                         <div class="cdh-card__body">
                             <p v-if="activeCompanies.length === 0" class="cdh-text-muted mb-0">
@@ -649,7 +687,7 @@ Editar
                     </article>
                 </div>
 
-                <article v-if="affiliationsVisible" class="cdh-card mt-3">
+                <article v-if="maySeeAffiliations" class="cdh-card mt-3">
                     <h2 class="cdh-card__title">Afiliaciones actuales</h2>
                     <div class="cdh-card__body">
                         <p v-if="activeAffiliations.length === 0" class="cdh-text-muted mb-0">
@@ -719,7 +757,13 @@ Editar
             </div>
 
             <!-- Empresas -->
-            <div v-show="tab === 'empresas'" id="panel-empresas" role="tabpanel" aria-labelledby="tab-empresas">
+            <div
+                v-if="maySeeCompanies"
+                v-show="tab === 'empresas'"
+                id="panel-empresas"
+                role="tabpanel"
+                aria-labelledby="tab-empresas"
+            >
                 <div class="d-flex justify-content-end mb-3">
                     <AppButton v-if="canManageRelationships" icon="bi-plus-lg" @click="openLink">
                         Vincular empresa

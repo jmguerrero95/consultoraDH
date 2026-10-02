@@ -32,6 +32,13 @@ use Illuminate\Support\Facades\DB;
  *
  *  3. History is closed, never overwritten. Changing entity closes the old row
  *     and opens a new one in one transaction.
+ *
+ *  4. A new open affiliation needs something still open itself: an active client
+ *     and an active entity. Both checks are here and not only in the selectors of
+ *     the interface, because a picker that filters is a convenience and a request
+ *     that is refused is the rule. Rows that already exist keep pointing wherever
+ *     they point: a closed historical affiliation to an entity that has since been
+ *     deactivated is history, not an error.
  */
 final class ManageAffiliations
 {
@@ -54,6 +61,19 @@ final class ManageAffiliations
         ?\DateTimeInterface $closeCurrentOn = null,
     ): ClientAffiliation {
         $type = $entity->type;
+
+        // Refused before anything is read or written, so a refused request leaves
+        // no trace and no half-open row.
+        if (! $client->isActive()) {
+            throw new DomainException('No se puede registrar una afiliación para un cliente inactivo.');
+        }
+
+        if (! $entity->isActive()) {
+            throw new DomainException(sprintf(
+                'No se puede registrar una afiliación con la entidad %s porque está inactiva.',
+                $entity->name,
+            ));
+        }
 
         $this->assertTypeMatches($type, $entity);
         $this->assertRiskAllowed($type, $riskClass);
@@ -140,6 +160,15 @@ final class ManageAffiliations
                 'No se puede cambiar una afiliación de %s a una entidad de %s.',
                 $current->type->value,
                 $to->type->value,
+            ));
+        }
+
+        // The destination has to be usable now. Moving somebody to an entity that
+        // has been deactivated would record an affiliation nobody can maintain.
+        if (! $to->isActive()) {
+            throw new DomainException(sprintf(
+                'No se puede cambiar la afiliación a la entidad %s porque está inactiva.',
+                $to->name,
             ));
         }
 

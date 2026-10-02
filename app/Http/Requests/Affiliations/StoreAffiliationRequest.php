@@ -41,7 +41,10 @@ final class StoreAffiliationRequest extends FormRequest
             'social_security_entity_id' => ['required', 'integer', Rule::exists('social_security_entities', 'id')],
             'type' => ['required', 'string', Rule::enum(SocialSecurityEntityType::class)],
             'started_on' => ['nullable', 'date'],
-            'ended_on' => ['nullable', 'date', 'after_or_equal:started_on'],
+            // Same as the relationship request: an affiliation is created open and
+            // closed by its own operation, so a closing date sent here is refused
+            // instead of quietly discarded.
+            'ended_on' => ['prohibited'],
             'arl_risk_class' => ['nullable', 'integer', Rule::in(ArlRiskClass::values())],
             'notes' => ['nullable', 'string', 'max:2000'],
             'client_company_assignment_id' => ['nullable', 'integer', Rule::exists('client_company_assignments', 'id')],
@@ -64,6 +67,7 @@ final class StoreAffiliationRequest extends FormRequest
             'started_on.date' => 'La fecha de inicio no tiene un formato válido.',
             'ended_on.date' => 'La fecha de cierre no tiene un formato válido.',
             'ended_on.after_or_equal' => 'La fecha de cierre no puede ser anterior a la de inicio.',
+            'ended_on.prohibited' => 'Una afiliación se crea abierta; para cerrarla use la operación de cierre.',
             'arl_risk_class.in' => 'El nivel de riesgo debe ser 1, 2, 3, 4 o 5.',
             'arl_risk_class.integer' => 'El nivel de riesgo debe ser un número.',
             'notes.max' => 'Las notas no pueden superar los 2000 caracteres.',

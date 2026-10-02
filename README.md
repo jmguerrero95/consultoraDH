@@ -179,7 +179,10 @@ que se inicializa el volumen de PostgreSQL.
 
 Las migraciones de A02 crean el dominio de negocio: `clients`, `companies`,
 `social_security_entities`, `client_company_assignments` y `client_affiliations`,
-y añaden `subject_type` y `subject_id` a `audit_events`.
+y añaden `subject_type` y `subject_id` a `audit_events`. A02-R1 añade tres más, que
+corrigen representación y restricciones sin reescribir las anteriores: el NIT se
+separa en número y dígito de verificación, y el correo de contacto y el código del
+catálogo dejan de ser únicos porque no identifican a nadie.
 
 Las relaciones con empresas y las afiliaciones se guardan como periodos
 históricos: cerrar o cambiar una relación **marca la fila anterior con su fecha de

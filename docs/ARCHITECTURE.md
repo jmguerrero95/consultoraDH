@@ -218,7 +218,62 @@ Criterios que sí se aplicaron, y por qué:
   combinación.** Las rutas declaran el permiso; `AuthorizationTest` recorre los
   cinco roles.
 
-### 6.1 El modelo histórico
+### 6.1 Las fechas de un periodo
+
+Los dos campos de fecha significan una cosa y sólo una:
+
+```
+[started_on, ended_on)
+```
+
+`started_on` es el primer día en que el registro es efectivo. `ended_on` es el
+primer día en que **deja** de serlo, y por eso queda fuera del periodo. `NULL`
+significa que todavía no ha terminado.
+
+Un traspaso efectivo el 1 de marzo escribe esa misma fecha en las dos filas: el
+fin de la anterior y el inicio de la nueva. El 28 defebrero responde la empresa
+anterior, el 1 de marzo la nueva, y no hay ningún día que pertenezca a las dos ni a
+ninguna. La convención inclusiva, `[inicio, fin]`, obligaría a escribir el cierre
+el día anterior y repartir esa resta entre todos los que llaman al dominio; una de
+esas cuentas acabaría mal.
+
+La regla vive en `App\Domain\Shared\EffectivePeriod`, la implementa el ámbito
+`activeOn()` de las dos tablas, y hay pruebas a ambos lados de la costura. A03 va a
+informar sobre periodos y tiene que heredar esto en vez de inventar su propia
+aritmética.
+
+### 6.2 Quién bloquea, y qué bloquea
+
+El bloqueo de una operación que cambia relaciones es **la fila del cliente**, dentro
+de la transacción, antes de leer nada.
+
+Bloquear las relaciones abiertas no sirve para serializar dos primeras relaciones
+simultáneas: cada transacción encuentra cero filas y por tanto bloquea cero filas, y
+las dos insertan. La fila maestra siempre existe, así que siempre hay algo con lo
+que contenderse. Es la misma razón por la que un "existe? entonces inserto" escrito
+en PHP es una carrera y un índice único no lo es.
+
+El orden importa: primero el bloqueo, después la lectura de las relaciones. Al revés,
+la lectura que decide se hace fuera del bloqueo y no sirve de nada.
+
+### 6.3 Cuándo el dominio no elige
+
+Dos casos en que el servidor se niega a decidir y devuelve un conflicto con lo que
+necesita para que la persona elija:
+
+- **Un vínculo repetido.** El origen de datos tiene personas en más de una empresa a
+  la vez y no hay forma de saber si es real o un error, así que quien llama dice qué
+  hacer: `transfer`, `parallel` (con motivo) o cancelar.
+- **Un traspaso con más de una relación abierta.** Con dos o más, elegir una es una
+  decisión de negocio y no le corresponde a este sistema. Responde
+  `transfer_source_required` con las relaciones abiertas; la transferencia se hace
+  después sobre el endpoint que nombra el origen en su ruta.
+
+Un `close_others` existe en el dominio para desactivar un cliente, y no se acepta
+por el endpoint de vínculo: un valor capaz de cerrar todas las relaciones abiertas
+no pertenece en una petición cuyo trabajo es añadir una.
+
+### 6.4 El modelo histórico
 
 Las relaciones con empresas y las afiliaciones no se actualizan: se cierran. Un
 cierre marca la fila anterior con su fecha de fin y abre una fila nueva, y un

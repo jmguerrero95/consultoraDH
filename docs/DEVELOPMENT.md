@@ -130,6 +130,25 @@ El catálogo de entidades de seguridad social se deja **vacío a propósito**. S
 datos de referencia reales; A02 no los inventa y sí impide que se inventen por
 error. Se registran desde *Configuración → Entidades de seguridad social*.
 
+Las tres migraciones de A02-R1 son correcciones y se aplican sobre el esquema de
+A02 sin reescribir la historia de Git:
+
+| Migración | Qué corrige |
+| --- | --- |
+| `2026_10_01_220000_split_tax_id_and_verification_digit` | Separa el NIT en número y dígito, y pone la unicidad sobre el número base |
+| `2026_10_01_220100_relax_contact_email_uniqueness` | El correo de contacto deja de ser único en clientes y empresas |
+| `2026_10_01_220200_relax_catalogue_code_uniqueness` | El código del catálogo deja de ser único en todo el catálogo |
+
+La primera **falla con un mensaje claro** si dos empresas acaban compartiendo el
+número base del NIT, nombrándolas, en vez de dejar que el índice único reviente con
+un error sobre una clave. No se descarta ninguna fila y no se recalcula ningún
+dígito: un dígito de verificación dudoso se conserva y se reporta como duda.
+
+Ninguna de las tres tiene un `down()` que deshaga la corrección: volver a mezclar
+el NIT con su dígito, o volver a poner una unicidad sobre el correo de contacto que
+la portfolio ya comparte, no es un estado al que valga la pena volver. Para
+retroceder hay que restaurar una copia anterior de la base.
+
 Para comprobar que las migraciones de un módulo se pueden revertir de verdad, lo
 más limpio es una base de datos desechable:
 

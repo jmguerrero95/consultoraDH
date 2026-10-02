@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Companies\Actions;
 
 use App\Domain\Companies\Events\CompanyCreated;
-use App\Domain\Companies\TaxId;
+use App\Domain\Companies\TaxIdParts;
 use App\Domain\Shared\RecordStatus;
 use App\Models\Company;
 use App\Models\User;
@@ -16,7 +16,8 @@ use Illuminate\Support\Facades\DB;
  *
  * The NIT is normalised and split here rather than in the model, because the
  * verification digit is a second stored value and the split is a domain decision
- * about how a NIT is read, not something a setter should be guessing at.
+ * about how a NIT is read, not something a setter should be guessing at. See
+ * `TaxIdParts` for what happens when the caller sends both spellings.
  *
  * An empty NIT is stored as NULL, not as an empty string, so that the partial
  * unique index does not make every NIT-less company a duplicate of the first one.
@@ -28,17 +29,14 @@ final class CreateCompany
      */
     public function execute(array $attributes, User $actor): Company
     {
-        $taxId = TaxId::normalise($attributes['tax_id'] ?? null);
-        $taxId = $taxId === '' ? null : $taxId;
+        [$taxId, $digit] = TaxIdParts::from($attributes);
 
-        return DB::transaction(function () use ($attributes, $actor, $taxId): Company {
+        return DB::transaction(function () use ($attributes, $actor, $taxId, $digit): Company {
             $company = Company::query()->create([
                 'legal_name' => $attributes['legal_name'],
                 'trade_name' => $attributes['trade_name'] ?? null,
                 'tax_id' => $taxId,
-                'verification_digit' => $taxId === null
-                    ? null
-                    : (TaxId::checkDigit($taxId) ?? ($attributes['verification_digit'] ?? null)),
+                'verification_digit' => $digit,
                 'email' => $attributes['email'] ?? null,
                 'phone' => $attributes['phone'] ?? null,
                 'address' => $attributes['address'] ?? null,

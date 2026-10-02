@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\DataQuality\DataQualityCode;
+use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\DataQuality\PortfolioMetrics;
 use App\Http\Controllers\Controller;
 use Illuminate\Contracts\Auth\Access\Authorizable;
@@ -30,6 +32,7 @@ final class DashboardController extends Controller
 {
     public function __construct(
         private readonly PortfolioMetrics $metrics,
+        private readonly DataQualityInspector $quality,
     ) {}
 
     public function __invoke(Request $request): JsonResponse
@@ -85,20 +88,70 @@ final class DashboardController extends Controller
 
         $counts = $this->metrics->counts();
 
-        return [
-            'visible' => true,
-            'counts' => [
-                'active_clients' => $counts['active_clients'],
-                'inactive_clients' => $counts['inactive_clients'],
-                'active_companies' => $counts['active_companies'],
-                'active_relationships' => $counts['active_relationships'],
-                'active_affiliations' => $counts['active_affiliations'],
-                'catalogue_entities' => $counts['catalogue_entities'],
-                'data_quality_issues' => $counts['data_quality_issues'],
-                'data_quality_warnings' => $counts['data_quality_warnings'],
-            ],
-            'multiple_companies' => $this->metrics->clientsWithMultipleCompanies(),
+        // Each figure is withheld from the roles that may not read the section it
+        // comes from. `active_affiliations` says how many people are affiliated and
+        // the quality figures about affiliations name the entities involved, so
+        // neither belongs on a screen for somebody without those permissions. A
+        // withheld figure is absent rather than zero, because zero is a claim about
+        // the portfolio.
+        $maySeeRelationships = $can->can('relationships.view');
+        $maySeeAffiliations = $can->can('affiliations.view');
+        $maySeeCatalogue = $can->can('social_security_entities.view');
+
+        $visible = [
+            'active_clients' => $counts['active_clients'],
+            'inactive_clients' => $counts['inactive_clients'],
+            'active_companies' => $counts['active_companies'],
+            'data_quality_issues' => $counts['data_quality_issues'],
+            'data_quality_warnings' => $counts['data_quality_warnings'],
         ];
+
+        if ($maySeeRelationships) {
+            $visible['active_relationships'] = $counts['active_relationships'];
+            $visible['authorised_parallel_relationships'] = $counts['authorised_parallel_relationships'];
+        }
+
+        if ($maySeeAffiliations) {
+            $visible['active_affiliations'] = $counts['active_affiliations'];
+        }
+
+        if ($maySeeCatalogue) {
+            $visible['catalogue_entities'] = $counts['catalogue_entities'];
+        }
+
+        // The per code figures behind the totals, filtered by the same rule, since
+        // some of them describe affiliations and some describe relationships.
+        $quality = array_filter(
+            $this->quality->summary(),
+            fn (string $code): bool => $this->maySeeQualityCode($can, $code),
+            ARRAY_FILTER_USE_KEY,
+        );
+
+        $portfolio = [
+            'visible' => true,
+            'counts' => $visible,
+            'quality' => $quality,
+        ];
+
+        if ($maySeeRelationships) {
+            $portfolio['multiple_companies'] = $this->metrics->clientsWithSeveralOpenRelationships();
+        }
+
+        return $portfolio;
+    }
+
+    /**
+     * Whether the role may read the figures behind a quality code.
+     *
+     * The section of each code is declared by the code itself, so this stays true
+     * when a check is added: a new check cannot leak by default, because it has to
+     * declare which section it belongs to before this can allow it.
+     */
+    private function maySeeQualityCode(object $user, string $code): bool
+    {
+        $case = DataQualityCode::tryFrom($code);
+
+        return $case === null || $user->can($case->section()->permission());
     }
 
     /**

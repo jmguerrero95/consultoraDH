@@ -27,7 +27,11 @@ final class StoreCompanyRequest extends FormRequest
         return [
             'legal_name' => ['required', 'string', 'min:2', 'max:180'],
             'trade_name' => ['nullable', 'string', 'max:180'],
+            // Accepts `900.123.456-3` as well as a bare number, and the digit can
+            // also arrive in its own field. What is stored is decided by the
+            // domain action, not here.
             'tax_id' => ['nullable', 'string', 'max:32'],
+            'verification_digit' => ['nullable', 'string', 'regex:/^[0-9]$/'],
             'email' => ['nullable', 'string', 'email:rfc', 'max:255'],
             'phone' => ['nullable', 'string', 'max:40'],
             'address' => ['nullable', 'string', 'max:255'],
@@ -47,6 +51,7 @@ final class StoreCompanyRequest extends FormRequest
             'legal_name.max' => 'La razón social no puede superar los 180 caracteres.',
             'trade_name.max' => 'El nombre comercial no puede superar los 180 caracteres.',
             'tax_id.max' => 'El NIT no puede superar los 32 caracteres.',
+            'verification_digit.regex' => 'El dígito de verificación debe ser un solo número.',
             'email.email' => 'El correo electrónico no tiene un formato válido.',
             'email.max' => 'El correo electrónico no puede superar los 255 caracteres.',
             'phone.max' => 'El teléfono no puede superar los 40 caracteres.',
@@ -65,6 +70,7 @@ final class StoreCompanyRequest extends FormRequest
             'legal_name' => 'razón social',
             'trade_name' => 'nombre comercial',
             'tax_id' => 'NIT',
+            'verification_digit' => 'dígito de verificación',
         ];
     }
 
@@ -79,6 +85,9 @@ final class StoreCompanyRequest extends FormRequest
                 return;
             }
 
+            // Uniqueness is decided on the base number: `900123456-3` and
+            // `900123456-7` are one company with two contradictory digits, not two
+            // companies.
             $taxId = TaxId::normalise($this->input('tax_id'));
 
             if ($taxId === '') {

@@ -8,6 +8,7 @@ use App\Domain\Affiliations\AffiliationAlreadyExists;
 use App\Domain\Affiliations\ManageAffiliations;
 use App\Domain\Affiliations\ManageClientCompanies;
 use App\Domain\Affiliations\ParallelRelationshipNotAllowed;
+use App\Domain\Affiliations\TransferSourceRequired;
 use App\Domain\Clients\Actions\ClientHasOpenRelationships;
 use App\Domain\Clients\Actions\CreateClient;
 use App\Domain\Clients\Actions\SetClientStatus;
@@ -36,6 +37,8 @@ use App\Models\ClientAffiliation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
 use App\Models\SocialSecurityEntity;
+use App\Support\Database\SchemaConstraint;
+use App\Support\Database\UniqueViolation;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -139,7 +142,14 @@ final class ClientController extends Controller
         try {
             $client = $this->createClient->execute($request->validated(), $request->user());
         } catch (QueryException $e) {
-            return $this->duplicateDocumentResponse();
+            // Only this constraint means "that document already exists". Anything
+            // else keeps travelling: reported as a server error, with the technical
+            // detail in the log, rather than sent back as a duplicate to fix.
+            if (UniqueViolation::isFor($e, SchemaConstraint::CLIENT_DOCUMENT)) {
+                return $this->duplicateDocumentResponse();
+            }
+
+            throw $e;
         }
 
         return response()->json([
@@ -150,9 +160,19 @@ final class ClientController extends Controller
 
     /**
      * The full profile: identity, relationships, affiliations and the history.
+     *
+     * Each section answers for itself. Reading a client says nothing about reading
+     * somebody's employment history, and nothing about which entities they are
+     * affiliated with, so `relationships.view` and `affiliations.view` gate their
+     * own sections. A section the caller may not read comes back as
+     * `{"visible": false}` rather than as an empty list: "you cannot see this" and
+     * "there is nothing here" are different answers and only one of them is true.
      */
     public function show(Request $request, Client $client): JsonResponse
     {
+        $maySeeRelationships = (bool) ($request->user()?->can('relationships.view'));
+        $maySeeAffiliations = (bool) ($request->user()?->can('affiliations.view'));
+
         $client->load([
             'companyAssignments' => fn ($q) => $q->with('company')->orderByDesc('started_on'),
             'affiliations' => fn ($q) => $q->with('entity')->orderByDesc('started_on'),
@@ -164,29 +184,27 @@ final class ClientController extends Controller
 
         return response()->json([
             'client' => new ClientResource($client),
-            'companies' => [
+            'companies' => $maySeeRelationships ? [
+                'visible' => true,
                 'active' => AssignmentResource::collection(
                     $active->sortByDesc(fn ($a) => $a->started_on?->format('Y-m-d'))->values()
                 )->resolve(),
                 'history' => AssignmentResource::collection($history->values())->resolve(),
-            ],
-            'affiliations' => $this->maySeeAffiliations($request)
-                ? [
-                    'visible' => true,
-                    'active' => AffiliationResource::collection(
-                        $affiliations->whereNull('ended_on')->values()
-                    )->resolve(),
-                    'history' => AffiliationResource::collection(
-                        $affiliations->whereNotNull('ended_on')->values()
-                    )->resolve(),
-                ]
-                // Said as "not permitted" rather than as an empty list: "you
-                // cannot see this" and "there is nothing here" are different
-                // answers, and only one of them is true.
-                : ['visible' => false],
-            'history' => $this->timeline($client, $this->maySeeAffiliations($request)),
+            ] : ['visible' => false],
+            'affiliations' => $maySeeAffiliations ? [
+                'visible' => true,
+                'active' => AffiliationResource::collection(
+                    $affiliations->whereNull('ended_on')->values()
+                )->resolve(),
+                'history' => AffiliationResource::collection(
+                    $affiliations->whereNotNull('ended_on')->values()
+                )->resolve(),
+            ] : ['visible' => false],
+            'history' => $this->timeline($client, $maySeeRelationships, $maySeeAffiliations),
+            // Only the findings whose section the caller may read: a quality
+            // problem with an affiliation says which entity is involved.
             'data_quality' => DataQualityResource::collection(
-                collect($this->quality->forClient($client))
+                $this->quality->forClientVisibleTo($request->user(), $client)
             )->resolve(),
         ]);
     }
@@ -310,9 +328,17 @@ final class ClientController extends Controller
                 jobTitle: $request->validated('job_title'),
                 notes: $request->validated('notes'),
                 resolution: $request->resolution(),
-                effectiveDate: $request->validated('effective_date'),
                 parallelReason: $request->parallelReason(),
             );
+        } catch (TransferSourceRequired $e) {
+            // Several open relationships: the caller has to say which one moves.
+            // The answer carries them so the interface can ask, instead of the
+            // server closing whichever row happened to come first.
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => 'transfer_source_required',
+                'open_assignments' => $e->openAssignmentIds,
+            ], 409);
         } catch (ParallelRelationshipNotAllowed $e) {
             return response()->json([
                 'message' => $e->getMessage(),
@@ -321,6 +347,10 @@ final class ClientController extends Controller
                 'options' => $e->options(),
             ], 409);
         } catch (QueryException $e) {
+            if (! UniqueViolation::isFor($e, SchemaConstraint::AFFILIATION_OPEN_PER_TYPE)) {
+                throw $e;
+            }
+
             return response()->json([
                 'message' => 'No fue posible registrar la relación.',
                 'code' => 'relationship_conflict',
@@ -451,6 +481,10 @@ final class ClientController extends Controller
                 'code' => 'affiliation_rejected',
             ], 422);
         } catch (QueryException $e) {
+            if (! UniqueViolation::isFor($e, SchemaConstraint::AFFILIATION_OPEN_PER_TYPE)) {
+                throw $e;
+            }
+
             return response()->json([
                 'message' => 'El cliente ya tiene una afiliación abierta de ese tipo.',
                 'code' => 'affiliation_already_exists',
@@ -527,11 +561,6 @@ final class ClientController extends Controller
     /**
      * Whether this user may see the person's affiliations at all.
      */
-    private function maySeeAffiliations(Request $request): bool
-    {
-        return (bool) ($request->user()?->can('affiliations.view'));
-    }
-
     /**
      * The audit entries about this client and the rows that belong to it.
      *
@@ -541,8 +570,11 @@ final class ClientController extends Controller
      *
      * @return list<array<string, mixed>>
      */
-    private function timeline(Client $client, bool $maySeeAffiliations = true): array
-    {
+    private function timeline(
+        Client $client,
+        bool $maySeeRelationships = true,
+        bool $maySeeAffiliations = true,
+    ): array {
         $entries = AuditEvent::query()
             ->where('subject_type', Client::class)
             ->where('subject_id', $client->id)
@@ -550,12 +582,16 @@ final class ClientController extends Controller
             ->limit(50)
             ->get();
 
-        $relationshipEntries = AuditEvent::query()
-            ->where('subject_type', ClientCompanyAssignment::class)
-            ->whereIn('subject_id', $client->companyAssignments()->select('id'))
-            ->orderByDesc('created_at')
-            ->limit(50)
-            ->get();
+        // Relationship events are about employment history, so they answer to
+        // `relationships.view` rather than to `clients.view`.
+        $relationshipEntries = $maySeeRelationships
+            ? AuditEvent::query()
+                ->where('subject_type', ClientCompanyAssignment::class)
+                ->whereIn('subject_id', $client->companyAssignments()->select('id'))
+                ->orderByDesc('created_at')
+                ->limit(50)
+                ->get()
+            : new Collection;
 
         // Only for a role that may see affiliations at all. The events carry the
         // type and the entity of the affiliation in their metadata, so showing

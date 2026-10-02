@@ -18,6 +18,19 @@ use Illuminate\Support\Facades\Schema;
  * A relationship is active exactly when `ended_on IS NULL`. That single
  * convention is what makes "close on a date" mean the same thing everywhere.
  *
+ * ## The meaning of the two dates
+ *
+ * The period is `[started_on, ended_on)`. `started_on` is the first day the
+ * relationship is effective; `ended_on` is the first day it is **no longer**
+ * effective. A transfer writes the same effective date to both rows: the old one
+ * as its end, the new one as its start, so the day before belongs to the old
+ * company, the effective day belongs to the new one, and no day belongs to both
+ * or to neither.
+ *
+ * Stated here because A03 reports on periods and has to inherit this rather than
+ * invent its own arithmetic; the rule itself lives in
+ * `App\Domain\Shared\EffectivePeriod` and the `activeOn()` scope implements it.
+ *
  * Foreign keys RESTRICT rather than CASCADE. A client cannot be deleted while a
  * relationship row references it, and that is deliberate: the rows are the
  * historical record.

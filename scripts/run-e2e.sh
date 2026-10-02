@@ -28,10 +28,18 @@ STAMP="$(date +%s | tail -c 8)"
 EMAIL="e2e@consultora-dh.test"
 READER_EMAIL="e2e-lectura@consultora-dh.test"
 
-# 20 random characters plus a class mix, so the password satisfies the shared
-# policy: 12 characters, mixed case and digits.
+# A random password that satisfies the shared policy by construction rather than
+# by luck: 18 random alphanumerics, plus one upper case letter, one lower case
+# letter and one digit. The earlier version uppercased whatever the first random
+# character happened to be and then failed the policy whenever the sample had no
+# digit at all, which made the suite fail for a reason unrelated to what it tests.
 random_password() {
-    head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20 | sed 's/^[a-z]/A/'
+    local random body
+
+    random="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 18)"
+    body="A${random}a7"
+
+    printf '%s' "$body"
 }
 
 PASSWORD="$(random_password)"

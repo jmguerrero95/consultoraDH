@@ -25,7 +25,8 @@ final class CompanyFactory extends Factory
             'trade_name' => $this->faker->company(),
             // Unique so a batch of test companies never collide on the partial
             // unique index.
-            'tax_id' => $this->faker->unique()->numerify('#########').'-1',
+            'tax_id' => $this->faker->unique()->numerify('#########'),
+            'verification_digit' => '1',
             'email' => $this->faker->unique()->companyEmail(),
             'phone' => $this->faker->numerify('2########'),
             'address' => $this->faker->streetAddress(),

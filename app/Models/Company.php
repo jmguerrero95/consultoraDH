@@ -23,8 +23,9 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * stay queryable.
  *
  * @property int $id
- * @property CompanyStatus $status
- * @property string|null $tax_id
+ * @property RecordStatus $status
+ * @property string|null $tax_id the NIT number on its own, digits only
+ * @property string|null $verification_digit one digit, kept apart from the number
  */
 #[Fillable([
     'legal_name',
@@ -70,22 +71,24 @@ class Company extends Model
     }
 
     /**
-     * The NIT as a person writes it: `900.123.456-1`.
+     * The NIT as a person writes it: `900.123.456-3`, from the two columns.
+     *
+     * Reading the digit out of the number would have been simpler, but the number
+     * no longer carries it: that is the whole point of storing them apart.
      */
     public function taxIdLabel(): ?string
     {
-        $taxId = trim((string) $this->tax_id);
+        $label = TaxId::forDisplay($this->tax_id, $this->verification_digit);
 
-        if ($taxId === '') {
-            return null;
-        }
-
-        return TaxId::forDisplay($taxId);
+        return $label === '' ? null : $label;
     }
 
     /**
-     * Normalise the NIT on the way in and split off the verification digit, so
-     * the column that exists for corrections is never left behind the main one.
+     * Keep the column digits only on the way in.
+     *
+     * Deliberately does not touch `verification_digit`: the split is the domain
+     * action's decision, because it has to decide what happens to a digit the
+     * caller supplied separately from the one inside the string.
      */
     protected function taxId(): Attribute
     {

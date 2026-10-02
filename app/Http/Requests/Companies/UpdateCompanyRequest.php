@@ -27,6 +27,7 @@ final class UpdateCompanyRequest extends FormRequest
             'legal_name' => ['sometimes', 'required', 'string', 'min:2', 'max:180'],
             'trade_name' => ['sometimes', 'nullable', 'string', 'max:180'],
             'tax_id' => ['sometimes', 'nullable', 'string', 'max:32'],
+            'verification_digit' => ['sometimes', 'nullable', 'string', 'regex:/^[0-9]$/'],
             'email' => ['sometimes', 'nullable', 'string', 'email:rfc', 'max:255'],
             'phone' => ['sometimes', 'nullable', 'string', 'max:40'],
             'address' => ['sometimes', 'nullable', 'string', 'max:255'],

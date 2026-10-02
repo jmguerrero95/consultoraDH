@@ -61,7 +61,7 @@ function detail(overrides: Partial<ClientDetailPayload> = {}): ClientDetailPaylo
             created_at: null,
             updated_at: null,
         },
-        companies: { active: [], history: [] },
+        companies: { visible: true, active: [], history: [] },
         affiliations: { visible: true, active: [], history: [] },
         history: [],
         data_quality: [],
@@ -466,7 +466,7 @@ describe('permission controlled actions', () => {
         expect(headerButtons.some((b) => b.text().trim() === 'Desactivar')).toBe(false);
     });
 
-    it('withholds the affiliations tab content when the role has no permission', async () => {
+    it('does not offer the affiliations tab when the role has no permission', async () => {
         vi.mocked(fetch).mockResolvedValue(
             jsonResponse(detail({ affiliations: { visible: false } })),
         );
@@ -475,10 +475,34 @@ describe('permission controlled actions', () => {
 
         await flushPromises();
 
-        await wrapper.get('#tab-afiliaciones').trigger('click');
+        // No tab at all, rather than a tab that opens onto a refusal: the
+        // permission is the server's, and this only avoids sending somebody to a
+        // screen whose answer is "you cannot see this".
+        expect(wrapper.find('#tab-afiliaciones').exists()).toBe(false);
+        expect(wrapper.text()).not.toContain('Entidades');
+    });
+
+    it('does not offer the empresas tab when the role has no permission', async () => {
+        vi.mocked(fetch).mockResolvedValue(jsonResponse(detail({ companies: { visible: false } })));
+
+        const { wrapper } = mountPage(['clients.view', 'affiliations.view']);
+
         await flushPromises();
 
-        expect(wrapper.text()).toContain('No tiene permiso');
+        expect(wrapper.find('#tab-empresas').exists()).toBe(false);
+        expect(wrapper.find('#tab-afiliaciones').exists()).toBe(true);
+        expect(wrapper.text()).not.toContain('Empresas actuales');
+    });
+
+    it('shows both tabs to a role holding both permissions', async () => {
+        vi.mocked(fetch).mockResolvedValue(jsonResponse(detail()));
+
+        const { wrapper } = mountPage(['clients.view', 'relationships.view', 'affiliations.view']);
+
+        await flushPromises();
+
+        expect(wrapper.find('#tab-empresas').exists()).toBe(true);
+        expect(wrapper.find('#tab-afiliaciones').exists()).toBe(true);
     });
 });
 

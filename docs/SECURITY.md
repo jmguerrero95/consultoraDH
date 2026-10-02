@@ -151,11 +151,30 @@ el cuerpo, y la interfaz indica cuántos segundos faltan.
 
 - **Roles** (`spatie/laravel-permission`): Super Admin, Administrator,
   Operations, Collections, Support, Read Only.
-- **Permisos**: además de `settings.view`, A02 introduce cinco familias:
-  `clients.*`, `companies.*`, `relationships.*`, `affiliations.*` y
-  `social_security_entities.*`. Cada familia tiene sus verbos (`view`, `create`,
-  `update`, `manage`, `change_status`) y no se crean permisos de negocio por
-  adelantado: llegan con su módulo.
+- **Permisos**: además de `settings.view`, A02 introduce **catorce** permisos de
+  negocio en cinco familias:
+
+  | Familia | Permisos |
+  | --- | --- |
+  | `clients.*` | `view`, `create`, `update`, `change_status` (4) |
+  | `companies.*` | `view`, `create`, `update`, `change_status` (4) |
+  | `relationships.*` | `view`, `manage` (2) |
+  | `affiliations.*` | `view`, `manage` (2) |
+  | `social_security_entities.*` | `view`, `manage` (2) |
+
+  No se crean permisos de negocio por adelantado: llegan con su módulo.
+- **Los permisos de lectura se aplican por sección, no por pantalla.**
+  `clients.view` autoriza leer el cliente: su documento, su nombre, su contacto.
+  No autoriza a leer con quién trabaja; para eso está `relationships.view`, que
+  gobierna las relaciones y su historial, y `affiliations.view`, que gobierna las
+  afiliaciones, su historial y los hallazgos de calidad derivados de ellas, que
+  nombran la entidad afectada. Una sección que el rol no puede leer se responde
+  como `{"visible": false}` y no como una lista vacía, porque "no puede verlo" y
+  "no hay nada" son respuestas distintas y sólo una es cierta. El panel omite las
+  cifras de las secciones que el rol no puede leer, en vez de mostrarlas en cero.
+  Las pruebas de `ReadPermissionsTest` construyen roles que no existen en el
+  sembrador, porque con los seis roles reales ninguna permiso se puede probar de
+  forma independiente: todos los que tienen uno tienen también el otro.
 - **Un rol sin permiso recibe `403`, no una respuesta vacía.** Los cinco roles se
   prueban endpoint por endpoint en `AuthorizationTest`. Donde la ausencia de
   permiso tiene una forma más honesta que una lista vacía, la API lo dice:
@@ -422,6 +441,20 @@ otro dato en la respuesta.
   variable está vacía. Una redacción anterior de `.env.example` sugería que
   podía quedar vacía en desarrollo, lo que contradecía al comportamiento real;
   ahora la documentación y la ejecución dicen lo mismo.
+
+### 8.1 Datos que no se tratan como secretos, y datos que sí
+
+Un correo de contacto **no** es una identidad y por eso no tiene índice único:
+varias personas pueden compartir una dirección, y lo mismo varias empresas con un
+mismo correo de contabilidad. Lo que sí es una identidad, y por lo tanto único,
+son el documento del cliente y el número del NIT.
+
+El NIT se guarda en dos columnas, `tax_id` (el número, `900123456`) y
+`verification_digit` (el dígito, `3`), porque la DIAN los trata como valores
+distintos. La unicidad recae sobre el número base, y el dígito **nunca se
+calcula**: un valor histórico dudoso se conserva tal como llegó y se reporta como
+duda. Un cálculo sin vectores de prueba de una fuente oficial no es ayuda, es una
+confianza falsa.
 
 ### 9.1 El comando `create-admin` no acepta contraseñas
 

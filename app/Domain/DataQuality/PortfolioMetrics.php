@@ -32,6 +32,11 @@ final class PortfolioMetrics
      */
     public function counts(): array
     {
+        // Read once and reused: the inspector memoises its summary per instance,
+        // and the dashboard wants the error and warning totals from the same
+        // read rather than from two more identical passes over the portfolio.
+        $quality = $this->quality->summary();
+
         return [
             'active_clients' => Client::query()->where('status', 'active')->count(),
             'inactive_clients' => Client::query()->where('status', 'inactive')->count(),
@@ -43,15 +48,19 @@ final class PortfolioMetrics
                 ->count(),
             'data_quality_issues' => $this->quality->errorCount(),
             'data_quality_warnings' => $this->quality->warningCount(),
+            'authorised_parallel_relationships' => $this->quality->authorisedParallelCount(),
         ];
     }
 
     /**
-     * Clients with more than one open company relationship, whether authorised
-     * or not. It is the number an administrator most wants to see, because it is
-     * the one situation that usually means the source data was misread.
+     * Clients with more than one open company relationship, whether the overlap
+     * was authorised or not.
+     *
+     * It is the number an administrator most wants to see, because it is the one
+     * situation that usually means the source data was misread. The inspector owns
+     * the count, so this is a name for it rather than a second implementation.
      */
-    public function clientsWithMultipleCompanies(): int
+    public function clientsWithSeveralOpenRelationships(): int
     {
         return $this->quality->countClientsWithSeveralOpenRelationships();
     }

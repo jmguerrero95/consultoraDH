@@ -5,6 +5,8 @@ declare(strict_types=1);
 use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Models\SocialSecurityEntity;
 use App\Models\User;
+use Spatie\Permission\Models\Role;
+use Spatie\Permission\PermissionRegistrar;
 
 /**
  * Helpers for the A02 feature tests.
@@ -67,4 +69,36 @@ function entityOf(SocialSecurityEntityType $type, ?string $name = null): SocialS
         'name' => $name ?? 'Entidad '.strtolower($type->value).' de prueba',
         'code' => strtoupper($type->value).'-'.random_int(1000, 9999),
     ]);
+}
+
+/**
+ * A user holding exactly the permissions given and nothing else.
+ *
+ * A role of its own, built here and not in the seeder, because the seeded matrix
+ * cannot prove that two permissions are independent: every seeded role that holds
+ * one of them happens to hold the others, so a test using it would pass even if the
+ * section were readable for the wrong reason.
+ *
+ * @param  list<string>  $permissions
+ */
+function userWithPermissions(array $permissions): User
+{
+    $role = Role::query()->create([
+        'name' => 'Prueba '.substr(md5(implode('|', $permissions)), 0, 8),
+        'guard_name' => 'web',
+    ]);
+
+    foreach ($permissions as $permission) {
+        $role->givePermissionTo($permission);
+    }
+
+    $user = User::factory()->create([
+        'email' => 'prueba.'.substr(md5(implode('|', $permissions).microtime(true)), 0, 12).'@consultora-dh.test',
+    ]);
+
+    $user->assignRole($role);
+
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+    return $user->fresh();
 }

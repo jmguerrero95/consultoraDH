@@ -19,7 +19,10 @@ it('creates a company', function (): void {
         ->postJson('/api/companies', companyPayload())
         ->assertCreated()
         ->assertJsonPath('company.legal_name', 'Comercializadora Ejemplo S.A.S.')
-        ->assertJsonPath('company.tax_id', '900123456-3')
+        // The two values are stored apart: the number on its own, and the digit in
+        // its own column. The label is the way a person writes them together.
+        ->assertJsonPath('company.tax_id', '900123456')
+        ->assertJsonPath('company.verification_digit', '3')
         ->assertJsonPath('company.tax_id_label', '900.123.456-3')
         ->assertJsonPath('company.status', 'active');
 
@@ -30,9 +33,67 @@ it('normalises the NIT and splits off the verification digit', function (): void
     $this->actingAs(actingAsRole())
         ->postJson('/api/companies', companyPayload(['tax_id' => '900.123.456-3']))
         ->assertCreated()
-        ->assertJsonPath('company.tax_id', '900123456-3')
+        ->assertJsonPath('company.tax_id', '900123456')
         ->assertJsonPath('company.verification_digit', '3');
 });
+
+it('accepts the NIT number and its digit as two separate values', function (): void {
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload([
+            'tax_id' => '900.654.321',
+            'verification_digit' => '8',
+        ]))
+        ->assertCreated()
+        ->assertJsonPath('company.tax_id', '900654321')
+        ->assertJsonPath('company.verification_digit', '8')
+        ->assertJsonPath('company.tax_id_label', '900.654.321-8');
+});
+
+it('stores a verification digit exactly as supplied, without calculating it', function (): void {
+    // Historical source data carries digits that may be wrong. The value is kept
+    // as it arrived: correcting it would replace a doubt with a fact nobody
+    // verified.
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload(['tax_id' => '900.777.888-9']))
+        ->assertCreated()
+        ->assertJsonPath('company.tax_id', '900777888')
+        ->assertJsonPath('company.verification_digit', '9');
+});
+
+it('leaves the verification digit empty rather than inventing one', function (): void {
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload(['tax_id' => '900.888.999']))
+        ->assertCreated()
+        ->assertJsonPath('company.tax_id', '900888999')
+        ->assertJsonPath('company.verification_digit', null)
+        ->assertJsonPath('company.tax_id_label', '900.888.999');
+});
+
+it('rejects a verification digit that is not one digit', function (): void {
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload([
+            'tax_id' => '900.999.000',
+            'verification_digit' => '12',
+        ]))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('verification_digit');
+});
+
+it('refuses two companies with the same NIT number and different digits', function (): void {
+    // One company with two contradictory digits, not two companies.
+    Company::factory()->create(['tax_id' => '900444555', 'verification_digit' => '3']);
+
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload(['tax_id' => '900.444.555-7']))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('tax_id');
+});
+
+it('enforces the unique NIT number in the database, digits aside', function (): void {
+    Company::factory()->create(['tax_id' => '111111111', 'verification_digit' => '1']);
+
+    Company::factory()->create(['tax_id' => '111111111', 'verification_digit' => '4']);
+})->throws(QueryException::class);
 
 it('accepts a company with no NIT and allows several of them', function (): void {
     foreach (['a@ejemplo.test', 'b@ejemplo.test', 'c@ejemplo.test'] as $index => $email) {
@@ -64,12 +125,6 @@ it('rejects a duplicate NIT however it is written', function (): void {
         ->assertJsonValidationErrors('tax_id');
 });
 
-it('enforces the duplicate NIT in the database, not only in the form', function (): void {
-    Company::factory()->create(['tax_id' => '111111111-1']);
-
-    Company::factory()->create(['tax_id' => '111111111-1']);
-})->throws(QueryException::class);
-
 it('updates the editable fields and the NIT', function (): void {
     $company = Company::factory()->create();
 
@@ -80,7 +135,7 @@ it('updates the editable fields and the NIT', function (): void {
         ])
         ->assertOk()
         ->assertJsonPath('company.legal_name', 'Razón Social Actualizada S.A.S.')
-        ->assertJsonPath('company.tax_id', '800999888-2');
+        ->assertJsonPath('company.tax_id', '800999888');
 
     expect($company->fresh()->verification_digit)->toBe('2');
 });
@@ -148,12 +203,14 @@ it('searches companies by name, trade name and NIT', function (): void {
     $match = Company::factory()->create([
         'legal_name' => 'Distribuidora Andina S.A.S.',
         'trade_name' => 'Andina',
-        'tax_id' => '900111222-3',
+        'tax_id' => '900111222',
+        'verification_digit' => '3',
         'email' => 'andina@ejemplo.test',
     ]);
     Company::factory()->create([
         'legal_name' => 'Otra Total S.A.S.',
-        'tax_id' => '900333444-3',
+        'tax_id' => '900333444',
+        'verification_digit' => '3',
         'email' => 'otra@ejemplo.test',
     ]);
 
@@ -202,8 +259,10 @@ it('reports an inactive company with active clients as a warning', function (): 
     $this->actingAs(actingAsRole())
         ->getJson("/api/companies/{$company->id}")
         ->assertOk()
-        ->assertJsonPath('data_quality.0.code', 'inactive_company_with_active_clients')
-        ->assertJsonPath('data_quality.0.severity', 'warning');
+        // Searched by code rather than by position: a company without a
+        // verification digit also produces a finding, and the order of the list is
+        // not part of the contract.
+        ->assertJsonFragment(['code' => 'inactive_company_with_active_clients', 'severity' => 'warning']);
 });
 
 it('has no destructive delete endpoint', function (): void {
@@ -215,8 +274,14 @@ it('has no destructive delete endpoint', function (): void {
 });
 
 it('stores no third party credentials, because it has nowhere to put them', function (): void {
-    // The API rejects unknown fields rather than silently persisting them, which
-    // is what makes "there is no credentials column" a structural fact.
+    // What is actually asserted here, precisely: the request succeeds and the extra
+    // fields are ignored, so nothing is persisted. The request does NOT reject them:
+    // an unknown field is not an error in this API, and saying otherwise would
+    // claim a strictness it does not have.
+    //
+    // The guarantee that matters is structural rather than procedural: there is no
+    // column to put a third party credential in, so no future code path can persist
+    // one by accident.
     $this->actingAs(actingAsRole())
         ->postJson('/api/companies', companyPayload([
             'portal_user' => 'usuario-cliente',
@@ -230,6 +295,12 @@ it('stores no third party credentials, because it has nowhere to put them', func
         ->not->toContain('portal_password')
         ->not->toContain('username')
         ->not->toContain('password');
+
+    // And nothing of it is echoed back either.
+    $this->actingAs(actingAsRole())
+        ->getJson('/api/companies')
+        ->assertOk()
+        ->assertJsonMissing(['portal_user' => 'usuario-cliente']);
 });
 
 it('records company changes in the audit trail', function (): void {

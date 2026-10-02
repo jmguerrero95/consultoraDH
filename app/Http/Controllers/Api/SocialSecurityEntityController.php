@@ -12,6 +12,8 @@ use App\Http\Requests\Catalogue\StoreEntityRequest;
 use App\Http\Requests\Catalogue\UpdateEntityRequest;
 use App\Http\Resources\SocialSecurityEntityResource;
 use App\Models\SocialSecurityEntity;
+use App\Support\Database\SchemaConstraint;
+use App\Support\Database\UniqueViolation;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -86,6 +88,13 @@ final class SocialSecurityEntityController extends Controller
         try {
             $entity = $this->catalogue->create($request->validated(), $request->user());
         } catch (QueryException $e) {
+            // Only the name constraint means "that entity already exists". The code
+            // index is deliberately not unique, and an unrelated database failure
+            // must not be dressed up as a duplicate.
+            if (! UniqueViolation::isFor($e, SchemaConstraint::ENTITY_NAME_PER_TYPE)) {
+                throw $e;
+            }
+
             return response()->json([
                 'message' => 'Ya existe una entidad de ese tipo con ese nombre.',
                 'code' => 'duplicate_entity',
@@ -118,6 +127,10 @@ final class SocialSecurityEntityController extends Controller
         try {
             $updated = $this->catalogue->update($entity, $request->validated(), $request->user());
         } catch (QueryException $e) {
+            if (! UniqueViolation::isFor($e, SchemaConstraint::ENTITY_NAME_PER_TYPE)) {
+                throw $e;
+            }
+
             return response()->json([
                 'message' => 'Ya existe una entidad de ese tipo con ese nombre.',
                 'code' => 'duplicate_entity',

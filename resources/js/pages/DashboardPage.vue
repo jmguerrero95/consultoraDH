@@ -171,12 +171,19 @@ onMounted(load);
                                 <span>Empresas activas</span>
                             </p>
                             <p class="cdh-stat__value">{{ data.portfolio.counts.active_companies }}</p>
-                            <p class="cdh-stat__hint">
+                            <p v-if="data.portfolio.counts.catalogue_entities !== undefined" class="cdh-stat__hint">
                                 {{ data.portfolio.counts.catalogue_entities }} entidades de seguridad social
                             </p>
                         </RouterLink>
 
-                        <article class="cdh-stat">
+                        <!--
+                            Each of these three figures is withheld by the server from
+                            roles that may not read the section it describes, so a card
+                            is drawn only when the figure is actually there. Rendering a
+                            zero instead would state something about the portfolio that
+                            the role is not entitled to know.
+                        -->
+                        <article v-if="data.portfolio.counts.active_relationships !== undefined" class="cdh-stat">
                             <p class="cdh-stat__label">
                                 <i class="bi bi-briefcase" aria-hidden="true" />
                                 <span>Relaciones activas</span>
@@ -187,7 +194,7 @@ onMounted(load);
                             </p>
                         </article>
 
-                        <article class="cdh-stat">
+                        <article v-if="data.portfolio.counts.active_affiliations !== undefined" class="cdh-stat">
                             <p class="cdh-stat__label">
                                 <i class="bi bi-hospital" aria-hidden="true" />
                                 <span>Afiliaciones activas</span>

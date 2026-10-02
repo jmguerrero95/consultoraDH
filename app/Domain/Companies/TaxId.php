@@ -5,165 +5,172 @@ declare(strict_types=1);
 namespace App\Domain\Companies;
 
 /**
- * Normalises a company's NIT (Número de Identificación Tributaria).
+ * Takes a company's NIT apart into the two values it really is.
  *
- * The NIT is stored as a string and never as a number: the values carry a
- * check digit, are written with thousand separators, and one of the historical
- * entries in the source data is inconsistent. Treating them as integers would
- * quietly discard leading zeros and would turn an uncertain value into a
- * confident-looking one.
+ * The DIAN treats a NIT as a base number and a verification digit (dígito de
+ * verificación), and Consultora DH stores them apart:
  *
- * Two properties are kept apart on purpose:
+ *     tax_id             900123456
+ *     verification_digit 3
  *
- *  - `normalise()` removes punctuation so that `900.123.456` and `900123456`
- *    are recognised as the same company.
- *  - `isPlausible()` reports whether the digits and check digit actually agree.
- *    It never changes a value; it only answers a question, so an import can
- *    flag the inconsistent entry instead of "fixing" it.
+ * Both as columns, so an operator can correct one without touching the other and
+ * so a future import can hold both without taking the string apart again. A
+ * person types `900.123.456-3`, which is the way it is printed, and the two parts
+ * are separated here.
  *
- * The verification digit is stored in its own column so an operator can correct
- * it without touching the main value.
+ * Two decisions worth stating outright:
+ *
+ *  - **The digit is never calculated.** There is a well known modulus eleven
+ *    algorithm for it, and an earlier version of this class implemented it. It was
+ *    removed. Without an authoritative source of DIAN test vectors to test it
+ *    against, a calculator that looks authoritative is worse than no calculator:
+ *    it would silently rewrite a historical value and turn a doubt into a fact
+ *    that nobody questioned. What arrives is what is stored.
+ *
+ *  - **Uniqueness is decided on the base number.** `900123456-3` and
+ *    `900123456-7` are one company with two contradictory digits, not two
+ *    companies, so the index that protects uniqueness covers `tax_id` alone. A
+ *    disagreement about the digit is reported as a doubt, not resolved by
+ *    inventing one of the two answers.
  */
 final class TaxId
 {
     /**
-     * Separators that carry no meaning in a NIT.
+     * Separators a person may type between the groups of a NIT: the period, the
+     * ordinary space, the non breaking one and the narrow no-break space.
      *
-     * The hyphen is NOT in this list: in a NIT it is meaningful, because it
-     * separates the main number from the verification digit. Stripping it
-     * would destroy the only structure that lets the two be stored
-     * independently.
+     * The hyphen is not in the list: in `900123456-3` it separates the base from
+     * the digit, and that structure is the only thing that makes the split
+     * possible.
      */
-    private const SEPARATORS = ["\u{002E}", "\u{0020}", "\u{00A0}", "\u{202F}"];
+    private const GROUP_SEPARATORS = ["\u{002E}", "\u{0020}", "\u{00A0}", "\u{202F}"];
 
     /**
-     * The canonical comparison form: thousand separators removed, the hyphen
-     * between the main number and the verification digit kept.
+     * The two parts of a NIT, already validated.
      *
-     * `900.123.456-1` and `900123456-1` both become `900123456-1`, so the two
-     * spellings are recognised as one company.
-     *
-     * Returns an empty string for input that holds no characters at all, which
-     * the caller treats as "no NIT supplied".
+     * @return array{tax_id: string, verification_digit: string|null}
      */
-    public static function normalise(?string $raw): string
+    public static function split(?string $raw): array
     {
         $value = mb_strtoupper(trim((string) $raw));
 
-        foreach (self::SEPARATORS as $character) {
-            $value = str_replace($character, '', $value);
+        foreach (self::GROUP_SEPARATORS as $separator) {
+            $value = str_replace($separator, '', $value);
         }
 
+        // Several hyphens are a typo rather than a structure; one is.
         $value = (string) preg_replace('/-+/', '-', $value);
 
-        return trim($value, '-');
+        if (preg_match('/^(\d{1,12})(?:-(\d))?$/', $value, $matches) === 1) {
+            return [
+                'tax_id' => $matches[1],
+                'verification_digit' => $matches[2] ?? null,
+            ];
+        }
+
+        // Anything else is returned whole and unverified, so the caller can decide
+        // what to do about it rather than having a guess silently applied.
+        return [
+            'tax_id' => trim($value, '-'),
+            'verification_digit' => null,
+        ];
     }
 
     /**
-     * The main numeric part, without the trailing check digit.
+     * The base number on its own, or null when the value is not one.
+     */
+    public static function base(?string $raw): ?string
+    {
+        return self::isBase(self::normalise($raw)) ? self::normalise($raw) : null;
+    }
+
+    /**
+     * Whether a value is a bare NIT number: digits only, no separators and no
+     * digit of its own.
+     */
+    public static function isBase(?string $value): bool
+    {
+        return $value !== null && preg_match('/^\d{1,12}$/', $value) === 1;
+    }
+
+    /**
+     * The digits of a value that already carries its own verification digit.
+     */
+    public static function checkDigit(?string $raw): ?string
+    {
+        $value = self::normalise($raw);
+
+        return preg_match('/^\d{1,12}-(\d)$/', $value, $matches) === 1 ? $matches[1] : null;
+    }
+
+    /**
+     * The form a uniqueness comparison uses: digits, nothing else.
      *
-     * Returns null when the value is absent or is not clearly a NIT, so that
-     * nothing is invented from a string that is not one.
+     * Applied to a base number that has already been split, so it is here for
+     * the search path, where a person types whatever they have in front of them.
      */
-    public static function base(?string $normalised): ?string
+    public static function normalise(?string $raw): string
     {
-        $value = (string) $normalised;
-
-        if (preg_match('/^(\d{1,12})(-\d)?$/', $value, $matches) !== 1) {
-            return null;
-        }
-
-        return $matches[1];
+        return self::split($raw)['tax_id'];
     }
 
     /**
-     * The check digit, when the value carries one.
-     */
-    public static function checkDigit(?string $normalised): ?string
-    {
-        $value = (string) $normalised;
-
-        if (preg_match('/^\d{1,12}-(\d)$/', $value, $matches) !== 1) {
-            return null;
-        }
-
-        return $matches[1];
-    }
-
-    /**
-     * Whether the check digit agrees with the main number.
+     * The two LIKE patterns a search over the NIT needs.
      *
-     * Uses the DIAN modulus 11 algorithm. A value without a check digit, or one
-     * that is not numeric at all, is reported as "not verifiable" rather than
-     * as invalid: the absence of a check digit is a gap in the record, not
-     * proof that the NIT is wrong.
+     * `number` matches the stored base number, so a person can type the number
+     * with or without separators and find it. `combined` matches the number and
+     * its digit joined by a hyphen, which is what somebody typing `900.123.456-3`
+     * means. Both are escaped, because a person typing `%` is typing a character.
+     *
+     * @return array{number: string, combined: string}
      */
-    public static function isPlausible(?string $normalised): bool
+    public static function searchPatterns(?string $raw): array
     {
-        $base = self::base($normalised);
+        $parts = self::split($raw);
+        $number = $parts['tax_id'];
 
-        if ($base === null) {
-            return false;
+        if ($number === '') {
+            return ['number' => '', 'combined' => ''];
         }
 
-        $checkDigit = self::checkDigit($normalised);
+        $escaped = self::escapeWildcards($number);
 
-        if ($checkDigit === null) {
-            return false;
-        }
-
-        return (int) $checkDigit === self::expectedCheckDigit($base);
+        return [
+            'number' => '%'.$escaped.'%',
+            'combined' => $parts['verification_digit'] === null
+                ? '%'.$escaped.'%'
+                : '%'.$escaped.'-'.$parts['verification_digit'].'%',
+        ];
     }
 
     /**
-     * The check digit the DIAN algorithm produces for a base number.
+     * Escape the characters PostgreSQL would read as wildcards.
+     *
+     * `\` has to go first, or the escaping of the others would double it.
      */
-    private static function expectedCheckDigit(string $base): int
+    public static function escapeWildcards(string $value): string
     {
-        $weights = [71, 67, 59, 53, 47, 43, 41, 37, 29, 23, 19, 17];
-
-        $sum = 0;
-
-        foreach (str_split($base) as $index => $digit) {
-            $weight = $weights[$index] ?? 1;
-
-            $sum += (int) $digit * $weight;
-        }
-
-        $remainder = $sum % 11;
-
-        return match ($remainder) {
-            0 => 9,
-            1 => 0,
-            default => 11 - $remainder,
-        };
+        return str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $value);
     }
 
     /**
-     * A form suitable for a uniqueness comparison in SQL.
+     * The form shown to a person: `900.123.456-3`, or the base alone when there is
+     * no digit to show.
      */
-    public static function searchable(?string $raw): string
+    public static function forDisplay(?string $base, ?string $verificationDigit): string
     {
-        return self::normalise($raw);
-    }
+        $number = trim((string) $base);
 
-    /**
-     * The form shown to a person: `900.123.456-1`.
-     */
-    public static function forDisplay(?string $normalised): string
-    {
-        $value = (string) $normalised;
-
-        if (preg_match('/^(\d{1,12})-(\d)$/', $value, $matches) !== 1) {
-            return $value;
+        if ($number === '') {
+            return '';
         }
 
-        $base = $matches[1];
+        $digit = trim((string) $verificationDigit);
 
-        if (mb_strlen($base) >= 5) {
-            $base = preg_replace('/(\d{3})(?=\d)/', '$1.', $base) ?? $base;
+        if (strlen($number) >= 5) {
+            $number = (string) preg_replace('/(\d{3})(?=\d)/', '$1.', $number);
         }
 
-        return $base.'-'.$matches[2];
+        return $digit === '' ? $number : $number.'-'.$digit;
     }
 }

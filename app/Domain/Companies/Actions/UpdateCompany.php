@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Companies\Actions;
 
 use App\Domain\Companies\Events\CompanyUpdated;
-use App\Domain\Companies\TaxId;
+use App\Domain\Companies\TaxIdParts;
 use App\Models\Company;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -44,15 +44,19 @@ final class UpdateCompany
             }
 
             if (array_key_exists('tax_id', $attributes)) {
-                $taxId = TaxId::normalise($attributes['tax_id']);
-                $taxId = $taxId === '' ? null : $taxId;
+                [$taxId, $digit] = TaxIdParts::from($attributes);
 
                 if ($taxId !== $company->tax_id) {
                     $company->tax_id = $taxId;
-                    $company->verification_digit = $taxId === null
-                        ? null
-                        : TaxId::checkDigit($taxId);
                     $changed[] = 'tax_id';
+                }
+
+                // A digit that changes on its own is a correction of an uncertain
+                // value, which is why the two columns are separate. It is recorded
+                // separately so the audit trail says which one moved.
+                if ($digit !== $company->verification_digit) {
+                    $company->verification_digit = $digit;
+                    $changed[] = 'verification_digit';
                 }
             }
 

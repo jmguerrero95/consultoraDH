@@ -35,19 +35,70 @@ use Illuminate\Support\Facades\DB;
 final class DataQualityInspector
 {
     /**
+     * @var array<string, int>|null
+     */
+    private ?array $summary = null;
+
+    /**
      * Every finding for one client.
      *
      * @return list<DataQualityFinding>
      */
     public function forClient(Client $client): array
     {
-        $findings = [];
+        return array_merge(
+            $this->documentFindings($client),
+            $this->relationshipFindings($client),
+            $this->affiliationFindings($client),
+        );
+    }
 
-        $findings = array_merge($findings, $this->documentFindings($client));
-        $findings = array_merge($findings, $this->relationshipFindings($client));
-        $findings = array_merge($findings, $this->affiliationFindings($client));
+    /**
+     * The findings for one client, bucketed by the section they came from.
+     *
+     * A caller that may read the client's identity is not automatically entitled to
+     * read which entities somebody is affiliated with, so the sections are returned
+     * apart and the caller asks for the ones it may see. Which permission governs
+     * which section is answered by `DataQualitySection::permission()` rather than
+     * being repeated here.
+     *
+     * @return array<string, list<DataQualityFinding>> section => findings
+     */
+    public function forClientBySection(Client $client): array
+    {
+        $buckets = [];
 
-        return $findings;
+        foreach ($this->forClient($client) as $finding) {
+            $buckets[$finding->code->section()->value][] = $finding;
+        }
+
+        return $buckets;
+    }
+
+    /**
+     * The findings whose section the caller is allowed to read.
+     *
+     * The permission check lives here so a controller cannot forget it: it is
+     * handed something that answers "may", and gets back only what it may show.
+     *
+     * @param  object|null  $viewer  anything answering `can()`, as the request user does
+     * @return list<DataQualityFinding>
+     */
+    public function forClientVisibleTo(?object $viewer, Client $client): array
+    {
+        $visible = [];
+
+        foreach ($this->forClientBySection($client) as $section => $findings) {
+            if (! $viewer?->can(DataQualitySection::from($section)->permission())) {
+                continue;
+            }
+
+            foreach ($findings as $finding) {
+                $visible[] = $finding;
+            }
+        }
+
+        return $visible;
     }
 
     /**
@@ -65,6 +116,42 @@ final class DataQualityInspector
                 severity: DataQualitySeverity::Notice,
                 message: 'La empresa no tiene NIT registrado.',
                 suggestion: 'Complete el NIT para poder detectarla en la importación.',
+            );
+        }
+
+        // A NIT without its digit is not a wrong NIT, it is an incomplete one. The
+        // supplied digit is never recalculated, so an uncertain historical value
+        // stays visible as uncertain instead of being quietly replaced by a
+        // confident looking one.
+        if ($company->tax_id !== null && trim($company->tax_id) !== ''
+            && ($company->verification_digit === null || trim($company->verification_digit) === '')) {
+            $findings[] = DataQualityFinding::make(
+                code: DataQualityCode::CompanyWithoutVerificationDigit,
+                severity: DataQualitySeverity::Notice,
+                message: 'El NIT no tiene dígito de verificación registrado.',
+                suggestion: 'Confirme el dígito de verificación con la fuente; no se calcula automáticamente.',
+            );
+        }
+
+        // The same conflict the aggregate counts, on the record that carries it:
+        // the dashboard total and the company screen have to agree.
+        $sameTaxId = Company::query()
+            ->whereNotNull('tax_id')
+            ->whereRaw('lower(btrim(tax_id)) = ?', [mb_strtolower(trim($company->tax_id ?? ''))])
+            ->whereKeyNot($company->id)
+            ->count();
+
+        if (trim((string) $company->tax_id) !== '' && $sameTaxId > 0) {
+            $findings[] = DataQualityFinding::make(
+                code: DataQualityCode::DuplicateCompanyTaxId,
+                severity: DataQualitySeverity::Error,
+                message: sprintf(
+                    'El NIT %s está registrado en %d empresa%s más.',
+                    $company->tax_id,
+                    $sameTaxId,
+                    $sameTaxId === 1 ? '' : 's',
+                ),
+                suggestion: 'Un NIT identifica a una sola empresa: revise los registros duplicados.',
             );
         }
 
@@ -89,14 +176,29 @@ final class DataQualityInspector
     /**
      * Findings across the whole portfolio, for the dashboard.
      *
+     * One aggregate query per code, and nothing that scales with the number of
+     * records. The earlier version loaded every client and ran the per record
+     * checks on each one, which turned the dashboard into a portfolio sized scan
+     * every time somebody opened it.
+     *
+     * Computed once per instance. The dashboard needs the same figures three
+     * times over (the whole summary, the error total and the warning total), and
+     * within one request the portfolio cannot change under it, so recomputing
+     * would only repeat identical reads. This is not a cache: the container
+     * hands out a fresh inspector per request.
+     *
      * @return array<string, int> code => number of records affected
      */
     public function summary(): array
     {
-        return [
+        if ($this->summary !== null) {
+            return $this->summary;
+        }
+
+        return $this->summary = [
             DataQualityCode::DuplicateClientDocument->value => $this->duplicateDocumentCount(),
             DataQualityCode::DuplicateCompanyTaxId->value => $this->duplicateTaxIdCount(),
-            DataQualityCode::MultipleActiveCompanies->value => $this->multipleActiveRelationshipsCount(),
+            DataQualityCode::MultipleActiveCompanies->value => $this->unauthorisedParallelCount(),
             DataQualityCode::InactiveClientWithActiveCompanies->value => $this->inactiveClientWithRelationshipsCount(),
             DataQualityCode::InactiveCompanyWithActiveClients->value => $this->inactiveCompanyWithRelationshipsCount(),
             DataQualityCode::AffiliationTypeMismatch->value => $this->affiliationTypeMismatchCount(),
@@ -108,43 +210,60 @@ final class DataQualityInspector
 
     /**
      * Total number of records carrying at least one blocking problem.
+     *
+     * Compares the string keys of `summary()` against the string values of the
+     * blocking codes. Both sides are strings on purpose: the earlier version
+     * mapped `blocking()` over the enum cases, which kept a list of booleans and
+     * discarded the codes, so a strict `in_array()` against string keys never
+     * matched and this method answered zero for a portfolio full of problems.
      */
     public function errorCount(): int
     {
-        $blocking = array_map(
-            static fn (DataQualityCode $code): bool => $code->blocking(),
-            DataQualityCode::cases(),
-        );
-
-        return array_sum(array_filter(
-            $this->summary(),
-            static fn (int $count, string $code): bool => in_array($code, $blocking, true),
-            ARRAY_FILTER_USE_BOTH,
-        ));
+        return $this->sumFor(DataQualityCode::blockingValues());
     }
 
     /**
-     * The number of clients that have at least one warning.
+     * How many findings need attention without being errors.
+     *
+     * Not the same set as the errors, and deliberately not a superset: a record
+     * whose only problem is a warning is counted here and not in `errorCount()`,
+     * so the two dashboard figures answer two different questions instead of
+     * adding up to a larger number of the same one. Notices are excluded
+     * entirely; they are facts about a record, not work waiting to be done.
+     *
+     * Aggregated in SQL, so the cost does not grow with the portfolio.
      */
     public function warningCount(): int
     {
-        $clients = Client::query()
-            ->with(['companyAssignments' => fn ($q) => $q->whereNull('ended_on')])
-            ->get();
+        return $this->sumFor(DataQualityCode::warningValues());
+    }
 
-        $warnings = 0;
+    /**
+     * Overlapping relationships that somebody authorised with a reason.
+     *
+     * Informational, and deliberately absent from both totals: the operator made a
+     * decision and wrote down why.
+     */
+    public function authorisedParallelCount(): int
+    {
+        return $this->countClientsWithSeveralOpenRelationships()
+            - $this->unauthorisedParallelCount();
+    }
 
-        foreach ($clients as $client) {
-            foreach ($this->forClient($client) as $finding) {
-                if ($finding->severity !== DataQualitySeverity::Notice) {
-                    $warnings++;
+    /**
+     * @param  list<string>  $codes
+     */
+    private function sumFor(array $codes): int
+    {
+        $counts = $this->summary();
 
-                    break;
-                }
-            }
+        $total = 0;
+
+        foreach ($codes as $code) {
+            $total += $counts[$code] ?? 0;
         }
 
-        return $warnings;
+        return $total;
     }
 
     // --- Individual checks ---------------------------------------------------
@@ -216,25 +335,41 @@ final class DataQualityInspector
             return $findings;
         }
 
-        $unauthorised = $open->where(fn (ClientCompanyAssignment $a): bool => ! $a->isAuthorisedParallel());
+        $unauthorised = $open->where(fn (ClientCompanyAssignment $a): bool => ! $a->isAuthorisedParallel())->count();
 
         $names = $open
             ->map(fn (ClientCompanyAssignment $a): string => $a->company?->displayName() ?? 'Empresa desconocida')
             ->implode(', ');
 
+        // The invariant, in one sentence: for N simultaneously open
+        // relationships, one may be the ordinary one and every additional row must
+        // carry an explicit authorisation and a reason. So a pair of unmarked rows
+        // is the problem, not the mere presence of a second row.
+        //
+        // This used to treat any unmarked row as unauthorised, which reported an
+        // overlap created correctly through the API as a warning: the first
+        // relationship is never marked, so "base plus one authorised parallel" was
+        // indistinguishable from "two rows nobody authorised".
         $findings[] = DataQualityFinding::make(
             code: DataQualityCode::MultipleActiveCompanies,
-            severity: $unauthorised->isEmpty()
-                ? DataQualitySeverity::Notice
-                : DataQualitySeverity::Warning,
-            message: sprintf(
-                'El cliente tiene %d relaciones abiertas: %s.',
-                $open->count(),
-                $names,
-            ),
-            suggestion: $unauthorised->isEmpty()
-                ? 'El paralelismo fue autorizado y queda documentado.'
-                : 'Confirme si el paralelismo es real y autorícelo con una justificación, o transfiera.',
+            severity: $unauthorised > 1
+                ? DataQualitySeverity::Warning
+                : DataQualitySeverity::Notice,
+            message: $unauthorised > 1
+                ? sprintf(
+                    'El cliente tiene %d relaciones abiertas y %d no están autorizadas: %s.',
+                    $open->count(),
+                    $unauthorised,
+                    $names,
+                )
+                : sprintf(
+                    'El cliente tiene %d relaciones abiertas, con el paralelismo autorizado: %s.',
+                    $open->count(),
+                    $names,
+                ),
+            suggestion: $unauthorised > 1
+                ? 'Confirme cuál es la relación principal y autorice las demás con una justificación, o transfiéralas.'
+                : 'El paralelismo fue autorizado y queda documentado.',
         );
 
         return $findings;
@@ -366,14 +501,35 @@ final class DataQualityInspector
             ->count();
     }
 
-    private function multipleActiveRelationshipsCount(): int
+    /**
+     * Clients holding more than one open relationship that nobody authorised.
+     *
+     * Public because it is the one counter an external reader asks about: the
+     * number of overlaps nobody authorised, as opposed to the ones somebody did.
+     *
+     * Counted per client with a conditional aggregate rather than by filtering the
+     * unmarked rows out before grouping. The old version did
+     * `whereNull('parallel_authorized_at')` and then grouped, so a client with
+     * one ordinary and one authorised parallel row contributed nothing and the
+     * dashboard disagreed with the client's own screen, which read the pair as
+     * an unauthorised overlap.
+     *
+     * A client is counted when it has at least two open rows and at most one
+     * unmarked row, which is the same rule `relationshipFindings()` applies to a
+     * single record.
+     */
+    public function unauthorisedParallelCount(): int
     {
-        return $this->countGrouped(
-            ClientCompanyAssignment::query()
-                ->whereNull('ended_on')
-                ->whereNull('parallel_authorized_at'),
-            'client_id',
-        );
+        return (int) ClientCompanyAssignment::query()
+            ->whereNull('ended_on')
+            ->select('client_id')
+            ->selectRaw('count(*) as open_count')
+            ->selectRaw('count(*) filter (where parallel_authorized_at is null) as unmarked_count')
+            ->groupBy('client_id')
+            ->havingRaw('count(*) > 1')
+            ->havingRaw('count(*) filter (where parallel_authorized_at is null) > 1')
+            ->get()
+            ->count();
     }
 
     private function inactiveClientWithRelationshipsCount(): int

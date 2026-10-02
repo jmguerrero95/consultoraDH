@@ -37,6 +37,17 @@ Detalle en [TASKS/A02.md](TASKS/A02.md). Lo que quedó fuera: la administración
 de roles en la interfaz, la reconstrucción por fecha como pantalla y la
 revisión en bloque del paralelismo autorizado.
 
+**A02-R1** corrigió quince defectos hallados en una auditoría externa del
+`f27401e`: el contador de errores de calidad que siempre valía cero, un escaneo del
+portafolio completo cada vez que se abría el panel, la representación del NIT, los
+índices únicos inventados sobre el correo de contacto y sobre el código del
+catálogo, los errores de base de datos disfrazados de duplicados, un bloqueo que no
+serializaba nada, un traspaso que elegía una relación al azar, un paralelismo
+autorizado reportado como problema, permisos de lectura que no se aplicaban, y las
+fechas de un periodo sin definición escrita. Ninguna de ellas cambia la
+arquitectura; todas cambian lo que el sistema afirma, y por eso tienen pruebas
+propias.
+
 ### A03 — Periodos, cortes, obligaciones, pagos y cartera
 
 Alcance: periodos mensuales, fechas de corte, obligaciones generadas, registro

@@ -26,12 +26,20 @@ final class LinkClientCompanyRequest extends FormRequest
 {
     use AuthorizesRequests;
 
-    /** @var list<string> */
+    /**
+     * The three answers a person may give when a client is already linked.
+     *
+     * There is no fourth. `ManageClientCompanies::RESOLUTION_CLOSE_OTHERS` exists
+     * for deactivating a client, and it is deliberately not here: a value that
+     * ends every open relationship does not belong in a request whose job is to
+     * add one, and offering it invites closing rows nobody meant to close.
+     *
+     * @var list<string>
+     */
     private const RESOLUTIONS = [
         ManageClientCompanies::RESOLUTION_ONLY_IF_NONE,
         ManageClientCompanies::RESOLUTION_TRANSFER,
         ManageClientCompanies::RESOLUTION_PARALLEL,
-        ManageClientCompanies::RESOLUTION_CLOSE_OTHERS,
     ];
 
     public function authorize(): bool
@@ -47,7 +55,12 @@ final class LinkClientCompanyRequest extends FormRequest
         return [
             'company_id' => ['required', 'integer', Rule::exists('companies', 'id')],
             'started_on' => ['required', 'date'],
-            'ended_on' => ['nullable', 'date', 'after_or_equal:started_on'],
+            // Rejected rather than merely absent. Creating a relationship always
+            // opens it, and closing is its own operation with its own endpoint; a
+            // caller who sends `ended_on` here means to record a closed period, so
+            // the honest answer is "that field does not belong in this request"
+            // instead of a 201 for a period they believe they closed.
+            'ended_on' => ['prohibited'],
             'job_title' => ['nullable', 'string', 'max:120'],
             'notes' => ['nullable', 'string', 'max:2000'],
             'resolution' => ['required', 'string', Rule::in(self::RESOLUTIONS)],
@@ -65,8 +78,7 @@ final class LinkClientCompanyRequest extends FormRequest
             'company_id.exists' => 'La empresa indicada no existe.',
             'started_on.required' => 'Debe indicar la fecha de inicio de la relación.',
             'started_on.date' => 'La fecha de inicio no tiene un formato válido.',
-            'ended_on.date' => 'La fecha de cierre no tiene un formato válido.',
-            'ended_on.after_or_equal' => 'La fecha de cierre no puede ser anterior a la de inicio.',
+            'ended_on.prohibited' => 'Una relación se crea abierta; para cerrarla use la operación de cierre.',
             'job_title.max' => 'El cargo no puede superar los 120 caracteres.',
             'notes.max' => 'Las notas no pueden superar los 2000 caracteres.',
             'resolution.required' => 'Debe indicar cómo tratar las relaciones abiertas del cliente.',

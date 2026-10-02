@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Domain\Shared\EffectivePeriod;
 use Database\Factories\ClientCompanyAssignmentFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Scope;
@@ -121,5 +122,24 @@ class ClientCompanyAssignment extends Model
     protected function closed(Builder $query): void
     {
         $query->whereNotNull('ended_on');
+    }
+
+    /**
+     * The rows that were effective on a date.
+     *
+     * `[started_on, ended_on)`: a period includes its start day and excludes its end
+     * day, so a transfer effective on the first of March answers the old row on the
+     * last of February and the new row on the first of March, with no day in
+     * between belonging to neither and no day belonging to both.
+     *
+     * Distinct from `active()`, which asks whether a row is open *now*; this asks
+     * whether it was effective on a day in the past.
+     *
+     * @param  Builder<self>  $query
+     */
+    #[Scope]
+    protected function activeOn(Builder $query, \DateTimeInterface|string $date): void
+    {
+        EffectivePeriod::scopeActiveOn($query, $date);
     }
 }

@@ -38,6 +38,9 @@ const busy = ref(false);
 const canUpdate = computed(() => auth.can('companies.update'));
 const canChangeStatus = computed(() => auth.can('companies.change_status'));
 
+// Withheld by the server from a role that may not read the relationships; the
+// card is drawn only when the section is actually visible.
+const maySeeClients = computed(() => payload.value?.clients.visible === true);
 const activeClients = computed<Assignment[]>(() => payload.value?.clients.active ?? []);
 
 async function load(): Promise<void> {
@@ -207,12 +210,12 @@ Editar
                     <h2 class="cdh-card__title">Resumen</h2>
                     <div class="cdh-card__body">
                         <div class="cdh-grid-2">
-                            <div class="cdh-stat">
+                            <div v-if="maySeeClients" class="cdh-stat">
                                 <p class="cdh-stat__value">{{ activeClients.length }}</p>
                                 <p class="cdh-stat__label mb-0">Clientes activos</p>
                             </div>
-                            <div class="cdh-stat">
-                                <p class="cdh-stat__value">{{ payload.clients.history_count }}</p>
+                            <div v-if="maySeeClients" class="cdh-stat">
+                                <p class="cdh-stat__value">{{ payload.clients.history_count ?? 0 }}</p>
                                 <p class="cdh-stat__label mb-0">Clientes históricos</p>
                             </div>
                         </div>
@@ -234,7 +237,8 @@ Editar
                 </article>
             </div>
 
-            <article class="cdh-card mt-3">
+            <!-- The client list is relationship data, and it names people. -->
+            <article v-if="maySeeClients" class="cdh-card mt-3">
                 <h2 class="cdh-card__title">Clientes con relación abierta</h2>
                 <div class="cdh-card__body cdh-card__body--flush">
                     <AppEmptyState

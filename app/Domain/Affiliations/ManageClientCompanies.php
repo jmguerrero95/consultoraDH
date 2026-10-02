@@ -48,25 +48,31 @@ final class ManageClientCompanies
     /** Keep the open relationship and open this one, with a justification. */
     public const RESOLUTION_PARALLEL = 'parallel';
 
-    /** Close every open relationship, then open this one. */
+    /**
+     * Close every open relationship, then open this one.
+     *
+     * Deliberately not one of the public resolutions in `LinkClientCompanyRequest`.
+     * A value that can end every open relationship of a client does not belong in
+     * a request that means "link this company": an operator who typed it, or who
+     * found it in a payload, would get a result nobody explained. The explicit
+     * operation that really wants this is deactivating the client, and that calls
+     * `closeAllOpen()` below.
+     */
     public const RESOLUTION_CLOSE_OTHERS = 'close_others';
-
-    use LocksRow;
 
     /**
      * Link a client to a company.
      *
      * When another relationship is already open, the caller must decide what to
-     * do about it. `$resolution` is one of:
+     * do about it. `$resolution` is one of the three public choices:
      *
      *   'only_if_none'  fail unless no other relationship is open. This is the
      *                   default and the safe one.
-     *   'transfer'      close the open relationship on `$effectiveDate` and
-     *                   open this one.
+     *   'transfer'      close the one open relationship on `$startedOn` and open
+     *                   this one. Refused when more than one is open: see
+     *                   `TransferSourceRequired`.
      *   'parallel'      keep the open relationship and open this one too, which
      *                   requires `$parallelReason`.
-     *   'close_others'  close every open relationship on `$effectiveDate` and
-     *                   open this one. Used when a client is deactivated.
      */
     public function link(
         Client $client,
@@ -76,7 +82,6 @@ final class ManageClientCompanies
         ?string $jobTitle = null,
         ?string $notes = null,
         string $resolution = self::RESOLUTION_ONLY_IF_NONE,
-        ?string $effectiveDate = null,
         ?string $parallelReason = null,
     ): ClientCompanyAssignment {
         if (! $client->isActive()) {
@@ -87,16 +92,18 @@ final class ManageClientCompanies
             throw new DomainException('No se puede vincular un cliente a una empresa inactiva.');
         }
 
-        $open = $this->openAssignments($client);
-
         return DB::transaction(function () use (
             $client, $company, $actor, $startedOn, $jobTitle, $notes,
-            $resolution, $effectiveDate, $parallelReason, $open
+            $resolution, $parallelReason
         ): ClientCompanyAssignment {
-            // Re-read inside the transaction, under a lock: a concurrent request
-            // may have opened a relationship between the check above and this
-            // write, and both would otherwise succeed.
-            $open = $this->lockedOpenAssignments($client);
+            // The client row is the lock, not the relationships. Two concurrent
+            // first relationships both used to find zero rows, lock zero rows, and
+            // both insert; there is nothing to contend on until the first row
+            // exists, and by then both transactions are inside. Locking the master
+            // row always contends, because it always exists.
+            $this->lockClient($client);
+
+            $open = $this->openAssignments($client);
 
             return match ($resolution) {
                 self::RESOLUTION_ONLY_IF_NONE => $open->isEmpty()
@@ -109,13 +116,20 @@ final class ManageClientCompanies
                     $client, $company, $actor, $startedOn, $jobTitle, $notes, true, $parallelReason
                 ),
 
-                self::RESOLUTION_CLOSE_OTHERS => $this->closeOthersAndOpen(
-                    $client, $open, $company, $actor, $startedOn, $jobTitle, $notes, $effectiveDate
-                ),
-
                 default => throw new DomainException("Resolución desconocida: {$resolution}."),
             };
         });
+    }
+
+    /**
+     * Take the write lock on the client row.
+     *
+     * Inside the caller's transaction, which is what makes the lock mean anything:
+     * taken outside, it would be released before the work it was meant to serialise.
+     */
+    private function lockClient(Client $client): void
+    {
+        Client::query()->whereKey($client->id)->lockForUpdate()->first();
     }
 
     /**
@@ -267,8 +281,15 @@ final class ManageClientCompanies
             return $this->open($client, $company, $actor, $startedOn, $jobTitle, $notes, false);
         }
 
-        // Only one can be closed: a transfer moves the client, it does not end
-        // every employment a person has ever had.
+        // With more than one open relationship there is no safe default. The old
+        // code took `$open->first()`, which closed whichever row happened to sort
+        // first: with two legitimate parallel relationships that ends an
+        // employment nobody asked to end.
+        if ($open->count() > 1) {
+            throw TransferSourceRequired::forClient($client, $open);
+        }
+
+        // A single open relationship is the case this flow is for.
         $current = $open->first();
 
         if ($startedOn->format('Y-m-d') < $current->started_on->format('Y-m-d')) {
@@ -281,25 +302,28 @@ final class ManageClientCompanies
     }
 
     /**
-     * @param  Collection<int, ClientCompanyAssignment>  $open
+     * Close every open relationship of a client on one date.
+     *
+     * Not reachable from the link endpoint on purpose. This is the operation
+     * behind deactivating a client, where closing whatever is open is the whole
+     * point, and it is named as such so nobody discovers it as a resolution string
+     * in a request they thought meant something else.
+     *
+     * @return list<ClientCompanyAssignment> the rows it closed
      */
-    private function closeOthersAndOpen(
+    public function closeAllOpen(
         Client $client,
-        $open,
-        Company $company,
         User $actor,
-        \DateTimeInterface $startedOn,
-        ?string $jobTitle,
-        ?string $notes,
-        ?string $effectiveDate,
-    ): ClientCompanyAssignment {
-        $endedOn = $effectiveDate ?? $startedOn->format('Y-m-d');
+        \DateTimeInterface $endedOn,
+        string $reason = 'Cierre por desactivación del cliente',
+    ): array {
+        $closed = [];
 
-        foreach ($open as $assignment) {
-            $this->close($assignment, $actor, new \DateTimeImmutable($endedOn), 'Cierre por desactivación del cliente');
+        foreach ($this->openAssignments($client) as $assignment) {
+            $closed[] = $this->close($assignment, $actor, $endedOn, $reason);
         }
 
-        return $this->open($client, $company, $actor, $startedOn, $jobTitle, $notes, false);
+        return $closed;
     }
 
     private function open(

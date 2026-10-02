@@ -121,13 +121,35 @@ it('enforces the duplicate name in the database, not only in the form', function
     ]);
 })->throws(QueryException::class);
 
-it('refuses a duplicate code', function (): void {
+it('refuses a second entity with the same name and type', function (): void {
+    $this->actingAs(actingAsRole())->postJson('/api/social-security-entities', entityPayload())->assertCreated();
+
+    // The same name with a different code. This test used to post a different name
+    // and pass only because the *code* was unique, so it was proving something
+    // other than what it said. The name and type are what identify an entity.
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/social-security-entities', entityPayload(['code' => 'NEP-999']))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('name');
+});
+
+it('allows two entities to share a code', function (): void {
+    // A code is not known to identify one entity across all of the EPS, AFP, ARL
+    // and CCF together: A02 established no source saying so, and a constraint
+    // invented without one would refuse reference data that may be perfectly good.
+    // If an official source later establishes uniqueness within a type, that is a
+    // deliberate decision for the task that imports the data.
     $this->actingAs(actingAsRole())->postJson('/api/social-security-entities', entityPayload())->assertCreated();
 
     $this->actingAs(actingAsRole())
-        ->postJson('/api/social-security-entities', entityPayload(['name' => 'Otra Entidad']))
-        ->assertStatus(422)
-        ->assertJsonValidationErrors('name');
+        ->postJson('/api/social-security-entities', entityPayload([
+            'name' => 'Entidad Con El Mismo Codigo',
+            'type' => 'CCF',
+        ]))
+        ->assertCreated()
+        ->assertJsonPath('entity.code', entityPayload()['code']);
+
+    expect(SocialSecurityEntity::query()->count())->toBe(2);
 });
 
 // --- Updates -----------------------------------------------------------------

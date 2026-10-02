@@ -448,8 +448,7 @@ it('reports an ARL without a risk level as a warning', function (): void {
     $this->actingAs(actingAsRole())
         ->getJson("/api/clients/{$client->id}")
         ->assertOk()
-        ->assertJsonPath('data_quality.0.code', 'arl_without_risk_class')
-        ->assertJsonPath('data_quality.0.severity', 'warning');
+        ->assertJsonFragment(['code' => 'arl_without_risk_class', 'severity' => 'warning']);
 });
 
 it('reports no warning when the ARL risk level is present', function (): void {
@@ -618,4 +617,90 @@ it('reports an inactive client that still holds an open relationship', function 
 
     expect(app(DataQualityInspector::class)->summary())
         ->toHaveKey('inactive_client_with_active_companies', 1);
+});
+
+// --- Inactive entities and inactive clients ---------------------------------
+
+it('refuses a new affiliation with an inactive entity', function (): void {
+    $client = Client::factory()->create();
+    $inactive = entityOf(SocialSecurityEntityType::Eps);
+    $inactive->forceFill(['status' => 'inactive'])->save();
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/affiliations", affiliationPayload([
+            'social_security_entity_id' => $inactive->id,
+            'type' => SocialSecurityEntityType::Eps,
+        ]))
+        ->assertStatus(422);
+
+    expect(ClientAffiliation::query()->where('client_id', $client->id)->count())->toBe(0);
+});
+
+it('refuses to change an affiliation to an inactive entity', function (): void {
+    $client = Client::factory()->create();
+    $current = entityOf(SocialSecurityEntityType::Eps, 'EPS Vigente');
+    $inactive = entityOf(SocialSecurityEntityType::Eps, 'EPS Inactiva');
+
+    $affiliation = ClientAffiliation::factory()->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => $current->id,
+        'type' => SocialSecurityEntityType::Eps,
+        'ended_on' => null,
+    ]);
+
+    $inactive->forceFill(['status' => 'inactive'])->save();
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/client-affiliations/{$affiliation->id}/change", [
+            'social_security_entity_id' => $inactive->id,
+            'effective_date' => '2026-01-01',
+        ])
+        ->assertStatus(422);
+
+    // The original row is untouched: the refusal happens before anything is closed.
+    expect(ClientAffiliation::query()->find($affiliation->id)->ended_on)->toBeNull()
+        ->and(ClientAffiliation::query()->where('client_id', $client->id)->count())->toBe(1);
+});
+
+it('keeps a historical affiliation readable after its entity is deactivated', function (): void {
+    $client = Client::factory()->create();
+    $entity = entityOf(SocialSecurityEntityType::Eps, 'EPS Que Se Desactivo');
+
+    $affiliation = ClientAffiliation::factory()->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => $entity->id,
+        'type' => SocialSecurityEntityType::Eps,
+        'ended_on' => null,
+    ]);
+
+    $entity->forceFill(['status' => 'inactive'])->save();
+
+    // Deactivating is refused while an open affiliation points at it, so the only
+    // way to get here is through a change of entity, which closes the row.
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/client-affiliations/{$affiliation->id}/change", [
+            'social_security_entity_id' => entityOf(SocialSecurityEntityType::Eps, 'EPS Nueva')->id,
+            'type' => SocialSecurityEntityType::Eps,
+            'effective_date' => '2026-01-01',
+        ])
+        ->assertOk();
+
+    $this->actingAs(actingAsRole())
+        ->getJson("/api/clients/{$client->id}")
+        ->assertOk()
+        ->assertJsonFragment(['id' => $entity->id]);
+});
+
+it('refuses a new open affiliation for an inactive client', function (): void {
+    $client = Client::factory()->inactive()->create();
+    $entity = entityOf(SocialSecurityEntityType::Eps);
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/affiliations", affiliationPayload([
+            'social_security_entity_id' => $entity->id,
+            'type' => SocialSecurityEntityType::Eps,
+        ]))
+        ->assertStatus(422);
+
+    expect(ClientAffiliation::query()->where('client_id', $client->id)->count())->toBe(0);
 });

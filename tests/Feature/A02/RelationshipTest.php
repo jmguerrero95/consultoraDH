@@ -67,10 +67,13 @@ it('refuses to link an inactive company', function (): void {
         ->assertStatus(422);
 });
 
-it('rejects a closing date before the opening date', function (): void {
+it('does not accept a closing date when opening a relationship', function (): void {
     $client = Client::factory()->create();
     $company = Company::factory()->create();
 
+    // Creating always opens the period; closing is its own operation. The field
+    // used to be validated and then ignored, so this used to answer "created" for
+    // a period the caller believed they had closed.
     $this->actingAs(actingAsRole())
         ->postJson("/api/clients/{$client->id}/companies", linkPayload([
             'company_id' => $company->id,
@@ -78,6 +81,8 @@ it('rejects a closing date before the opening date', function (): void {
         ]))
         ->assertStatus(422)
         ->assertJsonValidationErrors('ended_on');
+
+    expect(ClientCompanyAssignment::query()->count())->toBe(0);
 });
 
 it('refuses a date range the database would also reject', function (): void {
@@ -366,8 +371,7 @@ it('reports an unauthorised overlap as a warning', function (): void {
     $this->actingAs(actingAsRole())
         ->getJson("/api/clients/{$client->id}")
         ->assertOk()
-        ->assertJsonPath('data_quality.0.code', 'multiple_active_companies')
-        ->assertJsonPath('data_quality.0.severity', 'warning');
+        ->assertJsonFragment(['code' => 'multiple_active_companies', 'severity' => 'warning']);
 });
 
 it('reports an authorised overlap as a notice, not a problem', function (): void {
@@ -507,4 +511,214 @@ it('treats a wildcard typed into the picker as a character', function (): void {
         ->json('companies.*.id');
 
     expect($found)->toHaveCount(1);
+});
+
+// --- Which relationship a transfer moves -------------------------------------
+
+it('transfers the only open relationship through the convenient flow', function (): void {
+    $client = Client::factory()->create();
+    $from = Company::factory()->create();
+    $to = Company::factory()->create();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $from->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $to->id,
+        'started_on' => '2025-06-01',
+        'resolution' => 'transfer',
+    ]))->assertCreated();
+
+    $open = ClientCompanyAssignment::query()->where('client_id', $client->id)->whereNull('ended_on')->get();
+
+    expect($open)->toHaveCount(1)
+        ->and($open->first()->company_id)->toBe($to->id);
+});
+
+it('refuses to guess which relationship to transfer when several are open', function (): void {
+    $client = Client::factory()->create();
+
+    $first = $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated()->json('assignment');
+
+    $second = $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-02-01',
+        'resolution' => 'parallel',
+        'parallel_reason' => 'Presta servicios a las dos empresas',
+    ]))->assertCreated()->json('assignment');
+
+    $destination = Company::factory()->create();
+
+    $response = $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $destination->id,
+        'started_on' => '2025-01-01',
+        'resolution' => 'transfer',
+    ]));
+
+    $response->assertStatus(409)
+        ->assertJsonPath('code', 'transfer_source_required')
+        ->assertJsonPath('open_assignments', [$first['id'], $second['id']]);
+
+    // Nothing moved. The old behaviour closed whichever row sorted first, which
+    // with two legitimate parallel relationships ended an employment nobody asked
+    // about.
+    $open = ClientCompanyAssignment::query()
+        ->where('client_id', $client->id)
+        ->whereNull('ended_on')
+        ->orderBy('id')
+        ->pluck('id')
+        ->all();
+
+    expect($open)->toBe([$first['id'], $second['id']]);
+});
+
+it('transfers only the relationship that was chosen', function (): void {
+    $client = Client::factory()->create();
+
+    $first = $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated()->json('assignment');
+
+    $second = $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-02-01',
+        'resolution' => 'parallel',
+        'parallel_reason' => 'Presta servicios a las dos empresas',
+    ]))->assertCreated()->json('assignment');
+
+    $destination = Company::factory()->create();
+
+    // The dedicated endpoint, which names the source in its path.
+    $this->actingAs(actingAsRole())->postJson("/api/client-company-assignments/{$second['id']}/transfer", [
+        'to_company_id' => $destination->id,
+        'effective_on' => '2025-01-01',
+    ])->assertOk();
+
+    // The chosen one closed; the other one is still open, because a transfer moves
+    // a person from one company, it does not end every employment they have.
+    expect(ClientCompanyAssignment::query()->find($second['id'])->ended_on?->toDateString())
+        ->toBe('2025-01-01')
+        ->and(ClientCompanyAssignment::query()->find($first['id'])->ended_on)->toBeNull();
+
+    $open = ClientCompanyAssignment::query()->where('client_id', $client->id)->whereNull('ended_on')->get();
+
+    expect($open)->toHaveCount(2)
+        ->and($open->pluck('company_id')->all())->toContain($destination->id);
+});
+
+// --- The resolution that closes everything is not a public choice ------------
+
+it('does not accept close_others through the link endpoint', function (): void {
+    $client = Client::factory()->create();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated();
+
+    // A value that ends every open relationship does not belong in a request whose
+    // job is to add one.
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", linkPayload([
+            'company_id' => Company::factory()->create()->id,
+            'started_on' => '2024-02-01',
+            'resolution' => 'close_others',
+        ]))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('resolution');
+
+    expect(ClientCompanyAssignment::query()->whereNull('ended_on')->count())->toBe(1);
+});
+
+it('still closes every open relationship when a client is deactivated', function (): void {
+    $client = Client::factory()->create();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-02-01',
+        'resolution' => 'parallel',
+        'parallel_reason' => 'Presta servicios a las dos empresas',
+    ]))->assertCreated();
+
+    // Deactivating is the explicit operation that means "close what is open".
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/status", [
+        'status' => 'inactive',
+        'when' => 'close',
+        'effective_date' => '2025-03-01',
+    ])->assertOk();
+
+    expect(ClientCompanyAssignment::query()->where('client_id', $client->id)->whereNull('ended_on')->count())
+        ->toBe(0);
+});
+
+// --- The lock ---------------------------------------------------------------
+
+it('serialises relationship changes on the client row, not on an empty result', function (): void {
+    $client = Client::factory()->create();
+
+    // The lock is taken on the master row, which always exists. Two concurrent
+    // first relationships used to contend on nothing: each found zero open rows,
+    // locked zero rows, and both inserted.
+    //
+    // A true parallel test is not attempted here and this does not claim to be one:
+    // a single transaction cannot observe its own lock, and two connections would
+    // need a barrier inside the test runner to be deterministic. What is asserted
+    // is the invariant the lock protects, from both sides: the decision is taken
+    // from the relationships read inside the same transaction as the lock, and a
+    // decision refused by the domain leaves no rows behind.
+    $company = Company::factory()->create();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $company->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated();
+
+    // The second attempt is decided against the state read under the lock, and it
+    // is refused rather than quietly becoming a parallel relationship.
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => Company::factory()->create()->id,
+        'started_on' => '2024-02-01',
+    ]))->assertStatus(409);
+
+    expect(ClientCompanyAssignment::query()->where('client_id', $client->id)->count())->toBe(1);
+});
+
+it('takes the client row lock before reading the relationships', function (): void {
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+    $actor = actingAsRole();
+
+    $lockOrder = [];
+
+    DB::listen(function ($query) use (&$lockOrder): void {
+        if (str_contains(strtolower($query->sql), 'for update')) {
+            $lockOrder[] = $query->sql;
+        }
+    });
+
+    app(ManageClientCompanies::class)->link(
+        client: $client,
+        company: $company,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+        resolution: ManageClientCompanies::RESOLUTION_ONLY_IF_NONE,
+    );
+
+    // Exactly one lock, and it is on the client row. Locking the open
+    // relationships instead would lock nothing on the first relationship, which is
+    // the case the audit found.
+    expect($lockOrder)->toHaveCount(1)
+        ->and($lockOrder[0])->toContain('from "clients"')
+        ->and(strtolower($lockOrder[0]))->toContain('for update');
 });

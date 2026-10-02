@@ -33,21 +33,34 @@ export interface ServiceCheck {
     detail: string | null;
 }
 
+/**
+ * The dashboard figures.
+ *
+ * The relationship, affiliation and catalogue figures are optional because the
+ * server withholds them from roles that may not read the section they describe.
+ * A figure the role cannot read is absent rather than zero, because zero is a claim
+ * about the portfolio and the interface must not make that claim on the server's
+ * behalf.
+ */
 export interface PortfolioCounts {
     active_clients: number;
     inactive_clients: number;
     active_companies: number;
-    active_relationships: number;
-    active_affiliations: number;
-    catalogue_entities: number;
     data_quality_issues: number;
     data_quality_warnings: number;
+    active_relationships?: number;
+    active_affiliations?: number;
+    catalogue_entities?: number;
+    authorised_parallel_relationships?: number;
 }
 
 export interface PortfolioPayload {
     /** False when the user's role may not see the portfolio at all. */
     visible: boolean;
     counts?: PortfolioCounts;
+    /** The per code figures behind the totals, filtered by the same permissions. */
+    quality?: Record<string, number>;
+    /** Only present with `relationships.view`. */
     multiple_companies?: number;
 }
 
@@ -288,10 +301,24 @@ export interface ClientListPayload {
     filters: { search: string | null; status: string | null; company_id: number | null };
 }
 
+/**
+ * A section that can be withheld.
+ *
+ * `visible: false` means the role may not read it, which is not the same as it
+ * being empty, so the interface says so instead of drawing an empty list that
+ * looks like an answer.
+ */
+export interface ReadSection<T> {
+    visible: boolean;
+    active?: T[];
+    history?: T[];
+    history_count?: number;
+}
+
 export interface ClientDetailPayload {
     client: Client;
-    companies: { active: Assignment[]; history: Assignment[] };
-    affiliations: { visible: boolean; active?: Affiliation[]; history?: Affiliation[] };
+    companies: ReadSection<Assignment>;
+    affiliations: ReadSection<Affiliation>;
     history: TimelineEntry[];
     data_quality: DataQualityFinding[];
 }
@@ -304,7 +331,7 @@ export interface CompanyListPayload {
 
 export interface CompanyDetailPayload {
     company: Company;
-    clients: { active: Assignment[]; history_count: number };
+    clients: ReadSection<Assignment>;
     data_quality: DataQualityFinding[];
 }
 

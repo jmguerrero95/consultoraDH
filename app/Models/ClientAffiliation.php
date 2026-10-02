@@ -6,6 +6,7 @@ namespace App\Models;
 
 use App\Domain\Affiliations\ArlRiskClass;
 use App\Domain\Affiliations\SocialSecurityEntityType;
+use App\Domain\Shared\EffectivePeriod;
 use Database\Factories\ClientAffiliationFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Scope;
@@ -173,5 +174,21 @@ class ClientAffiliation extends Model
     protected function ofType(Builder $query, SocialSecurityEntityType $type): void
     {
         $query->where('type', $type);
+    }
+
+    /**
+     * The rows that were effective on a date.
+     *
+     * `[started_on, ended_on)`, the same convention the relationships use: the start
+     * day belongs to the period and the end day does not. A change of entity on the
+     * first of March means the old affiliation answered for the last of February and
+     * the new one for the first of March.
+     *
+     * @param  Builder<self>  $query
+     */
+    #[Scope]
+    protected function activeOn(Builder $query, \DateTimeInterface|string $date): void
+    {
+        EffectivePeriod::scopeActiveOn($query, $date);
     }
 }

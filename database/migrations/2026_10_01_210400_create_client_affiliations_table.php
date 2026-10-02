@@ -15,6 +15,15 @@ use Illuminate\Support\Facades\Schema;
  * EPS changes, the old row is closed and a new one opened inside one transaction;
  * the old row is never rewritten.
  *
+ * ## The meaning of the two dates
+ *
+ * The period is `[started_on, ended_on)`, the same convention the company
+ * relationships use. `started_on` is the first day the affiliation is effective and
+ * `ended_on` the first day it is no longer, so a change of entity writes one date
+ * as the end of the old row and the start of the new one: no overlap, no gap. The
+ * rule lives in `App\Domain\Shared\EffectivePeriod` and the `activeOn()` scope
+ * implements it.
+ *
  * The `type` is repeated here even though the entity already carries one. That is
  * deliberate redundancy with a purpose: a CHECK constraint cannot inspect another
  * table, so the type lives here as well in order to make "an ARL affiliation may
