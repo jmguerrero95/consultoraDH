@@ -268,6 +268,7 @@ it('withholds the affiliation quality figures from a role without affiliations.v
 it('keeps the whole portfolio for a role holding every read permission', function (): void {
     $portfolio = $this->actingAs(userWithPermissions([
         'clients.view',
+        'companies.view',
         'relationships.view',
         'affiliations.view',
         'social_security_entities.view',
@@ -289,4 +290,245 @@ it('keeps the whole portfolio for a role holding every read permission', functio
             'authorised_parallel_relationships',
         ])
         ->and($portfolio)->toHaveKey('multiple_companies');
+});
+
+it('shows the company figures to a role that may read only companies', function (): void {
+    Company::factory()->count(3)->create();
+    Client::factory()->create();
+
+    $portfolio = $this->actingAs(userWithPermissions(['companies.view']))
+        ->getJson('/api/dashboard')
+        ->assertOk()
+        ->json('portfolio');
+
+    // The portfolio no longer hangs on `clients.view`: a role that may read
+    // companies sees what it may read and nothing else.
+    expect($portfolio['visible'])->toBeTrue()
+        ->and($portfolio['counts'])->toHaveKey('active_companies')
+        ->and($portfolio['counts'])->not->toHaveKey('active_clients')
+        ->and($portfolio['counts'])->not->toHaveKey('active_relationships')
+        ->and($portfolio['counts'])->not->toHaveKey('active_affiliations');
+});
+
+// --- The nested endpoints ---------------------------------------------------
+
+it('refuses the nested relationship endpoint to a role holding only clients.view', function (): void {
+    $client = portfolioForPermissions();
+
+    // The client itself is readable; the employment history is not, and the URL is
+    // the other way in.
+    $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson("/api/clients/{$client->id}")
+        ->assertOk()
+        ->assertJsonPath('companies.visible', false);
+
+    $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson("/api/clients/{$client->id}/companies")
+        ->assertForbidden();
+});
+
+it('allows the nested relationship endpoint with both permissions', function (): void {
+    $client = portfolioForPermissions();
+
+    $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson("/api/clients/{$client->id}/companies")
+        ->assertOk()
+        ->assertJsonCount(1, 'assignments');
+});
+
+it('refuses the nested affiliation endpoint to a role holding only clients.view', function (): void {
+    $client = portfolioForPermissions();
+
+    $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson("/api/clients/{$client->id}/affiliations")
+        ->assertForbidden();
+});
+
+it('allows the nested affiliation endpoint with both permissions', function (): void {
+    $client = portfolioForPermissions();
+
+    $this->actingAs(userWithPermissions(['clients.view', 'affiliations.view']))
+        ->getJson("/api/clients/{$client->id}/affiliations")
+        ->assertOk()
+        ->assertJsonCount(1, 'affiliations');
+});
+
+it('refuses the nested affiliation endpoint to a role holding only affiliations.view', function (): void {
+    $client = portfolioForPermissions();
+
+    // The section permission on its own does not open the client's nested resource:
+    // a route under a client is only reachable by somebody who may read clients.
+    $this->actingAs(userWithPermissions(['affiliations.view']))
+        ->getJson("/api/clients/{$client->id}/affiliations")
+        ->assertForbidden();
+});
+
+// --- Company quality findings -----------------------------------------------
+
+it('hides a relationship finding on the company screen', function (): void {
+    $company = Company::factory()->inactive()->create();
+
+    // Real data behind the finding: an inactive company with an open relationship.
+    ClientCompanyAssignment::factory()->create([
+        'company_id' => $company->id,
+        'client_id' => Client::factory()->create()->id,
+        'ended_on' => null,
+    ]);
+
+    $codes = fn (array $permissions): array => collect(
+        $this->actingAs(userWithPermissions($permissions))
+            ->getJson("/api/companies/{$company->id}")
+            ->assertOk()
+            ->json('data_quality')
+    )->pluck('code')->all();
+
+    expect($codes(['companies.view']))->not->toContain('inactive_company_with_active_clients')
+        ->and($codes(['companies.view', 'relationships.view']))->toContain('inactive_company_with_active_clients');
+});
+
+it('shows a company identity finding without any relationship permission', function (): void {
+    $company = Company::factory()->create(['tax_id' => '900444555', 'verification_digit' => null]);
+
+    $codes = collect(
+        $this->actingAs(userWithPermissions(['companies.view']))
+            ->getJson("/api/companies/{$company->id}")
+            ->assertOk()
+            ->json('data_quality')
+    )->pluck('code');
+
+    // The company's own identity is read with `companies.view`, not with the
+    // client's permission it used to borrow.
+    expect($codes)->toContain('company_without_verification_digit');
+});
+
+it('does not demand clients.view to read a company identity finding', function (): void {
+    $company = Company::factory()->create(['tax_id' => '900444555', 'verification_digit' => null]);
+
+    $payload = $this->actingAs(userWithPermissions(['companies.view']))
+        ->getJson("/api/companies/{$company->id}")
+        ->assertOk()
+        ->json();
+
+    expect(collect($payload['data_quality'])->pluck('code'))
+        ->toContain('company_without_verification_digit');
+});
+
+// --- Dashboard totals, computed from what the role may read ------------------
+
+it('keeps hidden affiliation problems out of the quality totals', function (): void {
+    $client = Client::factory()->create();
+
+    // An affiliation problem, real and counted: an ARL with no risk level.
+    ClientAffiliation::factory()->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => SocialSecurityEntity::factory()->create([
+            'type' => SocialSecurityEntityType::Arl,
+            'name' => 'ARL Del Panel',
+        ])->id,
+        'type' => SocialSecurityEntityType::Arl,
+        'arl_risk_class' => null,
+        'ended_on' => null,
+    ]);
+
+    $withoutAffiliations = $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson('/api/dashboard')
+        ->assertOk()
+        ->json('portfolio');
+
+    $withAffiliations = $this->actingAs(userWithPermissions([
+        'clients.view',
+        'relationships.view',
+        'affiliations.view',
+    ]))
+        ->getJson('/api/dashboard')
+        ->assertOk()
+        ->json('portfolio');
+
+    // The warning exists and the role that may read affiliations sees it counted.
+    expect($withAffiliations['quality'])->toHaveKey('arl_without_risk_class')
+        ->and($withAffiliations['counts']['data_quality_warnings'])->toBe(1);
+
+    // The role that may not is shown a total computed only from the codes it may
+    // read, so the affiliation warning does not move it. The old totals were for
+    // every domain: this figure went up for a role that had no business knowing.
+    expect($withoutAffiliations['quality'])->not->toHaveKey('arl_without_risk_class')
+        ->and($withoutAffiliations['counts']['data_quality_warnings'])->toBe(0);
+});
+
+it('keeps hidden relationship problems out of the quality totals', function (): void {
+    $client = Client::factory()->create();
+
+    // Two open relationships, neither authorised: a relationship problem.
+    ClientCompanyAssignment::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => Company::factory()->create()->id,
+        'ended_on' => null,
+    ]);
+    ClientCompanyAssignment::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => Company::factory()->create()->id,
+        'ended_on' => null,
+    ]);
+
+    $withRelationships = $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson('/api/dashboard')
+        ->assertOk()
+        ->json('portfolio');
+
+    $withoutRelationships = $this->actingAs(userWithPermissions(['clients.view']))
+        ->getJson('/api/dashboard')
+        ->assertOk()
+        ->json('portfolio');
+
+    expect($withRelationships['counts']['data_quality_warnings'])->toBe(1)
+        ->and($withoutRelationships['quality'])->not->toHaveKey('multiple_active_companies')
+        // Zero for this role, not one: the relationship warning is outside its scope.
+        ->and($withoutRelationships['counts']['data_quality_warnings'])->toBe(0);
+});
+
+it('does not let hidden problems move the totals of a role that may read only companies', function (): void {
+    Company::factory()->create(['tax_id' => '900444555', 'verification_digit' => null]);
+
+    $before = $this->actingAs(userWithPermissions(['companies.view']))
+        ->getJson('/api/dashboard')
+        ->assertOk()
+        ->json('portfolio');
+
+    // Now add a relationship problem and an affiliation problem, both invisible to
+    // this role.
+    $client = Client::factory()->create();
+
+    ClientCompanyAssignment::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => Company::factory()->create()->id,
+        'ended_on' => null,
+    ]);
+    ClientCompanyAssignment::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => Company::factory()->create()->id,
+        'ended_on' => null,
+    ]);
+
+    ClientAffiliation::factory()->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => SocialSecurityEntity::factory()->create([
+            'type' => SocialSecurityEntityType::Arl,
+            'name' => 'ARL Invisible',
+        ])->id,
+        'type' => SocialSecurityEntityType::Arl,
+        'arl_risk_class' => null,
+        'ended_on' => null,
+    ]);
+
+    $after = $this->actingAs(userWithPermissions(['companies.view']))
+        ->getJson('/api/dashboard')
+        ->assertOk()
+        ->json('portfolio');
+
+    // Its totals only ever cover the codes it may read, so two hidden problems are
+    // two figures that did not move.
+    expect($after['quality'])->not->toHaveKey('multiple_active_companies')
+        ->and($after['quality'])->not->toHaveKey('arl_without_risk_class')
+        ->and($after['counts']['data_quality_warnings'])->toBe($before['counts']['data_quality_warnings'] ?? 0)
+        ->and($after['counts']['data_quality_issues'])->toBe($before['counts']['data_quality_issues'] ?? 0);
 });

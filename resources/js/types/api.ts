@@ -317,6 +317,11 @@ export interface ReadSection<T> {
 
 export interface ClientDetailPayload {
     client: Client;
+    /**
+     * The ARL risk classes, from the domain enum. The interface does not keep its
+     * own copy: a second list is a second thing to be wrong about what a class means.
+     */
+    risk_options: { value: number; label: string }[];
     companies: ReadSection<Assignment>;
     affiliations: ReadSection<Affiliation>;
     history: TimelineEntry[];

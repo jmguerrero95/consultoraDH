@@ -61,6 +61,13 @@ function detail(overrides: Partial<ClientDetailPayload> = {}): ClientDetailPaylo
             created_at: null,
             updated_at: null,
         },
+        risk_options: [
+            { value: 1, label: 'Riesgo I' },
+            { value: 2, label: 'Riesgo II' },
+            { value: 3, label: 'Riesgo III' },
+            { value: 4, label: 'Riesgo IV' },
+            { value: 5, label: 'Riesgo V' },
+        ],
         companies: { visible: true, active: [], history: [] },
         affiliations: { visible: true, active: [], history: [] },
         history: [],
@@ -189,7 +196,10 @@ describe('the ARL risk level', () => {
 
         expect(options).toContain('Riesgo I');
         expect(options).toContain('Riesgo III');
-        expect(options).toContain('Riesgo V (No clasificado)');
+        // Class V is the highest risk class, and the label comes from the server's
+        // enum rather than from a list kept beside it.
+        expect(options).toContain('Riesgo V');
+        expect(options).not.toContain('No clasificado');
         // Five levels, plus the "not registered" choice.
         expect(options).toHaveLength(6);
     });

@@ -3,6 +3,9 @@
 declare(strict_types=1);
 
 use App\Domain\Affiliations\ManageClientCompanies;
+use App\Domain\DataQuality\DataQualityCode;
+use App\Domain\DataQuality\DataQualityInspector;
+use App\Domain\DataQuality\DataQualitySeverity;
 use App\Models\AuditEvent;
 use App\Models\Client;
 use App\Models\ClientCompanyAssignment;
@@ -721,4 +724,285 @@ it('takes the client row lock before reading the relationships', function (): vo
     expect($lockOrder)->toHaveCount(1)
         ->and($lockOrder[0])->toContain('from "clients"')
         ->and(strtolower($lockOrder[0]))->toContain('for update');
+});
+
+// --- One lock order, and decisions taken under it ---------------------------
+
+it('takes the client lock before the relationship lock, in every operation', function (): void {
+    $order = [];
+
+    DB::listen(function ($query) use (&$order): void {
+        if (! str_contains(strtolower($query->sql), 'for update')) {
+            return;
+        }
+
+        $order[] = str_contains($query->sql, '"clients"') ? 'client' : 'relationship';
+    });
+
+    $client = Client::factory()->create();
+    $first = Company::factory()->create();
+    $second = Company::factory()->create();
+    $actor = actingAsRole();
+    $relationships = app(ManageClientCompanies::class);
+
+    // The order is documented in `LocksRow`; this is what holds the three operations
+    // to it, because an order taken two ways can deadlock.
+    $order = [];
+    $created = $relationships->link(
+        client: $client,
+        company: $first,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+    expect($order)->toBe(['client']);
+
+    $order = [];
+    $relationships->close($created, $actor, new DateTimeImmutable('2025-01-01'));
+    expect($order)->toBe(['client', 'relationship']);
+
+    $order = [];
+    $second_linked = $relationships->link(
+        client: $client,
+        company: $first,
+        actor: $actor,
+        startedOn: new DateTimeImmutable('2025-02-01'),
+    );
+
+    $order = [];
+    $relationships->transfer($second_linked, $second, $actor, new DateTimeImmutable('2025-06-01'));
+    expect($order[0])->toBe('client');
+});
+
+it('decides against the client read under the lock, not the instance it was given', function (): void {
+    $client = Client::factory()->create();
+    $company = Company::factory()->create();
+
+    // A copy of the client taken while it was active, and then deactivated by
+    // somebody else. This is exactly the shape of a request that was queued behind
+    // another one.
+    $stale = $client->fresh();
+    expect($stale->isActive())->toBeTrue();
+
+    $client->forceFill(['status' => 'inactive'])->save();
+
+    // The instance still says active, and the operation must refuse anyway.
+    expect($stale->isActive())->toBeTrue();
+
+    app(ManageClientCompanies::class)->link(
+        client: $stale,
+        company: $company,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+})->throws(DomainException::class, 'No se puede vincular un cliente inactivo');
+
+it('reads the open relationships inside the transaction, after the lock', function (): void {
+    $client = Client::factory()->create();
+    $first = Company::factory()->create();
+
+    app(ManageClientCompanies::class)->link(
+        client: $client,
+        company: $first,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2024-01-01'),
+    );
+
+    // With one relationship open, the second attempt is decided against what the
+    // locked read finds, and is refused rather than becoming a silent parallel row.
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", linkPayload([
+            'company_id' => Company::factory()->create()->id,
+            'started_on' => '2024-06-01',
+        ]))
+        ->assertStatus(409)
+        ->assertJsonPath('code', 'parallel_relationship_not_allowed');
+
+    expect(ClientCompanyAssignment::query()->where('client_id', $client->id)->count())->toBe(1);
+});
+
+it('refuses to deactivate a client that a concurrent link had opened', function (): void {
+    // The domain rule the lock exists to protect: the decision is taken against the
+    // relationships read inside the transaction, so a relationship opened since the
+    // request was built is still in the way.
+    $client = Client::factory()->create();
+
+    ClientCompanyAssignment::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => Company::factory()->create()->id,
+        'ended_on' => null,
+    ]);
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/status", ['status' => 'inactive', 'when' => 'block'])
+        ->assertStatus(409)
+        ->assertJsonPath('code', 'client_has_open_relationships');
+
+    expect($client->fresh()->isActive())->toBeTrue();
+});
+
+// --- Convenient transfer is a transfer in the audit trail --------------------
+
+it('records the convenient transfer as a transfer, not as a creation', function (): void {
+    $client = Client::factory()->create();
+    $from = Company::factory()->create();
+    $to = Company::factory()->create();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $from->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $to->id,
+        'started_on' => '2025-06-01',
+        'resolution' => 'transfer',
+    ]))->assertCreated();
+
+    // One event for one business action. Previously this path published
+    // `relationship.created` for the destination, so the trail said a relationship
+    // appeared and never said the person had moved.
+    expect(AuditEvent::query()->where('action', 'relationship.transferred')->count())->toBe(1)
+        ->and(AuditEvent::query()->where('action', 'relationship.created')->count())->toBe(1);
+
+    // And the one creation that does exist is the very first relationship.
+    $created = AuditEvent::query()->where('action', 'relationship.created')->firstOrFail();
+
+    expect(json_encode($created->metadata))->toContain((string) $from->id);
+});
+
+it('records the dedicated transfer the same way', function (): void {
+    $client = Client::factory()->create();
+    $from = Company::factory()->create();
+    $to = Company::factory()->create();
+
+    $assignment = $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", linkPayload([
+            'company_id' => $from->id,
+            'started_on' => '2024-01-01',
+        ]))
+        ->assertCreated()
+        ->json('assignment');
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/client-company-assignments/{$assignment['id']}/transfer", [
+            'to_company_id' => $to->id,
+            'effective_on' => '2025-06-01',
+        ])
+        ->assertOk();
+
+    // Both paths publish exactly the same thing, which is the point of the fix.
+    expect(AuditEvent::query()->where('action', 'relationship.transferred')->count())->toBe(1)
+        ->and(AuditEvent::query()->where('action', 'relationship.closed')->count())->toBe(0);
+});
+
+// --- Parallel means parallel to something -------------------------------------
+
+it('refuses a parallel resolution when nothing is open', function (): void {
+    $client = Client::factory()->create();
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", linkPayload([
+            'company_id' => Company::factory()->create()->id,
+            'started_on' => '2024-01-01',
+            'resolution' => 'parallel',
+            'parallel_reason' => 'Trabaja en dos empresas',
+        ]))
+        ->assertStatus(422);
+
+    // Nothing was written, and in particular nothing carries a parallel
+    // authorisation with nothing to be parallel to.
+    expect(ClientCompanyAssignment::query()->where('client_id', $client->id)->count())->toBe(0);
+});
+
+// --- Transferring a parallel relationship keeps the overlap authorised ---------
+
+it('keeps a transferred parallel relationship authorised', function (): void {
+    $client = Client::factory()->create();
+    $base = Company::factory()->create();
+    $parallel = Company::factory()->create();
+    $destination = Company::factory()->create();
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $base->id,
+        'started_on' => '2024-01-01',
+    ]))->assertCreated();
+
+    $authorised = $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", linkPayload([
+            'company_id' => $parallel->id,
+            'started_on' => '2024-02-01',
+            'resolution' => 'parallel',
+            'parallel_reason' => 'Presta servicios a las dos empresas',
+        ]))
+        ->assertCreated()
+        ->json('assignment');
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/client-company-assignments/{$authorised['id']}/transfer", [
+            'to_company_id' => $destination->id,
+            'effective_on' => '2025-06-01',
+        ])
+        ->assertOk();
+
+    $open = ClientCompanyAssignment::query()
+        ->where('client_id', $client->id)
+        ->whereNull('ended_on')
+        ->get();
+
+    // One unmarked base and one authorised parallel row: the invariant holds. Had
+    // the replacement been created unmarked, there would be two unmarked rows and
+    // the documented overlap would have become an undocumented one.
+    expect($open)->toHaveCount(2)
+        ->and($open->whereNull('parallel_authorized_at'))->toHaveCount(1)
+        ->and($open->whereNotNull('parallel_authorized_at'))->toHaveCount(1);
+
+    $newRow = $open->firstWhere('company_id', $destination->id);
+
+    expect($newRow->parallel_reason)->toBe('Presta servicios a las dos empresas');
+
+    // And the quality check agrees: an authorised overlap is not a warning.
+    $overlap = collect(app(DataQualityInspector::class)->forClient($client->refresh()))
+        ->firstWhere('code', DataQualityCode::MultipleActiveCompanies);
+
+    expect($overlap->severity)->toBe(DataQualitySeverity::Notice);
+});
+
+it('makes the destination the base when the transferred relationship was the base', function (): void {
+    $client = Client::factory()->create();
+    $base = Company::factory()->create();
+    $parallel = Company::factory()->create();
+    $destination = Company::factory()->create();
+
+    $baseRow = $this->actingAs(actingAsRole())
+        ->postJson("/api/clients/{$client->id}/companies", linkPayload([
+            'company_id' => $base->id,
+            'started_on' => '2024-01-01',
+        ]))
+        ->assertCreated()
+        ->json('assignment');
+
+    $this->actingAs(actingAsRole())->postJson("/api/clients/{$client->id}/companies", linkPayload([
+        'company_id' => $parallel->id,
+        'started_on' => '2024-02-01',
+        'resolution' => 'parallel',
+        'parallel_reason' => 'Presta servicios a las dos empresas',
+    ]))->assertCreated();
+
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/client-company-assignments/{$baseRow['id']}/transfer", [
+            'to_company_id' => $destination->id,
+            'effective_on' => '2025-06-01',
+        ])
+        ->assertOk();
+
+    $open = ClientCompanyAssignment::query()
+        ->where('client_id', $client->id)
+        ->whereNull('ended_on')
+        ->get();
+
+    // The authorised parallel row stays exactly as it was, and the destination takes
+    // over as the base: one unmarked, one authorised.
+    expect($open)->toHaveCount(2)
+        ->and($open->whereNull('parallel_authorized_at')->pluck('company_id')->all())->toBe([$destination->id])
+        ->and($open->whereNotNull('parallel_authorized_at')->pluck('company_id')->all())->toBe([$parallel->id]);
 });

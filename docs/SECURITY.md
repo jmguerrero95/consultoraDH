@@ -456,6 +456,12 @@ calcula**: un valor histórico dudoso se conserva tal como llegó y se reporta c
 duda. Un cálculo sin vectores de prueba de una fuente oficial no es ayuda, es una
 confianza falsa.
 
+Las cinco clases de riesgo de ARL son ordinales y la quinta es la **máxima**, no una
+ausencia de clasificación: I mínimo, II bajo, III medio, IV alto, V máximo. Lo que
+no se conoce es `NULL`. Confundir las dos cosas hacía que un trabajador en riesgo
+máximo apareciera como si nadie supiera en qué clase está, y por eso las etiquetas
+las envía el enum del dominio en lugar de una lista que la interfaz mantenía aparte.
+
 ### 9.1 El comando `create-admin` no acepta contraseñas
 
 `consultora-dh:create-admin` **no tiene la opción `--password`**. No está

@@ -60,7 +60,12 @@ onMounted(async () => {
 
         form.legal_name = payload.company.legal_name;
         form.trade_name = payload.company.trade_name ?? '';
-        form.tax_id = payload.company.tax_id ?? '';
+        // The combined label, not the bare number. The stored number does not carry
+        // the verification digit any more, and loading it alone meant that saving
+        // the form sent "the number, with no digit", which cleared a digit that was
+        // perfectly good. The server now preserves it in that case too, so the two
+        // sides agree; this is here so the operator can see and edit the digit.
+        form.tax_id = payload.company.tax_id_label ?? payload.company.tax_id ?? '';
         form.email = payload.company.email ?? '';
         form.phone = payload.company.phone ?? '';
         form.address = payload.company.address ?? '';

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Domain\Affiliations\ArlRiskClass;
+use App\Domain\Affiliations\ManageAffiliations;
 use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Models\AuditEvent;
@@ -703,4 +704,75 @@ it('refuses a new open affiliation for an inactive client', function (): void {
         ->assertStatus(422);
 
     expect(ClientAffiliation::query()->where('client_id', $client->id)->count())->toBe(0);
+});
+
+// --- The client status is decided under the lock ------------------------------
+
+it('refuses a new affiliation for a client deactivated after the request was built', function (): void {
+    $client = Client::factory()->create();
+    $entity = entityOf(SocialSecurityEntityType::Eps);
+
+    // A copy taken while the client was active, then deactivated by somebody else.
+    $stale = $client->fresh();
+
+    $client->forceFill(['status' => 'inactive'])->save();
+
+    expect($stale->isActive())->toBeTrue();
+
+    app(ManageAffiliations::class)->create(
+        client: $stale,
+        entity: $entity,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2026-01-01'),
+    );
+})->throws(DomainException::class, 'cliente inactivo');
+
+it('refuses to change the entity of an affiliation of an inactive client', function (): void {
+    $client = Client::factory()->create();
+    $first = entityOf(SocialSecurityEntityType::Eps, 'EPS Antes De Desactivar');
+    $second = entityOf(SocialSecurityEntityType::Eps, 'EPS Despues De Desactivar');
+
+    $affiliation = ClientAffiliation::factory()->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => $first->id,
+        'type' => SocialSecurityEntityType::Eps,
+        'ended_on' => null,
+    ]);
+
+    $client->forceFill(['status' => 'inactive'])->save();
+
+    // Changing entity opens a new row, so it is creating an open affiliation and
+    // obeys the same rule.
+    $this->actingAs(actingAsRole())
+        ->postJson("/api/client-affiliations/{$affiliation->id}/change", [
+            'social_security_entity_id' => $second->id,
+            'type' => SocialSecurityEntityType::Eps,
+            'effective_date' => '2026-02-01',
+        ])
+        ->assertStatus(422);
+
+    // The original row is untouched: the refusal happens before anything is closed.
+    expect(ClientAffiliation::query()->find($affiliation->id)->ended_on)->toBeNull();
+});
+
+it('keeps historical rows readable whatever the client state', function (): void {
+    $client = Client::factory()->inactive()->create();
+    $entity = entityOf(SocialSecurityEntityType::Eps, 'EPS Historica');
+
+    $affiliation = ClientAffiliation::factory()->closed('2025-12-31')->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => $entity->id,
+        'type' => SocialSecurityEntityType::Eps,
+        'started_on' => '2024-01-01',
+    ]);
+
+    // A closed period is history, and history is readable whatever happened to the
+    // client afterwards. Only *new open* affiliations need an active client.
+    $this->actingAs(actingAsRole())
+        ->getJson("/api/clients/{$client->id}")
+        ->assertOk()
+        ->assertJsonFragment(['id' => $entity->id]);
+
+    expect(ClientAffiliation::query()->find($affiliation->id)->ended_on?->toDateString())
+        ->toBe('2025-12-31');
 });

@@ -72,6 +72,26 @@ final class DashboardController extends Controller
      *
      * @return array<string, mixed>
      */
+    /**
+     * The portfolio, composed from independently authorised groups.
+     *
+     * Every figure belongs to exactly one group, and a group that the role may not
+     * read is left out entirely rather than reported as zero. Zero is a claim about
+     * the portfolio, and the interface must not make that claim on the server's
+     * behalf.
+     *
+     * Two things this gets right that the earlier version did not:
+     *
+     *  - the whole payload no longer hangs on `clients.view`, so a role that may
+     *    read companies sees the company figures and nothing else, rather than an
+     *    empty screen;
+     *  - the two quality totals are computed from the codes that role may see.
+     *    They used to be the totals for every domain, so a role without
+     *    `affiliations.view` could infer hidden affiliation problems by watching
+     *    `data_quality_issues` go up.
+     *
+     * @return array<string, mixed>
+     */
     private function portfolioFor(mixed $user): array
     {
         $can = $user instanceof Authorizable && method_exists($user, 'can')
@@ -82,62 +102,81 @@ final class DashboardController extends Controller
             return ['visible' => false];
         }
 
-        if (! $can->can('clients.view')) {
-            return ['visible' => false];
-        }
-
         $counts = $this->metrics->counts();
+        $portfolio = ['visible' => true];
 
-        // Each figure is withheld from the roles that may not read the section it
-        // comes from. `active_affiliations` says how many people are affiliated and
-        // the quality figures about affiliations name the entities involved, so
-        // neither belongs on a screen for somebody without those permissions. A
-        // withheld figure is absent rather than zero, because zero is a claim about
-        // the portfolio.
-        $maySeeRelationships = $can->can('relationships.view');
-        $maySeeAffiliations = $can->can('affiliations.view');
-        $maySeeCatalogue = $can->can('social_security_entities.view');
-
-        $visible = [
-            'active_clients' => $counts['active_clients'],
-            'inactive_clients' => $counts['inactive_clients'],
-            'active_companies' => $counts['active_companies'],
-            'data_quality_issues' => $counts['data_quality_issues'],
-            'data_quality_warnings' => $counts['data_quality_warnings'],
-        ];
-
-        if ($maySeeRelationships) {
-            $visible['active_relationships'] = $counts['active_relationships'];
-            $visible['authorised_parallel_relationships'] = $counts['authorised_parallel_relationships'];
+        if ($can->can('clients.view')) {
+            $portfolio['counts'] = array_merge(
+                $portfolio['counts'] ?? [],
+                [
+                    'active_clients' => $counts['active_clients'],
+                    'inactive_clients' => $counts['inactive_clients'],
+                ],
+            );
         }
 
-        if ($maySeeAffiliations) {
-            $visible['active_affiliations'] = $counts['active_affiliations'];
+        if ($can->can('companies.view')) {
+            $portfolio['counts'] = array_merge($portfolio['counts'] ?? [], [
+                'active_companies' => $counts['active_companies'],
+            ]);
         }
 
-        if ($maySeeCatalogue) {
-            $visible['catalogue_entities'] = $counts['catalogue_entities'];
+        if ($can->can('relationships.view')) {
+            $portfolio['counts'] = array_merge($portfolio['counts'] ?? [], [
+                'active_relationships' => $counts['active_relationships'],
+                'authorised_parallel_relationships' => $counts['authorised_parallel_relationships'],
+            ]);
+
+            $portfolio['multiple_companies'] = $this->metrics->clientsWithSeveralOpenRelationships();
         }
 
-        // The per code figures behind the totals, filtered by the same rule, since
-        // some of them describe affiliations and some describe relationships.
-        $quality = array_filter(
+        if ($can->can('affiliations.view')) {
+            $portfolio['counts'] = array_merge($portfolio['counts'] ?? [], [
+                'active_affiliations' => $counts['active_affiliations'],
+            ]);
+        }
+
+        if ($can->can('social_security_entities.view')) {
+            $portfolio['counts'] = array_merge($portfolio['counts'] ?? [], [
+                'catalogue_entities' => $counts['catalogue_entities'],
+            ]);
+        }
+
+        // The per code figures this role may read, and the two totals computed from
+        // exactly those, so the totals and the list cannot describe different sets.
+        $visible = array_filter(
             $this->quality->summary(),
             fn (string $code): bool => $this->maySeeQualityCode($can, $code),
             ARRAY_FILTER_USE_KEY,
         );
 
-        $portfolio = [
-            'visible' => true,
-            'counts' => $visible,
-            'quality' => $quality,
-        ];
+        $portfolio['quality'] = $visible;
 
-        if ($maySeeRelationships) {
-            $portfolio['multiple_companies'] = $this->metrics->clientsWithSeveralOpenRelationships();
+        if ($visible !== []) {
+            $portfolio['counts'] = array_merge($portfolio['counts'] ?? [], [
+                'data_quality_issues' => $this->sumCodes($visible, DataQualityCode::blockingValues()),
+                'data_quality_warnings' => $this->sumCodes($visible, DataQualityCode::warningValues()),
+            ]);
         }
 
         return $portfolio;
+    }
+
+    /**
+     * The sum of the given codes inside a summary.
+     *
+     * @param  array<string, int>  $summary
+     * @param  list<string>  $codes
+     */
+    private function sumCodes(array $summary, array $codes): int
+    {
+        $total = 0;
+
+        foreach ($codes as $code) {
+            $total += $summary[$code] ?? 0;
+        }
+
+        return $total;
     }
 
     /**

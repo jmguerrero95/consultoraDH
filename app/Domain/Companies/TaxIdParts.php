@@ -31,7 +31,7 @@ final class TaxIdParts
 {
     /**
      * @param  array<string, mixed>  $attributes
-     * @return array{0: string|null, 1: string|null} the number and the digit
+     * @return array{tax_id: string|null, verification_digit: string|null}
      */
     public static function from(array $attributes): array
     {
@@ -43,13 +43,16 @@ final class TaxIdParts
 
         if ($raw === null || trim($raw) === '') {
             // A digit on its own identifies nothing, so it is not kept either.
-            return [null, null];
+            return ['tax_id' => null, 'verification_digit' => null];
         }
 
         $parts = TaxId::split($raw);
         $number = $parts['tax_id'] === '' ? null : $parts['tax_id'];
         $inside = $parts['verification_digit'];
 
-        return [$number, $inside ?? $separate];
+        return [
+            'tax_id' => $number,
+            'verification_digit' => $inside ?? $separate,
+        ];
     }
 }

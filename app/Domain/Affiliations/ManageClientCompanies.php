@@ -84,10 +84,6 @@ final class ManageClientCompanies
         string $resolution = self::RESOLUTION_ONLY_IF_NONE,
         ?string $parallelReason = null,
     ): ClientCompanyAssignment {
-        if (! $client->isActive()) {
-            throw new DomainException('No se puede vincular un cliente inactivo a una empresa.');
-        }
-
         if (! $company->isActive()) {
             throw new DomainException('No se puede vincular un cliente a una empresa inactiva.');
         }
@@ -96,13 +92,17 @@ final class ManageClientCompanies
             $client, $company, $actor, $startedOn, $jobTitle, $notes,
             $resolution, $parallelReason
         ): ClientCompanyAssignment {
-            // The client row is the lock, not the relationships. Two concurrent
-            // first relationships both used to find zero rows, lock zero rows, and
-            // both insert; there is nothing to contend on until the first row
-            // exists, and by then both transactions are inside. Locking the master
-            // row always contends, because it always exists.
-            $this->lockClient($client);
+            // The client row is the lock, and it is re-read: everything the instance
+            // in the caller's hands says may have become stale while this
+            // transaction waited. Two concurrent first relationships used to find
+            // zero open rows, lock zero rows, and both insert.
+            $client = $this->lockClient($client);
 
+            if (! $client->isActive()) {
+                throw new DomainException('No se puede vincular un cliente inactivo a una empresa.');
+            }
+
+            // Read after the lock, never before it.
             $open = $this->openAssignments($client);
 
             return match ($resolution) {
@@ -112,24 +112,23 @@ final class ManageClientCompanies
 
                 self::RESOLUTION_TRANSFER => $this->transferWithin($client, $open, $company, $actor, $startedOn, $jobTitle, $notes),
 
-                self::RESOLUTION_PARALLEL => $this->open(
-                    $client, $company, $actor, $startedOn, $jobTitle, $notes, true, $parallelReason
-                ),
+                // A parallel relationship is parallel to something. With nothing
+                // open there is no parallel, and a row marked as authorised next to
+                // nothing is a claim the record does not support. Refused, rather
+                // than quietly stored as an ordinary relationship, so the caller is
+                // told which of the two things they asked for did not happen.
+                self::RESOLUTION_PARALLEL => $open->isEmpty()
+                    ? throw new DomainException(
+                        'No hay ninguna relación abierta con la que ser paralelo. '
+                        .'Use la resolución ordinaria para registrar esta relación.'
+                    )
+                    : $this->open(
+                        $client, $company, $actor, $startedOn, $jobTitle, $notes, true, $parallelReason
+                    ),
 
                 default => throw new DomainException("Resolución desconocida: {$resolution}."),
             };
         });
-    }
-
-    /**
-     * Take the write lock on the client row.
-     *
-     * Inside the caller's transaction, which is what makes the lock mean anything:
-     * taken outside, it would be released before the work it was meant to serialise.
-     */
-    private function lockClient(Client $client): void
-    {
-        Client::query()->whereKey($client->id)->lockForUpdate()->first();
     }
 
     /**
@@ -145,16 +144,20 @@ final class ManageClientCompanies
         \DateTimeInterface $endedOn,
         string $reason = 'Cierre manual',
     ): ClientCompanyAssignment {
-        if (! $assignment->isActive()) {
-            throw new DomainException('La relación ya estaba cerrada.');
-        }
-
         if ($endedOn->format('Y-m-d') < $assignment->started_on->format('Y-m-d')) {
             throw new DomainException('La fecha de cierre no puede ser anterior al inicio de la relación.');
         }
 
         DB::transaction(function () use ($assignment, $actor, $endedOn, $reason): void {
+            // Client first, then the history row: the documented order, everywhere.
+            // Then the row itself, re-read, because the caller's copy may be stale.
+            $this->lockClient($assignment->client);
+
             $locked = $this->locked($assignment);
+
+            if (! $locked->isActive()) {
+                throw new DomainException('La relación ya estaba cerrada.');
+            }
 
             $locked->forceFill(['ended_on' => $endedOn->format('Y-m-d')])->save();
 
@@ -178,10 +181,6 @@ final class ManageClientCompanies
         ?string $jobTitle = null,
         ?string $notes = null,
     ): ClientCompanyAssignment {
-        if (! $current->isActive()) {
-            throw new DomainException('Sólo se puede transferir desde una relación abierta.');
-        }
-
         if (! $to->isActive()) {
             throw new DomainException('No se puede transferir a una empresa inactiva.');
         }
@@ -197,11 +196,42 @@ final class ManageClientCompanies
         }
 
         return DB::transaction(function () use ($current, $to, $actor, $effectiveOn, $jobTitle, $notes) {
-            $closed = $this->locked($current);
+            // Everything the decision needs is read under the locks taken below, not
+            // from the copy the caller was holding.
+            // Client first, then the relationship being moved, then everything the
+            // decision depends on is read again from under those locks. The two rows
+            // keep their own names: they are different rows with different keys, and
+            // conflating them reads an assignment that happens to share an id.
+            $client = $this->lockClient($current->client);
+
+            $closed = ClientCompanyAssignment::query()
+                ->whereKey($current->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
 
             if (! $closed->isActive()) {
                 throw new DomainException('La relación de origen ya no está abierta.');
             }
+
+            // What will remain open once this row is closed decides whether the new
+            // row needs an authorisation of its own.
+            //
+            //   the source was the ordinary base relationship  the destination is the
+            //   new base and stays unmarked;
+            //
+            //   the source was an authorised parallel one, and another relationship
+            //   is still open  the destination has to be authorised too. Creating it
+            //   unmarked would leave two unmarked rows side by side and turn a
+            //   documented overlap into an undocumented one, which is the state the
+            //   quality check warns about.
+            $stillOpen = ClientCompanyAssignment::query()
+                ->where('client_id', $closed->client_id)
+                ->whereNull('ended_on')
+                ->whereKeyNot($closed->getKey())
+                ->lockForUpdate()
+                ->get();
+
+            $needsAuthorisation = $closed->isAuthorisedParallel() && $stillOpen->isNotEmpty();
 
             $closed->forceFill(['ended_on' => $effectiveOn->format('Y-m-d')])->save();
 
@@ -211,11 +241,13 @@ final class ManageClientCompanies
                 $effectiveOn,
                 $jobTitle,
                 $notes,
-                parallel: false,
-                parallelReason: null,
-                // The transfer takes effect on the same day the previous one
-                // ended, so the client is never shown as belonging to nobody for
-                // a day and never to both for one.
+                parallel: $needsAuthorisation,
+                // The original reason described why this person worked alongside
+                // another company. It is carried forward rather than replaced.
+                parallelReason: $needsAuthorisation ? $closed->parallel_reason : null,
+                // The transfer takes effect on the same day the previous one ended,
+                // so the client is never shown as belonging to nobody for a day and
+                // never to both for one.
                 startedOnOverride: $effectiveOn->format('Y-m-d'),
             );
 
@@ -298,7 +330,30 @@ final class ManageClientCompanies
 
         $current->forceFill(['ended_on' => $startedOn->format('Y-m-d')])->save();
 
-        return $this->open($client, $company, $actor, $startedOn, $jobTitle, $notes, false);
+        // The same event the dedicated transfer endpoint emits. This used to call
+        // `open()`, which published `relationship.created` for a row that was the
+        // result of a transfer, so the same business action was recorded differently
+        // depending on which endpoint the interface happened to call: one that
+        // closed a relationship reported a creation, and nothing said the person had
+        // moved. One action, one event.
+        $opened = $this->createRow(
+            $client,
+            $company,
+            $startedOn,
+            $jobTitle,
+            $notes,
+            parallel: false,
+            parallelReason: null,
+        );
+
+        event(new RelationshipTransferred(
+            $current->refresh(),
+            $opened,
+            $actor,
+            $startedOn->format('Y-m-d'),
+        ));
+
+        return $opened;
     }
 
     /**

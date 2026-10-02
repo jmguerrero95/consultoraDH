@@ -34,6 +34,27 @@ use Illuminate\Database\Eloquent\Builder;
  * the boundary. A03 will report on periods; it has to inherit this convention
  * rather than invent one, so it lives in the domain and is named here.
  *
+ * ## A row with no start date
+ *
+ * `started_on` is nullable, because the historical source data has affiliations
+ * whose start nobody knows. A NULL start means exactly that: **the start date is
+ * unknown**, not "it started at the beginning of time".
+ *
+ * So `activeOn($date)` does not return such a row. The system cannot claim a record
+ * was effective on a particular day in the past when it does not know when it began,
+ * and answering "yes, it was effective all the way back" would put a period on a
+ * client for a span nobody can support.
+ *
+ * That makes two different questions, and they are both legitimate:
+ *
+ *   `active()`        is the record open right now?              `ended_on IS NULL`
+ *   `activeOn($date)` was the record effective on that day?      needs a start
+ *
+ * R1 had these two disagreeing: the SQL treated a NULL start as covering every past
+ * date while the PHP helper returned false, so the same question had two answers
+ * depending on which implementation answered it. They now agree, and a test asserts
+ * that they do.
+ *
  * @see ClientCompanyAssignment::activeOn()
  * @see ClientAffiliation::activeOn()
  */
@@ -42,8 +63,9 @@ final class EffectivePeriod
     /**
      * Whether a period with these bounds is effective on a date.
      *
-     * The same three comparisons as the scopes, so a caller in PHP and a query in
-     * SQL cannot disagree about the boundary.
+     * The same three comparisons as the scope, so a caller in PHP and a query in SQL
+     * cannot disagree about the boundary, and a row whose start is unknown is not
+     * claimed to have been effective on any day.
      */
     public static function covers(
         \DateTimeInterface|string|null $startedOn,
@@ -72,15 +94,23 @@ final class EffectivePeriod
     {
         $day = self::day($date);
 
-        // `started_on <= the day`, and `ended_on` either absent or after it. The
-        // comparison is on dates, not timestamps, because the domain stores dates
-        // and a timestamp would push a period that started that morning out of the
-        // day it started.
-        $query->where(function ($query) use ($day): void {
-            $query->whereNull('started_on')->orWhere('started_on', '<=', $day);
-        })->where(function ($query) use ($day): void {
-            $query->whereNull('ended_on')->orWhere('ended_on', '>', $day);
-        });
+        // Two conditions, and both are real:
+        //
+        //   `started_on <= the day`     the period had begun by then;
+        //   `ended_on` absent or after   it had not yet finished.
+        //
+        // `started_on IS NULL` is deliberately **not** included: an unknown start
+        // cannot support a claim about a past day. The previous version allowed it,
+        // which is why the scope and `covers()` disagreed.
+        //
+        // The comparisons are on dates, not timestamps, because the domain stores
+        // dates and a timestamp would push a period that started that morning out of
+        // the day it started.
+        $query->whereNotNull('started_on')
+            ->where('started_on', '<=', $day)
+            ->where(function ($query) use ($day): void {
+                $query->whereNull('ended_on')->orWhere('ended_on', '>', $day);
+            });
     }
 
     /**

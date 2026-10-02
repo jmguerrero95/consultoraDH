@@ -48,6 +48,18 @@ fechas de un periodo sin definición escrita. Ninguna de ellas cambia la
 arquitectura; todas cambian lo que el sistema afirma, y por eso tienen pruebas
 propias.
 
+**A02-R2** corrigió otros quince defectos de una segunda auditoría externa de
+`585b396`: la clase de riesgo V descrita como "no clasificado" cuando es el riesgo
+**máximo**; un formulario que borraba el dígito de verificación al editar el
+teléfono; un NIT mal escrito que llegaba a PostgreSQL y terminaba en un 500; dos
+endpoints anidados que se leían sin el permiso de su sección; los hallazgos de
+calidad de una empresa que revelaban cuántos clientes tiene; los totales del panel
+que sumaban problemas que el rol no podía ver; una fila sin fecha de inicio que no
+se podía cerrar nunca; decisiones tomadas con una copia del cliente leída antes de
+esperar el bloqueo; un traspaso registrado como creación según el endpoint usado;
+un `parallel` sin nada con lo que ser paralelo; y un traspaso de una relación en
+paralelo que dejaba el solapamiento sin autorizar.
+
 ### A03 — Periodos, cortes, obligaciones, pagos y cartera
 
 Alcance: periodos mensuales, fechas de corte, obligaciones generadas, registro

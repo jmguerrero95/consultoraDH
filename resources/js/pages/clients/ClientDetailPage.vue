@@ -404,13 +404,19 @@ const AFFILIATION_TYPES: { value: SocialSecurityType; label: string }[] = [
     { value: 'CCF', label: 'Caja de Compensación Familiar' },
 ];
 
-const RISK_LEVELS = [
-    { value: '1', label: 'Riesgo I' },
-    { value: '2', label: 'Riesgo II' },
-    { value: '3', label: 'Riesgo III' },
-    { value: '4', label: 'Riesgo IV' },
-    { value: '5', label: 'Riesgo V (No clasificado)' },
-];
+/**
+ * The risk levels the server sent, in the shape the form field wants.
+ *
+ * Deliberately not written down here. The enum `ArlRiskClass` is the single
+ * definition of what the five classes mean, and this list used to disagree with it
+ * about class V.
+ */
+const riskLevels = computed(() =>
+    (payload.value?.risk_options ?? []).map((option) => ({
+        value: String(option.value),
+        label: option.label,
+    })),
+);
 
 const entityOptions = ref<SocialSecurityEntity[]>([]);
 const affiliationOpen = ref(false);
@@ -1232,7 +1238,7 @@ Editar
                 v-model="affiliationForm.arl_risk_class"
                 label="Nivel de riesgo"
                 name="affiliation_risk"
-                :options="RISK_LEVELS"
+                :options="riskLevels"
                 empty-label="Sin registrar"
                 hint="Solo las afiliaciones de ARL tienen nivel de riesgo."
             />

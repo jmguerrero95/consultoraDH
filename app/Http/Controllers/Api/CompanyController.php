@@ -8,6 +8,7 @@ use App\Domain\Companies\Actions\CompanyHasActiveClients;
 use App\Domain\Companies\Actions\CreateCompany;
 use App\Domain\Companies\Actions\SetCompanyStatus;
 use App\Domain\Companies\Actions\UpdateCompany;
+use App\Domain\Companies\ConflictingVerificationDigit;
 use App\Domain\Companies\TaxId;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\Shared\RecordStatus;
@@ -152,8 +153,10 @@ final class CompanyController extends Controller
                 )->resolve(),
                 'history_count' => $history->count(),
             ] : ['visible' => false],
+            // Filtered the same way as the sections above, so a quality finding is
+            // not a way around the permission that governs its subject.
             'data_quality' => DataQualityResource::collection(
-                collect($this->quality->forCompany($company))
+                $this->quality->forCompanyVisibleTo($request->user(), $company)
             )->resolve(),
         ]);
     }
@@ -161,7 +164,17 @@ final class CompanyController extends Controller
     public function update(UpdateCompanyRequest $request, Company $company): JsonResponse
     {
         try {
-            $updated = $this->updateCompany->execute($company, $request->validated(), $request->user());
+            $updated = $this->updateCompany->execute($company, $request->companyAttributes(), $request->user());
+        } catch (ConflictingVerificationDigit $e) {
+            // Two answers to the same question in one request. Choosing one silently
+            // would decide somebody else's tax identity for them.
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => 'conflicting_verification_digit',
+                'errors' => [
+                    'verification_digit' => [$e->getMessage()],
+                ],
+            ], 422);
         } catch (QueryException $e) {
             if (! UniqueViolation::isFor($e, SchemaConstraint::COMPANY_TAX_ID)) {
                 throw $e;

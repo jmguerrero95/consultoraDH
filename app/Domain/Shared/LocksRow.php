@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Shared;
 
+use App\Models\Client;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -11,7 +12,7 @@ use Illuminate\Database\Eloquent\Model;
  *
  * Every write in A02 that touches a row of history has to take it out of reach of
  * a concurrent request first. A transfer closes one row and opens another; if two
- * operators transferred the same relationship at the same time, both would read
+ * operators transferred the same relationship at the same moment, both would read
  * it as open and both would open a new one, leaving the client with two open
  * relationships and no transfer having actually moved them.
  *
@@ -41,6 +42,44 @@ trait LocksRow
             // Deleted between the read and the lock. Nothing to update, and
             // pretending otherwise would silently succeed.
             throw new \RuntimeException('El registro ya no existe.');
+        }
+
+        return $fresh;
+    }
+
+    /**
+     * Lock the client master row and return it, read under that lock.
+     *
+     * ## The order
+     *
+     * Always the client, then the history rows, in that order, everywhere. Two
+     * transactions that take the two locks in opposite orders can deadlock, and a
+     * deadlock is a real failure even though PostgreSQL resolves it.
+     *
+     * ## Why the client and not the relationships
+     *
+     * Locking the open assignments serialises only the operations that found rows.
+     * A client's *first* relationship finds none, so it locks nothing and two
+     * concurrent first relationships both insert. The master row always exists, so
+     * there is always something to contend on.
+     *
+     * ## Why the caller must not trust its own copy
+     *
+     * Everything the model instance says may have been read before this
+     * transaction started waiting for the lock. A client deactivated by somebody
+     * else a moment ago is still `active` on the instance that is about to insert a
+     * relationship for them. So the row is read again here, under the lock, and the
+     * decision is made from that copy.
+     *
+     * Must be called inside a transaction.
+     */
+    private function lockClient(Client $client): Client
+    {
+        /** @var Client|null $fresh */
+        $fresh = Client::query()->lockForUpdate()->find($client->id);
+
+        if ($fresh === null) {
+            throw new \RuntimeException('El cliente ya no existe.');
         }
 
         return $fresh;

@@ -88,15 +88,25 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::get('/clients', [ClientController::class, 'index'])->name('api.clients.index');
         Route::get('/clients/{client}', [ClientController::class, 'show'])->name('api.clients.show');
 
-        Route::get('/clients/{client}/companies', [ClientController::class, 'companies'])
-            ->name('api.clients.companies');
     });
 
-    // Affiliations are their own permission. A role that may read the client
-    // record is not automatically entitled to the person's health and pension
-    // affiliations, which is why this is a separate gate rather than being
-    // folded into `clients.view`.
-    Route::middleware('can:affiliations.view')
+    // The nested read endpoints need the parent's permission **and** the section's.
+    //
+    // They were inside the `clients.view` group, which made `relationships.view` a
+    // decoration on the client's own screen: anything that could open the client
+    // could also open this URL and read the employment history the screen had just
+    // refused to show. A nested resource is not automatically readable by whoever
+    // can read its parent.
+    //
+    // Two `can:` middlewares rather than one with a comma: Laravel treats
+    // `can:a,b` as "either", which is the opposite of what this gate is for.
+    Route::middleware(['can:clients.view', 'can:relationships.view'])
+        ->get('/clients/{client}/companies', [ClientController::class, 'companies'])
+        ->name('api.clients.companies');
+
+    // Same for the affiliations, which are their own permission because they say
+    // which health and pension entities somebody belongs to.
+    Route::middleware(['can:clients.view', 'can:affiliations.view'])
         ->get('/clients/{client}/affiliations', [ClientController::class, 'affiliations'])
         ->name('api.clients.affiliations');
 

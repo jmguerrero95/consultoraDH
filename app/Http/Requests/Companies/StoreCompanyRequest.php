@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Requests\Companies;
 
 use App\Domain\Companies\TaxId;
+use App\Domain\Companies\TaxIdSyntax;
 use App\Models\Company;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Foundation\Http\FormRequest;
@@ -28,9 +29,13 @@ final class StoreCompanyRequest extends FormRequest
             'legal_name' => ['required', 'string', 'min:2', 'max:180'],
             'trade_name' => ['nullable', 'string', 'max:180'],
             // Accepts `900.123.456-3` as well as a bare number, and the digit can
-            // also arrive in its own field. What is stored is decided by the
-            // domain action, not here.
-            'tax_id' => ['nullable', 'string', 'max:32'],
+            // also arrive in its own field. What is stored is decided by the domain
+            // action, not here.
+            //
+            // The syntax rule rather than a bare length: the column holds digits
+            // only and the database enforces that, so a length check let `ABC123`
+            // through to be answered with a server error.
+            'tax_id' => ['nullable', 'string', 'max:32', new TaxIdSyntax],
             'verification_digit' => ['nullable', 'string', 'regex:/^[0-9]$/'],
             'email' => ['nullable', 'string', 'email:rfc', 'max:255'],
             'phone' => ['nullable', 'string', 'max:40'],

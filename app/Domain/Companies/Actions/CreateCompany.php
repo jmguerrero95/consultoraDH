@@ -29,7 +29,9 @@ final class CreateCompany
      */
     public function execute(array $attributes, User $actor): Company
     {
-        [$taxId, $digit] = TaxIdParts::from($attributes);
+        $parts = TaxIdParts::from($attributes);
+        $taxId = $parts['tax_id'];
+        $digit = $parts['verification_digit'];
 
         return DB::transaction(function () use ($attributes, $actor, $taxId, $digit): Company {
             $company = Company::query()->create([

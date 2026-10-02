@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Companies\Actions;
 
 use App\Domain\Companies\Events\CompanyUpdated;
-use App\Domain\Companies\TaxIdParts;
+use App\Domain\Companies\TaxIdUpdate;
 use App\Models\Company;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -43,17 +43,21 @@ final class UpdateCompany
                 $changed[] = $field;
             }
 
-            if (array_key_exists('tax_id', $attributes)) {
-                [$taxId, $digit] = TaxIdParts::from($attributes);
+            // Both fields are resolved together, because sending one of them says
+            // something about the other. An edit of an unrelated field that happens
+            // to carry the bare number must not clear the digit: see `TaxIdUpdate`.
+            if (array_key_exists('tax_id', $attributes) || array_key_exists('verification_digit', $attributes)) {
+                $parts = TaxIdUpdate::resolve($company, $attributes);
+                $taxId = $parts['tax_id'];
+                $digit = $parts['verification_digit'];
 
                 if ($taxId !== $company->tax_id) {
                     $company->tax_id = $taxId;
                     $changed[] = 'tax_id';
                 }
 
-                // A digit that changes on its own is a correction of an uncertain
-                // value, which is why the two columns are separate. It is recorded
-                // separately so the audit trail says which one moved.
+                // Recorded separately so the audit trail says which one moved: a
+                // digit changed on its own is a correction of an uncertain value.
                 if ($digit !== $company->verification_digit) {
                     $company->verification_digit = $digit;
                     $changed[] = 'verification_digit';

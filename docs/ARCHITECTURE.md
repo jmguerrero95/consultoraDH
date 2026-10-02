@@ -256,6 +256,15 @@ en PHP es una carrera y un índice único no lo es.
 El orden importa: primero el bloqueo, después la lectura de las relaciones. Al revés,
 la lectura que decide se hace fuera del bloqueo y no sirve de nada.
 
+Y vale igual para todo lo que depende del estado del cliente: vincular, cerrar,
+trasladar, cambiar de estado y también registrar o cambiar una afiliación, porque
+esa última abre un periodo nuevo. Todas toman el cliente y **vuelven a leerlo**; la
+copia que tenía el llamador puede haberse quedado vieja mientras esperaba, y decidir
+con ella es decidir con información caducada.
+
+El orden completo es siempre **cliente, después historial**. Dos transacciones que
+tomaran los bloqueos en orden contrario pueden interbloquearse.
+
 ### 6.3 Cuándo el dominio no elige
 
 Dos casos en que el servidor se niega a decidir y devuelve un conflicto con lo que

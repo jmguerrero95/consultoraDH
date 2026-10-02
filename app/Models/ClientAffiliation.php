@@ -22,7 +22,8 @@ use Illuminate\Support\Carbon;
  *
  * Same historical rule as the company relationship: rows are closed and new ones
  * opened, never rewritten. When a client changes EPS, the old row keeps its end
- * date and the new row starts the next day.
+ * date, and the new row starts on that same day: `[started_on, ended_on)`, so the
+ * effective day belongs to the new row and to the new row only.
  *
  * `type` repeats the entity's type so the database can reject a mismatch: a
  * CHECK constraint cannot look at another table.

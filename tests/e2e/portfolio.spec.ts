@@ -156,6 +156,16 @@ test.describe('A02: clients, companies and affiliation history', () => {
         await page.getByRole('tab', { name: 'Empresas' }).click();
         await page.getByRole('button', { name: 'Vincular empresa' }).click();
 
+        // Searched rather than picked from the list: the picker answers with a
+        // bounded page, and with more companies than that the one just created is
+        // not in it. The company is always reachable; the list is not exhaustive.
+        await page
+            .getByRole('dialog')
+            .getByRole('searchbox', { name: /Buscar empresa/ })
+            .fill(companyName);
+        await expect(
+            page.getByRole('dialog').getByRole('option', { name: companyName }),
+        ).toBeAttached();
         await page.getByRole('combobox', { name: /^Empresa/ }).selectOption({ label: companyName });
         await page.getByRole('textbox', { name: /Fecha de inicio/ }).fill('2025-01-15');
         await page.getByRole('textbox', { name: /Cargo/ }).fill('Analista');

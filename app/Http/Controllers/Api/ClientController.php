@@ -201,6 +201,11 @@ final class ClientController extends Controller
                 )->resolve(),
             ] : ['visible' => false],
             'history' => $this->timeline($client, $maySeeRelationships, $maySeeAffiliations),
+            // The risk levels come from the domain enum rather than from a list the
+            // interface keeps beside it. The two drifted once already: the frontend
+            // said class V meant "no clasificado" while the domain said something
+            // else, and the interface was the one people read.
+            'risk_options' => $this->quality->riskOptions(),
             // Only the findings whose section the caller may read: a quality
             // problem with an affiliation says which entity is involved.
             'data_quality' => DataQualityResource::collection(
@@ -345,15 +350,6 @@ final class ClientController extends Controller
                 'code' => 'parallel_relationship_not_allowed',
                 'open_assignments' => $e->openAssignmentIds,
                 'options' => $e->options(),
-            ], 409);
-        } catch (QueryException $e) {
-            if (! UniqueViolation::isFor($e, SchemaConstraint::AFFILIATION_OPEN_PER_TYPE)) {
-                throw $e;
-            }
-
-            return response()->json([
-                'message' => 'No fue posible registrar la relación.',
-                'code' => 'relationship_conflict',
             ], 409);
         } catch (\DomainException $e) {
             return response()->json([

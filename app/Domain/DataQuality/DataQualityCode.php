@@ -143,10 +143,13 @@ enum DataQualityCode: string
     public function section(): DataQualitySection
     {
         return match ($this) {
-            self::DuplicateClientDocument,
+            self::DuplicateClientDocument => DataQualitySection::ClientIdentity,
+
+            // A company's identity belongs to `companies.view`, not to the client's
+            // permission it used to borrow from `Identity`.
             self::CompanyWithoutTaxId,
             self::CompanyWithoutVerificationDigit,
-            self::DuplicateCompanyTaxId => DataQualitySection::Identity,
+            self::DuplicateCompanyTaxId => DataQualitySection::CompanyIdentity,
 
             self::MultipleActiveCompanies,
             self::InactiveClientWithActiveCompanies,

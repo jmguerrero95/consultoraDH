@@ -174,6 +174,49 @@ final class DataQualityInspector
     }
 
     /**
+     * The findings for one company, bucketed by the section they came from.
+     *
+     * @return array<string, list<DataQualityFinding>> section => findings
+     */
+    public function forCompanyBySection(Company $company): array
+    {
+        $buckets = [];
+
+        foreach ($this->forCompany($company) as $finding) {
+            $buckets[$finding->code->section()->value][] = $finding;
+        }
+
+        return $buckets;
+    }
+
+    /**
+     * The findings about a company that the caller is allowed to read.
+     *
+     * Same contract as `forClientVisibleTo()`, and for the same reason: a role
+     * without `relationships.view` must not learn how many clients a company has
+     * from a sentence about its inactivity.
+     *
+     * @param  object|null  $viewer  anything answering `can()`, as the request user does
+     * @return list<DataQualityFinding>
+     */
+    public function forCompanyVisibleTo(?object $viewer, Company $company): array
+    {
+        $visible = [];
+
+        foreach ($this->forCompanyBySection($company) as $section => $findings) {
+            if (! $viewer?->can(DataQualitySection::from($section)->permission())) {
+                continue;
+            }
+
+            foreach ($findings as $finding) {
+                $visible[] = $finding;
+            }
+        }
+
+        return $visible;
+    }
+
+    /**
      * Findings across the whole portfolio, for the dashboard.
      *
      * One aggregate query per code, and nothing that scales with the number of

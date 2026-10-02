@@ -83,14 +83,16 @@ function entityOf(SocialSecurityEntityType $type, ?string $name = null): SocialS
  */
 function userWithPermissions(array $permissions): User
 {
-    $role = Role::query()->create([
-        'name' => 'Prueba '.substr(md5(implode('|', $permissions)), 0, 8),
-        'guard_name' => 'web',
-    ]);
+    // Reused when the same set is asked for twice in one test: the tests compare a
+    // role with and without one permission, which means the same role appears more
+    // than once and its name has to be stable.
+    $name = 'Prueba '.substr(md5(implode('|', $permissions)), 0, 8);
 
-    foreach ($permissions as $permission) {
-        $role->givePermissionTo($permission);
-    }
+    $role = Role::query()->firstOrCreate(
+        ['name' => $name, 'guard_name' => 'web'],
+    );
+
+    $role->syncPermissions($permissions);
 
     $user = User::factory()->create([
         'email' => 'prueba.'.substr(md5(implode('|', $permissions).microtime(true)), 0, 12).'@consultora-dh.test',

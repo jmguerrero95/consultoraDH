@@ -144,7 +144,20 @@ número base del NIT, nombrándolas, en vez de dejar que el índice único revie
 un error sobre una clave. No se descarta ninguna fila y no se recalcula ningún
 dígito: un dígito de verificación dudoso se conserva y se reporta como duda.
 
-Ninguna de las tres tiene un `down()` que deshaga la corrección: volver a mezclar
+A02-R2 añade una más:
+
+| Migración | Qué corrige |
+| --- | --- |
+| `2026_10_01_230000_allow_unknown_start_to_be_closed` | Permite registrar un fin para una afiliación cuyo inicio se desconoce |
+
+Esa última es una relajación deliberada de una restricción de A02. La anterior sólo
+permitía un `started_on` nulo mientras `ended_on` también fuese nulo, así que una
+afiliación de la que no se conoce el inicio se podía crear pero no cerrar ni cambiar
+de entidad, que es justo para lo que existe la columna nullable. La regla nueva
+ordena las dos fechas sólo cuando ambas se conocen. Su `down()` existe, pero
+reventará si hay filas con inicio desconocido y fin conocido.
+
+Ninguna de las tres de R1 tiene un `down()` que deshaga la corrección: volver a mezclar
 el NIT con su dígito, o volver a poner una unicidad sobre el correo de contacto que
 la portfolio ya comparte, no es un estado al que valga la pena volver. Para
 retroceder hay que restaurar una copia anterior de la base.

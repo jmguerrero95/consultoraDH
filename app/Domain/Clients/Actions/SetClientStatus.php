@@ -40,18 +40,27 @@ final class SetClientStatus
         string $when = 'block',
         ?\DateTimeInterface $effectiveOn = null,
     ): Client {
-        if ($client->status === $to) {
-            return $client;
-        }
+        return DB::transaction(function () use ($client, $to, $actor, $when, $effectiveOn): Client {
+            // The client row is locked first and read again, and only then are the
+            // open relationships read. R1 read them before the transaction, so the
+            // decision could be taken against a state that had already changed: a
+            // relationship opened by somebody else in the meantime was invisible
+            // here, and 'block' deactivated a client with an open relationship.
+            //
+            // This is what serialises linking against deactivating, transferring
+            // against deactivating, and closing against linking.
+            $locked = Client::query()->lockForUpdate()->findOrFail($client->id);
 
-        $open = $this->relationships->openAssignments($client);
+            if ($locked->status === $to) {
+                return $locked;
+            }
 
-        if ($to === RecordStatus::Inactive && $when === 'block' && $open->isNotEmpty()) {
-            throw ClientHasOpenRelationships::forClient($client, $open->count());
-        }
+            $from = $locked->status->value;
+            $open = $this->relationships->openAssignments($locked);
 
-        return DB::transaction(function () use ($client, $to, $actor, $when, $open, $effectiveOn): Client {
-            $from = $client->status->value;
+            if ($to === RecordStatus::Inactive && $when === 'block' && $open->isNotEmpty()) {
+                throw ClientHasOpenRelationships::forClient($locked, $open->count());
+            }
 
             if ($to === RecordStatus::Inactive && $when === 'close') {
                 $endedOn = $effectiveOn ?? new \DateTimeImmutable('today');
@@ -66,11 +75,11 @@ final class SetClientStatus
                 }
             }
 
-            $client->forceFill(['status' => $to->value])->save();
+            $locked->forceFill(['status' => $to->value])->save();
 
-            event(new ClientStatusChanged($client->refresh(), $actor, $from, $to->value));
+            event(new ClientStatusChanged($locked->refresh(), $actor, $from, $to->value));
 
-            return $client->refresh();
+            return $locked->refresh();
         });
     }
 }

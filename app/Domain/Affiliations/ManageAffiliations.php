@@ -26,9 +26,10 @@ use Illuminate\Support\Facades\DB;
  *     table, so this one is enforced in the domain layer in both directions, and
  *     the redundant `type` column lets the database check the rest.
  *
- *  2. Only an ARL may carry a risk level, and the level is 1..5. Level V means
- *     "not classified"; NULL means genuinely unknown, which is allowed for any
- *     type.
+ *  2. Only an ARL may carry a risk level, and the level is 1..5, ordinal from
+ *     lowest to highest risk. Class V is the highest class, not an absence of
+ *     classification; NULL is the only representation of "not recorded", and it is
+ *     allowed for any type.
  *
  *  3. History is closed, never overwritten. Changing entity closes the old row
  *     and opens a new one in one transaction.
@@ -62,12 +63,6 @@ final class ManageAffiliations
     ): ClientAffiliation {
         $type = $entity->type;
 
-        // Refused before anything is read or written, so a refused request leaves
-        // no trace and no half-open row.
-        if (! $client->isActive()) {
-            throw new DomainException('No se puede registrar una afiliación para un cliente inactivo.');
-        }
-
         if (! $entity->isActive()) {
             throw new DomainException(sprintf(
                 'No se puede registrar una afiliación con la entidad %s porque está inactiva.',
@@ -86,6 +81,16 @@ final class ManageAffiliations
             $client, $entity, $actor, $startedOn, $riskClass, $underAssignment, $notes,
             $closeCurrent, $closeCurrentOn, $type
         ): ClientAffiliation {
+            // The client row is locked and re-read, in the documented order, and the
+            // status decision is taken from the copy read under the lock. Checking
+            // the instance the caller was holding meant a client deactivated a
+            // moment ago could still be given a new open affiliation.
+            $client = $this->lockClient($client);
+
+            if (! $client->isActive()) {
+                throw new DomainException('No se puede registrar una afiliación para un cliente inactivo.');
+            }
+
             $current = $this->currentAffiliation($client, $type);
 
             if ($current !== null && ! $closeCurrent) {
@@ -185,6 +190,16 @@ final class ManageAffiliations
         }
 
         return DB::transaction(function () use ($current, $to, $actor, $effectiveOn, $riskClass, $notes) {
+            // Changing entity closes one row and opens another, so it is creating a
+            // new open affiliation and it obeys the same rule as `create()`: the
+            // client is locked and re-read first, then the decision is taken from
+            // that copy.
+            $client = $this->lockClient($current->client);
+
+            if (! $client->isActive()) {
+                throw new DomainException('No se puede cambiar una afiliación de un cliente inactivo.');
+            }
+
             $closed = $this->locked($current);
 
             if (! $closed->isActive()) {
