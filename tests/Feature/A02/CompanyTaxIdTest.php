@@ -5,6 +5,8 @@ declare(strict_types=1);
 use App\Domain\Companies\Actions\CreateCompany;
 use App\Domain\Companies\Actions\UpdateCompany;
 use App\Domain\Companies\InvalidTaxId;
+use App\Domain\Companies\InvalidVerificationDigit;
+use App\Domain\Companies\TaxIdParts;
 use App\Models\AuditEvent;
 use App\Models\Company;
 
@@ -406,4 +408,106 @@ it('still allows removing the digit on update', function (): void {
         ->assertOk()
         ->assertJsonPath('company.tax_id', '800111222')
         ->assertJsonPath('company.verification_digit', null);
+});
+
+// --- The verification digit is checked by the domain, not only by the form ---
+
+it('refuses a verification digit that is not one decimal digit, on create', function (mixed $digit): void {
+    // Called through the application service, with no form request anywhere. This is
+    // the path the importer, the assistant and the maintenance commands will use, and
+    // the rule used to live only in a form request regex that none of them pass
+    // through.
+    expect(fn () => app(CreateCompany::class)->execute(
+        ['legal_name' => 'Cifra inválida S.A.S.', 'tax_id' => '901234567', 'verification_digit' => $digit],
+        actingAsRole(),
+    ))->toThrow(InvalidVerificationDigit::class);
+
+    expect(Company::query()->count())->toBe(0);
+})->with([
+    'two digits' => '12',
+    'a sign' => '-1',
+    'a letter' => 'X',
+    'a padded digit' => '03',
+    'an empty string' => '',
+    'whitespace padded' => ' 3 ',
+    'a decimal point' => '3.5',
+]);
+
+it('refuses a verification digit that is not one decimal digit, on update', function (mixed $digit): void {
+    $company = companyWithDigit('800111222', '2');
+
+    expect(fn () => app(UpdateCompany::class)->execute(
+        $company,
+        ['verification_digit' => $digit],
+        actingAsRole(),
+    ))->toThrow(InvalidVerificationDigit::class);
+
+    // The stored digit is untouched.
+    expect($company->fresh()->verification_digit)->toBe('2');
+})->with([
+    'two digits' => '12',
+    'a sign' => '-1',
+    'a letter' => 'X',
+    'a padded digit' => '03',
+]);
+
+it('refuses a verification digit that is not a string or a small integer', function (): void {
+    // Not a dataset. Pest spreads an array dataset value into positional arguments,
+    // so `['3']` as a dataset entry arrives as `'3'` and silently tests the wrong
+    // thing, which is how a list-shaped digit would have looked covered.
+    foreach ([true, false, ['3'], 3.5, 10, -1, new stdClass] as $digit) {
+        expect(fn () => TaxIdParts::requireSingleDigit($digit))
+            ->toThrow(InvalidVerificationDigit::class);
+    }
+});
+
+it('accepts every single digit, and the integer form of one', function (): void {
+    foreach (['0', '1', '5', '9', 7] as $accepted) {
+        expect(fn () => TaxIdParts::requireSingleDigit($accepted))->not->toThrow(InvalidVerificationDigit::class);
+    }
+
+    // And the whole range, as strings, because that is how a form sends them.
+    for ($digit = 0; $digit <= 9; $digit++) {
+        expect(fn () => TaxIdParts::requireSingleDigit((string) $digit))->not->toThrow(InvalidVerificationDigit::class);
+    }
+
+    // Absent is absent, not invalid.
+    expect(fn () => TaxIdParts::requireSingleDigit(null))->not->toThrow(InvalidVerificationDigit::class);
+});
+
+it('stores a valid digit supplied on its own', function (): void {
+    $company = app(CreateCompany::class)->execute(
+        ['legal_name' => 'Cifra válida S.A.S.', 'tax_id' => '901234567', 'verification_digit' => '8'],
+        actingAsRole(),
+    );
+
+    expect($company->verification_digit)->toBe('8');
+});
+
+it('answers an invalid digit over HTTP with 422, not a crash', function (): void {
+    // Over HTTP the form request's regex refuses this first, so the answer is a
+    // validation error and carries no `code`. That is the layering working: the
+    // cheapest check answers, and the domain rule behind it exists for the callers
+    // that never pass through the form.
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/companies', companyPayload([
+            'tax_id' => '902234567',
+            'verification_digit' => '12',
+        ]))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('verification_digit')
+        ->assertJsonPath('errors.verification_digit.0', 'El dígito de verificación debe ser un solo número.');
+
+    expect(Company::query()->where('tax_id', '902234567')->exists())->toBeFalse();
+});
+
+it('answers an invalid digit on update over HTTP with 422', function (): void {
+    $company = companyWithDigit('800111222', '2');
+
+    $this->actingAs(actingAsRole())
+        ->patchJson("/api/companies/{$company->id}", ['verification_digit' => 'XX'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('verification_digit');
+
+    expect($company->fresh()->verification_digit)->toBe('2');
 });

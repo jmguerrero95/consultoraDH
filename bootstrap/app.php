@@ -13,6 +13,7 @@ use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
 use Illuminate\Session\Middleware\AuthenticateSession;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 return Application::configure(basePath: dirname(__DIR__))
@@ -150,6 +151,20 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $exceptions->render(function (Throwable $e, Request $request) {
             if (! $request->is('api/*')) {
+                return null;
+            }
+
+            // A validation failure is not a server fault, and the framework already
+            // renders it as 422 with the failed rules. Returning null hands it back.
+            //
+            // This matters because of what follows: a ValidationException is not an
+            // HttpExceptionInterface, so it would be classified as a 500 and, with
+            // APP_DEBUG off, replaced by the generic error body. With APP_DEBUG on the
+            // `config('app.debug')` branch below returns null anyway, which is why the
+            // difference was invisible until the end to end stack, which runs with
+            // debug off, met it. A domain action that refuses bad input with a
+            // ValidationException answered 422 in development and 500 there.
+            if ($e instanceof ValidationException) {
                 return null;
             }
 

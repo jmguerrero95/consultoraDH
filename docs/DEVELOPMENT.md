@@ -297,15 +297,56 @@ docker compose exec node npm run test -- --coverage
 ./scripts/run-e2e.sh tests/e2e/login.spec.ts
 ```
 
-El script genera dos contraseñas aleatorias, crea dos cuentas temporales en la
-base de datos de desarrollo, instala el navegador si hace falta, ejecuta la suite
-y elimina las cuentas. **Ninguna credencial se escribe en disco.**
+El script genera dos contraseñas aleatorias, crea dos cuentas temporales,
+instala el navegador si hace falta y ejecuta la suite.
+**Ninguna credencial se escribe en disco.**
 
 Las dos cuentas son deliberadas: una con rol Super Admin, que es la que usa la
 mayoría de los flujos, y otra con rol Read Only, que es la única forma de
 comprobar que una escritura sin permiso se rechaza en el servidor y no sólo que
 el botón no aparece. También exporta `E2E_STAMP`, un sufijo por ejecución, para
-que los registros creados por un flujo no choquen con los de otro.
+que los registros creados por un flujo no choquen con los de otro dentro de la
+base de pruebas end to end.
+
+> **La suite no toca la base de datos de desarrollo.** Corre contra una
+> aplicación y una base propias, definidas en `compose.e2e.yaml`:
+>
+> | qué                | base de datos    | Redis       |
+> |--------------------|------------------|-------------|
+> | desarrollo         | `consultora_dh`  | db 0 / caché 1 |
+> | pruebas unitarias  | `consultora_dh_test` | (ninguno) |
+> | pruebas end to end | `consultora_dh_e2e`  | db 2 / caché 3 |
+>
+> Antes escribía en la base de desarrollo y luego borraba lo suyo. Para
+> reconocerlo usaba una coincidencia de subcadena (`LIKE '%1234567%'`) sobre
+> números de documento y razones sociales, y además borraba las filas que ya
+> coincidieran **antes** de empezar. Un registro legítimo que contuviera esos
+> dígitos podía ser borrado por una ejecución de pruebas, sin que ninguna prueba
+> hubiera fallado. A03 añade periodos, pagos y registros financieros: es
+> justamente el tipo de dato que no debe adivinarse.
+>
+> Ahora `run-e2e.sh` levanta `app-e2e` y `nginx-e2e` (que **no** publica ningún
+> puerto), reinicia `consultora_dh_e2e` con `scripts/reset-e2e-db.sh`, crea las
+> cuentas ahí y mide el estado de desarrollo antes y después para demostrar que
+> no cambió. No hay ningún paso de borrado de datos de negocio, porque no hay
+> nada que borrar.
+
+Para levantar o detener solo el entorno end to end:
+
+```bash
+docker compose -f compose.yaml -f compose.e2e.yaml up -d app-e2e nginx-e2e
+docker compose -f compose.yaml -f compose.e2e.yaml down
+```
+
+Si la base `consultora_dh_e2e` todavía no existe (por ejemplo, en una
+instalación anterior a este cambio), créela una sola vez con:
+
+```bash
+./scripts/ensure-e2e-db.sh
+```
+
+Ese script **sólo** crea esa base si falta. Nunca borra ni recrea la base de
+desarrollo, y nunca ejecuta migraciones.
 
 Si la primera ejecución falla por falta de navegador:
 

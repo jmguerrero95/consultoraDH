@@ -36,6 +36,10 @@ services:
       # Laravel reads DB_USERNAME / DB_PASSWORD from .env directly.
       DB_DATABASE: ${DB_DATABASE:-consultora_dh}
       DB_TEST_DATABASE: ${DB_TEST_DATABASE:-consultora_dh_test}
+      # The end to end database. Created alongside the other two, for the same
+      # reason: the Playwright suite writes real records and must not write them
+      # into development.
+      DB_E2E_DATABASE: ${DB_E2E_DATABASE:-consultora_dh_e2e}
       DB_USERNAME: ${DB_USERNAME:?DB_USERNAME must be set in .env}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
 

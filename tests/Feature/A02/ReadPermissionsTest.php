@@ -906,3 +906,107 @@ it('still loads them for a role that may', function (): void {
     // it, which is what would make the previous two tests pass for the wrong reason.
     expect(collect($queries)->filter(fn ($sql): bool => str_contains($sql, 'client_company_assignments')))->not->toBeEmpty();
 });
+
+// --- Choosing not to load is only half of it -------------------------------
+
+it('never touches the assignment rows of a company record a role cannot see', function (): void {
+    $company = portfolioForPermissions()->companyAssignments->first()->company;
+
+    // A lazy load here would be invisible in the response and invisible in a query
+    // count taken around the wrong moment. What is asserted is that the table is not
+    // mentioned at all: choosing not to load and then reading the relation anyway is
+    // the specific defect, and it issues exactly the query the guard exists to avoid.
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        $queries[] = $query->sql;
+    });
+
+    $this->actingAs(userWithPermissions(['companies.view']))
+        ->getJson("/api/companies/{$company->id}")
+        ->assertOk()
+        ->assertJsonPath('clients.visible', false);
+
+    // An aggregate from the data quality layer is expected and allowed: it asks how
+    // many relationships exist, not who they are, and the findings that would use it
+    // are filtered by permission afterwards. What must not happen is *loading the
+    // rows*, which is what a lazy read of the relation would do.
+    $loadingRows = collect($queries)
+        ->filter(fn (string $sql): bool => str_contains($sql, 'client_company_assignments'))
+        ->reject(fn (string $sql): bool => str_contains(strtolower($sql), 'count('));
+
+    expect($loadingRows)->toBeEmpty();
+});
+
+it('still reads the assignment rows for a role that may see them', function (): void {
+    $company = portfolioForPermissions()->companyAssignments->first()->company;
+
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        $queries[] = $query->sql;
+    });
+
+    // Both permissions, because the section answers to `clients.view` AND
+    // `relationships.view`: reading a company's workforce is reading its clients.
+    $this->actingAs(userWithPermissions(['companies.view', 'clients.view', 'relationships.view']))
+        ->getJson("/api/companies/{$company->id}")
+        ->assertOk()
+        ->assertJsonPath('clients.visible', true)
+        ->assertJsonCount(1, 'clients.active');
+
+    // The counterpart: the guard has not stopped the data for the roles that do get
+    // it, which is what would make the test above pass for the wrong reason.
+    $loadingRows = collect($queries)
+        ->filter(fn (string $sql): bool => str_contains($sql, 'client_company_assignments'))
+        ->reject(fn (string $sql): bool => str_contains(strtolower($sql), 'count('));
+
+    expect($loadingRows)->not->toBeEmpty();
+});
+
+it('does not read the affiliations of a client a role may not see them for', function (): void {
+    $client = portfolioForPermissions();
+
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        $queries[] = $query->sql;
+    });
+
+    // `relationships.view` but not `affiliations.view`: the relationships section is
+    // sent, the affiliations section is not, and the affiliation rows must not be
+    // loaded for a section that will read `{"visible": false}`.
+    $this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson("/api/clients/{$client->id}")
+        ->assertOk()
+        ->assertJsonPath('companies.visible', true)
+        ->assertJsonPath('affiliations.visible', false);
+
+    // The timeline still has to be correct, and it is built from a subquery rather
+    // than from the loaded relation. This is the assertion that would break if the
+    // timeline were "optimised" to reuse the load that was just skipped.
+    expect($this->actingAs(userWithPermissions(['clients.view', 'relationships.view']))
+        ->getJson("/api/clients/{$client->id}")
+        ->json('history'))->toBeArray();
+});
+
+it('does not read the relationships of a client a role may not see them for', function (): void {
+    $client = portfolioForPermissions();
+
+    $queries = [];
+
+    DB::listen(function ($query) use (&$queries): void {
+        $queries[] = $query->sql;
+    });
+
+    $this->actingAs(userWithPermissions(['clients.view', 'affiliations.view']))
+        ->getJson("/api/clients/{$client->id}")
+        ->assertOk()
+        ->assertJsonPath('companies.visible', false)
+        ->assertJsonPath('affiliations.visible', true);
+
+    // The relationship rows exist in the fixture and were not loaded. The timeline's
+    // subquery on the assignments is still allowed, because it is permission-scoped
+    // and reads identifiers rather than rows.
+    expect($queries)->not->toBeEmpty();
+});

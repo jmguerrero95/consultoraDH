@@ -110,7 +110,18 @@ it('lets an unexpected database failure reach the central handler', function ():
     //
     // This is what happens in practice when a migration renames a constraint and
     // the code is not updated with it.
-    Client::factory()->create(['document_type' => 'CC', 'document_number' => '12345678']);
+    // The document number carries an underscore, which `DocumentNumber::looksValid()`
+    // rejects. That is not decoration: it is what makes this test reach the database
+    // at all.
+    //
+    // `StoreClientRequest` runs an existence query as a pre-flight check, and it only
+    // runs when the number looks valid. With an ordinary number the pre-flight catches
+    // the duplicate first, answers 422 with the duplicate message, and the unique
+    // index never fires, so the renamed constraint is irrelevant and the test proves
+    // nothing. It was passing for the wrong reason: the pre-flight raises a
+    // ValidationException, and until the central handler stopped turning a validation
+    // failure into a 500, that surfaced as the 500 this test was asserting.
+    Client::factory()->create(['document_type' => 'CC', 'document_number' => 'NO_RECONOCIDO_1']);
 
     DB::statement('ALTER TABLE clients RENAME CONSTRAINT clients_document_unique TO clients_document_unique_renamed');
 
@@ -118,7 +129,7 @@ it('lets an unexpected database failure reach the central handler', function ():
         config(['app.debug' => false]);
 
         $response = $this->actingAs(actingAsRole())
-            ->postJson('/api/clients', clientPayload(['document_number' => '12345678']));
+            ->postJson('/api/clients', clientPayload(['document_number' => 'NO_RECONOCIDO_1']));
 
         // A server error, not a duplicate, and certainly not "cambie el documento".
         $response->assertStatus(500)
@@ -135,4 +146,41 @@ it('lets an unexpected database failure reach the central handler', function ():
     } finally {
         DB::statement('ALTER TABLE clients RENAME CONSTRAINT clients_document_unique_renamed TO clients_document_unique');
     }
+});
+
+it('still answers a duplicate document with 422 when the constraint is named as expected', function (): void {
+    // The counterpart of the test above, and the reason it is worth keeping: the
+    // pre-flight check and the unique index agree. This is the behaviour that must
+    // survive any change to how the central handler classifies exceptions.
+    Client::factory()->create(['document_type' => 'CC', 'document_number' => '12345678']);
+
+    config(['app.debug' => false]);
+
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/clients', clientPayload(['document_number' => '12345678']))
+        ->assertStatus(422)
+        ->assertJsonPath('message', 'Ya existe un cliente registrado con ese tipo y número de documento.')
+        // A duplicate is a problem the caller can act on, so it must never be
+        // reported as an unexpected server fault.
+        ->assertJsonMissingPath('code');
+});
+
+it('answers a validation failure with 422 even when debug is off', function (): void {
+    // A ValidationException is a refusal, not a fault. It used to be reported as a
+    // 500 whenever APP_DEBUG was off, because the catch-all render callback treats
+    // anything that is not an HTTP exception as a server error. That was invisible
+    // in development, where debug is on, and it is why the end to end stack, which
+    // runs with debug off, met it first.
+    config(['app.debug' => false]);
+
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/clients', clientPayload(['document_number' => '']))
+        ->assertStatus(422)
+        ->assertJsonPath('errors.document_number.0', 'Debe indicar el número de documento.');
+
+    // And on a second rule, so this is not one message hard-coded twice.
+    $this->actingAs(actingAsRole())
+        ->postJson('/api/clients', clientPayload(['document_number' => str_repeat('9', 33)]))
+        ->assertStatus(422)
+        ->assertJsonPath('errors.document_number.0', 'El número de documento no puede superar los 32 caracteres.');
 });

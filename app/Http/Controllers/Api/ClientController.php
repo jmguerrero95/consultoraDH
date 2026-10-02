@@ -182,25 +182,46 @@ final class ClientController extends Controller
         $maySeeRelationships = (bool) ($request->user()?->can('relationships.view'));
         $maySeeAffiliations = (bool) ($request->user()?->can('affiliations.view'));
 
-        $client->load([
-            'companyAssignments' => fn ($q) => $q->with('company')->orderByDesc('started_on'),
-            'affiliations' => fn ($q) => $q->with('entity')->orderByDesc('started_on'),
-        ]);
+        // Each side is loaded only when its section will be sent, and read only
+        // inside the same guard.
+        //
+        // The timeline does not need either load: it reads the identifiers through a
+        // subquery of its own, so it stays permission-scoped without pulling rows the
+        // response may not include. Leaving the two unrelated, then reading the
+        // relations anyway, would be a lazy load and would issue exactly the queries
+        // the guards exist to avoid.
+        if ($maySeeRelationships) {
+            $client->load([
+                'companyAssignments' => fn ($q) => $q->with('company')->orderByDesc('started_on'),
+            ]);
+        }
 
-        $active = $client->companyAssignments->whereNull('ended_on');
-        $history = $client->companyAssignments->whereNotNull('ended_on');
-        $affiliations = $client->affiliations;
+        if ($maySeeAffiliations) {
+            $client->load([
+                'affiliations' => fn ($q) => $q->with('entity')->orderByDesc('started_on'),
+            ]);
+        }
 
-        return response()->json([
-            'client' => new ClientResource($client),
-            'companies' => $maySeeRelationships ? [
+        $companies = ['visible' => false];
+        $affiliationsSection = ['visible' => false];
+
+        if ($maySeeRelationships) {
+            $active = $client->companyAssignments->whereNull('ended_on');
+            $history = $client->companyAssignments->whereNotNull('ended_on');
+
+            $companies = [
                 'visible' => true,
                 'active' => AssignmentResource::collection(
                     $active->sortByDesc(fn ($a) => $a->started_on?->format('Y-m-d'))->values()
                 )->resolve(),
                 'history' => AssignmentResource::collection($history->values())->resolve(),
-            ] : ['visible' => false],
-            'affiliations' => $maySeeAffiliations ? [
+            ];
+        }
+
+        if ($maySeeAffiliations) {
+            $affiliations = $client->affiliations;
+
+            $affiliationsSection = [
                 'visible' => true,
                 'active' => AffiliationResource::collection(
                     $affiliations->whereNull('ended_on')->values()
@@ -208,7 +229,13 @@ final class ClientController extends Controller
                 'history' => AffiliationResource::collection(
                     $affiliations->whereNotNull('ended_on')->values()
                 )->resolve(),
-            ] : ['visible' => false],
+            ];
+        }
+
+        return response()->json([
+            'client' => new ClientResource($client),
+            'companies' => $companies,
+            'affiliations' => $affiliationsSection,
             'history' => $this->timeline($client, $maySeeRelationships, $maySeeAffiliations),
             // The risk levels come from the domain enum rather than from a list the
             // interface keeps beside it. The two drifted once already: the frontend

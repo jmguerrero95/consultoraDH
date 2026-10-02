@@ -36,6 +36,12 @@ final class TaxIdUpdate
      */
     public static function resolve(Company $company, array $attributes): array
     {
+        // The same rule `TaxIdParts` applies on a create, enforced here because this
+        // path never reaches `TaxIdParts`. A caller correcting the digit of an existing
+        // company is sending the field that matters most for a tax identity, and it is
+        // not the field least worth checking.
+        TaxIdParts::requireSingleDigit($attributes['verification_digit'] ?? null);
+
         $sendsTaxId = array_key_exists('tax_id', $attributes);
         $sendsDigit = array_key_exists('verification_digit', $attributes);
 

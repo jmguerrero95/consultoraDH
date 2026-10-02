@@ -63,6 +63,12 @@ final class TaxIdParts
         $raw = $attributes['tax_id'] ?? null;
         $raw = is_string($raw) ? trim($raw) : '';
 
+        // Checked before anything is parsed, so a bad digit is refused whatever else
+        // the request carries. The domain owns this rule from here on: it used to live
+        // only in a form request regex, which no importer, assistant or maintenance
+        // command would ever pass through.
+        self::requireSingleDigit($attributes['verification_digit'] ?? null);
+
         $separate = $attributes['verification_digit'] ?? null;
         $separate = is_string($separate) && trim($separate) !== '' ? trim($separate) : null;
 
@@ -95,6 +101,43 @@ final class TaxIdParts
             'tax_id' => $number,
             'verification_digit' => $inside ?? $separate,
         ];
+    }
+
+    /**
+     * The separately supplied verification digit, checked on its own.
+     *
+     * The NIT base is parsed strictly by `from()`, and this closes the other half.
+     * A digit arriving in its own field was only ever checked by the form request's
+     * regex, which means it was checked for HTTP callers and for nobody else. The
+     * importer, the assistant and the maintenance commands write through these same
+     * services, and `verification_digit = '12'` or `'-1'` would have been stored as
+     * whatever the column accepted, or refused by PostgreSQL rather than by the
+     * domain.
+     *
+     * The rule is the narrow one the column implies: absent, or exactly one decimal
+     * digit. Nothing is normalised. ` 3 ` is refused rather than trimmed into `3`,
+     * because a value that needed repairing is a value the caller should be told
+     * about while they are still looking at the field.
+     *
+     * @throws InvalidTaxId when the value is present and is not a single digit
+     */
+    public static function requireSingleDigit(mixed $digit): void
+    {
+        if ($digit === null) {
+            return;
+        }
+
+        if (is_int($digit) && $digit >= 0 && $digit <= 9) {
+            return;
+        }
+
+        if (is_string($digit) && preg_match('/^[0-9]$/', $digit) === 1) {
+            return;
+        }
+
+        throw new InvalidVerificationDigit(
+            is_scalar($digit) ? (string) $digit : gettype($digit)
+        );
     }
 
     /**

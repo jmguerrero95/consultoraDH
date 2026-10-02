@@ -1,0 +1,135 @@
+# ---------------------------------------------------------------------------
+# Consultora DH - end to end test environment
+#
+# A second, disposable copy of the application used only by the Playwright suite.
+#
+#     docker compose -f compose.yaml -f compose.e2e.yaml up -d
+#     ./scripts/run-e2e.sh
+#
+# ## Why this exists
+#
+# The Playwright suite creates real records: clients, companies, social security
+# entities, relationships, affiliations and audit rows. While it ran against the
+# development database it had to delete them afterwards, and it identified them by
+# a numeric substring: `WHERE document_number LIKE '%1234567%'`. That is a guess.
+# A developer whose own record happened to contain those digits would have had it
+# deleted by a test run, and `run-e2e.sh` also removed pre-existing matching rows
+# *before* the suite started, so the damage needed no test to have failed.
+#
+# A03 adds payment periods, obligations and financial records, which is exactly
+# the kind of data that must never be guessed at. So the suite gets its own
+# database and its own application instance, and writes to nothing else.
+#
+# ## The separation
+#
+#   | what              | database          | redis            |
+#   |-------------------|-------------------|------------------|
+#   | development       | consultora_dh     | db 0 / cache 1   |
+#   | Pest suite        | consultora_dh_test| (none)           |
+#   | end to end suite  | consultora_dh_e2e | db 2 / cache 3   |
+#
+# The two application stacks share the source tree, the `vendor` volume and the
+# Docker network, because they are the same program at the same version. They
+# differ in environment variables alone: which database they connect to, which
+# Redis namespace they use, and which host they answer to.
+#
+# ## Nothing is published to the host
+#
+# `nginx-e2e` binds no port. It exists only on the `consultora-dh` network, and
+# the Playwright container reaches it at `http://nginx-e2e`. Publishing it would
+# put a second, publicly reachable copy of an application with seeded test
+# accounts on the machine's loopback interface, for no benefit: no human needs it.
+# ---------------------------------------------------------------------------
+
+name: consultora-dh
+
+services:
+  # The E2E application. Same image, same code, different world.
+  app-e2e:
+    image: consultora-dh/app:local
+    container_name: consultora-dh-app-e2e
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+      # Shared with the development container on purpose. Both run the same
+      # composer.lock, and a second copy would double a 300 MB volume to save a
+      # dependency install that happens once either way.
+      - vendor:/var/www/html/vendor
+    environment:
+      # --- The database. This is the whole point of the file.
+      APP_ENV: testing
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_DATABASE: ${DB_E2E_DATABASE:-consultora_dh_e2e}
+
+      # --- Identity. The host is the internal service name, because nothing is
+      # published and the browser Playwright drives is inside the network.
+      APP_URL: http://nginx-e2e
+      # Trusted for this test-only host. The development instance trusts
+      # localhost; this one trusts the name it is actually reached by, and
+      # nothing else. A wildcard here would make the trusted-host guard
+      # meaningless for the very instance it exists to isolate.
+      TRUSTED_HOSTS: nginx-e2e,nginx-e2e.local,localhost,127.0.0.1
+
+      # --- Redis. A different server database and a different key prefix.
+      #
+      # The two are not redundant. The database number keeps the keyspace apart;
+      # the prefix means that even a connection pointed at the same number, by a
+      # misconfigured variable or a forgotten default, cannot read or flush the
+      # development cache. `run-e2e.sh` used to run `cache:clear` against the
+      # development application to reset rate-limit counters between runs, which
+      # meant a test run could discard a developer's cache.
+      REDIS_HOST: redis
+      REDIS_DB: "2"
+      REDIS_CACHE_DB: "3"
+      REDIS_PREFIX: consultora-dh-e2e-
+      CACHE_PREFIX: consultora-dh-e2e-cache-
+      CACHE_STORE: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      # A distinct cookie name, so a session opened by the test suite cannot be
+      # presented to the development application or the reverse, even though both
+      # are reachable from the same browser during a test run.
+      SESSION_COOKIE: consultora_dh_e2e_session
+
+      # Debug is off so that a failure inside a test run reports an exception
+      # rather than rendering a debug page into a screenshot.
+      APP_DEBUG: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "/usr/local/bin/consultora-dh-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks:
+      - consultora-dh
+
+  # The web server for the test instance. No published port: reachable only from
+  # inside the network.
+  nginx-e2e:
+    image: nginx:1.31-alpine
+    container_name: consultora-dh-nginx-e2e
+    restart: unless-stopped
+    volumes:
+      - .:/var/www/html:ro
+      # Its own configuration. The only difference from the development one is
+      # which PHP container it talks to; sharing the file would mean editing the
+      # development configuration to change the test one.
+      - ./docker/nginx/e2e.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app-e2e:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - consultora-dh

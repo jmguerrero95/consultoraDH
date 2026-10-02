@@ -21,6 +21,9 @@ final class UpdateCompany
 {
     /**
      * @param  array<string, string|null>  $attributes
+     *
+     * @throws InvalidTaxId when the NIT is present and is not a NIT
+     * @throws InvalidVerificationDigit when a verification digit is not a single digit
      */
     public function execute(Company $company, array $attributes, User $actor): Company
     {
@@ -46,6 +49,11 @@ final class UpdateCompany
             // Both fields are resolved together, because sending one of them says
             // something about the other. An edit of an unrelated field that happens
             // to carry the bare number must not clear the digit: see `TaxIdUpdate`.
+            //
+            // The digit rule is enforced here as well as inside `TaxIdParts`, because
+            // the branch below resolves through `TaxIdUpdate` and never reaches
+            // `TaxIdParts`. One rule, both paths: an update that corrects the digit of
+            // a company is exactly the operation a future importer would perform.
             if (array_key_exists('tax_id', $attributes) || array_key_exists('verification_digit', $attributes)) {
                 $parts = TaxIdUpdate::resolve($company, $attributes);
                 $taxId = $parts['tax_id'];

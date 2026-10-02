@@ -26,6 +26,9 @@ final class CreateCompany
 {
     /**
      * @param  array<string, string|null>  $attributes
+     *
+     * @throws InvalidTaxId when the NIT is present and is not a NIT
+     * @throws InvalidVerificationDigit when a verification digit is not a single digit
      */
     public function execute(array $attributes, User $actor): Company
     {

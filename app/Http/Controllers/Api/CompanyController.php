@@ -10,6 +10,7 @@ use App\Domain\Companies\Actions\SetCompanyStatus;
 use App\Domain\Companies\Actions\UpdateCompany;
 use App\Domain\Companies\ConflictingVerificationDigit;
 use App\Domain\Companies\InvalidTaxId;
+use App\Domain\Companies\InvalidVerificationDigit;
 use App\Domain\Companies\TaxId;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\Shared\RecordStatus;
@@ -112,6 +113,8 @@ final class CompanyController extends Controller
     {
         try {
             $company = $this->createCompany->execute($request->validated(), $request->user());
+        } catch (InvalidVerificationDigit $e) {
+            return $this->invalidDigitResponse($e);
         } catch (InvalidTaxId $e) {
             return $this->invalidTaxIdResponse($e);
         } catch (ConflictingVerificationDigit $e) {
@@ -171,18 +174,30 @@ final class CompanyController extends Controller
             ]);
         }
 
-        $active = $company->assignments->whereNull('ended_on');
-        $history = $company->assignments->whereNotNull('ended_on');
+        // The split into active and history happens inside the guard. Reading
+        // `$company->assignments` when the load above was deliberately skipped would
+        // be a lazy load: Laravel would issue the very query the guard exists to
+        // avoid, one row at a time, and hand the result to code that then discards it.
+        // The finding was that choosing not to load and then reading anyway is worse
+        // than not choosing at all.
+        $clients = ['visible' => false];
 
-        return response()->json([
-            'company' => new CompanyResource($company),
-            'clients' => $maySeeClients ? [
+        if ($maySeeClients) {
+            $active = $company->assignments->whereNull('ended_on');
+            $history = $company->assignments->whereNotNull('ended_on');
+
+            $clients = [
                 'visible' => true,
                 'active' => AssignmentResource::collection(
                     $active->sortBy(fn ($a) => $a->client?->fullName() ?? '')->values()
                 )->resolve(),
                 'history_count' => $history->count(),
-            ] : ['visible' => false],
+            ];
+        }
+
+        return response()->json([
+            'company' => new CompanyResource($company),
+            'clients' => $clients,
             // Filtered the same way as the sections above, so a quality finding is
             // not a way around the permission that governs its subject.
             'data_quality' => DataQualityResource::collection(
@@ -288,6 +303,25 @@ final class CompanyController extends Controller
             'code' => 'invalid_tax_id',
             'errors' => [
                 'tax_id' => [$e->getMessage()],
+            ],
+        ], 422);
+    }
+
+    /**
+     * A verification digit that is not one.
+     *
+     * Answers 422 with the same shape as every other refusal on these two paths, for
+     * the same reason: the form request already rejects this value with a validation
+     * message, so a caller arriving by another door must not be told something
+     * different about the same field.
+     */
+    private function invalidDigitResponse(InvalidVerificationDigit $e): JsonResponse
+    {
+        return response()->json([
+            'message' => $e->getMessage(),
+            'code' => 'invalid_verification_digit',
+            'errors' => [
+                'verification_digit' => [$e->getMessage()],
             ],
         ], 422);
     }
