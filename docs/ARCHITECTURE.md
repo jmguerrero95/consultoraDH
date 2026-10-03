@@ -298,6 +298,74 @@ tener presentes:
   acciones de cliente, de vínculo y de afiliación en la misma ficha sin un
   registro de cambios escrito a mano.
 
+## 6.5 A03: el libro financiero
+
+La sección 6.4 explica el modelo histórico del directorio. El módulo financiero
+extiende esa idea a tres cosas, y conviene tenerlas juntas porque se refuerzan.
+
+### Nada guarda un saldo
+
+No hay columna `balance`, ni en las obligaciones, ni en los pagos, ni en la
+cartera. Lo que se factura es la **instantánea** que escribió la generación —el
+importe y las referencias de la configuración que lo produjo— más los ajustes
+registrados; lo que se pagó son las **aplicaciones vivas de pagos que no están
+anulados**. Todo lo demás se calcula al leer.
+
+La consecuencia práctica es que anular un pago, revertir una aplicación o
+revertir un ajuste cambia todos los saldos en la siguiente petición, sin que
+exista ningún campo que alguien pueda olvidar actualizar, y sin que dos pantallas
+puedan discrepar porque una tenga un contador y la otra no.
+
+Y la consecuencia incómoda, que vale la pena decir: un pago registrado sin
+aplicar es un **anticipo**. La empresa tiene ese dinero y todavía no lo ha
+confrontado con una deuda. La cartera lo cuenta como crédito, nunca como saldo a
+favor del cliente, y la lista de pagos lo marca «sin aplicar» sin pintarlo como
+error, porque un adelanto es una operación corriente y marcarlo como falla
+enseña al operador a ignorar ese color.
+
+### La configuración tiene vigencia, no estado
+
+`cutoff_rules` y `client_company_rates` no dicen «cuál es el valor actual»: dicen
+cuál estaba en vigor en cada mes. Un periodo se factura con la regla y el valor
+que aplicaban **al inicio de ese mes**, y la obligación guarda `rate_id` y
+`cutoff_rule_id` para que la instantánea sea evidencia y no coincidencia.
+
+La consecuencia es que corregir una decisión pasada no es una edición: es
+agregar una decisión nueva con vigencia posterior. Si el mes ya se facturó, el
+servidor se niega a cambiar la fila que usó y responde `409` diciendo qué periodos
+ya facturó con ella. La forma de corregir lo que se facturó mal es un ajuste
+registrado con su motivo, que convive con la instantánea en lugar de reemplazarla.
+
+Falta el valor, o falta la fecha de corte, y la generación **no escribe nada** para
+esa relación y nombra qué falta. Un mes a medio facturar es un mes que nadie sabe
+leer.
+
+### El bloqueo es el comportamiento por defecto
+
+`client → empresa → general` para la fecha de corte: gana la más específica que
+aplique. Un `cutoff_day` mayor que los días del mes se recorta al último día, así
+que el 31 de febrero es el 28.
+
+Varios periodos pueden estar abiertos. El «periodo actual» es el que corresponde
+al mes calendario si está abierto, y si no el abierto más reciente. Cerrar un
+periodo congela su **estructura** —no se generan obligaciones nuevas— pero no su
+dinero: los pagos y los ajustes de ese mes siguen siendo válidos.
+
+### El orden de los bloqueos
+
+Cuando dos transacciones del libro se tocan, el orden importa más que la
+corrección, porque dos operaciones correctas en orden inverso se bloquean entre sí:
+
+| Operación | Orden |
+| --- | --- |
+| Estructural de un periodo | periodo → filas candidatas y de referencia |
+| Pago | cliente → pago → obligaciones ascendente por id → aplicaciones |
+| Ajuste | obligación → aplicaciones |
+
+Y en cada caso, la cifra que se usó para **elegir** se vuelve a leer después de
+tomar el bloqueo. Sin eso, dos operadores pueden decidir sobre números que el
+otro ya dejó viejos.
+
 ## 7. Base de datos
 
 - **PostgreSQL 18** para todo. No hay SQLite en desarrollo ni en pruebas: se
@@ -311,7 +379,12 @@ tener presentes:
   difieran sólo en mayúsculas.
 - **No hay borrado lógico** en A01. Se añade sólo cuando exista una razón
   concreta; un `deleted_at` global aplicado sin criterio es una decisión
-  difícil de revertir.
+  difícil de revertir. A03 no lo añade: sus siete tablas no tienen columna de
+  borrado porque ninguna de sus filas se borra.
+- Los importes de A03 son `BIGINT` de pesos enteros. No hay `NUMERIC`, no hay
+  decimales y no hay coma flotante en ninguna parte del camino. Una cantidad con
+  centavos es un dato que este sistema no sabe representar, y aceptarla
+  redondeándola sería inventar dinero.
 
 ### 7.1 Base de datos de pruebas
 

@@ -5,6 +5,7 @@ import { RouterLink } from 'vue-router';
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
+import { pesos } from '@/composables/useFormatters';
 import { api } from '@/services/api';
 import { ApiError } from '@/services/http';
 
@@ -226,6 +227,77 @@ onMounted(load);
                                 {{ data.portfolio.counts.data_quality_warnings }} advertencias
                             </p>
                         </article>
+                    </div>
+                </div>
+            </section>
+
+            <section
+                v-if="data.portfolio.financial"
+                class="cdh-card mb-3"
+                aria-labelledby="financial-heading"
+            >
+                <div class="cdh-card__header">
+                    <div>
+                        <h2 id="financial-heading" class="cdh-card__title">Posición financiera</h2>
+                        <p class="cdh-card__subtitle">
+                            Calculada en el momento sobre las obligaciones y los pagos
+                            registrados. Un saldo pendiente nunca vence por dejarlo quieto.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="cdh-card__body">
+                    <div class="cdh-grid-stats">
+                        <RouterLink
+                            :to="{ name: 'receivables' }"
+                            class="cdh-stat cdh-stat--link"
+                            aria-label="Ver la cartera"
+                        >
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-cash-stack" aria-hidden="true" />
+                                <span>Saldo por cobrar</span>
+                            </p>
+                            <p class="cdh-stat__value">
+                                {{ pesos(data.portfolio.financial.outstanding_balance_cop) }}
+                            </p>
+                            <p class="cdh-stat__hint">
+                                {{ data.portfolio.financial.clients_with_debt }} clientes con saldo
+                            </p>
+                        </RouterLink>
+
+                        <RouterLink
+                            :to="{ name: 'receivables' }"
+                            class="cdh-stat cdh-stat--link"
+                            aria-label="Ver la cartera vencida"
+                        >
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-exclamation-triangle" aria-hidden="true" />
+                                <span>Vencido</span>
+                            </p>
+                            <p
+                                class="cdh-stat__value"
+                                :class="{ 'cdh-danger': data.portfolio.financial.overdue_balance_cop > 0 }"
+                            >
+                                {{ pesos(data.portfolio.financial.overdue_balance_cop) }}
+                            </p>
+                            <p class="cdh-stat__hint">Obligaciones que ya pasaron su vencimiento</p>
+                        </RouterLink>
+
+                        <RouterLink
+                            :to="{ name: 'payments' }"
+                            class="cdh-stat cdh-stat--link"
+                            aria-label="Ver los pagos"
+                        >
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-check2-circle" aria-hidden="true" />
+                                <span>Recaudado</span>
+                            </p>
+                            <p class="cdh-stat__value">{{ pesos(data.portfolio.financial.total_paid_cop) }}</p>
+                            <p class="cdh-stat__hint">
+                                {{ data.portfolio.financial.payments_requiring_reconciliation }} pagos por
+                                conciliar
+                            </p>
+                        </RouterLink>
                     </div>
                 </div>
             </section>

@@ -1,8 +1,24 @@
 import { request } from '@/services/http';
 
+/**
+ * A month as the server stores it for effective-dated configuration.
+ *
+ * A cutoff and a rate are effective *from* a date, so they are stored as the first
+ * day of that month and sent that way. A period is named rather than dated — an
+ * operator says "October", not "1 October" — so it is sent as `YYYY-MM`. The two
+ * conversions live here so no page has to know about either of them.
+ */
+function comoMesDeVigencia(mes: string): string {
+    return /-\d{2}$/.test(mes) ? `${mes}-01` : mes;
+}
+
 import type {
+    AdjustmentSummary,
     Affiliation,
     Assignment,
+    AutoAllocationPlan,
+    BillingVocabularyPayload,
+    ClientAccountPayload,
     AuthUser,
     Client,
     ClientDetailPayload,
@@ -11,11 +27,25 @@ import type {
     CompanyDetailPayload,
     CompanyListPayload,
     CompanySummary,
+    CutoffRuleListPayload,
+    CutoffRuleSummary,
     DashboardPayload,
     EntityListPayload,
     HealthPayload,
     LoginPayload,
+    GenerationPreviewPayload,
+    GenerationResultPayload,
     MessagePayload,
+    ObligationSummary,
+    Pagination,
+    PaymentListPayload,
+    PaymentSummary,
+    PeriodListPayload,
+    PeriodSummary,
+    RateHistoryPayload,
+    RateListPayload,
+    RateSummary,
+    ReceivablesListPayload,
     SettingsPayload,
     SocialSecurityEntity,
     UpdateEmailPayload,
@@ -257,6 +287,258 @@ export const businessApi = {
             payload: { status: 'active' | 'inactive'; reason?: string | null },
         ): Promise<{ message: string; company: Company }> {
             return request('POST', `/api/companies/${id}/status`, { body: payload });
+        },
+    },
+
+    /**
+     * The A03 surface: periods, obligations, payments and receivables.
+     *
+     * Every figure arrives as a whole number of pesos. Nothing here formats money,
+     * and nothing here accepts a formatted string: the interface converts for
+     * display, the server validates as an integer, and no step in between invents a
+     * value.
+     */
+    periods: {
+        list(params: ListParams = {}): Promise<PeriodListPayload> {
+            return request<PeriodListPayload>('GET', '/api/periods', { query: params });
+        },
+
+        /**
+         * The open period, for a caller that only needs that one value.
+         */
+        openPeriods(): Promise<{ current: PeriodSummary | null; open_periods: PeriodSummary[] }> {
+            return request('GET', '/api/periods/current');
+        },
+
+        current(): Promise<{ current: PeriodSummary | null; open_periods: PeriodSummary[] }> {
+            return request('GET', '/api/periods/current');
+        },
+
+        show(id: number): Promise<{ period: PeriodSummary }> {
+            return request('GET', `/api/periods/${id}`);
+        },
+
+        open(month: string): Promise<{ message: string; period: PeriodSummary }> {
+            return request('POST', '/api/periods', { body: { period_month: month } });
+        },
+
+        close(id: number, reason?: string | null): Promise<{ message: string; period: PeriodSummary }> {
+            return request('POST', `/api/periods/${id}/close`, {
+                body: { reason: reason ?? null, confirm: true },
+            });
+        },
+
+        reopen(id: number, reason: string): Promise<{ message: string; period: PeriodSummary }> {
+            return request('POST', `/api/periods/${id}/reopen`, {
+                body: { reason, confirm: true },
+            });
+        },
+
+        obligations(
+            id: number,
+            params: ListParams & { client_id?: number | null; company_id?: number | null; settlement_state?: string | null } = {},
+        ): Promise<{ items: ObligationSummary[]; pagination: Pagination }> {
+            return request('GET', `/api/periods/${id}/obligations`, { query: params });
+        },
+
+        /**
+         * What generation would do, before it does it.
+         *
+         * Read only, and the reason the confirmation dialog can list the blockers
+         * rather than only reporting that something went wrong.
+         */
+        previewObligations(id: number, missingOnly = true): Promise<GenerationPreviewPayload> {
+            return request('POST', `/api/periods/${id}/obligations/preview`, {
+                body: { missing_only: missingOnly },
+            });
+        },
+
+        generateObligations(
+            id: number,
+            missingOnly = true,
+        ): Promise<GenerationResultPayload> {
+            return request('POST', `/api/periods/${id}/obligations/generate`, {
+                body: { missing_only: missingOnly },
+            });
+        },
+    },
+
+    obligations: {
+        adjust(
+            id: number,
+            payload: { type: string; delta_cop: number; reason: string },
+        ): Promise<{ message: string; adjustment: AdjustmentSummary; obligation: ObligationSummary }> {
+            return request('POST', `/api/obligations/${id}/adjustments`, { body: payload });
+        },
+
+        adjustments(id: number): Promise<{ adjustments: AdjustmentSummary[] }> {
+            return request('GET', `/api/obligations/${id}/adjustments`);
+        },
+
+        reverseAdjustment(
+            adjustmentId: number,
+            reason: string,
+        ): Promise<{ message: string; adjustment: AdjustmentSummary }> {
+            return request('POST', `/api/obligation-adjustments/${adjustmentId}/reverse`, {
+                body: { reason, confirm: true },
+            });
+        },
+    },
+
+    payments: {
+        list(
+            params: ListParams & {
+                client_id?: number | null;
+                state?: string | null;
+                method?: string | null;
+                date_from?: string | null;
+                date_to?: string | null;
+                requires_reconciliation?: boolean;
+            } = {},
+        ): Promise<PaymentListPayload> {
+            return request<PaymentListPayload>('GET', '/api/payments', { query: params });
+        },
+
+        show(id: number): Promise<{ payment: PaymentSummary }> {
+            return request('GET', `/api/payments/${id}`);
+        },
+
+        register(payload: {
+            client_id: number;
+            amount_cop: number;
+            received_on: string;
+            method: string;
+            reference?: string | null;
+            notes?: string | null;
+            confirm_duplicate?: boolean;
+        }): Promise<{ message: string; payment: PaymentSummary }> {
+            return request('POST', '/api/payments', { body: payload });
+        },
+
+        allocate(
+            paymentId: number,
+            payload: { obligation_id: number; amount_cop: number },
+        ): Promise<{ message: string; allocation: unknown; payment: PaymentSummary }> {
+            return request('POST', `/api/payments/${paymentId}/allocations`, { body: payload });
+        },
+
+        previewAutoAllocation(paymentId: number): Promise<{ plan: AutoAllocationPlan }> {
+            return request('POST', `/api/payments/${paymentId}/auto-allocate/preview`);
+        },
+
+        autoAllocate(paymentId: number): Promise<{
+            message: string;
+            plan: AutoAllocationPlan;
+            payment: PaymentSummary;
+        }> {
+            return request('POST', `/api/payments/${paymentId}/auto-allocate`);
+        },
+
+        reverseAllocation(
+            allocationId: number,
+            reason: string,
+        ): Promise<{ message: string; allocation: unknown; payment: PaymentSummary }> {
+            return request('POST', `/api/payment-allocations/${allocationId}/reverse`, {
+                body: { reason, confirm: true },
+            });
+        },
+
+        /**
+         * Invalidate a payment.
+         *
+         * `confirm` is sent because the server demands it: a void takes money out of
+         * every balance the payment touched, and a request that only carried a reason
+         * would be indistinguishable from a mis-click on a form. The dialog is the
+         * confirmation; this is the server being sure one happened.
+         */
+        void(paymentId: number, reason: string): Promise<{ message: string; payment: PaymentSummary }> {
+            return request('POST', `/api/payments/${paymentId}/void`, {
+                body: { reason, confirm: true },
+            });
+        },
+    },
+
+    receivables: {
+        list(
+            params: ListParams & {
+                as_of?: string | null;
+                client_id?: number | null;
+                company_id?: number | null;
+                settlement_state?: string | null;
+                aging_bucket?: string | null;
+                traffic_light?: string | null;
+                overdue?: boolean;
+                outstanding_only?: boolean;
+                minimum_balance?: number | null;
+                maximum_balance?: number | null;
+            } = {},
+        ): Promise<ReceivablesListPayload> {
+            return request<ReceivablesListPayload>('GET', '/api/receivables', { query: params });
+        },
+
+        clientAccount(id: number, asOf?: string | null): Promise<ClientAccountPayload> {
+            return request('GET', `/api/clients/${id}/account`, { query: { as_of: asOf } });
+        },
+
+        vocabulary(): Promise<BillingVocabularyPayload> {
+            return request<BillingVocabularyPayload>('GET', '/api/receivables/vocabulary');
+        },
+    },
+
+    billing: {
+        cutoffRules(params: ListParams & { scope?: string | null } = {}): Promise<CutoffRuleListPayload> {
+            return request('GET', '/api/cutoff-rules', { query: params });
+        },
+
+        storeCutoffRule(payload: {
+            scope: string;
+            client_id?: number | null;
+            company_id?: number | null;
+            effective_month: string;
+            cutoff_day: number;
+            month_offset: number;
+            notes?: string | null;
+        }): Promise<{ message: string; rule: CutoffRuleSummary }> {
+            return request('POST', '/api/cutoff-rules', {
+                body: { ...payload, effective_month: comoMesDeVigencia(payload.effective_month) },
+            });
+        },
+
+        updateCutoffRule(
+            id: number,
+            payload: { cutoff_day?: number; month_offset?: number; notes?: string | null; effective_month?: string },
+        ): Promise<{ message: string; rule: CutoffRuleSummary }> {
+            return request('PATCH', `/api/cutoff-rules/${id}`, {
+                body:
+                    payload.effective_month === undefined
+                        ? payload
+                        : { ...payload, effective_month: comoMesDeVigencia(payload.effective_month) },
+            });
+        },
+
+        rates(params: ListParams & { client_id?: number | null; company_id?: number | null } = {}): Promise<RateListPayload> {
+            return request('GET', '/api/rates', { query: params });
+        },
+
+        rateHistory(clientId: number, companyId?: number | null): Promise<RateHistoryPayload> {
+            return request('GET', `/api/clients/${clientId}/rates`, { query: { company_id: companyId } });
+        },
+
+        storeRate(payload: {
+            client_id: number;
+            company_id: number;
+            effective_month: string;
+            amount_cop: number;
+            notes?: string | null;
+        }): Promise<{ message: string; rate: RateSummary }> {
+            return request('POST', '/api/rates', { body: payload });
+        },
+
+        updateRate(
+            id: number,
+            payload: { amount_cop?: number; notes?: string | null },
+        ): Promise<{ message: string; rate: RateSummary }> {
+            return request('PATCH', `/api/rates/${id}`, { body: payload });
         },
     },
 

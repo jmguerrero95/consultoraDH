@@ -630,7 +630,53 @@ A01 no almacena archivos subidos por el usuario, de modo que la ruta no se usa.
 La entrega de documentos en A07 será una acción de controlador explícita, con
 autorización y registro en la bitácora.
 
-## 13. Registro (bitácora)
+## 13. Datos financieros
+
+A03 introduce las primeras cantidades de dinero del sistema, y con ellas dos
+preguntas que antes no había que responder.
+
+### Qué se registra y qué no
+
+Un pago tiene una **referencia**, que puede ser el número de un comprobante
+bancario. Esa referencia sí se guarda —es el dato que permite conciliar— pero no
+se escribe en la bitácora: la auditoría de pagos registra el identificador, el
+importe y el estado, nunca la referencia ni las notas.
+
+Los metadatos de auditoría de los eventos financieros llevan **identificadores y
+cantidades**: `client_id`, `company_id`, `period_id`, `delta_cop`,
+`amount_cop`. No llevan nombres, documentos, correos ni direcciones. La pregunta
+que resuelve ese límite es «responder quién y cuánto», y un nombre no hace falta
+para contestarla; quien lee la auditoría es alguien que no debería estar
+leyendo el padrón de clientes.
+
+### El límite de permiso por separado de la lectura
+
+El total por cobrar es el número más sensible del sistema, así que `receivables.view`
+no se comparte con ninguna otra capacidad y `obligations.generate` es un permiso
+distinto de `obligations.adjust`. Collections puede registrar y aplicar un pago y
+no puede decidir cuánto se factura; Operations puede decidir y no puede recibir
+dinero. Esa separación se prueba, no se documenta solamente: el flujo H registra un
+pago con Collections y verifica que la generación, la modificación de un valor,
+una fecha de corte, el cierre y la reapertura responden `403`.
+
+Las cifras de la cartera tampoco se filtran a través de conteos. El panel muestra
+la sección financiera únicamente cuando el rol puede leer el portafolio, y el
+vocabulario de la cartera responde `403` sin él.
+
+### El límite general por peticiones
+
+Toda ruta autenticada de la API pasa por el limitador `api`, **120 peticiones por
+minuto y por cuenta**. Ese número es el valor por defecto en el código y el que
+documenta `.env.example`.
+
+El entorno de pruebas de extremo a extremo lo sube a 2000 **sólo en
+`compose.e2e.yaml`**, porque los flujos de A03 recorren un mes financiero completo
+y eso son cientos de peticiones en un par de minutos. El valor por defecto de
+producción y el del desarrollo siguen siendo 120: ninguno de los dos fija la
+variable. La suite fija esa cifra en una prueba, para que no pueda convertirse en
+el valor normal por accidente.
+
+## 14. Registro (bitácora)
 
 - La bitácora vive en `storage/logs/laravel.log` y en la salida estándar de los
   contenedores.
@@ -641,8 +687,16 @@ autorización y registro en la bitácora.
   los errores a un colector central.
 - El `user_agent` se trunca a 512 caracteres: lo controla el cliente y una
   cadena sin límite sería una vía para inflar la base de datos.
+- **La única credencial que sí llega a la bitácora es el correo de restablecimiento
+  de contraseña, y sólo porque el entorno local usa `MAIL_MAILER=log`.** Laravel
+  escribe el mensaje completo en `laravel.log` en lugar de enviarlo, y ese mensaje
+  lleva el enlace con el token. En producción el valor es un SMTP real, así que no
+  ocurre; mientras tanto, quien tenga acceso al archivo de bitácora de esta máquina
+  puede restablecer la contraseña de esa cuenta local. Por eso `storage/logs/` está
+  fuera del repositorio, y por eso hay que borrarlo —o al menos `truncarlo`— antes de
+  compartir el archivo de una sesión de desarrollo.
 
-## 14. Antes de publicar: lista de verificación
+## 15. Antes de publicar: lista de verificación
 
 - [ ] `APP_ENV=production`
 - [ ] **`APP_DEBUG=false`** — con la depuración activa se muestran trazas

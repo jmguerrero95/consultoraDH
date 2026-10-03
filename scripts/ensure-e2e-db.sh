@@ -34,6 +34,34 @@ TEST_DATABASE="${DB_TEST_DATABASE:-consultora_dh_test}"
 APP_USER="${DB_USERNAME:-consultora_dh_app}"
 BOOTSTRAP_USER="${POSTGRES_USER:-postgres}"
 
+# Every identifier below is interpolated into administrative SQL, so each one is
+# checked against the grammar PostgreSQL allows for an identifier before it reaches a
+# statement. A database name arriving as `consultora_dh_e2e"; DROP DATABASE postgres;`
+# would otherwise be executed as two commands, and this script is exactly the place
+# where nobody would look twice. The check is deliberately narrow: lowercase letters,
+# digits and underscores, starting with a letter, because that covers every name this
+# project uses and nothing else.
+validate_identifier() {
+    _label="$1"
+    _value="$2"
+
+    case "$_value" in
+        "" | *[!a-z0-9_]* | [0-9]*)
+            printf 'Refusing to continue.\n' >&2
+            printf '%s (%s) is not a plain lowercase identifier.\n' "$_label" "$_value" >&2
+            printf 'Only letters, digits and underscores are allowed, starting with a letter.\n' >&2
+            printf 'No database was created.\n' >&2
+            exit 1
+            ;;
+    esac
+}
+
+validate_identifier "DB_E2E_DATABASE" "$E2E_DATABASE"
+validate_identifier "DB_DATABASE" "$DEVELOPMENT_DATABASE"
+validate_identifier "DB_TEST_DATABASE" "$TEST_DATABASE"
+validate_identifier "DB_USERNAME" "$APP_USER"
+validate_identifier "POSTGRES_USER" "$BOOTSTRAP_USER"
+
 # The same separation the initialisation script insists on. If these collide, the
 # three suites share a database and every guard downstream is meaningless, so this
 # is checked before anything is created.

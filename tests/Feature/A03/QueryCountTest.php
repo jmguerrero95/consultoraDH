@@ -1,0 +1,209 @@
+<?php
+
+declare(strict_types=1);
+
+use App\Domain\Billing\Actions\GeneratePeriodObligations;
+use App\Domain\Payments\Actions\ManagePayments;
+use App\Models\MonthlyObligation;
+use App\Models\MonthlyPeriod;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * A list screen that costs one query per row is a screen whose cost grows with the
+ * history rather than with the page size. These tests count the queries so the
+ * regression is caught by the suite instead of by whoever happens to open the page
+ * when the portfolio is large.
+ *
+ * The count is deliberately a ceiling rather than an exact number: adding a column
+ * to a page should not fail a test, but tripling the queries for the same page
+ * should.
+ */
+beforeEach(function (): void {
+    seedPortfolioRoles();
+});
+
+/**
+ * Run a callback and report how many queries it made.
+ */
+function a03_queries(callable $callback): int
+{
+    DB::flushQueryLog();
+    DB::enableQueryLog();
+
+    try {
+        $callback();
+    } finally {
+        DB::disableQueryLog();
+    }
+
+    return count(DB::getQueryLog());
+}
+
+/**
+ * Twelve months, each generated and each partly paid.
+ */
+function a03_busyHistory(int $from = 1, int $to = 12): void
+{
+    $payments = app(ManagePayments::class);
+
+    foreach (range($from, $to) as $offset) {
+        $key = now()->subMonths($offset)->format('Y-m');
+        $employer = a03_employerFor("historia-{$offset}");
+        $period = a03_openPeriod($key);
+
+        app(GeneratePeriodObligations::class)->execute($period, actingAsRole());
+
+        // This employer's own obligation: by now the period holds one for every
+        // employer built so far, so the first row is somebody else's.
+        $obligation = MonthlyObligation::query()
+            ->where('period_id', $period->id)
+            ->where('client_id', $employer['client']->id)
+            ->firstOrFail();
+
+        $payment = $payments->register(
+            $employer['client'],
+            ['amount_cop' => 100000, 'received_on' => now()->format('Y-m-d'), 'method' => 'cash'],
+            actingAsRole(),
+        );
+
+        $payments->allocate($payment, $obligation, 100000, actingAsRole());
+    }
+
+}
+
+it('draws the period list without a query per row', function (): void {
+    a03_busyHistory(1, 12);
+
+    $this->actingAs(userWithPermissions(['periods.view']));
+
+    // Warm the route, its bindings and the authentication first, so what is counted
+    // is the screen and not the framework's start-up.
+    $this->getJson('/api/periods?per_page=12')->assertOk();
+
+    $queries = a03_queries(fn () => $this->getJson('/api/periods?per_page=12')->assertOk());
+
+    // A constant number whatever the number of periods: the page, its count, the two
+    // grouped sums and the two or three the current-period resolver needs. The point
+    // is that none of it grows with the twelve rows on the page.
+    expect($queries)->toBeLessThanOrEqual(12);
+});
+
+it('costs the same to draw a long history as a short one', function (): void {
+    a03_busyHistory(1, 3);
+    expect(MonthlyPeriod::query()->count())->toBe(3);
+
+    $this->actingAs(userWithPermissions(['periods.view']));
+    $this->getJson('/api/periods')->assertOk();
+    $short = a03_queries(fn () => $this->getJson('/api/periods')->assertOk());
+
+    // Nine more months of history.
+    a03_busyHistory(12, 21);
+    $this->getJson('/api/periods')->assertOk();
+    $long = a03_queries(fn () => $this->getJson('/api/periods')->assertOk());
+
+    // The important part is not the number: it is that adding nine months of history
+    // does not add queries.
+
+    expect($long)->toBe($short);
+});
+
+it('draws the receivables portfolio without a query per client', function (): void {
+    // Three months, built once, and then fifteen employers generating into them. The
+    // point is fifteen rows on one page, not fifteen months of setup.
+    $periods = collect(['2026-01', '2026-02', '2026-03'])
+        ->map(fn (string $key): MonthlyPeriod => a03_openPeriod($key));
+
+    foreach (range(1, 15) as $index) {
+        a03_employerFor("cartera-{$index}");
+
+        // Missing-only generation, so the second employer for a month adds to the
+        // first rather than replacing it.
+        app(GeneratePeriodObligations::class)->execute($periods[$index % 3], actingAsRole());
+    }
+
+    $this->actingAs(userWithPermissions(['receivables.view']));
+    $this->getJson('/api/receivables')->assertOk();
+
+    $queries = a03_queries(fn () => $this->getJson('/api/receivables?per_page=15')->assertOk());
+
+    // The figures come from one derived table, one aggregate and one page. The
+    // traffic light, the aging bucket and the owed months are all part of that same
+    // query rather than three more per row.
+    expect($queries)->toBeLessThanOrEqual(8);
+});
+
+it('draws the payments list without a query per payment', function (): void {
+    $payments = app(ManagePayments::class);
+
+    foreach (range(1, 15) as $index) {
+        $employer = a03_employerFor("pagos-{$index}");
+
+        $payments->register(
+            $employer['client'],
+            ['amount_cop' => 50000 + $index, 'received_on' => now()->format('Y-m-d'), 'method' => 'cash'],
+            actingAsRole(),
+        );
+    }
+
+    $this->actingAs(userWithPermissions(['payments.view']));
+    $this->getJson('/api/payments')->assertOk();
+
+    $queries = a03_queries(fn () => $this->getJson('/api/payments?per_page=15')->assertOk());
+
+    expect($queries)->toBeLessThanOrEqual(8);
+});
+
+it('serves one client account in a fixed number of queries', function (): void {
+    $employer = a03_employerFor('cuenta-rendija');
+    $payments = app(ManagePayments::class);
+
+    for ($month = 1; $month <= 6; $month++) {
+        $period = a03_openPeriod(sprintf('2026-%02d', $month));
+        app(GeneratePeriodObligations::class)->execute($period, actingAsRole());
+
+        $obligation = MonthlyObligation::query()
+            ->where('period_id', $period->id)
+            ->where('client_id', $employer['client']->id)
+            ->firstOrFail();
+
+        $payment = $payments->register(
+            $employer['client'],
+            ['amount_cop' => 235000, 'received_on' => now()->format('Y-m-d'), 'method' => 'bank_transfer'],
+            actingAsRole(),
+        );
+
+        $payments->allocate($payment, $obligation, 235000, actingAsRole());
+    }
+
+    $url = "/api/clients/{$employer['client']->id}/account";
+
+    $this->actingAs(userWithPermissions(['receivables.view']));
+    $this->getJson($url)->assertOk();
+
+    $queries = a03_queries(fn () => $this->getJson($url)->assertOk());
+
+    // Six months, and the number of queries does not depend on it: the statement is
+    // one derived table plus the per-obligation figures.
+    expect($queries)->toBeLessThanOrEqual(10);
+});
+
+it('answers a month of obligations in a fixed number of queries', function (): void {
+    // One month, ten employers: the page is a month of obligations, and the count
+    // must not depend on how many of them there are.
+    $period = a03_openPeriod('2026-05');
+
+    foreach (range(1, 10) as $index) {
+        a03_employerFor("mes-{$index}");
+
+        app(GeneratePeriodObligations::class)->execute($period, actingAsRole());
+    }
+
+    // Warm the same request twice, so what is counted is the screen and not the
+    // framework's first-call start-up.
+    $this->actingAs(userWithPermissions(['obligations.view', 'periods.view']));
+    $this->getJson("/api/periods/{$period->id}/obligations?per_page=10")->assertOk();
+
+    $queries = a03_queries(fn () => $this->getJson("/api/periods/{$period->id}/obligations?per_page=10")->assertOk());
+
+    expect($queries)->toBeLessThanOrEqual(8);
+});

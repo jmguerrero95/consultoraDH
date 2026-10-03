@@ -17,12 +17,24 @@ const props = withDefaults(
         cancelLabel?: string;
         busy?: boolean;
         destructive?: boolean;
+        /**
+         * Blocks the confirm button without hiding it.
+         *
+         * For the case where the dialog is asking to confirm something the server
+         * has already said is impossible: hiding the button would leave the reader
+         * wondering what they are supposed to do, and disabling it explains.
+         */
+        disabled?: boolean;
+        /** A wider dialog, for a dialog whose content is a table. */
+        wide?: boolean;
     }>(),
     {
         confirmLabel: 'Confirmar',
         cancelLabel: 'Cancelar',
         busy: false,
         destructive: false,
+        disabled: false,
+        wide: false,
     },
 );
 
@@ -76,6 +88,7 @@ onBeforeUnmount(() => {
     <dialog
         ref="dialog"
         class="cdh-modal"
+        :class="{ 'cdh-modal--wide': wide }"
         :aria-labelledby="titleId"
         :aria-describedby="bodyId"
         @cancel="onNativeCancel"
@@ -96,6 +109,7 @@ onBeforeUnmount(() => {
             <AppButton
                 :variant="destructive ? 'danger' : 'primary'"
                 :busy="busy"
+                :disabled="disabled"
                 @click="emit('confirm')"
             >
                 {{ confirmLabel }}

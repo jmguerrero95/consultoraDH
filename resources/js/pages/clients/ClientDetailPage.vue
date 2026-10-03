@@ -9,12 +9,14 @@ import AppFormField from '@/components/ui/AppFormField.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
 import AppModal from '@/components/ui/AppModal.vue';
 import { useDebouncedRef } from '@/composables/useDebouncedRef';
+import { pesos } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
 import { useToastStore } from '@/stores/toast';
 
 import type {
+    ClientAccountPayload,
     Affiliation,
     Assignment,
     ClientDetailPayload,
@@ -58,6 +60,7 @@ const canSeeAffiliations = computed(() => auth.can('affiliations.view'));
 
 const TABS = [
     { id: 'resumen', label: 'Resumen' },
+    { id: 'cuenta', label: 'Cuenta' },
     { id: 'empresas', label: 'Empresas' },
     { id: 'afiliaciones', label: 'Afiliaciones' },
     { id: 'historial', label: 'Historial' },
@@ -559,6 +562,55 @@ const maySeeAffiliations = computed(() => payload.value?.affiliations.visible ==
  * refuses to give, so the tab is not offered. The permission is the server's; this
  * only avoids sending somebody to a screen that says "you cannot see this".
  */
+const maySeeFinancials = computed(() => auth.can('receivables.view'));
+
+/**
+ * The debt summary, loaded only when the tab is actually shown.
+ *
+ * A person who never opens the Cuenta tab does not need a financial request made on
+ * their behalf, and a Support user who cannot read it never triggers one that would
+ * come back 403.
+ */
+const financials = ref<ClientAccountPayload | null>(null);
+const loadingFinancials = ref(false);
+const financialsError = ref<string | null>(null);
+let financialsRequest = 0;
+
+async function loadFinancials(): Promise<void> {
+    const current = ++financialsRequest;
+
+    loadingFinancials.value = true;
+    financialsError.value = null;
+
+    try {
+        const payload = await businessApi.receivables.clientAccount(Number(id));
+
+        if (current !== financialsRequest) {
+            return;
+        }
+
+        financials.value = payload;
+    } catch (cause) {
+        if (current !== financialsRequest) {
+            return;
+        }
+
+        financials.value = null;
+        financialsError.value =
+            cause instanceof ApiError ? cause.message : 'No fue posible cargar la cuenta.';
+    } finally {
+        if (current === financialsRequest) {
+            loadingFinancials.value = false;
+        }
+    }
+}
+
+watch([tab, maySeeFinancials], ([selected, permitted]) => {
+    if (selected === 'cuenta' && permitted && financials.value === null) {
+        void loadFinancials();
+    }
+});
+
 const visibleTabs = computed(() =>
     TABS.filter((entry) => {
         if (entry.id === 'empresas') {
@@ -567,6 +619,14 @@ const visibleTabs = computed(() =>
 
         if (entry.id === 'afiliaciones') {
             return maySeeAffiliations.value;
+        }
+
+        // What the client owes is a separate permission from what the directory
+        // knows about them. Support reads a client's situation without holding
+        // authority over the money, and Collections reads the debt without needing
+        // the whole directory.
+        if (entry.id === 'cuenta') {
+            return maySeeFinancials.value;
         }
 
         return true;
@@ -766,6 +826,138 @@ Editar
                         </ul>
                     </div>
                 </article>
+            </div>
+
+            <!--
+                Cuenta: what this client owes. A summary rather than the whole
+                statement, because the statement is a screen of its own and the ficha
+                is about who somebody is rather than what they owe.
+            -->
+            <div
+                v-if="maySeeFinancials"
+                v-show="tab === 'cuenta'"
+                id="panel-cuenta"
+                role="tabpanel"
+                aria-labelledby="tab-cuenta"
+            >
+                <div v-if="financials === null" class="cdh-text-muted">
+                    <AppLoading v-if="loadingFinancials" label="Cargando la cuenta" />
+                    <AppAlert
+                        v-else-if="financialsError !== null"
+                        variant="warning"
+                        :title="financialsError"
+                    />
+                    <p v-else>Sin datos financieros.</p>
+                </div>
+
+                <template v-else>
+                    <div class="cdh-grid-2 mb-3">
+                        <article class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-cash-coin" aria-hidden="true" />
+                                <span>Saldo pendiente</span>
+                            </p>
+                            <p class="cdh-stat__value">
+                                {{ pesos(financials.summary.outstanding_balance_cop) }}
+                            </p>
+                            <p class="cdh-stat__hint">
+                                {{ financials.summary.open_obligations_count }} obligaciones
+                                abiertas
+                            </p>
+                        </article>
+
+                        <article class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-exclamation-triangle" aria-hidden="true" />
+                                <span>Vencido</span>
+                            </p>
+                            <p
+                                class="cdh-stat__value"
+                                :class="{ 'cdh-danger': financials.summary.overdue_balance_cop > 0 }"
+                            >
+                                {{ pesos(financials.summary.overdue_balance_cop) }}
+                            </p>
+                            <p class="cdh-stat__hint">
+                                {{ formatDate(financials.as_of) }}
+                            </p>
+                        </article>
+                    </div>
+
+                    <AppEmptyState
+                        v-if="financials.obligations.length === 0"
+                        title="Sin obligaciones"
+                        description="Este cliente no tiene obligaciones generadas."
+                    />
+
+                    <div v-else class="cdh-table-wrap">
+                        <table class="cdh-table">
+                            <caption class="cdh-visually-hidden">
+                                Obligaciones del cliente
+                            </caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Periodo</th>
+                                    <th scope="col" class="cdh-table__wide">Empresa</th>
+                                    <th scope="col">Total</th>
+                                    <th scope="col">Pagado</th>
+                                    <th scope="col">Saldo</th>
+                                    <th scope="col">Vence</th>
+                                    <th scope="col">Estado</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="obligation in financials.obligations" :key="obligation.id">
+                                    <td data-label="Periodo">
+                                        <span class="cdh-table__primary">
+                                            {{ obligation.period_label }}
+                                        </span>
+                                    </td>
+                                    <td data-label="Empresa" class="cdh-table__wide">
+                                        {{ obligation.company_name }}
+                                    </td>
+                                    <td data-label="Total" class="cdh-table__numeric">
+                                        {{ pesos(obligation.effective_amount_cop) }}
+                                    </td>
+                                    <td data-label="Pagado" class="cdh-table__numeric">
+                                        {{ pesos(obligation.paid_amount_cop) }}
+                                    </td>
+                                    <td data-label="Saldo" class="cdh-table__numeric">
+                                        {{ pesos(obligation.balance_cop) }}
+                                    </td>
+                                    <td data-label="Vence">
+                                        <span :class="{ 'cdh-danger': obligation.is_overdue }">
+                                            {{ formatDate(obligation.due_on) }}
+                                        </span>
+                                    </td>
+                                    <td data-label="Estado">
+                                        <span
+                                            class="cdh-badge"
+                                            :class="
+                                                obligation.settlement_state === 'paid'
+                                                    ? 'cdh-badge--success'
+                                                    : obligation.settlement_state === 'partial'
+                                                      ? 'cdh-badge--warning'
+                                                      : 'cdh-badge--neutral'
+                                            "
+                                        >
+                                            {{ obligation.settlement_state_label }}
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="d-flex justify-content-end mt-3">
+                        <AppButton
+                            variant="secondary"
+                            :to="{ name: 'clients.account', params: { id } }"
+                            icon="bi-list-check"
+                        >
+                            Ver la cuenta completa
+                        </AppButton>
+                    </div>
+                </template>
             </div>
 
             <!-- Empresas -->

@@ -134,8 +134,13 @@ final class AppServiceProvider extends ServiceProvider
 
         // General API budget, applied to every authenticated endpoint, so a
         // script cannot hammer the application with a valid session.
-        RateLimiter::for('api', fn (Request $request): Limit => Limit::perMinute(120)
-            ->by('api|'.($request->user()?->getAuthIdentifier() ?: $request->ip())));
+        RateLimiter::for('api', fn (Request $request): Limit => Limit::perMinute(
+            // Configurable because the end to end suite drives a few hundred requests
+            // in a couple of minutes, which the production budget correctly refuses.
+            // The suite raises it for itself; nothing else does, and the default is
+            // the production figure.
+            (int) env('API_RATE_LIMIT_PER_MINUTE', 120),
+        )->by('api|'.($request->user()?->getAuthIdentifier() ?: $request->ip())));
     }
 
     /**

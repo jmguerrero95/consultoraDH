@@ -3,10 +3,14 @@
 declare(strict_types=1);
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\BillingConfigurationController;
 use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\PeriodController;
 use App\Http\Controllers\Api\ProfileController;
+use App\Http\Controllers\Api\ReceivableController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\SocialSecurityEntityController;
 use App\Http\Controllers\HealthController;
@@ -191,5 +195,129 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.entities.update');
         Route::post('/social-security-entities/{entity}/deactivate', [SocialSecurityEntityController::class, 'deactivate'])
             ->name('api.entities.deactivate');
+    });
+
+    // =================================================================
+    // A03: periods, obligations, payments and receivables
+    // =================================================================
+    //
+    // Every mutation is an explicit business action with its own name, never a
+    // generic PATCH that sets a field. Closing a month, voiding a payment and
+    // reversing an allocation are decisions somebody makes and somebody else
+    // reads in the audit trail; a route that accepted `{"status": "..."}` would
+    // make the decision invisible and unaudited.
+    //
+    // Read and write permissions are separate for the same reason A02 separated
+    // them: knowing what a client owes is not authority to change it.
+
+    // --- periods -------------------------------------------------------
+    Route::middleware('can:periods.view')->group(function (): void {
+        Route::get('/periods', [PeriodController::class, 'index'])->name('api.periods.index');
+        Route::get('/periods/current', [PeriodController::class, 'current'])->name('api.periods.current');
+        Route::get('/periods/{period}', [PeriodController::class, 'show'])->name('api.periods.show');
+
+        // The preview is a calculation. It creates nothing and audits nothing, which
+        // is what makes it safe to call on a live system as a confirmation step.
+        Route::post('/periods/{period}/obligations/preview', [PeriodController::class, 'previewObligations'])
+            ->name('api.periods.obligations.preview');
+
+        Route::get('/periods/{period}/obligations', [PeriodController::class, 'obligations'])
+            ->name('api.periods.obligations.index');
+    });
+
+    Route::middleware('can:periods.create')->group(function (): void {
+        Route::post('/periods', [PeriodController::class, 'store'])->name('api.periods.store');
+    });
+
+    Route::middleware('can:periods.close')->group(function (): void {
+        Route::post('/periods/{period}/close', [PeriodController::class, 'close'])
+            ->name('api.periods.close');
+    });
+
+    // Reopening is exceptional and Operations does not hold it by default.
+    Route::middleware('can:periods.reopen')->group(function (): void {
+        Route::post('/periods/{period}/reopen', [PeriodController::class, 'reopen'])
+            ->name('api.periods.reopen');
+    });
+
+    Route::middleware('can:obligations.generate')->group(function (): void {
+        Route::post('/periods/{period}/obligations/generate', [PeriodController::class, 'generateObligations'])
+            ->name('api.periods.obligations.generate');
+    });
+
+    // --- obligations and adjustments -----------------------------------
+    Route::middleware('can:obligations.view')->group(function (): void {
+        Route::get('/obligations/{obligation}/adjustments', [BillingConfigurationController::class, 'adjustments'])
+            ->name('api.obligations.adjustments.index');
+    });
+
+    Route::middleware('can:obligations.adjust')->group(function (): void {
+        Route::post('/obligations/{obligation}/adjustments', [BillingConfigurationController::class, 'storeAdjustment'])
+            ->name('api.obligations.adjustments.store');
+        Route::post('/obligation-adjustments/{adjustment}/reverse', [BillingConfigurationController::class, 'reverseAdjustment'])
+            ->name('api.obligation-adjustments.reverse');
+    });
+
+    // --- cutoff configuration ------------------------------------------
+    Route::middleware('can:cutoffs.view')->group(function (): void {
+        Route::get('/cutoff-rules', [BillingConfigurationController::class, 'cutoffRules'])
+            ->name('api.cutoff-rules.index');
+    });
+
+    Route::middleware('can:cutoffs.manage')->group(function (): void {
+        Route::post('/cutoff-rules', [BillingConfigurationController::class, 'storeCutoffRule'])
+            ->name('api.cutoff-rules.store');
+        Route::patch('/cutoff-rules/{rule}', [BillingConfigurationController::class, 'updateCutoffRule'])
+            ->name('api.cutoff-rules.update');
+    });
+
+    // --- rates ---------------------------------------------------------
+    Route::middleware('can:rates.view')->group(function (): void {
+        Route::get('/rates', [BillingConfigurationController::class, 'rates'])->name('api.rates.index');
+        Route::get('/clients/{client}/rates', [BillingConfigurationController::class, 'rateHistory'])
+            ->name('api.clients.rates');
+    });
+
+    Route::middleware('can:rates.manage')->group(function (): void {
+        Route::post('/rates', [BillingConfigurationController::class, 'storeRate'])->name('api.rates.store');
+        Route::patch('/rates/{rate}', [BillingConfigurationController::class, 'updateRate'])
+            ->name('api.rates.update');
+    });
+
+    // --- payments ------------------------------------------------------
+    Route::middleware('can:payments.view')->group(function (): void {
+        Route::get('/payments', [PaymentController::class, 'index'])->name('api.payments.index');
+        Route::get('/payments/{payment}', [PaymentController::class, 'show'])->name('api.payments.show');
+    });
+
+    Route::middleware('can:payments.create')->group(function (): void {
+        Route::post('/payments', [PaymentController::class, 'store'])->name('api.payments.store');
+    });
+
+    Route::middleware('can:payments.allocate')->group(function (): void {
+        Route::post('/payments/{payment}/allocations', [PaymentController::class, 'allocate'])
+            ->name('api.payments.allocations.store');
+        // The preview exists so an operator reconciling a backlog can see the plan
+        // before committing to it. It writes nothing.
+        Route::post('/payments/{payment}/auto-allocate/preview', [PaymentController::class, 'previewAutoAllocation'])
+            ->name('api.payments.auto-allocate.preview');
+        Route::post('/payments/{payment}/auto-allocate', [PaymentController::class, 'autoAllocate'])
+            ->name('api.payments.auto-allocate');
+        Route::post('/payment-allocations/{allocation}/reverse', [PaymentController::class, 'reverseAllocation'])
+            ->name('api.payment-allocations.reverse');
+    });
+
+    Route::middleware('can:payments.void')->group(function (): void {
+        Route::post('/payments/{payment}/void', [PaymentController::class, 'void'])
+            ->name('api.payments.void');
+    });
+
+    // --- receivables ---------------------------------------------------
+    Route::middleware('can:receivables.view')->group(function (): void {
+        Route::get('/receivables', [ReceivableController::class, 'index'])->name('api.receivables.index');
+        Route::get('/receivables/vocabulary', [ReceivableController::class, 'vocabulary'])
+            ->name('api.receivables.vocabulary');
+        Route::get('/clients/{client}/account', [ReceivableController::class, 'clientAccount'])
+            ->name('api.clients.account');
     });
 });

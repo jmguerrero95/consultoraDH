@@ -511,3 +511,53 @@ it('answers an invalid digit on update over HTTP with 422', function (): void {
 
     expect($company->fresh()->verification_digit)->toBe('2');
 });
+
+// --- The digit arrives as one thing and leaves as another -------------------
+
+it('stores an integer verification digit as the digit, never as nothing', function (): void {
+    // An importer, an assistant or a JSON client that counts rather than spells
+    // sends the digit as a number. The rule has always accepted `7`; reading it back
+    // with an `is_string` test then discarded it, so the response reported a digit
+    // the database never received.
+    app(CreateCompany::class)->execute(
+        ['legal_name' => 'Con cifra numérica S.A.S.', 'tax_id' => '901234567', 'verification_digit' => 7],
+        actingAsRole(),
+    );
+
+    expect(Company::query()->firstOrFail()->verification_digit)->toBe('7');
+});
+
+it('stores zero as the digit zero', function (): void {
+    // Zero is a digit and is as valid as any other. Treating it as "absent" would
+    // silently drop it.
+    app(CreateCompany::class)->execute(
+        ['legal_name' => 'Con cifra cero S.A.S.', 'tax_id' => '901234568', 'verification_digit' => 0],
+        actingAsRole(),
+    );
+
+    expect(Company::query()->firstOrFail()->verification_digit)->toBe('0');
+});
+
+it('updates a digit supplied as an integer', function (): void {
+    $company = companyWithDigit('800111222', '2');
+
+    app(UpdateCompany::class)->execute(
+        $company,
+        ['verification_digit' => 9],
+        actingAsRole(),
+    );
+
+    expect($company->fresh()->verification_digit)->toBe('9');
+});
+
+it('normalises the digit to one stored form whatever it arrived as', function (): void {
+    expect(TaxIdParts::normaliseSingleDigit(3))->toBe('3')
+        ->and(TaxIdParts::normaliseSingleDigit('3'))->toBe('3')
+        ->and(TaxIdParts::normaliseSingleDigit(null))->toBeNull();
+
+    // And a value that is not a digit normalises to nothing, while
+    // `requireSingleDigit` is the one that refuses it loudly.
+    expect(TaxIdParts::normaliseSingleDigit('12'))->toBeNull()
+        ->and(fn () => TaxIdParts::requireSingleDigit('12'))
+        ->toThrow(InvalidVerificationDigit::class);
+});

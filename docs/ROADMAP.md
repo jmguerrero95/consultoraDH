@@ -60,12 +60,24 @@ esperar el bloqueo; un traspaso registrado como creación según el endpoint usa
 un `parallel` sin nada con lo que ser paralelo; y un traspaso de una relación en
 paralelo que dejaba el solapamiento sin autorizar.
 
-### A03 — Periodos, cortes, obligaciones, pagos y cartera
+### A03 — Periodos, cortes, obligaciones, pagos y cartera — **completada**
 
-Alcance: periodos mensuales, fechas de corte, obligaciones generadas, registro
-de pagos, cuentas por cobrar y estado de la cartera.
+Alcance entregado: periodos mensuales, fechas de corte con vigencia, valores con
+vigencia, obligaciones generadas con previsualización de solo lectura, ajustes con
+reversión, registro de pagos, aplicaciones y anulaciones, cuenta por cobrar,
+antigüedad, semáforo y estado de cuenta por cliente.
 
-Prepara: permisos `payments.*`, `periods.*`; cálculo de cartera y saldos.
+Entregado: **16 permisos** (`periods.*`, `cutoffs.*`, `rates.*`, `obligations.*`,
+`payments.*`, `receivables.view`), siete tablas, veintiuna restricciones `CHECK` y
+veintisiete llaves foráneas —trece con `RESTRICT` y catorce de auditoría con
+`SET NULL`—, ocho flujos de extremo a extremo y
+cuatro pantallas nuevas más el panel y la pestaña *Cuenta* de la ficha del cliente.
+
+Detalle en [docs/TASKS/A03.md](TASKS/A03.md).
+
+No entregado, y fuera de alcance por diseño: importación desde Excel, planillas,
+exportación a PDF, facturación electrónica, automatización recurrente,
+pasarelas de pago, portal, asistente de IA y MCP.
 
 ### A04 — Importación y normalización de Excel, reconstrucción de historial
 

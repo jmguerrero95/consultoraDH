@@ -59,4 +59,29 @@ enum AuditAction: string
     case SocialSecurityEntityCreated = 'social_security_entity.created';
     case SocialSecurityEntityUpdated = 'social_security_entity.updated';
     case SocialSecurityEntityDeactivated = 'social_security_entity.deactivated';
+
+    // --- A03: monthly periods ------------------------------------------
+    case PeriodCreated = 'period.created';
+    case PeriodClosed = 'period.closed';
+    case PeriodReopened = 'period.reopened';
+
+    // --- A03: cutoff configuration -------------------------------------
+    case CutoffRuleCreated = 'cutoff_rule.created';
+    case CutoffRuleUpdated = 'cutoff_rule.updated';
+
+    // --- A03: monthly rates --------------------------------------------
+    case RateCreated = 'rate.created';
+    case RateUpdated = 'rate.updated';
+
+    // --- A03: obligations and adjustments ------------------------------
+    case ObligationGenerated = 'obligation.generated';
+    case ObligationAdjusted = 'obligation.adjusted';
+    case ObligationAdjustmentReversed = 'obligation.adjustment_reversed';
+
+    // --- A03: payments and allocations ---------------------------------
+    case PaymentCreated = 'payment.created';
+    case PaymentAllocated = 'payment.allocated';
+    case PaymentAllocationReversed = 'payment.allocation_reversed';
+    case PaymentAutoAllocated = 'payment.auto_allocated';
+    case PaymentVoided = 'payment.voided';
 }

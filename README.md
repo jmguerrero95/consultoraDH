@@ -184,6 +184,21 @@ corrigen representación y restricciones sin reescribir las anteriores: el NIT s
 separa en número y dígito de verificación, y el correo de contacto y el código del
 catálogo dejan de ser únicos porque no identifican a nadie.
 
+Las migraciones de A03 crean el dominio financiero: `monthly_periods`,
+`cutoff_rules`, `client_company_rates`, `monthly_obligations`,
+`obligation_adjustments`, `payments` y `payment_allocations`. Los importes son
+enteros de pesos en `BIGINT` y **ningún saldo se guarda**: lo que se factura es la
+instantánea que escribió la generación más los ajustes, y lo que se pagó son las
+aplicaciones vivas de pagos no anulados. Un pago registrado sin aplicar es un
+anticipo —dinero que la empresa tiene y todavía no ha confrontedado con una
+deuda—, no un error, y la cartera lo cuenta como crédito.
+
+La configuración (fecha de corte y valor) tiene **vigencia, no estado**: un mes se
+factura con la regla y el valor que estaban en vigor al inicio de ese mes, y la
+obligación guarda la referencia a la fila que produjo el importe. Si falta la
+configuración de una relación, la generación no escribe nada y dice qué falta: el
+sistema no supone cantidades que nadie acordó.
+
 Las relaciones con empresas y las afiliaciones se guardan como periodos
 históricos: cerrar o cambiar una relación **marca la fila anterior con su fecha de
 fin y crea una fila nueva**. Por eso no hay borrados en esas dos tablas, y por eso
@@ -273,12 +288,13 @@ consultora-dh/
 └── tests/
     ├── e2e/              # Playwright: flujos de extremo a extremo
     ├── Feature/A02/      # Pest: clientes, empresas, afiliaciones, permisos
+    ├── Feature/A03/      # Pest: periodos, obligaciones, ajustes, pagos, cartera
     └── frontend/         # Vitest: composables, campos de formulario, páginas
 ```
 
 ### 9.1 Los cuatro flujos de A02 en las pruebas
 
-`scripts/run-e2e.sh` crea **dos** cuentas temporales con contraseñas aleatorias y
+`scripts/run-e2e.sh` crea **tres** cuentas temporales con contraseñas aleatorias y
 las elimina al terminar:
 
 | Flujo | Qué demuestra |
@@ -290,6 +306,23 @@ las elimina al terminar:
 
 El cuarto flujo necesita dos cuentas a propósito: un administrador no puede
 demostrar que una petición sin permiso es rechazada.
+
+### 9.2 Los ocho flujos de A03 en las pruebas
+
+| Flujo | Qué demuestra |
+| --- | --- |
+| A. Configuración y apertura | Una fecha de corte y un valor, y el mes abierto sin generar nada |
+| B. Generación | La previsualización antes de escribir, y que escribir exactamente eso |
+| C. Bloqueo | Sin configuración no se genera nada, y el diálogo nombra la relación y lo que falta |
+| D. Anticipo | Un pago registrado sin aplicar se muestra como dinero tenido, no como error, y no altera el saldo |
+| E. Más antiguo primero | Un pago cubre el mes más antiguo y el siguiente, y los saldos siguen |
+| F. Corrección | Un ajuste con motivo suma al importe generado sin tocar la instantánea |
+| G. Anulación | Anular un pago devuelve todos los saldos y conserva las aplicaciones |
+| H. Cierre y permisos | Cerrar y reabrir con motivo, y Collections no puede decidir lo que se factura |
+
+Cada flujo crea su propia empresa, cliente, relación y valor, con la relación
+**acotada a su propio mes**, y ninguna aserción depende de la posición de una
+fila ni de un nombre de mes escrito en el archivo de pruebas.
 ```
 
 ## 10. Detener el entorno
@@ -335,6 +368,7 @@ Los detalles y la lista completa están en [docs/SECURITY.md](docs/SECURITY.md).
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Plan de A02 a A15 |
 | [docs/TASKS/A01.md](docs/TASKS/A01.md) | Qué se entregó en A01 |
 | [docs/TASKS/A02.md](docs/TASKS/A02.md) | Clientes, empresas, afiliaciones e historial |
+| [docs/TASKS/A03.md](docs/TASKS/A03.md) | Periodos, obligaciones, ajustes, pagos y cartera |
 
 ## 13. Licencia
 

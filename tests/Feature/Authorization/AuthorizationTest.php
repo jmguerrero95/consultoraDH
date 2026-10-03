@@ -97,7 +97,8 @@ it('creates no permission ahead of the module that enforces it', function (): vo
     // closed if somebody typed a permission name wrongly.
     expect(array_diff($guarded, $declared))->toBe([]);
 
-    // And the catalogue holds nothing that is neither A01's nor A02's.
+    // And the catalogue holds nothing that belongs to no module at all: A01's
+    // settings, A02's directory, and A03's financial permissions.
     $expected = ['settings.view'];
     $expected = array_merge($expected, [
         'clients.view', 'clients.create', 'clients.update', 'clients.change_status',
@@ -105,6 +106,14 @@ it('creates no permission ahead of the module that enforces it', function (): vo
         'relationships.view', 'relationships.manage',
         'affiliations.view', 'affiliations.manage',
         'social_security_entities.view', 'social_security_entities.manage',
+    ]);
+    $expected = array_merge($expected, [
+        'periods.view', 'periods.create', 'periods.close', 'periods.reopen',
+        'cutoffs.view', 'cutoffs.manage',
+        'rates.view', 'rates.manage',
+        'obligations.view', 'obligations.generate', 'obligations.adjust',
+        'payments.view', 'payments.create', 'payments.allocate', 'payments.void',
+        'receivables.view',
     ]);
 
     expect($declared)->toEqualCanonicalizing($expected);

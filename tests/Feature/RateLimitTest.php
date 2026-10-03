@@ -320,6 +320,28 @@ it('enforces the API limiter at runtime', function (): void {
     expect($statuses)->toContain(429);
 });
 
+it('reads the general API budget from the environment, and defaults to the documented figure', function (): void {
+    // The budget is configurable so the end to end suite can raise it for itself: the
+    // A03 flows walk a whole financial month end to end, which is a few hundred
+    // requests in a couple of minutes, and the production budget refuses that on
+    // purpose. Nothing else raises it, and these two tests are what stop that from
+    // quietly becoming the normal figure.
+    expect(env('API_RATE_LIMIT_PER_MINUTE'))->toBeNull();
+
+    $budget = RateLimiter::limiter('api');
+
+    expect($budget)->not->toBeNull();
+
+    // The default, read straight out of the example environment file rather than
+    // repeated here, so the two cannot drift apart.
+    $documented = (string) (preg_match(
+        '/^API_RATE_LIMIT_PER_MINUTE=(\d+)$/m',
+        (string) file_get_contents(base_path('.env.example')),
+        $matches) === 1 ? $matches[1] : '');
+
+    expect($documented)->toBe('120');
+});
+
 it('does not let the authentication limiters affect a session at all', function (): void {
     // Signing in spends one attempt; the rest of the session must be unlimited
     // by the authentication policies.

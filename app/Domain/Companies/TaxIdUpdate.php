@@ -127,16 +127,19 @@ final class TaxIdUpdate
      * An explicit null clears it, which is how a caller says "this value is empty"
      * rather than "I did not mean to mention it".
      */
+    /**
+     * The digit as it will be stored, or null when none was sent.
+     *
+     * Null means "not sent" and is different from `null` meaning "clear it": the
+     * caller below decides between them by whether the key was present at all.
+     *
+     * An integer digit is canonicalised rather than discarded. It has already been
+     * checked by `TaxIdParts::requireSingleDigit` a few lines above, so anything
+     * reaching here is a valid digit and the only question is its type — and reading
+     * it with an `is_string` test would answer "absent" for a `7`.
+     */
     private static function digitSeparate(mixed $raw): ?string
     {
-        if ($raw === null) {
-            return null;
-        }
-
-        if (! is_string($raw) || trim($raw) === '') {
-            return null;
-        }
-
-        return trim($raw);
+        return TaxIdParts::normaliseSingleDigit($raw);
     }
 }

@@ -55,6 +55,33 @@ final class SchemaConstraint
     public const ASSIGNMENT_OPEN_PER_COMPANY = 'assignments_one_open_client_company_unique';
 
     /**
+     * One monthly obligation per client and company per period.
+     *
+     * This is what makes generation idempotent at the database level rather than only
+     * in the domain: two requests that somehow interleaved would have the second
+     * refused here instead of duplicating the economic fact.
+     */
+    public const OBLIGATION_PERIOD_CLIENT_COMPANY = 'monthly_obligations_period_client_company_unique';
+
+    /**
+     * One live allocation of a payment to an obligation.
+     *
+     * Partial: a reversed allocation is kept, and the pair is free again so a
+     * corrected allocation can be written without deleting the original.
+     */
+    public const ALLOCATION_LIVE_PAIR = 'payment_allocations_live_pair_unique';
+
+    /** One cutoff rule per scope per identifiers per effective month. */
+    public const CUTOFF_RULE_GENERAL_MONTH = 'cutoff_rules_general_month_unique';
+
+    public const CUTOFF_RULE_COMPANY_MONTH = 'cutoff_rules_company_month_unique';
+
+    public const CUTOFF_RULE_CLIENT_MONTH = 'cutoff_rules_client_month_unique';
+
+    /** One rate per client, per company, per effective month. */
+    public const RATE_CLIENT_COMPANY_MONTH = 'client_company_rates_client_company_month_unique';
+
+    /**
      * Every one of them, for the tests that assert the schema matches this list.
      *
      * @return list<string>
@@ -67,6 +94,15 @@ final class SchemaConstraint
             self::ENTITY_NAME_PER_TYPE,
             self::AFFILIATION_OPEN_PER_TYPE,
             self::ASSIGNMENT_OPEN_PER_COMPANY,
+
+            self::OBLIGATION_PERIOD_CLIENT_COMPANY,
+            self::ALLOCATION_LIVE_PAIR,
+
+            self::CUTOFF_RULE_GENERAL_MONTH,
+            self::CUTOFF_RULE_COMPANY_MONTH,
+            self::CUTOFF_RULE_CLIENT_MONTH,
+
+            self::RATE_CLIENT_COMPANY_MONTH,
         ];
     }
 }

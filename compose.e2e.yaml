@@ -66,6 +66,10 @@ services:
       # --- Identity. The host is the internal service name, because nothing is
       # published and the browser Playwright drives is inside the network.
       APP_URL: http://nginx-e2e
+      # The A03 flows walk a whole financial month end to end, which is a few hundred
+      # requests in a couple of minutes. The production budget refuses that on
+      # purpose; the suite raises it for itself and for nothing else.
+      API_RATE_LIMIT_PER_MINUTE: "2000"
       # Trusted for this test-only host. The development instance trusts
       # localhost; this one trusts the name it is actually reached by, and
       # nothing else. A wildcard here would make the trusted-host guard

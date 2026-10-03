@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api;
 use App\Domain\DataQuality\DataQualityCode;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\DataQuality\PortfolioMetrics;
+use App\Domain\Receivables\ReceivablesService;
 use App\Http\Controllers\Controller;
 use Illuminate\Contracts\Auth\Access\Authorizable;
 use Illuminate\Http\JsonResponse;
@@ -16,7 +17,8 @@ use Illuminate\Support\Facades\Redis;
 use Throwable;
 
 /**
- * The dashboard payload: infrastructure health plus the A02 portfolio counts.
+ * The dashboard payload: infrastructure health plus the A02 portfolio counts and
+ * the A03 financial position.
  *
  * Reports only facts that are safe to show to a signed in administrator:
  * connectivity, versions, and counts computed from the tables. It never exposes
@@ -33,6 +35,7 @@ final class DashboardController extends Controller
     public function __construct(
         private readonly PortfolioMetrics $metrics,
         private readonly DataQualityInspector $quality,
+        private readonly ReceivablesService $receivables,
     ) {}
 
     public function __invoke(Request $request): JsonResponse
@@ -159,7 +162,36 @@ final class DashboardController extends Controller
             ]);
         }
 
+        $this->addFinancialPosition($can, $portfolio);
+
         return $portfolio;
+    }
+
+    /**
+     * What the business owes and what it has collected.
+     *
+     * One call to the receivables service, so the figures on the dashboard are the
+     * same arithmetic as the figures on the cartera screen rather than a second,
+     * slightly different sum. Shown only to a role that may read the portfolio: a
+     * total owed is the most sensitive number on the system.
+     *
+     * @param  array<string, mixed>  $portfolio
+     */
+    private function addFinancialPosition(?object $can, array &$portfolio): void
+    {
+        if ($can === null || ! $can->can('receivables.view')) {
+            return;
+        }
+
+        $summary = $this->receivables->portfolioSummary();
+
+        $portfolio['financial'] = [
+            'outstanding_balance_cop' => $summary['outstanding_balance_cop'],
+            'overdue_balance_cop' => $summary['overdue_balance_cop'],
+            'total_paid_cop' => $summary['total_paid_cop'],
+            'clients_with_debt' => $summary['clients_with_debt'],
+            'payments_requiring_reconciliation' => $summary['payments_requiring_reconciliation'],
+        ];
     }
 
     /**

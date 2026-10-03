@@ -58,6 +58,20 @@ export interface PortfolioPayload {
     /** False when the user's role may not see the portfolio at all. */
     visible: boolean;
     counts?: PortfolioCounts;
+    /**
+     * A03: the financial position, beside the directory counts it belongs with.
+     *
+     * Optional because the server withholds it from a role that may not read the
+     * portfolio, exactly as it withholds the counts. An absent figure means withheld
+     * and is never drawn as a zero.
+     */
+    financial?: {
+        outstanding_balance_cop: number;
+        overdue_balance_cop: number;
+        total_paid_cop: number;
+        clients_with_debt: number;
+        payments_requiring_reconciliation: number;
+    };
     /** The per code figures behind the totals, filtered by the same permissions. */
     quality?: Record<string, number>;
     /** Only present with `relationships.view`. */
@@ -372,4 +386,376 @@ export interface ConflictPayload {
     open_affiliations_count?: number;
     active_clients_count?: number;
     errors?: FieldErrors;
+}
+
+// --- A03: periods, obligations, payments and receivables ---------------------
+//
+// Money is a whole number of pesos everywhere, on the wire and in the interface.
+// It is never a formatted string sent from the server and never a float: the value
+// that arrives is the value that is owed, and the formatting is this application's
+// business and nobody else's.
+
+export type PeriodStatus = 'open' | 'closed';
+
+/** Where an obligation's amount came from, for the interface to explain itself. */
+export type ObligationSource = 'generated' | 'manual' | 'imported';
+
+export type SettlementState = 'paid' | 'partial' | 'pending';
+
+export type AgingBucketKey =
+    | 'not_due'
+    | '1_30'
+    | '31_60'
+    | '61_90'
+    | 'over_90';
+
+export type TrafficLightKey = 'green' | 'yellow' | 'orange' | 'red';
+
+export type PaymentMethodKey = 'cash' | 'bank_transfer' | 'deposit' | 'other';
+
+export type ReconciliationStateKey =
+    | 'unallocated'
+    | 'partially_allocated'
+    | 'fully_allocated'
+    | 'voided';
+
+export type AdjustmentTypeKey = 'correction' | 'discount' | 'surcharge';
+
+export interface PeriodSummary {
+    id: number;
+    key: string;
+    label: string;
+    period_month: string;
+    starts_on: string;
+    ends_on_exclusive: string;
+    status: PeriodStatus;
+    status_label: string;
+    opened_at: string | null;
+    closed_at: string | null;
+    reopened_at: string | null;
+    last_reopen_reason: string | null;
+    generation_performed_at: string | null;
+    obligation_count: number;
+    total_base_cop: number;
+    total_effective_cop: number;
+    total_paid_cop: number;
+    total_balance_cop: number;
+    accepts_structural_change?: boolean;
+    accepts_financial_activity?: boolean;
+}
+
+export interface PeriodListPayload {
+    items: PeriodSummary[];
+    pagination: Pagination;
+    /** The period the system considers current, or null when none is open. */
+    current: PeriodSummary | null;
+}
+
+export interface ObligationTotals {
+    base_amount_cop: number;
+    adjustments_cop: number;
+    effective_amount_cop: number;
+    paid_amount_cop: number;
+    balance_cop: number;
+    settlement_state: SettlementState;
+    is_overdue: boolean;
+    days_late: number;
+    aging_bucket: AgingBucketKey;
+}
+
+export interface ObligationSummary extends ObligationTotals {
+    id: number;
+    period_id: number;
+    period_key?: string | null;
+    period_label?: string | null;
+    client_id: number;
+    client_name?: string | null;
+    company_id: number;
+    company_name?: string | null;
+    due_on: string | null;
+    source: ObligationSource;
+    source_label: string;
+    settlement_state_label?: string;
+    aging_bucket_label?: string;
+}
+
+export interface AdjustmentSummary {
+    id: number;
+    obligation_id: number;
+    type: AdjustmentTypeKey;
+    type_label: string;
+    delta_cop: number;
+    reason: string;
+    reverses_adjustment_id: number | null;
+    reversed_at: string | null;
+    reversed_by: number | null;
+    reversal_reason: string | null;
+    created_at: string;
+}
+
+export interface GenerationFinding {
+    code: string;
+    message: string;
+    context?: Record<string, unknown>;
+}
+
+export interface ObligationCandidate {
+    client_id: number;
+    company_id: number;
+    client_name: string | null;
+    company_name: string | null;
+    assignment_id: number;
+    /** The snapshot that would be written, and null when the configuration is missing. */
+    amount_cop: number | null;
+    /**
+     * The rule that resolved this candidate, and what it produced. Null `due_on`
+     * with `resolved: false` is how a missing cutoff says so.
+     */
+    cutoff: {
+        resolved: boolean;
+        due_on: string | null;
+        source: string | null;
+        source_label: string | null;
+        cutoff_rule_id: number | null;
+        cutoff_day: number | null;
+        month_offset: number | null;
+    };
+    rate_id: number | null;
+    already_exists: boolean;
+    will_be_created: boolean;
+    blockers: GenerationFinding[];
+}
+
+export interface GenerationPreview {
+    period: { key: string; label: string };
+    candidate_count: number;
+    creatable_count: number;
+    resolved_count: number;
+    blocker_count: number;
+    total_amount_cop: number;
+    /** False when at least one blocker stands: the month cannot be generated yet. */
+    can_generate: boolean;
+    candidates: ObligationCandidate[];
+    blockers: GenerationFinding[];
+    warnings: GenerationFinding[];
+}
+
+export interface GenerationPreviewPayload {
+    period: PeriodSummary;
+    preview: GenerationPreview;
+}
+
+export interface GenerationResultPayload {
+    message: string;
+    result: {
+        created: number;
+        skipped: number;
+        total_amount_cop: number;
+    };
+    period: PeriodSummary;
+}
+
+export interface PaymentSummary {
+    id: number;
+    client_id: number;
+    client_name: string | null;
+    amount_cop: number;
+    received_on: string | null;
+    method: PaymentMethodKey;
+    method_label: string;
+    reference: string | null;
+    notes: string | null;
+    allocated_amount_cop: number;
+    unallocated_amount_cop: number;
+    reconciliation_state: ReconciliationStateKey;
+    reconciliation_state_label: string;
+    requires_reconciliation: boolean;
+    is_voided: boolean;
+    voided_at: string | null;
+    void_reason: string | null;
+    allocations?: PaymentAllocationSummary[];
+}
+
+export interface PaymentAllocationSummary {
+    id: number;
+    payment_id: number;
+    obligation_id: number;
+    obligation_label?: string | null;
+    amount_cop: number;
+    reversed_at: string | null;
+    reversed_by: number | null;
+    reversal_reason: string | null;
+    created_at: string;
+}
+
+export interface PaymentListPayload {
+    items: PaymentSummary[];
+    pagination: Pagination;
+    filters?: Record<string, string | null>;
+}
+
+/** A payment that looks like one already recorded, offered for confirmation. */
+export interface PossibleDuplicate {
+    id: number;
+    amount_cop: number;
+    received_on: string | null;
+    reference: string | null;
+    method: PaymentMethodKey;
+}
+
+export interface DuplicateWarningPayload {
+    message: string;
+    code: 'possible_duplicate';
+    possible_duplicates: PossibleDuplicate[];
+}
+
+export interface AutoAllocationLine {
+    obligation_id: number;
+    period_key: string;
+    period_label: string | null;
+    due_on: string | null;
+    balance_cop: number;
+    /** How much of this obligation the payment would reach. */
+    would_apply_cop: number;
+}
+
+export interface AutoAllocationPlan {
+    payment_id: number;
+    available_cop: number;
+    would_apply_count: number;
+    would_apply_cop: number;
+    would_remain_unallocated_cop: number;
+    allocations: AutoAllocationLine[];
+}
+
+export interface ReceivableRow {
+    client_id: number;
+    full_name: string;
+    document_label: string;
+    company_names: string[];
+    balance_cop: number;
+    paid_amount_cop: number;
+    overdue_balance_cop: number;
+    open_obligations_count: number;
+    overdue_obligations_count: number;
+    owed_periods: string[];
+    oldest_due_on: string | null;
+    aging_bucket: AgingBucketKey;
+    traffic_light: TrafficLightKey;
+    traffic_light_label: string;
+    traffic_light_reason: string;
+}
+
+export interface ReceivablesTotals {
+    outstanding_balance_cop: number;
+    overdue_balance_cop: number;
+    total_effective_obligations_cop: number;
+    total_paid_cop: number;
+    clients_with_debt: number;
+    open_obligations_count: number;
+    overdue_obligations_count: number;
+    unallocated_credit_cop: number;
+    payments_requiring_reconciliation: number;
+}
+
+export interface ReceivablesListPayload {
+    items: ReceivableRow[];
+    summary: ReceivablesTotals;
+    total: number;
+    page: number;
+    per_page: number;
+    last_page: number;
+}
+
+export interface ClientAccountPayload {
+    client: {
+        id: number;
+        full_name: string;
+        document_label: string;
+    };
+    as_of: string;
+    summary: {
+        total_effective_obligations_cop: number;
+        total_paid_cop: number;
+        outstanding_balance_cop: number;
+        overdue_balance_cop: number;
+        unallocated_credit_cop: number;
+        open_obligations_count: number;
+        overdue_obligations_count: number;
+        owed_periods: string[];
+    };
+    obligations: Array<
+        ObligationSummary & {
+            aging_bucket: AgingBucketKey;
+            aging_bucket_label: string;
+            settlement_state_label: string;
+        }
+    >;
+}
+
+export interface CutoffRuleSummary {
+    id: number;
+    scope: 'general' | 'company' | 'client';
+    scope_label: string;
+    company_id: number | null;
+    company_name: string | null;
+    client_id: number | null;
+    client_name: string | null;
+    effective_month: string;
+    effective_month_label: string;
+    cutoff_day: number;
+    month_offset: number;
+    month_offset_label: string;
+    /** A worked example, so the rule can be checked without doing the arithmetic. */
+    example_due_on: string;
+    example_period: string;
+    notes: string | null;
+    /** A generated month already quotes this rule, so its day cannot change. */
+    in_use: boolean;
+}
+
+export interface CutoffRuleListPayload {
+    items: CutoffRuleSummary[];
+    pagination: Pagination;
+    scopes: VocabularyOption[];
+    offsets: VocabularyOption[];
+}
+
+export interface RateSummary {
+    id: number;
+    client_id: number;
+    client_name: string;
+    company_id: number;
+    company_name: string;
+    effective_month: string;
+    effective_month_label: string;
+    amount_cop: number;
+    notes: string | null;
+    /** A generated obligation already quotes this value, so it cannot change. */
+    in_use: boolean;
+}
+
+export interface RateListPayload {
+    items: RateSummary[];
+    pagination: Pagination;
+}
+
+export interface RateHistoryPayload {
+    client_id: number;
+    company_id: number;
+    current: RateSummary | null;
+    history: RateSummary[];
+}
+
+export interface VocabularyOption {
+    value: string;
+    label: string;
+}
+
+export interface BillingVocabularyPayload {
+    aging_buckets: VocabularyOption[];
+    traffic_lights: VocabularyOption[];
+    payment_methods: VocabularyOption[];
+    settlement_states: VocabularyOption[];
+    period_statuses: VocabularyOption[];
 }

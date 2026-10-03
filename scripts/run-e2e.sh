@@ -70,6 +70,10 @@ STAMP="$(date +%s | tail -c 8)"
 
 EMAIL="e2e@consultora-dh.test"
 READER_EMAIL="e2e-lectura@consultora-dh.test"
+# The third account holds Collections, which is the role that receives money. A03
+# needs it: it can create and apply payments but must not generate obligations,
+# and only two roles can show that a permission is enforced rather than hidden.
+COLLECTIONS_EMAIL="e2e-cartera@consultora-dh.test"
 
 # A random password that satisfies the shared policy by construction rather than
 # by luck: 18 random alphanumerics, plus one upper case letter, one lower case
@@ -87,6 +91,7 @@ random_password() {
 
 PASSWORD="$(random_password)"
 READER_PASSWORD="$(random_password)"
+COLLECTIONS_PASSWORD="$(random_password)"
 
 # --- The URL the suite talks to ---------------------------------------------
 #
@@ -114,8 +119,23 @@ development_fingerprint() {
 
 # --- Start the E2E stack -----------------------------------------------------
 
+# The database first. `app-e2e` migrates on start, so bringing it up against a
+# missing database produces a container that boots, fails, and reports itself as
+# healthy for a while. Ensuring it exists here means the failure, if there is one, is
+# this script's and it can be read in one line.
+echo "--- ensuring the end to end database exists"
+./scripts/ensure-e2e-db.sh
+
 echo "--- starting the end to end services"
-"${E2E_COMPOSE[@]}" up -d app-e2e nginx-e2e >/dev/null
+"${E2E_COMPOSE[@]}" up -d app-e2e nginx-e2e node >/dev/null
+
+# `node` runs the suite. Starting it here rather than assuming somebody already did
+# is the difference between "the suite runs" and "the suite runs on this machine".
+if ! "${E2E_COMPOSE[@]}" ps --status running node 2>/dev/null | grep -q node; then
+    echo "!!! The node service did not come up; it runs the suite." >&2
+    "${E2E_COMPOSE[@]}" logs --tail 40 node >&2 || true
+    exit 1
+fi
 
 echo "--- waiting for the end to end web server"
 for attempt in $(seq 1 60); do
@@ -166,11 +186,12 @@ echo "--- resetting the end to end database"
 
 # --- Provision the two accounts, inside the E2E database --------------------
 #
-# Two accounts, because the suite has to prove that authorisation is enforced by
+# Three accounts, because the suite has to prove that authorisation is enforced by
 # the server and not merely hidden in the interface. A single administrator can
 # show that a button is offered; it cannot show that a request without permission
-# is refused. The second account holds the Read Only role, which can read the
-# portfolio and change nothing.
+# is refused. The Read Only account reads the portfolio and changes nothing, and
+# the Collections account receives money while being refused the authority to
+# decide what is owed.
 
 echo "--- creating the temporary end to end accounts"
 "${E2E_COMPOSE[@]}" exec -T \
@@ -191,6 +212,15 @@ echo "--- creating the temporary end to end accounts"
         --role="Read Only" \
         --no-interaction
 
+"${E2E_COMPOSE[@]}" exec -T \
+    -e CONSULTORA_DH_ADMIN_PASSWORD="$COLLECTIONS_PASSWORD" \
+    -e CONSULTORA_DH_ADMIN_PASSWORD_CONFIRMATION="$COLLECTIONS_PASSWORD" \
+    app-e2e php artisan consultora-dh:create-admin \
+        --name="Cuenta E2E Cartera" \
+        --email="$COLLECTIONS_EMAIL" \
+        --role="Collections" \
+        --no-interaction
+
 # --- Install the browser on first run ----------------------------------------
 
 echo "--- installing the browser (first run only)"
@@ -204,6 +234,8 @@ echo "--- running the suite against $E2E_URL"
     -e E2E_PASSWORD="$PASSWORD" \
     -e E2E_READER_EMAIL="$READER_EMAIL" \
     -e E2E_READER_PASSWORD="$READER_PASSWORD" \
+    -e E2E_COLLECTIONS_EMAIL="$COLLECTIONS_EMAIL" \
+    -e E2E_COLLECTIONS_PASSWORD="$COLLECTIONS_PASSWORD" \
     -e E2E_STAMP="$STAMP" \
     -e E2E_URL="$E2E_URL" \
     -e APP_URL="$E2E_URL" \

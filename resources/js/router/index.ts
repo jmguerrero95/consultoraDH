@@ -153,6 +153,73 @@ const routes: RouteRecordRaw[] = [
                 meta: { title: 'Editar empresa', permission: 'companies.update' },
             },
             {
+                // The financial module. Ordered after the directory because a
+                // period, a payment and a debt all mean nothing without knowing who
+                // the client and the company are.
+                path: 'periods',
+                name: 'periods',
+                component: () => import('@/pages/periods/PeriodListPage.vue'),
+                meta: {
+                    title: 'Periodos',
+                    nav: { label: 'Periodos', icon: 'bi-calendar3', order: 30 },
+                    permission: 'periods.view',
+                },
+            },
+            {
+                path: 'periods/:id(\\d+)/obligations',
+                name: 'periods.obligations',
+                component: () => import('@/pages/periods/PeriodObligationsPage.vue'),
+                props: true,
+                meta: { title: 'Obligaciones del periodo', permission: 'obligations.view' },
+            },
+            {
+                path: 'payments',
+                name: 'payments',
+                component: () => import('@/pages/payments/PaymentListPage.vue'),
+                meta: {
+                    title: 'Pagos',
+                    nav: { label: 'Pagos', icon: 'bi-cash-coin', order: 40 },
+                    permission: 'payments.view',
+                },
+            },
+            {
+                path: 'receivables',
+                name: 'receivables',
+                component: () => import('@/pages/receivables/ReceivablesPage.vue'),
+                meta: {
+                    title: 'Cartera',
+                    nav: { label: 'Cartera', icon: 'bi-list-check', order: 50 },
+                    permission: 'receivables.view',
+                },
+            },
+            {
+                // Nested under the client rather than at the top level: a statement is
+                // about one person, and reaching it from the directory makes that
+                // obvious.
+                path: 'clients/:id(\\d+)/account',
+                name: 'clients.account',
+                component: () => import('@/pages/receivables/ClientAccountPage.vue'),
+                props: true,
+                meta: { title: 'Cuenta del cliente', permission: 'receivables.view' },
+            },
+            {
+                // Under Configuración, because a cutoff and a rate are configuration
+                // rather than financial activity: they decide what will be billed
+                // later, they do not record anything that has happened.
+                path: 'settings/billing',
+                name: 'billing-settings',
+                component: () => import('@/pages/settings/BillingSettingsPage.vue'),
+                meta: {
+                    title: 'Fechas de corte y valores',
+                    nav: {
+                        label: 'Fechas de corte y valores',
+                        icon: 'bi-sliders2-vertical',
+                        order: 89,
+                    },
+                    permission: 'cutoffs.view',
+                },
+            },
+            {
                 // Under Configuración, so the catalogue reads as reference data
                 // rather than as another top level module.
                 path: 'settings/social-security-entities',

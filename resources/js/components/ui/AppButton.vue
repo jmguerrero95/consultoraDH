@@ -18,6 +18,11 @@ import type { RouteLocationRaw } from 'vue-router';
 const props = withDefaults(
     defineProps<{
         variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
+        /**
+         * `sm` is for actions inside a table row, where a full size button makes the
+         * row taller than the data it describes.
+         */
+        size?: 'sm' | 'md';
         type?: 'button' | 'submit' | 'reset';
         busy?: boolean;
         block?: boolean;
@@ -31,6 +36,7 @@ const props = withDefaults(
     }>(),
     {
         variant: 'primary',
+        size: 'md',
         type: 'button',
         busy: false,
         block: false,
@@ -47,10 +53,10 @@ const classes = [
     'cdh-btn',
     `cdh-btn--${props.variant}`,
     { 'cdh-btn--block': props.block },
+    { 'cdh-btn--sm': props.size === 'sm' },
+    // Bootstrap's small sizing, which the design tokens already line up with.
     'btn',
-    props.variant === 'primary' && 'btn-sm',
-    props.variant === 'secondary' && 'btn-sm',
-    props.variant === 'danger' && 'btn-sm',
+    props.size === 'sm' && 'btn-sm',
 ];
 </script>
 

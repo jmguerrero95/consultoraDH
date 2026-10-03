@@ -69,8 +69,13 @@ final class TaxIdParts
         // command would ever pass through.
         self::requireSingleDigit($attributes['verification_digit'] ?? null);
 
-        $separate = $attributes['verification_digit'] ?? null;
-        $separate = is_string($separate) && trim($separate) !== '' ? trim($separate) : null;
+        // Canonicalised rather than merely checked. An integer 7 is a perfectly good
+        // verification digit, and the rule accepts it — but reading it back with an
+        // `is_string` test would then discard it and store null, so the request would
+        // report a digit it had just thrown away. The check above still happens
+        // first: normalisation is about the shape of a valid digit, never about
+        // quietly discarding an invalid one.
+        $separate = self::normaliseSingleDigit($attributes['verification_digit'] ?? null);
 
         if ($raw === '') {
             // A digit on its own identifies nothing. On create that is an error the
@@ -123,21 +128,55 @@ final class TaxIdParts
      */
     public static function requireSingleDigit(mixed $digit): void
     {
-        if ($digit === null) {
-            return;
-        }
-
-        if (is_int($digit) && $digit >= 0 && $digit <= 9) {
-            return;
-        }
-
-        if (is_string($digit) && preg_match('/^[0-9]$/', $digit) === 1) {
+        // Absent is not invalid: a form that was never filled in sends nothing, and a
+        // caller with no digit to correct is doing something legitimate. Only a value
+        // that is present and is not a digit is refused.
+        if ($digit === null || self::isSingleDigit($digit)) {
             return;
         }
 
         throw new InvalidVerificationDigit(
             is_scalar($digit) ? (string) $digit : gettype($digit)
         );
+    }
+
+    /**
+     * A verification digit in the one form this application stores.
+     *
+     * Always a string, always one character, or null when there is none. Callers that
+     * accept digits from a form, a JSON body, an import or an assistant all end up
+     * with the same value here, so nothing downstream has to ask what type it was
+     * given and nothing can quietly store null for a digit that was supplied.
+     */
+    public static function normaliseSingleDigit(mixed $digit): ?string
+    {
+        return self::isSingleDigit($digit) ? (string) $digit : null;
+    }
+
+    /**
+     * Whether the value is a verification digit at all.
+     *
+     * Zero is a digit and is accepted; an empty string is not one and is treated as
+     * absent rather than refused, because a form that was never filled in sends one.
+     */
+    private static function isSingleDigit(mixed $digit): bool
+    {
+        if ($digit === null) {
+            return false;
+        }
+
+        if (is_int($digit)) {
+            return $digit >= 0 && $digit <= 9;
+        }
+
+        if (is_string($digit)) {
+            // Not trimmed: `' 3 '` is refused, exactly as it always was. A field
+            // padded with spaces is a paste, and silently accepting the paste would
+            // be a second way to store a digit nobody typed.
+            return preg_match('/^[0-9]$/', $digit) === 1;
+        }
+
+        return false;
     }
 
     /**

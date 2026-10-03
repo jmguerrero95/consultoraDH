@@ -70,14 +70,47 @@ it('gives operations everything except the catalogue writes and the status chang
         ->not->toContain('social_security_entities.manage');
 });
 
-it('gives collections only the three read permissions', function (): void {
+it('gives collections the reads and the money work, and nothing else', function (): void {
+    // Collections reads the debt and receives the money. What it must not do is
+    // decide how much is owed or change the calendar that produces the debt: writing
+    // an obligation or reopening a closed month is a different kind of authority from
+    // collecting what is already owed.
     expect(Role::findByName('Collections', 'web')->permissions->pluck('name')->sort()->values()->all())
-        ->toBe(['clients.view', 'companies.view', 'relationships.view']);
+        ->toBe([
+            'clients.view',
+            'companies.view',
+            'obligations.view',
+            'payments.allocate',
+            'payments.create',
+            'payments.view',
+            'payments.void',
+            'periods.view',
+            'receivables.view',
+            'relationships.view',
+        ])
+        ->not->toContain('obligations.generate')
+        ->not->toContain('obligations.adjust')
+        ->not->toContain('periods.close')
+        ->not->toContain('periods.reopen')
+        ->not->toContain('rates.manage');
 });
 
 it('gives support reads including affiliations but no writes', function (): void {
+    // Support answers questions about a client's situation. It never changes one, in
+    // the directory or in the money.
     expect(Role::findByName('Support', 'web')->permissions->pluck('name')->sort()->values()->all())
-        ->toBe(['affiliations.view', 'clients.view', 'companies.view', 'relationships.view']);
+        ->toBe([
+            'affiliations.view',
+            'clients.view',
+            'companies.view',
+            'obligations.view',
+            'payments.view',
+            'periods.view',
+            'receivables.view',
+            'relationships.view',
+        ])
+        ->not->toContain('payments.create')
+        ->not->toContain('obligations.adjust');
 });
 
 it('gives read only every view permission and nothing else', function (): void {

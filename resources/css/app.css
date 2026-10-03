@@ -392,6 +392,11 @@ pre {
 }
 
 /* --- Buttons ---------------------------------------------------------------- */
+.cdh-btn--sm {
+    padding: var(--cdh-space-1) var(--cdh-space-3);
+    font-size: var(--cdh-font-size-xs);
+}
+
 .cdh-btn {
     --bs-btn-focus-box-shadow: var(--cdh-focus-ring);
     display: inline-flex;
@@ -798,6 +803,15 @@ pre {
     background: var(--cdh-surface);
     border-radius: var(--cdh-radius-lg);
     box-shadow: var(--cdh-shadow-lg);
+}
+
+/*
+ * For a dialog whose content is a table. A preview listing every relationship of a
+ * month in a 28rem box would either scroll sideways or hide columns, and both make
+ * the reader trust the summary more than the rows.
+ */
+.cdh-modal--wide {
+    width: min(64rem, 100%);
 }
 
 .cdh-modal__header {

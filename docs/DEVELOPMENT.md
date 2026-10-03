@@ -325,18 +325,33 @@ base de pruebas end to end.
 > hubiera fallado. A03 añade periodos, pagos y registros financieros: es
 > justamente el tipo de dato que no debe adivinarse.
 >
-> Ahora `run-e2e.sh` levanta `app-e2e` y `nginx-e2e` (que **no** publica ningún
-> puerto), reinicia `consultora_dh_e2e` con `scripts/reset-e2e-db.sh`, crea las
-> cuentas ahí y mide el estado de desarrollo antes y después para demostrar que
-> no cambió. No hay ningún paso de borrado de datos de negocio, porque no hay
-> nada que borrar.
+> Ahora `run-e2e.sh` se encarga de lo que antes se daba por hecho: llama a
+> `scripts/ensure-e2e-db.sh` para que la base exista **antes** de levantar
+> `app-e2e` (un contenedor que arranca contra una base inexistente se levanta,
+> falla y durante un rato parece sano), levanta `app-e2e`, `nginx-e2e` —que **no**
+> publica ningún puerto— y `node`, que es quien ejecuta la suite. Reinicia
+> `consultora_dh_e2e` con `scripts/reset-e2e-db.sh`, crea las cuentas ahí y mide
+> el estado de desarrollo antes y después para demostrar que no cambió. No hay
+> ningún paso de borrado de datos de negocio, porque no hay nada que borrar.
+>
+> El límite general de peticiones de la API es de 120 por minuto y por cuenta. Los
+> flujos de A03 recorren un mes financiero completo, que son cientos de peticiones
+> en un par de minutos, así que **sólo** `compose.e2e.yaml` lo sube a 2000.
+> Producción y desarrollo siguen en 120, y ninguno de los dos fija la variable
+> `API_RATE_LIMIT_PER_MINUTE`.
 
 Para levantar o detener solo el entorno end to end:
 
 ```bash
-docker compose -f compose.yaml -f compose.e2e.yaml up -d app-e2e nginx-e2e
+docker compose -f compose.yaml -f compose.e2e.yaml up -d app-e2e nginx-e2e node
 docker compose -f compose.yaml -f compose.e2e.yaml down
 ```
+
+`scripts/ensure-e2e-db.sh` valida los identificadores antes de interpolarlos
+en el SQL administrativo: una base llamada
+`consultora_dh_e2e"; DROP DATABASE postgres; --` se rechaza antes de
+ejecutarse. El mismo script es el que `run-e2e.sh` llama antes de levantar
+`app-e2e`.
 
 Si la base `consultora_dh_e2e` todavía no existe (por ejemplo, en una
 instalación anterior a este cambio), créela una sola vez con:
