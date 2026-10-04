@@ -9,6 +9,7 @@ use App\Models\Company;
 use App\Models\MonthlyObligation;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
+use Illuminate\Support\Facades\DB;
 
 /**
  * A03-R1 §13, §14 and §15: the payment application model.
@@ -90,6 +91,111 @@ it('reverses only the second instalment and leaves the first applied', function 
     // And the balances reflect exactly that one row.
     expect($obligation->refresh()->balance())->toBe(120000)
         ->and($payment->refresh()->unallocatedAmount())->toBe(220000);
+});
+
+/**
+ * §8: the cost of drawing the payment after a reversal.
+ *
+ * The reversal response publishes the whole payment, allocations and all — the same `describe()`
+ * call `show`, `store`, `allocate` and `void` make. Four of those five went through
+ * `loadForDetail()`; the reversal did not, so the client and every allocation's obligation
+ * graph — period, client, company — arrived unloaded and `describe()`'s fallbacks fetched them
+ * one at a time. Ten allocations cost forty extra queries to reverse one of them.
+ *
+ * ## What is asserted, and why not a number
+ *
+ * Not "at most N queries" but "the same number of queries for two allocations as for ten".
+ * The absolute count moves whenever anything unrelated changes — the audit write, a lock, a
+ * route binding — and a test that has to be re-tuned after every such change stops being read
+ * and starts being adjusted. The property that was actually broken is that the cost followed
+ * the number of allocations, and only the comparison catches that.
+ */
+function a03_reversalQueryCount(): callable
+{
+    // `$test` rather than `$this`: a closure returned from a plain function is not bound to
+    // the test case, so `$this` is not in scope inside it.
+    return function (object $test, int $howMany): int {
+        $employer = a03_employer();
+        $payment = a03_payablePayment(900000, $employer);
+        $payments = app(ManagePayments::class);
+
+        $allocations = collect(range(1, $howMany))->map(fn (int $index) => $payments->allocate(
+            $payment,
+            a03_payable(50000, sprintf('2026-%02d', $index), $employer),
+            50000,
+            actingAsRole(),
+        ));
+
+        $reversed = $allocations->last();
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+
+        try {
+            $test->postJson("/api/payment-allocations/{$reversed->id}/reverse", [
+                'reason' => 'Se aplicó de más a esta cuota.',
+                'confirm' => true,
+            ])->assertOk();
+
+            return count(DB::getQueryLog());
+        } finally {
+            DB::disableQueryLog();
+        }
+    };
+}
+
+it('costs the same to draw a payment with two allocations as with ten', function (): void {
+    $this->actingAs(userWithPermissions(['payments.view', 'payments.allocate']));
+
+    // The first request in a test pays for loading the user's roles and permissions, which
+    // has nothing to do with the endpoint. Spend it once so both counts are the endpoint's
+    // own work, and the comparison is like for like.
+    $this->getJson('/api/payments')->assertOk();
+
+    $count = a03_reversalQueryCount();
+
+    expect($count($this, 2))->toBe($count($this, 10));
+});
+
+it('reports a reversed allocation as such, and keeps the payment it came from', function (): void {
+    $employer = a03_employer();
+    $payment = a03_payablePayment(900000, $employer);
+    $payments = app(ManagePayments::class);
+
+    $allocations = collect(range(1, 10))->map(function (int $index) use ($employer, $payments, $payment) {
+        return $payments->allocate(
+            $payment,
+            a03_payable(50000, sprintf('2026-%02d', $index), $employer),
+            50000,
+            actingAsRole(),
+        );
+    });
+
+    $reversed = $allocations->last();
+
+    $response = $this->actingAs(userWithPermissions(['payments.view', 'payments.allocate']))
+        ->postJson("/api/payment-allocations/{$reversed->id}/reverse", [
+            'reason' => 'Se aplicó de más a esta cuota.',
+            'confirm' => true,
+        ])->assertOk();
+
+    // The answer is right, not just cheap: the reversal is reported, and the payment still
+    // carries the other nine applications with the money that is no longer applied.
+    expect($response->json('allocation.id'))->toBe($reversed->id)
+        ->and($response->json('allocation.reversed_at'))->not->toBeNull()
+        ->and($response->json('allocation.reversal_reason'))->toBe('Se aplicó de más a esta cuota.')
+        ->and($response->json('payment.allocations'))->toHaveCount(10);
+
+    $row = collect($response->json('payment.allocations'))
+        ->firstWhere('id', $reversed->id);
+
+    expect($row['is_reversed'])->toBeTrue()
+        ->and($row['is_active'])->toBeFalse()
+        // Both states, so the history still shows the row (§17).
+        ->and($row)->toHaveKeys(['reversed_at', 'reversed_by', 'reversal_reason'])
+        // And the money: one allocation of 50 000 is no longer applied.
+        ->and($response->json('payment.allocated_amount_cop'))->toBe(9 * 50000)
+        ->and($response->json('payment.unallocated_amount_cop'))->toBe(900000 - 9 * 50000);
 });
 
 it('never lets live allocations exceed the payment', function (): void {

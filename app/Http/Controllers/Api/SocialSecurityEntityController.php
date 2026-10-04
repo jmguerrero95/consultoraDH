@@ -14,6 +14,7 @@ use App\Http\Resources\SocialSecurityEntityResource;
 use App\Models\SocialSecurityEntity;
 use App\Support\Database\SchemaConstraint;
 use App\Support\Database\UniqueViolation;
+use App\Support\Validation\SafeSearch;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -50,8 +51,8 @@ final class SocialSecurityEntityController extends Controller
 
         if ($pattern !== null) {
             $query->where(function ($q) use ($pattern): void {
-                $q->whereRaw("lower(name) LIKE ? ESCAPE '\\'", [$pattern])
-                    ->orWhereRaw("lower(coalesce(code, '')) LIKE ? ESCAPE '\\'", [$pattern]);
+                $q->whereRaw(SafeSearch::match('name'), [$pattern])
+                    ->orWhereRaw(SafeSearch::match("coalesce(code, '')"), [$pattern]);
             });
         }
 

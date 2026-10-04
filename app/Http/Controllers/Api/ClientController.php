@@ -40,6 +40,7 @@ use App\Models\Company;
 use App\Models\SocialSecurityEntity;
 use App\Support\Database\SchemaConstraint;
 use App\Support\Database\UniqueViolation;
+use App\Support\Validation\SafeSearch;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -96,16 +97,21 @@ final class ClientController extends Controller
             $compact = mb_strtolower(str_replace(['.', ' ', '-'], '', $needle));
             $compactPattern = $compact === mb_strtolower($needle)
                 ? null
-                : '%'.str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $compact).'%';
+                : SafeSearch::likeNeedle($compact);
 
             $query->where(function ($q) use ($pattern, $compactPattern): void {
                 // Every column an administrator would look somebody up by.
                 foreach (['document_number', 'first_names', 'last_names', 'email', 'phone'] as $column) {
-                    $q->orWhereRaw("lower({$column}) LIKE ? ESCAPE '\\'", [$pattern]);
+                    $q->orWhereRaw(SafeSearch::match($column), [$pattern]);
                 }
 
+                // And the whole name at once, which no single column contains. Without
+                // this, "Ana María Gómez" finds nobody — and this search is how the
+                // billing screen picks the client a rule is about.
+                $q->orWhereRaw(SafeSearch::fullNameMatch('first_names', 'last_names'), [$pattern]);
+
                 if ($compactPattern !== null) {
-                    $q->orWhereRaw("lower(document_number) LIKE ? ESCAPE '\\'", [$compactPattern]);
+                    $q->orWhereRaw(SafeSearch::match('document_number'), [$compactPattern]);
                 }
             });
         }
@@ -329,17 +335,23 @@ final class ClientController extends Controller
      */
     public function companyOptions(Request $request): JsonResponse
     {
-        // Folded for the same reason `ListQueryRequest::searchPattern()` folds it:
-        // the columns are compared through `lower()`, so an unfolded term would
-        // never match. "Paralela B" typed into the picker found nothing for
-        // exactly that reason.
-        $pattern = $this->escape($request->query('search'));
-        $pattern = $pattern === null ? null : '%'.mb_strtolower($pattern).'%';
+        // The pattern is built by `SafeSearch`, as in every other search, because this
+        // picker searches the same names through its own code path and used to fold them
+        // differently. "Paralela B" typed into the picker found nothing for exactly that
+        // reason: the term went into `lower(...) LIKE '%Paralela B%'` unfolded, so it could
+        // only ever match something already stored in lower case.
+        //
+        // The raw term, not a pre-escaped one: `SafeSearch::likeNeedle()` escapes, and
+        // escaping twice turns `a_b` into a pattern that matches nothing.
+        $pattern = $request->query('search');
+        $pattern = ! is_string($pattern) || trim($pattern) === ''
+            ? null
+            : SafeSearch::likeNeedle($pattern);
 
         $companies = Company::query()
             ->when($pattern !== null, fn ($q) => $q->where(function ($q) use ($pattern): void {
-                $q->whereRaw("lower(legal_name) LIKE ? ESCAPE '\\'", [$pattern])
-                    ->orWhereRaw("lower(coalesce(trade_name, '')) LIKE ? ESCAPE '\\'", [$pattern]);
+                $q->whereRaw(SafeSearch::match('legal_name'), [$pattern])
+                    ->orWhereRaw(SafeSearch::match("coalesce(trade_name, '')"), [$pattern]);
             }))
             ->orderBy('legal_name')
             // Inactive companies are not offered: linking to one is refused by
@@ -690,15 +702,6 @@ final class ClientController extends Controller
                 'document_number' => ['Ya existe un cliente registrado con ese tipo y número de documento.'],
             ],
         ], 422);
-    }
-
-    private function escape(?string $value): ?string
-    {
-        if ($value === null || trim($value) === '') {
-            return null;
-        }
-
-        return str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], trim($value));
     }
 
     /**

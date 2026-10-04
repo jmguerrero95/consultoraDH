@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use App\Domain\Billing\Actions\GeneratePeriodObligations;
+use App\Domain\Billing\BatchedConfigResolver;
 use App\Domain\Payments\Actions\ManagePayments;
+use App\Models\ClientCompanyRate;
 use App\Models\MonthlyObligation;
 use App\Models\MonthlyPeriod;
 use Illuminate\Support\Facades\DB;
@@ -245,6 +247,111 @@ it('does not cost more per candidate to preview a hundred than ten', function ()
     // its own cutoff rule. BatchedConfigResolver is why ten and a hundred cost the same.
     expect($large)->toBeLessThanOrEqual($small + 8);
 });
+/**
+ * §9: bounded by the pairs being billed, not by how long the rates have been corrected.
+ *
+ * `BatchedConfigResolver` says so in its own comment — "the rows returned are bounded by the
+ * number of distinct keys rather than by the length of the configuration history" — and the
+ * three cutoff queries did it with `DISTINCT ON`. `rates()` did not: it fetched every
+ * applicable rate for the pairs and kept the first row per key in PHP.
+ *
+ * The answer was right and the query count was the same, because the count is the same
+ * whichever rows come back. The rows are the difference: a client whose rate has been
+ * corrected every month for four years contributes forty-eight rows to answer a question
+ * about one month, and the portfolio's preview pays for all of them.
+ *
+ * The assertion is on the rows the database returns, not on the query count, because the
+ * query count cannot see this defect at all — it is one query either way. Asserting the
+ * bound directly is what makes it a regression test rather than a comment.
+ */
+it('returns one rate row per pair however long the history behind it is', function (): void {
+    $employer = a03_employerFor('historia-corta');
+
+    // `a03_employer()` has already created one rate, effective 2024-01 and still in force
+    // for every month since. That is the "one decision" case.
+    $month = App\Domain\Periods\MonthlyPeriod::fromKey('2026-10');
+    $key = $employer['client']->id.':'.$employer['company']->id;
+
+    $returned = fn (): array => (new BatchedConfigResolver)->rates(
+        [[$employer['client']->id, $employer['company']->id]],
+        $month,
+    );
+
+    $one = $returned();
+
+    expect($one)->toHaveCount(1)
+        ->and($one[$key]->amount_cop)->toBe(235000);
+
+    // The same pair, corrected every month from 2024-02 to 2026-10: forty-seven more
+    // decisions, of which exactly one answers "what does 2026-10 bill at".
+    a03_seedRateHistory($employer, fromKey: '2024-02', months: 47, amountCop: 250000);
+
+    $history = $returned();
+
+    // Still one row — and the newest, because that is the decision in force for 2026-10.
+    expect($history)->toHaveCount(1)
+        ->and($history[$key]->amount_cop)->toBe(250000)
+        // The same key, because the shape of the answer did not change either.
+        ->and(array_keys($history))->toBe([$key]);
+
+    // And the table really does hold the history this is refusing to read: forty-eight rows
+    // plus the original, so the test would pass for the wrong reason if the seeding quietly
+    // overwrote instead of inserting.
+    expect(ClientCompanyRate::query()
+        ->where('client_id', $employer['client']->id)
+        ->where('company_id', $employer['company']->id)
+        ->count())->toBe(48);
+});
+
+/**
+ * Seed `$months` consecutive rate decisions for one pair, starting at `$fromKey`.
+ *
+ * Consecutive months, because the unique index is on `(client, company, month)` — a history
+ * has to be months that do not collide with each other.
+ *
+ * The start is a parameter rather than computed from the end because `a03_employer()` has
+ * already created one rate at 2024-01, and a helper that guessed would collide with it.
+ */
+function a03_seedRateHistory(array $employer, string $fromKey, int $months, int $amountCop): void
+{
+    $first = App\Domain\Periods\MonthlyPeriod::fromKey($fromKey)->startsOn();
+
+    foreach (range(0, $months - 1) as $offset) {
+        ClientCompanyRate::query()->create([
+            'client_id' => $employer['client']->id,
+            'company_id' => $employer['company']->id,
+            'effective_month' => $first->copy()->addMonthsNoOverflow($offset)->toDateString(),
+            'amount_cop' => $amountCop,
+        ]);
+    }
+}
+
+it('does not cost more to preview a month whose rates were corrected for years', function (): void {
+    $employers = collect(range(1, 8))->map(fn (int $i) => a03_employerFor("historial-{$i}"));
+
+    $period = a03_openPeriod('2026-11');
+
+    $this->actingAs(userWithPermissions(['obligations.view', 'obligations.generate']));
+    $this->postJson("/api/periods/{$period->id}/obligations/preview")->assertOk();
+
+    $before = a03_queries(fn () => $this->postJson(
+        "/api/periods/{$period->id}/obligations/preview",
+    )->assertOk());
+
+    // Three years of corrections on the same eight pairs: 288 rate rows behind them.
+    foreach ($employers as $employer) {
+        a03_seedRateHistory($employer, fromKey: '2024-02', months: 35, amountCop: 250000);
+    }
+
+    $after = a03_queries(fn () => $this->postJson(
+        "/api/periods/{$period->id}/obligations/preview",
+    )->assertOk());
+
+    // The same number of queries — and, what the previous test actually proves, the same
+    // number of rows coming back from the one that matters.
+    expect($after)->toBe($before);
+});
+
 it('does not cost more per debt to auto-allocate fifty than five', function (): void {
     $payments = app(ManagePayments::class);
     $employer = a03_employerFor('auto-pequeno');

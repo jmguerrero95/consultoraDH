@@ -8,6 +8,7 @@ use App\Domain\Payments\Actions\ManagePayments;
 use App\Models\Client;
 use App\Models\Company;
 use App\Models\MonthlyObligation;
+use App\Models\MonthlyPeriod;
 use App\Models\ObligationAdjustment;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
@@ -111,6 +112,85 @@ it('hides a period\'s monetary figures from a calendar-only role', function (): 
         ->and($item)->toHaveKey('status')
         ->and($item)->toHaveKey('generation_performed_at');
 });
+
+/**
+ * §5. The two period endpoints that were not passing the gate.
+ *
+ * `index()` has always asked `maySeeMoney()`, and the tests above cover it. `current()` and
+ * `show()` did not: both called `summarise()` and left `withMoney` at its default of `true`,
+ * so `total_base_cop`, `total_effective_cop`, `total_paid_cop`, `total_balance_cop` and
+ * `obligation_count` came back to a role holding `periods.view` and nothing else.
+ *
+ * That is the same authority the list withholds, reached through a different door — and the
+ * door an operator actually uses, because the shell asks "which month is current" on load.
+ * The period list is a calendar; the amounts are somebody else's question.
+ */
+it('hides the figures from every period endpoint, not just the list', function (): void {
+    a03_payable(250000, '2026-10', a03_employer());
+
+    $period = MonthlyPeriod::query()->where('period_month', '2026-10-01')->firstOrFail();
+
+    $money = ['obligation_count', 'total_base_cop', 'total_effective_cop', 'total_paid_cop', 'total_balance_cop'];
+
+    // Authenticated once and then read three times: re-authenticating between requests
+    // starts a new session each time and the later requests come back 401, which is a
+    // property of the test client rather than of the endpoints.
+    $this->actingAs(a03_minimalUser(['periods.view'], 'periodos'));
+
+    // Every surface that publishes a period: the list, the current one, and one month.
+    $surfaces = [
+        'GET /api/periods' => fn (): array => $this->getJson('/api/periods')->assertOk()->json('items.0'),
+        'GET /api/periods/current' => fn (): array => $this->getJson('/api/periods/current')
+            ->assertOk()
+            ->json('current'),
+        "GET /api/periods/{$period->id}" => fn (): array => $this->getJson("/api/periods/{$period->id}")
+            ->assertOk()
+            ->json('period'),
+    ];
+
+    foreach ($surfaces as $surface => $read) {
+        $payload = $read();
+
+        expect($payload)->not->toBeNull($surface);
+
+        foreach ($money as $key) {
+            expect($payload, $surface.' → '.$key)->not->toHaveKey($key);
+        }
+
+        // The month's own state is still there: this permission is not useless, it is about
+        // the calendar rather than the money.
+        expect($payload, $surface)->toHaveKey('status')->toHaveKey('key');
+    }
+
+    // And the figures are not withheld from the roles that may have them. A separate
+    // example rather than a loop over both, because switching the authenticated user
+    // between requests in one example leaves the second call unauthenticated — the test
+    // client's session cookie belongs to the first.
+});
+
+it('publishes the figures to a role with obligations authority', function (string $permission): void {
+    a03_payable(250000, '2026-10', a03_employer());
+
+    $period = MonthlyPeriod::query()->where('period_month', '2026-10-01')->firstOrFail();
+
+    $money = ['obligation_count', 'total_base_cop', 'total_effective_cop', 'total_paid_cop', 'total_balance_cop'];
+
+    $with = $this->actingAs(a03_minimalUser(['periods.view', $permission], 'dinero-'.$permission))
+        ->getJson("/api/periods/{$period->id}")
+        ->assertOk()
+        ->json('period');
+
+    foreach ($money as $key) {
+        expect($with, $permission.' → '.$key)->toHaveKey($key);
+    }
+
+    // So the gate withholds the figures from the calendar-only role without taking them away
+    // from anybody: a missing key is not a zero.
+    expect($with['total_base_cop'])->toBe(250000)
+        ->and($with['obligation_count'])->toBe(1)
+        ->and($with['total_paid_cop'])->toBe(0)
+        ->and($with['total_balance_cop'])->toBe(250000);
+})->with(['obligations.view', 'obligations.generate']);
 
 it('omits the monetary keys for a calendar-only role without erroring', function (): void {
     a03_payable(250000, '2026-10', a03_employer());

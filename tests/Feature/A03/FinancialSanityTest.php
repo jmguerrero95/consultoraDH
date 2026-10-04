@@ -286,11 +286,34 @@ it('agrees with SQL on a portfolio of several clients and months', function (): 
         ->whereNull('py.voided_at')
         ->sum('pa.amount_cop');
 
-    $portfolio = app(ReceivablesService::class)->list([], 1, 50);
+    // §1. Every obligation here is settled, so the debtor-only default leaves an **empty**
+    // result — and a summary that followed the filter reads zero, which is the whole point of
+    // §1. Before it, the header quoted the whole portfolio beside a list of nothing, so
+    // "collected 2 115 000" sat above an empty screen. Both halves of that are asserted,
+    // because the mistake would be to fix only one of them.
+    $debtorsOnly = app(ReceivablesService::class)->list([], 1, 50);
 
-    // Nine obligations of 235 000, every one settled, so the portfolio owes nothing
-    // and collected 2 115 000.
     expect(MonthlyObligation::query()->count())->toBe(9)
         ->and($sqlTotalPaid)->toBe(9 * 235000)
-        ->and($portfolio['summary']['total_paid_cop'])->toBe($sqlTotalPaid);
+        // The rows and the summary describe the same (empty) question.
+        ->and($debtorsOnly['items'])->toBe([])
+        ->and($debtorsOnly['total'])->toBe(0)
+        ->and($debtorsOnly['summary']['clients_in_result'])->toBe(0)
+        ->and($debtorsOnly['summary']['total_paid_cop'])->toBe(0)
+        ->and($debtorsOnly['summary']['total_effective_obligations_cop'])->toBe(0);
+
+    // Ask about settled obligations too, and the same figures must agree with SQL. This is
+    // the assertion the test was written for: the service does not invent money.
+    $all = app(ReceivablesService::class)->list(['outstanding_only' => false], 1, 50);
+
+    expect($all['total'])->toBe(3)
+        ->and($all['summary']['clients_in_result'])->toBe(3)
+        ->and($all['summary']['total_effective_obligations_cop'])->toBe(9 * 235000)
+        ->and($all['summary']['total_paid_cop'])->toBe($sqlTotalPaid)
+        ->and($all['summary']['outstanding_balance_cop'])->toBe(0);
+
+    foreach ($all['items'] as $client) {
+        expect($client['paid_amount_cop'])->toBe(3 * 235000)
+            ->and($client['balance_cop'])->toBe(0);
+    }
 });

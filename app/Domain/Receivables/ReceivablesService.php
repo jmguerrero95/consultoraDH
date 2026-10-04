@@ -11,7 +11,6 @@ use App\Domain\Clients\DocumentNumber;
 use App\Domain\Clients\DocumentType;
 use App\Domain\Periods\MonthlyPeriod as MonthValue;
 use App\Models\Client;
-use App\Models\MonthlyPeriod;
 use App\Models\Payment;
 use App\Support\Validation\SafeSearch;
 use Illuminate\Database\Query\Builder as QueryBuilder;
@@ -224,12 +223,23 @@ final class ReceivablesService
             }
         }
 
+        // `MonthValue`, not the Eloquent model of the same short name: `parse()` lives on
+        // the domain value object, and asking the model for it was a 500 — so the period
+        // range filter had never worked, on either boundary.
         if (isset($filters['period_from'])) {
-            $obligations->where('obligations.period_month', '>=', MonthlyPeriod::parse((string) $filters['period_from'])->startsOn());
+            $obligations->where(
+                'obligations.period_month',
+                '>=',
+                MonthValue::parse((string) $filters['period_from'])->startsOn(),
+            );
         }
 
         if (isset($filters['period_to'])) {
-            $obligations->where('obligations.period_month', '<=', MonthlyPeriod::parse((string) $filters['period_to'])->startsOn());
+            $obligations->where(
+                'obligations.period_month',
+                '<=',
+                MonthValue::parse((string) $filters['period_to'])->startsOn(),
+            );
         }
 
         if (($filters['settlement_state'] ?? null) !== null) {
@@ -270,9 +280,15 @@ final class ReceivablesService
             $needle = SafeSearch::likeNeedle($filters['search']);
 
             $obligations->where(function (QueryBuilder $query) use ($needle): void {
-                $query->whereRaw('lower(obligations.first_names) LIKE ?'.$this->likeEscape(), [$needle])
-                    ->orWhereRaw('lower(obligations.last_names) LIKE ?'.$this->likeEscape(), [$needle])
-                    ->orWhereRaw('lower(obligations.document_number) LIKE ?'.$this->likeEscape(), [$needle]);
+                $query->whereRaw(SafeSearch::match('obligations.first_names'), [$needle])
+                    ->orWhereRaw(SafeSearch::match('obligations.last_names'), [$needle])
+                    ->orWhereRaw(SafeSearch::match('obligations.document_number'), [$needle])
+                    // And the whole name, which no single column contains. Searching a
+                    // portfolio by the name on it is the ordinary thing to do.
+                    ->orWhereRaw(
+                        SafeSearch::fullNameMatch('obligations.first_names', 'obligations.last_names'),
+                        [$needle],
+                    );
             });
         }
 
@@ -310,6 +326,12 @@ final class ReceivablesService
             }
         }
 
+        // The whole population, before any page is taken off it. §1: the header summary
+        // describes this population and not the page, so it must be captured before
+        // `forPage()` puts a `limit` on the builder — a summary computed from the page
+        // would answer a different question from the one the pager answers.
+        $population = clone $perClient;
+
         // §27 C and D. `total` counts the rows **after** every filter, including the ones
         // applied as `having` on the grouped query. Computed from the same grouped query, so
         // the header and the pager cannot disagree — which is what made the last page of a
@@ -337,7 +359,19 @@ final class ReceivablesService
             'page' => $page,
             'per_page' => $perPage,
             'last_page' => max(1, (int) ceil($total / $perPage)),
-            'summary' => $this->portfolioSummary($asOf),
+            // §1. The summary describes **the question being asked**, which is the same
+            // filtered population the rows and the pager describe.
+            //
+            // It used to be `portfolioSummary($asOf)`, an independent statement about every
+            // debtor in the system. So typing a name, choosing a semaphore band or ticking
+            // "only overdue" changed the table while the cards above it kept describing
+            // the whole portfolio — three cards and a count sitting on screen next to a
+            // list they did not describe, on the one screen whose whole purpose is to
+            // describe this list.
+            //
+            // Derived from the same grouped query as the rows, so the three cannot drift
+            // apart again: a filter that moved a row moves every figure with it.
+            'summary' => $this->filteredSummary($population),
             'applied_filters' => [
                 // Published so the screen can state which question it is answering. A header
                 // card that does not follow the filter is worse than no card.
@@ -365,6 +399,7 @@ final class ReceivablesService
         return $obligations
             ->selectRaw('obligations.client_id')
             ->selectRaw('obligations.first_names, obligations.last_names, obligations.document_type, obligations.document_number')
+            ->selectRaw('coalesce(sum(obligations.effective_amount_cop), 0) as effective_amount_cop')
             ->selectRaw('coalesce(sum(obligations.balance_cop), 0) as balance_cop')
             ->selectRaw('coalesce(sum(obligations.paid_amount_cop), 0) as paid_amount_cop')
             ->selectRaw('coalesce(sum(CASE WHEN '.$outstanding.' AND obligations.due_on < ? THEN obligations.balance_cop ELSE 0 END), 0) as overdue_balance_cop', [$asOf->format('Y-m-d')])
@@ -395,8 +430,11 @@ final class ReceivablesService
             ->selectRaw(
                 'json_agg(distinct obligations.company_id) filter (where '.$outstanding.') as company_ids',
             )
+            // §6, the same display name as the row. The `order by` repeats the expression
+            // because Postgres orders by the aggregate's *argument*; leaving it on
+            // `legal_name` would have sorted the column by a name the screen never shows.
             ->selectRaw(
-                'json_agg(distinct obligations.legal_name order by obligations.legal_name) '
+                'json_agg(distinct obligations.company_display_name order by obligations.company_display_name) '
                 ."filter (where {$outstanding}) as company_names",
             )
             ->groupBy(
@@ -451,6 +489,117 @@ final class ReceivablesService
             // The reason names **months**, which is what the light counts and what the label
             // in `TrafficLight` already says.
             'traffic_light_reason' => $light->meaning($overduePeriods),
+        ];
+    }
+
+    /**
+     * The header figures, for the population the rows describe.
+     *
+     * ## The contract
+     *
+     * A card that does not follow the filter is worse than no card. This used to be
+     * `portfolioSummary()` — an independent statement about the whole portfolio — so
+     * `search=Ana&traffic_light=yellow&overdue=true` changed the table and left the cards
+     * describing everybody. This method takes the **same grouped query** the rows and the
+     * pager come from, so the three cannot disagree:
+     *
+     *   * the debt figures are sums over the filtered rows;
+     *   * `clients_with_debt` counts the filtered rows that still owe something, which is
+     *     the same population `total` describes;
+     *   * the payment figures are scoped to *the clients that population contains*, because
+     *     "how much money are they holding in advance" is a question about people, not
+     *     about debts. Reporting the whole portfolio's unapplied credit beside a filtered
+     *     list would be the same mistake one card lower.
+     *
+     * ## Why it is two queries and not one
+     *
+     * The debt figures come from the filtered obligations; the payment figures come from
+     * `payments`, a different table with no row-level relationship to the filter. Joining
+     * them would multiply every obligation by every payment and make every sum wrong — the
+     * reason `obligationsQuery()` uses correlated subqueries in the first place. So the
+     * client population is handed over as a subquery, which is bounded: no loop over
+     * clients, no N+1, and two queries whatever the portfolio's size.
+     *
+     * @param  QueryBuilder  $perClient  the grouped, filtered query, before pagination
+     * @return array<string, int>
+     */
+    private function filteredSummary(QueryBuilder $perClient): array
+    {
+        $row = DB::query()->fromSub((clone $perClient), 'debtors')
+            ->selectRaw('coalesce(sum(debtors.effective_amount_cop), 0) as total_effective_cop')
+            ->selectRaw('coalesce(sum(debtors.paid_amount_cop), 0) as total_paid_cop')
+            ->selectRaw('coalesce(sum(debtors.balance_cop), 0) as outstanding_balance_cop')
+            ->selectRaw('coalesce(sum(debtors.overdue_balance_cop), 0) as overdue_balance_cop')
+            ->selectRaw('coalesce(sum(debtors.open_obligations_count), 0) as open_obligations_count')
+            ->selectRaw('coalesce(sum(debtors.overdue_obligations_count), 0) as overdue_obligations_count')
+            // §24: the same row count the light is not built from. Published under its own
+            // name precisely because it is a different number from the months.
+            ->selectRaw('coalesce(sum(debtors.overdue_periods_count), 0) as overdue_periods_count')
+            ->selectRaw('count(*) filter (where debtors.balance_cop > 0) as clients_with_debt')
+            ->selectRaw('count(*) as clients_in_result')
+            ->first();
+
+        $money = $this->filteredPaymentFigures($perClient);
+
+        return [
+            'total_effective_obligations_cop' => (int) $row->total_effective_cop,
+            // `applied` — money matched to an obligation. Not money received. §40: the
+            // dashboard labelled this "Recaudado", and a client who paid 300000 with
+            // nothing allocated read as "collected: 0" on the day the money arrived.
+            'total_applied_cop' => (int) $row->total_paid_cop,
+            'total_paid_cop' => (int) $row->total_paid_cop,
+            'outstanding_balance_cop' => (int) $row->outstanding_balance_cop,
+            'overdue_balance_cop' => (int) $row->overdue_balance_cop,
+            // A client can appear with a zero balance when the caller asked to see settled
+            // clients, so this is "clients in the result" rather than "clients with debt".
+            'clients_with_debt' => (int) $row->clients_with_debt,
+            'clients_in_result' => (int) $row->clients_in_result,
+            'open_obligations_count' => (int) $row->open_obligations_count,
+            'overdue_obligations_count' => (int) $row->overdue_obligations_count,
+            'overdue_periods_count' => (int) $row->overdue_periods_count,
+            // Received, and the part of it not yet applied. Together with the applied figure
+            // these satisfy the conservation identity over non-voided payments:
+            //
+            //     received = applied + unallocated
+            //
+            // a voided payment is in neither, because money that never arrived is not
+            // collected and not unapplied.
+            'total_received_cop' => $money['received'],
+            'unallocated_credit_cop' => $money['credit'],
+            'payments_requiring_reconciliation' => $money['unreconciled'],
+        ];
+    }
+
+    /**
+     * Received, unapplied and unreconciled, for the clients the filtered result contains.
+     *
+     * One query, with the client population handed in as a subquery of the filtered grouped
+     * query rather than assembled in PHP: a loop over clients is the failure mode this whole
+     * screen was built to avoid, and it would be reintroduced here by convenience.
+     *
+     * @return array{received: int, credit: int, unreconciled: int}
+     */
+    private function filteredPaymentFigures(QueryBuilder $perClient): array
+    {
+        $applied = 'coalesce((select sum(pa.amount_cop) from payment_allocations pa '
+            .'where pa.payment_id = payments.id and pa.reversed_at is null), 0)';
+
+        $row = DB::query()
+            ->fromSub(
+                (clone $perClient)->select('obligations.client_id as client_id'),
+                'population',
+            )
+            ->join('payments', 'payments.client_id', '=', 'population.client_id')
+            ->whereNull('payments.voided_at')
+            ->selectRaw('coalesce(sum(payments.amount_cop), 0) as received')
+            ->selectRaw('coalesce(sum(payments.amount_cop - ('.$applied.')), 0) as credit')
+            ->selectRaw('count(*) filter (where payments.amount_cop > ('.$applied.')) as unreconciled')
+            ->first();
+
+        return [
+            'received' => (int) $row->received,
+            'credit' => (int) $row->credit,
+            'unreconciled' => (int) $row->unreconciled,
         ];
     }
 
@@ -536,6 +685,11 @@ final class ReceivablesService
      * `paid_amount_cop` excludes voided payments, which is what makes a void take
      * effect immediately in every balance derived from this query.
      */
+    /**
+     * `Company::displayName()`, written in SQL. See `obligationsQuery()`.
+     */
+    private const COMPANY_DISPLAY_NAME = "coalesce(nullif(btrim(companies.trade_name), ''), companies.legal_name)";
+
     private function obligationsQuery(): QueryBuilder
     {
         return DB::table('monthly_obligations')
@@ -547,7 +701,19 @@ final class ReceivablesService
             ->selectRaw('date_trunc(\'month\', monthly_periods.period_month)::date as period_month')
             ->selectRaw('to_char(monthly_periods.period_month, \'YYYY-MM\') as period_key')
             ->selectRaw('clients.first_names, clients.last_names, clients.document_type, clients.document_number')
-            ->selectRaw('companies.legal_name')
+            // §6. The employer's **display** name, which is the trade name when it has one.
+            // This read `companies.legal_name` while every other screen — the period's
+            // obligations, the billing configuration, the company pickers, the client's own
+            // company list — goes through `Company::displayName()`. One employer therefore
+            // appeared under two names depending on which screen you were looking at, and a
+            // collections operator comparing the portfolio with a client's statement saw the
+            // same company renamed between them.
+            //
+            // Spelled in SQL because this query is the aggregate's source and the aggregate
+            // cannot call a PHP method. The expression is `Company::displayName()` exactly:
+            // a blank trade name falls back to the legal one, rather than showing an empty
+            // "Empresa" cell.
+            ->selectRaw(self::COMPANY_DISPLAY_NAME.' as company_display_name')
             ->selectRaw('(monthly_obligations.base_amount_cop + coalesce(('
                 .'select sum(oa.delta_cop) from obligation_adjustments oa '
                 .'where oa.obligation_id = monthly_obligations.id'
@@ -607,7 +773,7 @@ final class ReceivablesService
             'period_label' => MonthValue::fromKey((string) $row->period_key)->label(),
             'client_id' => (int) $row->client_id,
             'company_id' => (int) $row->company_id,
-            'company_name' => $row->legal_name,
+            'company_name' => $row->company_display_name,
             'base_amount_cop' => $base,
             'effective_amount_cop' => $effective,
             'paid_amount_cop' => $paid,
@@ -716,11 +882,6 @@ final class ReceivablesService
         }
 
         return $asOf->copy()->startOfDay();
-    }
-
-    private function likeEscape(): string
-    {
-        return SafeSearch::likeEscape();
     }
 
     /**

@@ -55,14 +55,27 @@ final class BillingConfigurationController extends Controller
     {
         abort_unless($request->user()?->can('cutoffs.view'), 403, 'No tiene permisos para ver las fechas de corte.');
 
-        $rules = CutoffRule::query()
+        $query = CutoffRule::query()
             ->with(['company', 'client'])
             ->when($request->input('scope'), fn ($query, $scope) => $query->where('scope', $scope))
             ->when($request->input('company_id'), fn ($query, $id) => $query->where('company_id', $id))
-            ->when($request->input('client_id'), fn ($query, $id) => $query->where('client_id', $id))
+            ->when($request->input('client_id'), fn ($query, $id) => $query->where('client_id', $id));
+
+        // §2. The interface has always sent `search` and nothing read it, so the field was
+        // decorative: an operator typing a company name saw the same fifty rows. It also
+        // paginated with a hardcoded 50 while the pager on screen said 25, so the range and
+        // the rows could not both be right.
+        //
+        // A `general` rule names nobody, so it is not matched by a name search — searching
+        // for a company should not return the rule that applies to every company.
+        if ($term = $this->searchTerm($request)) {
+            $this->applyNameSearch($query, $term);
+        }
+
+        $rules = $query
             ->orderBy('effective_month')
             ->orderBy('id')
-            ->paginate(50);
+            ->paginate($this->perPage($request));
 
         $this->batchCutoffInUse($rules->getCollection()->all());
 
@@ -164,12 +177,13 @@ final class BillingConfigurationController extends Controller
             $query->where('company_id', (int) $companyId);
         }
 
-        // §32, same as the cutoff list: the interface sent `search` and nothing read it.
+        // §2 and §3. The interface sent `search` and nothing read it (§32), and what did read
+        // it emitted `lower(clients.first_names)` against a query whose only table is
+        // `client_company_rates` — the names are loaded by `with()`, which is a second query,
+        // not a join. So **any** search was a 500 from PostgreSQL about a missing FROM entry,
+        // and the field had never once succeeded.
         if ($term = $this->searchTerm($request)) {
-            $this->applySearch($query, $term, [
-                'clients.first_names', 'clients.last_names', 'clients.document_number',
-                'companies.legal_name',
-            ]);
+            $this->applyNameSearch($query, $term);
         }
 
         $rates = $query->orderByDesc('client_id')
@@ -417,24 +431,42 @@ final class BillingConfigurationController extends Controller
     }
 
     /**
-     * Restrict a configuration query to a set of related columns.
+     * Restrict a configuration query to the client and company a term names.
      *
-     * `LIKE` with an escaped, case-folded needle and an explicit `ESCAPE`: an unescaped `%`
-     * typed by an operator becomes "anything", so searching `100%` returns every row rather
-     * than the one that contains a percent sign. The needle is folded and the columns are
-     * folded in SQL, which is what makes typing `Ana` match `Ana María`.
+     * ## Why relations and not columns
      *
-     * @param  list<string>  $columns
+     * The obvious version — `lower(clients.first_names) LIKE ?` on a
+     * `client_company_rates` query — does not work, and did not: the names are brought in by
+     * `with()`, which issues a second query, so `clients` is not in the FROM clause and
+     * PostgreSQL answers "missing FROM-clause entry". Adding the joins to make it work would
+     * multiply the page: several rates for one client would repeat the client once each.
+     *
+     * `whereHas` puts the condition in an `EXISTS` against the relation instead, which keeps
+     * one row per rate and costs one query for the whole page rather than one per row.
+     *
+     * ## The pattern
+     *
+     * Escaped and folded on both sides, with an explicit `ESCAPE`, so an operator typing
+     * `100%` gets the row that contains a percent sign and not every row that contains
+     * `100`. The client's **whole name** is matched as well as each column: `Ana María
+     * Gómez` lives in two columns and neither of them contains it (§11).
+     *
+     * @param  Builder<CutoffRule|ClientCompanyRate>  $query
      */
-    private function applySearch(Builder $query, string $term, array $columns): void
+    private function applyNameSearch(Builder $query, string $term): void
     {
         $needle = SafeSearch::likeNeedle($term);
-        $escape = SafeSearch::likeEscape();
 
-        $query->where(function (Builder $inner) use ($columns, $needle, $escape): void {
-            foreach ($columns as $column) {
-                $inner->orWhereRaw("lower({$column}) LIKE ?{$escape}", [$needle]);
-            }
+        $query->where(function (Builder $inner) use ($needle): void {
+            $inner->whereHas('client', function (Builder $client) use ($needle): void {
+                $client->whereRaw(SafeSearch::match('first_names'), [$needle])
+                    ->orWhereRaw(SafeSearch::match('last_names'), [$needle])
+                    ->orWhereRaw(SafeSearch::match('document_number'), [$needle])
+                    ->orWhereRaw(SafeSearch::fullNameMatch('first_names', 'last_names'), [$needle]);
+            })->orWhereHas('company', function (Builder $company) use ($needle): void {
+                $company->whereRaw(SafeSearch::match('legal_name'), [$needle])
+                    ->orWhereRaw(SafeSearch::match("coalesce(trade_name, '')"), [$needle]);
+            });
         });
     }
 

@@ -73,12 +73,14 @@ final class PaymentController extends Controller
             // Folded on both sides and escaped: `Ana` matches `Ana María`, and a typed `%`
             // is a percent sign rather than "anything".
             $needle = SafeSearch::likeNeedle($filters['search']);
-            $escape = SafeSearch::likeEscape();
 
-            $query->whereHas('client', function ($clientQuery) use ($needle, $escape): void {
-                $clientQuery->whereRaw('lower(first_names) LIKE ?'.$escape, [$needle])
-                    ->orWhereRaw('lower(last_names) LIKE ?'.$escape, [$needle])
-                    ->orWhereRaw('lower(document_number) LIKE ?'.$escape, [$needle]);
+            $query->whereHas('client', function ($clientQuery) use ($needle): void {
+                $clientQuery->whereRaw(SafeSearch::match('first_names'), [$needle])
+                    ->orWhereRaw(SafeSearch::match('last_names'), [$needle])
+                    ->orWhereRaw(SafeSearch::match('document_number'), [$needle])
+                    // And the whole name, which neither name column contains: a payment
+                    // looked up by the name on it is looked up by the full name.
+                    ->orWhereRaw(SafeSearch::fullNameMatch('first_names', 'last_names'), [$needle]);
             });
         }
 
@@ -298,7 +300,16 @@ final class PaymentController extends Controller
                 'reversed_at' => $reversed->reversed_at?->toIso8601String(),
                 'reversal_reason' => $reversed->reversal_reason,
             ],
-            'payment' => $this->describe($allocation->payment->refresh(), detailed: true),
+            // §8. This was the one detail response that did not go through
+            // `loadForDetail()`, while `show`, `store`, `allocate` and `void` all did. So
+            // `client` and every allocation's obligation graph — period, client, company —
+            // arrived unloaded and were fetched one at a time by `describe()`'s own
+            // fallbacks: a payment with thirty allocations cost a hundred queries to
+            // reverse one of them.
+            //
+            // The same shape was returned the same way five times and four of the five
+            // loaded it. That is what made it easy to miss.
+            'payment' => $this->describe($this->loadForDetail($allocation->payment->refresh()), detailed: true),
         ]);
     }
 

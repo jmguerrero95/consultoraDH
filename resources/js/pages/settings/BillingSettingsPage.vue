@@ -193,8 +193,14 @@ const ruleCanSave = computed(() => {
         return false;
     }
 
+    // §4. A `client` exception is a client **and** an employer — the domain models it that
+    // way because one client can be attached to several employers at once, each counting its
+    // own contribution on its own date. This checked only the client, so the button was
+    // enabled with no company chosen and the save was refused by the server with a 422 that
+    // arrived as a bare error under the dialog. The rule has always required both; the form
+    // just let you find that out by pressing the button.
     if (ruleForm.value.scope === 'client') {
-        return ruleForm.value.clientId !== null;
+        return ruleForm.value.clientId !== null && ruleForm.value.companyId !== null;
     }
 
     if (ruleForm.value.scope === 'company') {

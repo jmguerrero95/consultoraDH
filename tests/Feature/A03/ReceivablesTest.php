@@ -279,7 +279,7 @@ it('paginates the portfolio without losing or repeating a client', function (): 
 
 // --- Totals -----------------------------------------------------------------
 
-it('totals the portfolio once, and the same figures on every screen', function (): void {
+it('totals the portfolio once, and says the same thing on both screens', function (): void {
     $one = a03_employerFor('total-uno');
     $two = a03_employerFor('total-dos');
 
@@ -296,23 +296,49 @@ it('totals the portfolio once, and the same figures on every screen', function (
 
     $asOf = '2026-06-01';
 
-    $summary = a03_receivables()->portfolioSummary(now()->parse($asOf));
-    $list = a03_receivables()->list(['as_of' => $asOf], 1, 50);
+    // The dashboard asks about the whole portfolio, and answers about the whole portfolio.
+    $dashboard = a03_receivables()->portfolioSummary(now()->parse($asOf));
 
-    expect($summary['total_effective_obligations_cop'])->toBe(500000)
-        ->and($summary['total_paid_cop'])->toBe(200000)
-        ->and($summary['outstanding_balance_cop'])->toBe(300000)
-        ->and($summary['clients_with_debt'])->toBe(1)
-        // What is owed agrees exactly between the dashboard and the list header,
-        // because both mean "money still owed right now".
-        ->and($list['summary']['outstanding_balance_cop'])->toBe($summary['outstanding_balance_cop'])
-        // The collected total agrees too. It has to: the header describes the filtered
-        // obligations, and the debtor filter decides which *clients* are listed, not
-        // which of their months are added up. Hiding a settled month from the
-        // arithmetic would make a client who paid in full look like they had paid
-        // nothing, and a receipt is not a projection.
-        ->and($list['summary']['total_paid_cop'])->toBe($summary['total_paid_cop'])
-        ->and($list['summary']['total_effective_obligations_cop'])->toBe(500000);
+    expect($dashboard['total_effective_obligations_cop'])->toBe(500000)
+        ->and($dashboard['total_paid_cop'])->toBe(200000)
+        ->and($dashboard['outstanding_balance_cop'])->toBe(300000)
+        ->and($dashboard['clients_with_debt'])->toBe(1);
+
+    // The debtor list asks a different question — "who still owes" — so its header
+    // answers about its own rows. §1: this used to be the dashboard's figures pasted next
+    // to a filtered table, which is how a list of one client came to sit under cards
+    // describing everybody.
+    //
+    // The client that paid in full is not a debtor, so it leaves the population and its
+    // 200 000 leaves the applied figure with it. Hiding a settled month from the
+    // arithmetic *within* a client would make a client who paid look like they had paid
+    // nothing — a receipt is not a projection — but a client who owes nothing has no row
+    // here at all, so counting their payment under a row that is not shown would be the
+    // same claim as that one.
+    $debtors = a03_receivables()->list(['as_of' => $asOf], 1, 50);
+
+    expect($debtors['total'])->toBe(1)
+        ->and($debtors['summary']['clients_with_debt'])->toBe(1)
+        ->and($debtors['summary']['outstanding_balance_cop'])->toBe(300000)
+        ->and($debtors['summary']['total_paid_cop'])->toBe(0);
+
+    // Asked for the whole population, the same screen says exactly what the dashboard
+    // says. That is the property worth keeping: one arithmetic, two questions, and each
+    // screen honest about which one it is answering.
+    $everyone = a03_receivables()->list(
+        ['as_of' => $asOf, 'outstanding_only' => false],
+        1,
+        50,
+    );
+
+    expect($everyone['summary']['total_effective_obligations_cop'])
+        ->toBe($dashboard['total_effective_obligations_cop'])
+        ->and($everyone['summary']['total_paid_cop'])->toBe($dashboard['total_paid_cop'])
+        ->and($everyone['summary']['outstanding_balance_cop'])
+        ->toBe($dashboard['outstanding_balance_cop'])
+        ->and($everyone['summary']['total_received_cop'])->toBe($dashboard['total_received_cop'])
+        ->and($everyone['summary']['unallocated_credit_cop'])
+        ->toBe($dashboard['unallocated_credit_cop']);
 });
 
 it('counts an unapplied payment as credit rather than as money owed', function (): void {

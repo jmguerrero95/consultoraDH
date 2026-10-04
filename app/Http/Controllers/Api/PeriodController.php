@@ -32,6 +32,7 @@ use App\Models\User;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 
 /**
  * Monthly periods, and the obligations generated into them.
@@ -156,7 +157,14 @@ final class PeriodController extends Controller
         $open = $this->periods->openPeriods();
 
         return response()->json([
-            'current' => $period === null ? null : $this->summarise($period),
+            // §5. `withMoney` was left at its default of `true` here and in `show()`, so a
+            // role that may see the calendar could also see what the months are worth —
+            // `total_base_cop`, `total_paid_cop` and the balance — from the one period the
+            // screen asks about, while `index()` correctly withheld them. The gate is the
+            // same rule in all four places; it was simply not passed to two of them.
+            'current' => $period === null
+                ? null
+                : $this->summarise($period, withMoney: $this->maySeeMoney($request->user())),
             'has_current' => $period !== null,
             // Sent alongside because "which month is current" is ambiguous for a
             // caller when several are open, and the interface shows the list.
@@ -172,7 +180,14 @@ final class PeriodController extends Controller
     {
         $this->authorizeFinancial($request, 'periods.view');
 
-        return response()->json(['period' => $this->summarise($period, detailed: true)]);
+        return response()->json([
+            // §5, same omission as in `current()`.
+            'period' => $this->summarise(
+                $period,
+                detailed: true,
+                withMoney: $this->maySeeMoney($request->user()),
+            ),
+        ]);
     }
 
     public function store(StorePeriodRequest $request): JsonResponse
@@ -295,7 +310,13 @@ final class PeriodController extends Controller
             ->orderBy('company_id')
             ->paginate($this->perPage($request));
 
-        $asOf = $request->date('as_of') ?? now();
+        // §7. `$request->date('as_of')` answers `null` for anything it cannot parse, so an
+        // unreadable reference date was dropped rather than refused and the month was
+        // reported "as of today" — which is a different answer to the question that was
+        // asked. Validated instead: an `as_of` that cannot be read is a 422, so the
+        // interface can say so, rather than showing figures for a day the operator did
+        // not ask about.
+        $asOf = $this->referenceDate($request);
 
         // Presented in one pass, so the adjustments and the payments of a whole page
         // come from two grouped queries rather than two for every row.
@@ -431,6 +452,35 @@ final class PeriodController extends Controller
         // `periods.view` alone does not. That is the whole point of §37: a role that may see
         // the calendar is not thereby entitled to what the months are worth.
         return ($user?->can('obligations.view') ?? false) || ($user?->can('obligations.generate') ?? false);
+    }
+
+    /**
+     * The reference date for the month, or today.
+     *
+     * Rejects rather than falls back, unlike `Request::date()`: the fallback is silent, and
+     * a silently-ignored filter is a wrong answer rather than no answer. Bounded to
+     * `Y-m-d` because the interface sends that and nothing else is worth guessing at.
+     */
+    private function referenceDate(Request $request): Carbon
+    {
+        $asOf = $request->query('as_of');
+
+        if ($asOf === null || $asOf === '') {
+            return now();
+        }
+
+        $validated = validator(
+            ['as_of' => $asOf],
+            ['as_of' => ['required', 'string', 'date_format:Y-m-d']],
+            ['as_of.date_format' => 'La fecha de referencia debe ser una fecha como 2026-04-10.'],
+            ['as_of' => 'fecha de referencia'],
+        );
+
+        if ($validated->fails()) {
+            abort(422, $validated->errors()->first('as_of'));
+        }
+
+        return Carbon::parse((string) $asOf)->startOfDay();
     }
 
     private function obligationsService(): ObligationPresenter

@@ -25,6 +25,7 @@ use App\Http\Resources\DataQualityResource;
 use App\Models\Company;
 use App\Support\Database\SchemaConstraint;
 use App\Support\Database\UniqueViolation;
+use App\Support\Validation\SafeSearch;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -71,11 +72,13 @@ final class CompanyController extends Controller
             $patterns = TaxId::searchPatterns((string) $request->validated('search'));
 
             $query->where(function ($q) use ($pattern, $patterns): void {
-                $q->whereRaw("lower(legal_name) LIKE ? ESCAPE '\\'", [$pattern])
-                    ->orWhereRaw("lower(coalesce(trade_name, '')) LIKE ? ESCAPE '\\'", [$pattern])
-                    ->orWhereRaw("lower(coalesce(tax_id, '')) LIKE ? ESCAPE '\\'", [$patterns['number']])
+                $q->whereRaw(SafeSearch::match('legal_name'), [$pattern])
+                    ->orWhereRaw(SafeSearch::match("coalesce(trade_name, '')"), [$pattern])
+                    ->orWhereRaw(SafeSearch::match("coalesce(tax_id, '')"), [$patterns['number']])
                     ->orWhereRaw(
-                        "(lower(coalesce(tax_id, '')) || '-' || coalesce(verification_digit, '')) LIKE ? ESCAPE '\\'",
+                        SafeSearch::match(
+                            "(coalesce(tax_id, '') || '-' || coalesce(verification_digit, ''))"
+                        ),
                         [$patterns['combined']],
                     );
             });

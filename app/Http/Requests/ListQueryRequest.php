@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Requests;
 
+use App\Support\Validation\SafeSearch;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Str;
 
@@ -66,40 +67,36 @@ abstract class ListQueryRequest extends FormRequest
     }
 
     /**
-     * The search term with the wildcards escaped, ready for a LIKE pattern.
+     * The search term as a LIKE pattern, with the wildcards a user typed
+     * appended so that "juan" also finds "juancho".
      *
-     * Returns null when no search was given, so callers can skip the condition
-     * entirely rather than matching "%%" against every row.
+     * The folding and the escaping are `SafeSearch`'s, so that every searchable screen
+     * behaves identically. The comparison is written by `SafeSearch::match()`, which folds
+     * **both** sides in SQL as `lower(unaccent(...))`, and that is what actually makes the
+     * search case- and accent-insensitive — a needle folded only here would miss `Única`,
+     * because this database's `C` collation cannot fold a non-ASCII capital.
+     *
+     * `SafeSearch::likeNeedle()` also lowercases. That is redundant with the SQL and harmless.
+     *
+     * There is deliberately no escaping helper here any more. Two escaping paths in a
+     * codebase means one of them is applied twice somewhere, and "escaped, then escaped
+     * again" fails by matching nothing rather than by raising.
+     *
+     * @see SafeSearch::match()
      */
-    public function escapedSearch(): ?string
+    public function searchPattern(): ?string
     {
+        // The **raw** term, not a pre-escaped one. `SafeSearch::likeNeedle()` escapes, so
+        // escaping here as well would escape twice and `a_b` would arrive at the database as
+        // `a\\_b` — a literal backslash followed by any character, which matches nothing.
+        // That is not a hypothetical: it is exactly what this method did for one commit.
         $search = $this->validated('search');
 
         if (! is_string($search) || trim($search) === '') {
             return null;
         }
 
-        $trimmed = trim($search);
-
-        // The escape character has to go first, or escaping the wildcards would
-        // double it and leave a stray backslash in the pattern.
-        return str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], $trimmed);
-    }
-
-    /**
-     * The search term as a LIKE pattern, with the wildcards a user typed
-     * appended so that "juan" also finds "juancho".
-     *
-     * Lower cased, because every column it is compared against is wrapped in
-     * `lower()`. That is what makes the search case insensitive without a
-     * functional index, and it is why the term has to be folded here as well:
-     * `lower(nombre) LIKE '%Zapata%'` would never match anything.
-     */
-    public function searchPattern(): ?string
-    {
-        $escaped = $this->escapedSearch();
-
-        return $escaped === null ? null : '%'.mb_strtolower($escaped).'%';
+        return SafeSearch::likeNeedle($search);
     }
 
     /**

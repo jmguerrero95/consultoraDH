@@ -11,10 +11,10 @@ use App\Domain\Payments\PaymentMethod;
 use App\Domain\Periods\PeriodStatus;
 use App\Domain\Receivables\ReceivablesService;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Receivables\ListClientAccountRequest;
 use App\Http\Requests\Receivables\ListReceivablesRequest;
 use App\Models\Client;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 
 /**
  * Cartera: who owes what.
@@ -46,12 +46,12 @@ final class ReceivableController extends Controller
     /**
      * One client's account: the statement, without the PDF.
      */
-    public function clientAccount(Request $request, Client $client): JsonResponse
+    public function clientAccount(ListClientAccountRequest $request, Client $client): JsonResponse
     {
         abort_unless($request->user()?->can('receivables.view'), 403, 'No tiene permisos para ver la cuenta del cliente.');
 
         return response()->json(
-            $this->receivables->clientAccount($client, $request->date('as_of')),
+            $this->receivables->clientAccount($client, $request->asOf()),
         );
     }
 

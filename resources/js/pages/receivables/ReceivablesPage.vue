@@ -228,7 +228,7 @@ function owedPeriodsLabel(row: ReceivableRow): string {
             </div>
 
             <div class="cdh-filters__field">
-                <label class="cdh-form-label" for="cartera-aging">Antigüedad</label>
+                <label class="cdh-form-label" for="cartera-aging">Días de mora</label>
                 <select id="cartera-aging" v-model="agingBucket" class="form-control form-control-sm">
                     <option value="">Todas</option>
                     <option v-for="option in vocabulary?.aging_buckets ?? []" :key="option.value" :value="option.value">
@@ -317,7 +317,7 @@ function owedPeriodsLabel(row: ReceivableRow): string {
                             <th scope="col">Periodos debidos</th>
                             <th scope="col">Saldo</th>
                             <th scope="col">Vencido</th>
-                            <th scope="col">Antigüedad</th>
+                            <th scope="col">Días de mora</th>
                             <th scope="col">Semáforo</th>
                             <th scope="col"><span class="cdh-visually-hidden">Acciones</span></th>
                         </tr>
@@ -364,7 +364,7 @@ function owedPeriodsLabel(row: ReceivableRow): string {
                             >
                                 {{ row.overdue_balance_cop > 0 ? pesos(row.overdue_balance_cop) : '—' }}
                             </td>
-                            <td data-label="Antigüedad">
+                            <td data-label="Días de mora">
                                 {{ agingLabel(row) }}
                                 <span v-if="row.oldest_due_on" class="cdh-table__secondary">
                                     desde {{ fecha(row.oldest_due_on) }}

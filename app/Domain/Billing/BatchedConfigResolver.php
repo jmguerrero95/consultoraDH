@@ -77,21 +77,20 @@ final class BatchedConfigResolver
         // effective history instead.
         [$pairPredicate, $pairBindings] = self::pairIn('client_id', 'company_id', $pairs);
 
-        $rows = ClientCompanyRate::query()
-            ->whereRaw($pairPredicate, $pairBindings)
-            ->forMonth($month)
-            ->get();
+        // §9. This fetched **every** applicable rate for the pairs and kept the first row
+        // per key in PHP, so the query was bounded by the *pairs* but not by anything else:
+        // one rate per key is one row, and a client whose rate had been corrected every
+        // month for four years contributed forty-eight. The result was correct — the first
+        // row per key was the decision in force — and the cost was not, and it grew with
+        // history rather than with the month being billed.
+        //
+        // That is the exact alternative the class comment says it exists to avoid, and the
+        // three cutoff queries below already use `DISTINCT ON` for it. Rates was the one
+        // method that did not, which is why nothing noticed: the tests build one rate per
+        // pair, so the history is a single row and both shapes return it.
+        $query = ClientCompanyRate::query()->whereRaw($pairPredicate, $pairBindings);
 
-        $resolved = [];
-
-        foreach ($rows as $rate) {
-            // `forMonth` orders newest effective month first, so the first row seen for
-            // a key is the decision in force and later rows for the same key are older
-            // history that this month does not answer with.
-            $resolved[$rate->client_id.':'.$rate->company_id] ??= $rate;
-        }
-
-        return $resolved;
+        return $this->newestPerKey($query, ['client_id', 'company_id'], $month);
     }
 
     /**
@@ -214,8 +213,16 @@ final class BatchedConfigResolver
      * The general scope has no key columns: it is one rule per month for everybody, so it
      * needs no `DISTINCT ON` at all and is a plain `first()`.
      *
+     * Shared by the three cutoff levels and by rates: the shape is the same question in all
+     * four — "the newest decision in force for this key" — and it is asked once here rather
+     * than four times, because the way to get it wrong is to write it out again without the
+     * `DISTINCT ON`.
+     *
+     * @template TKey of \Illuminate\Database\Eloquent\Model
+     *
+     * @param  Builder<TKey>  $query
      * @param  list<string>  $keyColumns
-     * @return array<string, CutoffRule>
+     * @return array<string, TKey>
      */
     private function newestPerKey(Builder $query, array $keyColumns, MonthValue $month): array
     {

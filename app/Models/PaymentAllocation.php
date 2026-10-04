@@ -19,9 +19,40 @@ use Illuminate\Support\Carbon;
  * never deleted, so "what did somebody believe this payment was for, and when" is
  * answerable after the fact.
  *
- * The database refuses two live allocations of the same payment to the same
- * obligation, so this is either one allocation or two by construction rather than
- * by a sum somebody has to interpret. A reversal frees the pair.
+ * ## Several live rows for one pair are normal
+ *
+ * This used to say the opposite:
+ *
+ * > The database refuses two live allocations of the same payment to the same
+ * > obligation, so this is either one allocation or two by construction rather than by a
+ * > sum somebody has to interpret. A reversal frees the pair.
+ *
+ * That was true when the comment was written and stopped being true in A03-R1, which
+ * dropped `payment_allocations_live_pair_unique`
+ * (`2026_10_03_120000_allow_repeated_live_payment_allocations.php`). Paying a debt in two
+ * instalments from one receipt is ordinary, not ambiguous, so the index was refusing a
+ * legitimate action — and, because `applyOldestFirst` caught the violation and moved on to
+ * the next debt, it was refusing it *while reporting that the oldest-first ordering had been
+ * applied*.
+ *
+ * ## What guarantees the totals instead
+ *
+ * Not an index, which cannot express either of these: both compare an aggregate against a
+ * figure on another row.
+ *
+ *     total live allocations on a payment     <= payment amount
+ *     total live non-voided money on a debt   <= effective obligation amount
+ *
+ * `ManagePayments` holds them by locking the client, then the payment, then the obligations
+ * in ascending id, and recomputing both sums **after** the locks. Two callers cannot both be
+ * inside that window, so the second one sees the first one's rows.
+ *
+ * ## Reading the live rows
+ *
+ * Everything downstream sums them and filters `reversed_at IS NULL`; the applied amount of a
+ * payment is never a single column. A reversal does not "free the pair" — there is nothing
+ * to free. It stops counting and stays visible (§17), because "what was believed, and when"
+ * is only answerable if the wrong belief is still there.
  *
  * @property int $id
  * @property int $payment_id

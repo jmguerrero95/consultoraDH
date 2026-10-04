@@ -202,7 +202,13 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
                             <th scope="col">Saldo</th>
                             <th scope="col">Vence</th>
                             <th scope="col">Estado</th>
-                            <th scope="col">Antigüedad</th>
+                    <!--
+                        §13. "Antigüedad" said how old the obligation was; what this column
+                        holds is how many days past **its due date** it is. A debt that is not
+                        due yet read "Antigüedad: No vencida", which is a sentence about age
+                        that then denies having one. The label now names the measurement.
+                    -->
+                            <th scope="col">Días de mora</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -249,7 +255,7 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
                                     {{ obligation.settlement_state_label }}
                                 </span>
                             </td>
-                            <td data-label="Antigüedad">
+                            <td data-label="Días de mora">
                                 <span v-if="obligation.balance_cop === 0" class="cdh-table__secondary">
                                     —
                                 </span>
@@ -276,9 +282,9 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
                     closed on that date, and an auditor comparing two of these would draw a
                     conclusion the numbers do not support.
                 -->
-                Antigüedad evaluada al {{ fecha(account.as_of) }}. Los saldos, los pagos y los
+                Mora evaluada al {{ fecha(account.as_of) }}. Los saldos, los pagos y los
                 ajustes de hoy están incluidos en todo caso; esta fecha sólo cambia qué se
-                cuenta como vencido y qué antigüedad se le calcula.
+                cuenta como vencido y cuántos días de mora se le calculan.
             </p>
         </template>
     </section>
