@@ -316,3 +316,58 @@ it('keeps personal data out of the adjustment audit trail', function (): void {
         ->and(json_encode($metadata))->not->toContain($obligation->client->fullName())
         ->and(json_encode($metadata))->not->toContain($obligation->client->document_number);
 });
+
+/*
+ * §2 of R4: the adjustment vocabulary has one permission, and it is `obligations.adjust`.
+ *
+ * The route is inside `can:obligations.adjust` and the interface only asks for this when it
+ * holds `obligations.adjust`. The controller checked `obligations.view`, so the two disagreed
+ * and neither side could see it: a caller with `.adjust` passed the route and was then refused
+ * by the controller, and a caller with `.view` never reached the route to be refused by it.
+ *
+ * The vocabulary is the list of adjustment types and the direction each moves the total. That
+ * is the minimum somebody needs in order to perform the action they are already authorized to
+ * perform, so it belongs to `.adjust` — and deliberately not to both: requiring `.view` to read
+ * it would stop a person who may correct a figure from opening the form that corrects it.
+ */
+
+it('gives the vocabulary to a role that may adjust, and only to one', function (): void {
+    $adjustOnly = userWithPermissions(['obligations.adjust'], 'solo-ajusta');
+    $viewOnly = userWithPermissions(['obligations.view'], 'solo-ve');
+    $neither = userWithPermissions(['payments.view'], 'no-ajusta-ni-ve');
+
+    // May adjust: the vocabulary is what the adjustment form is built from.
+    $allowed = $this->actingAs($adjustOnly)
+        ->getJson('/api/obligation-adjustments/vocabulary')
+        ->assertOk();
+
+    // Not empty, because an empty vocabulary would make this test pass against an endpoint that
+    // simply answers nothing to everybody.
+    expect($allowed->json('types'))->toBeArray()->not->toBeEmpty();
+
+    foreach ($allowed->json('types') as $type) {
+        expect($type)->toHaveKeys(['value', 'label', 'direction']);
+    }
+
+    // May only read the obligations: no adjustments, so no adjustment vocabulary.
+    $this->actingAs($viewOnly)
+        ->getJson('/api/obligation-adjustments/vocabulary')
+        ->assertForbidden();
+
+    // Neither.
+    $this->actingAs($neither)
+        ->getJson('/api/obligation-adjustments/vocabulary')
+        ->assertForbidden();
+});
+
+it('refuses the vocabulary consistently, whatever the caller sends', function (): void {
+    // The §1 lesson applied here: the refusal must not depend on the shape of a caller's
+    // request. A permission check that some inputs reach and others do not is not a boundary.
+    $viewOnly = userWithPermissions(['obligations.view'], 'solo-ve');
+
+    foreach (['', '?type=correction', '?type=inventado'] as $query) {
+        $this->actingAs($viewOnly)
+            ->getJson("/api/obligation-adjustments/vocabulary{$query}")
+            ->assertForbidden();
+    }
+});

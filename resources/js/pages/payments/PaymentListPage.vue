@@ -11,7 +11,7 @@ import { fecha, fechaHora, hoy, pesos, pesosDesdeTexto } from '@/composables/use
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
-import { reasonIsLongEnough, REASON_MIN_LENGTH, REASON_MIN_LENGTH_HINT } from '@/validation/reasons';
+import { reasonIsLongEnough, REASON_MIN_LENGTH_HINT } from '@/validation/reasons';
 
 import type {
     AllocatableDebt,
@@ -272,13 +272,16 @@ const reversalReason = ref('');
 const reversalBusy = ref(false);
 const reversalError = ref<string | null>(null);
 
-const reversalProblem = computed(() => {
-    if (reversalReason.value.trim().length < 10) {
-        return `Explique el motivo de la reversa (mínimo ${REASON_MIN_LENGTH} caracteres).`;
-    }
-
-    return null;
-});
+// §4 of R4. This read `reversalReason.value.trim().length < 10` — a literal, in a file that
+// already imports the shared predicate for the void flow two hundred lines up. Both values
+// happen to be 10, so it was functionally correct and structurally a second implementation of
+// the same rule: the next person to change `REASON_MIN_LENGTH` would have changed the void
+// dialog and left this one behind, and the reversal would have started accepting a reason the
+// server refuses. The predicate and the sentence both come from the module now, as the other
+// three dialogs do.
+const reversalProblem = computed(() =>
+    reasonIsLongEnough(reversalReason.value) ? null : REASON_MIN_LENGTH_HINT,
+);
 
 async function openHistory(payment: PaymentSummary): Promise<void> {
     historyTarget.value = payment;

@@ -173,6 +173,24 @@ Detalle en [docs/TASKS/A03-R2-REMEDIATION.md](TASKS/A03-R2-REMEDIATION.md).
 
 Detalle en [docs/TASKS/A03-R3-REMEDIATION.md](TASKS/A03-R3-REMEDIATION.md).
 
+**A03-R4** cerró cuatro defectos residuales de contrato sobre ese commit:
+
+- Las obligaciones del periodo autorizaban **después** de validar, así que un rol con
+  `periods.view` y sin `obligations.view` recibía `422` con una fecha mal formada y `403`
+  con una fecha bien formada: el límite dependía de si el llamador adivinaba el formato.
+- El vocabulario de ajustes exigía `obligations.view` cuando su ruta y la interfaz
+  exigen `obligations.adjust`, así que nadie con un solo permiso podía usarlo.
+- `PeriodController::summarise()` seguía declarando `withMoney = true`. No había fuga
+  —todos los puntos de llamada pasan la puerta— pero el helper era *fail-open*, y tres
+  rondas han encontrado ya una fuga exactamente así: R2 en `current()` y `show()`, R3 en
+  `close()` y `reopen()`. Ahora el valor por omisión es `false`: omitirlo cuesta una clave
+  ausente, no una cifra.
+- La reversión de una aplicación comparaba contra un `10` literal en un archivo que ya
+  importaba el predicado compartido. Correcto mientras ambos valen 10, y una segunda
+  implementación de la misma regla.
+
+Detalle en [docs/TASKS/A03-R4-REMEDIATION.md](TASKS/A03-R4-REMEDIATION.md).
+
 No entregado, y fuera de alcance por diseño: importación desde Excel, planillas,
 exportación a PDF, facturación electrónica, automatización recurrente,
 pasarelas de pago, portal, asistente de IA y MCP.

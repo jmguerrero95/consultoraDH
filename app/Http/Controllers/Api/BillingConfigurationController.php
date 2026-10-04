@@ -291,7 +291,23 @@ final class BillingConfigurationController extends Controller
      */
     public function adjustmentVocabulary(Request $request): JsonResponse
     {
-        abort_unless($request->user()?->can('obligations.view'), 403, 'No tiene permisos para ver los ajustes.');
+        // §2 of R4. The route already gates this on `obligations.adjust`, and the interface
+        // only asks for the vocabulary when it holds `obligations.adjust` too. The check here
+        // said `obligations.view`, so the two disagreed about who the endpoint was for, and
+        // the incoherence was not visible from either side: a caller with `.adjust` passed the
+        // route and was then refused by the controller, and a caller with `.view` could not
+        // reach the route to be refused by it.
+        //
+        // `obligations.adjust`, not both. The vocabulary is the list of adjustment types and
+        // the direction each one moves the total — the minimum an operator needs in order to
+        // perform the action they are already authorized to perform. Requiring `obligations.view`
+        // to read it would make a person who may correct a figure unable to open the form that
+        // corrects it, which is the inversion R3 §8 found in the dialogs' gating.
+        abort_unless(
+            $request->user()?->can('obligations.adjust'),
+            403,
+            'No tiene permisos para registrar ajustes.',
+        );
 
         return response()->json([
             'types' => array_map(static fn (AdjustmentType $type): array => [

@@ -401,7 +401,28 @@ final class PeriodController extends Controller
      * @param  array{adjustments: int, paid: int}|null  $totals  precomputed for a list
      * @return array<string, mixed>
      */
-    private function summarise(MonthlyPeriod $period, bool $detailed = false, ?array $totals = null, bool $withMoney = true): array
+    /**
+     * One period, as the screen shows it.
+     *
+     * `withMoney` defaults to **false**.
+     *
+     * It used to default to `true`, which made this helper fail *open*: a call site that
+     * forgot the argument published `total_base_cop`, `total_effective_cop`, `total_paid_cop`,
+     * `total_balance_cop` and `obligation_count`. Three separate rounds have now found a leak
+     * of exactly that shape — R2 on `current()` and `show()`, R3 on `close()` and `reopen()` —
+     * and every one of them was a forgotten argument rather than a wrong gate.
+     *
+     * The argument is therefore not something a caller may omit. The omission has to mean
+     * "publish nothing", so that a mistake costs a missing key on a screen that then renders
+     * without a figure, rather than financial data reaching a role that may not read it.
+     *
+     * `maySeeMoney()` is the only thing that should decide, and it is passed explicitly at
+     * every call site. `PeriodMoneyBoundaryTest` additionally reads this file's source and
+     * fails on any `summarise()` call that omits it; that check is kept because it catches the
+     * caller that passes the argument but passes it wrongly, but it is a backstop, not the
+     * invariant. The invariant is the default.
+     */
+    private function summarise(MonthlyPeriod $period, bool $detailed = false, ?array $totals = null, bool $withMoney = false): array
     {
         $summary = [
             'id' => $period->id,

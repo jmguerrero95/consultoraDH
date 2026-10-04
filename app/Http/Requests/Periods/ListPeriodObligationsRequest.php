@@ -49,12 +49,29 @@ use Illuminate\Support\Carbon;
  */
 final class ListPeriodObligationsRequest extends FormRequest
 {
+    /**
+     * `obligations.view`, enforced **here** so it runs before validation.
+     *
+     * R1 §36 made this endpoint depend on both `obligations.view` and `periods.view`, and the
+     * route middleware still enforces `periods.view`. This half was checked in the controller
+     * body, which runs *after* this request's validation — so the order was wrong, and the
+     * symptom was that authorization depended on the shape of an unauthorized caller's input:
+     *
+     *     GET /periods/1/obligations                     -> 403
+     *     GET /periods/1/obligations?as_of=garbage        -> 422 errors.as_of
+     *
+     * A boundary that answers 422 to one caller and 403 to another, differing only in whether
+     * the caller who may not read this data guessed the query format correctly, is not a
+     * boundary. It is also the more revealing order: the 422 confirmed that the endpoint
+     * exists and what it validates before deciding whether this caller may see anything.
+     *
+     * Laravel resolves the FormRequest — `authorize()` first, then `rules()` — before the
+     * controller is entered at all, so putting the check here makes the order deterministic.
+     * The controller keeps its own assertion as well, which is redundant on purpose.
+     */
     public function authorize(): bool
     {
-        // `obligations.view` is checked by the controller, in `authorizeFinancial()`, so the
-        // refusal names the screen the operator was actually on. R1 §36 made this endpoint
-        // depend on both `obligations.view` and `periods.view` deliberately; that stays.
-        return true;
+        return $this->user()?->can('obligations.view') ?? false;
     }
 
     /**

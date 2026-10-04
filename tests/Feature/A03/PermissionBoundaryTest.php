@@ -168,6 +168,64 @@ it('hides the figures from every period endpoint, not just the list', function (
     // client's session cookie belongs to the first.
 });
 
+/**
+ * §1 of R4: the month's obligations refuse an unauthorized caller *before* validating them.
+ *
+ * `ListPeriodObligationsRequest::authorize()` used to return `true` and left the
+ * `obligations.view` check to the controller body. Laravel resolves a FormRequest — authorize,
+ * then rules — before the controller is entered, so the order was:
+ *
+ *     malformed as_of + no obligations.view  ->  422 errors.as_of
+ *     valid query       + no obligations.view  ->  403
+ *
+ * Authorization depended on whether the caller who may not read this data happened to guess the
+ * query format correctly. The 422 also confirmed the endpoint exists and what it validates
+ * before deciding whether this caller may see anything.
+ */
+it('refuses before it validates, so the boundary does not depend on the input', function (): void {
+    a03_payable(250000, '2026-10', a03_employer());
+
+    $period = MonthlyPeriod::query()->where('period_month', '2026-10-01')->firstOrFail();
+
+    // `periods.view` alone: enough for the route, not for this endpoint.
+    $calendar = userWithPermissions(['periods.view'], 'periodo-solo-calendario');
+
+    // Every one of these must be a 403. A 422 on any of them is the defect: it means the
+    // request was validated by somebody who was never going to be shown the data.
+    $queries = [
+        'no parameters' => '',
+        'unreadable as_of' => '?as_of=garbage',
+        'impossible month' => '?as_of=2026-13-45',
+        'oversized page' => '?per_page=9999',
+        'wrong type for page' => '?page=abc',
+        'unknown filter' => '?settlement_state=inventado',
+        'several at once' => '?as_of=2026-02-30&per_page=0',
+    ];
+
+    foreach ($queries as $label => $query) {
+        $this->actingAs($calendar)
+            ->getJson("/api/periods/{$period->id}/obligations{$query}")
+            ->assertForbidden($label);
+    }
+});
+
+it('still validates for a caller who is allowed to read it', function (): void {
+    a03_payable(250000, '2026-10', a03_employer());
+
+    $period = MonthlyPeriod::query()->where('period_month', '2026-10-01')->firstOrFail();
+
+    // The strictness R2 §7 established is not weakened by moving the permission check earlier:
+    // a caller who *may* read this still gets a 422 for a date it cannot read.
+    $this->actingAs(userWithPermissions(['periods.view', 'obligations.view'], 'periodo-completo'))
+        ->getJson("/api/periods/{$period->id}/obligations?as_of=garbage")
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('as_of');
+
+    $this->actingAs(userWithPermissions(['periods.view', 'obligations.view'], 'periodo-completo'))
+        ->getJson("/api/periods/{$period->id}/obligations")
+        ->assertOk();
+});
+
 it('publishes the figures to a role with obligations authority', function (string $permission): void {
     a03_payable(250000, '2026-10', a03_employer());
 

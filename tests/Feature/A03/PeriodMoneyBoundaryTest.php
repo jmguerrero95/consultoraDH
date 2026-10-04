@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Domain\Payments\Actions\ManagePayments;
 use App\Domain\Periods\Actions\ClosePeriod;
+use App\Http\Controllers\Api\PeriodController;
 use App\Models\MonthlyPeriod;
 
 /**
@@ -171,6 +172,37 @@ it('still publishes the figures to a role that holds the obligations permission'
         ->and($summary['total_paid_cop'])->toBe(100000)
         ->and($summary['total_balance_cop'])->toBe(150000);
 })->with(['obligations.view', 'obligations.generate']);
+
+it('fails closed: omitting withMoney publishes no money', function (): void {
+    // §3 of R4. Asserted by reflection, on the parameter's default value, because that is the
+    // invariant itself. The source-inspection example below is a backstop for a *caller* that
+    // passes the argument wrongly; this one is the invariant that makes such a mistake harmless.
+    //
+    // `summarise()` had `bool $withMoney = true`, which is fail-open: a call site that forgot
+    // the argument published the month's finances. Three separate rounds found a leak of exactly
+    // that shape — R2 on `current()` and `show()`, R3 on `close()` and `reopen()` — every one a
+    // forgotten argument rather than a wrong gate.
+    //
+    // A regex over the source can only *notice* that mistake after somebody has made it. A
+    // default of `false` makes the mistake cost a missing key instead of a disclosure, which is
+    // the difference between a bug that shows nothing and a bug that shows money.
+    $method = new ReflectionMethod(PeriodController::class, 'summarise');
+
+    $parameters = array_values(array_filter(
+        $method->getParameters(),
+        static fn (ReflectionParameter $parameter): bool => $parameter->getName() === 'withMoney',
+    ));
+
+    expect($parameters)->toHaveCount(1)
+        ->and($parameters[0]->isDefaultValueAvailable())->toBeTrue()
+        ->and($parameters[0]->getDefaultValue())->toBeFalse();
+
+    // `maySeeMoney()` is untouched, and remains the only thing that should decide.
+    $gate = new ReflectionMethod(PeriodController::class, 'maySeeMoney');
+
+    expect($gate->isPrivate())->toBeTrue()
+        ->and($gate->getNumberOfParameters())->toBe(1);
+});
 
 it('gates every place a period is published, not just the ones this round found', function (): void {
     // The defect was two call sites forgetting one argument. The check below is the one that

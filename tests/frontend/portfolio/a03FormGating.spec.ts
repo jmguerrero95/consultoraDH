@@ -8,6 +8,11 @@ import type { Component } from 'vue';
 
 import BillingSettingsPage from '@/pages/settings/BillingSettingsPage.vue';
 import PaymentListPage from '@/pages/payments/PaymentListPage.vue';
+// The same component as source text. Vite inlines it at build time; `vite/client` types
+// `*?raw`, and this project already lists `vite/client` in `tsconfig.app.json`, so it needs
+// no `@types/node` — which is deliberately not a dependency and must not become one for a
+// test.
+import paymentListSource from '@/pages/payments/PaymentListPage.vue?raw';
 import PeriodListPage from '@/pages/periods/PeriodListPage.vue';
 import PeriodObligationsPage from '@/pages/periods/PeriodObligationsPage.vue';
 import { createAppRouter } from '@/router';
@@ -112,6 +117,51 @@ function emptyPayload(url: string): Response {
         return jsonResponse({
             payment_methods: [{ value: 'cash', label: 'Efectivo' }],
             client_reasons: [],
+        });
+    }
+
+    if (/\/api\/payments\/\d+$/.test(url)) {
+        // The payment detail, with one live allocation. Without an allocation the history
+        // table has no "Revertir" row button, so the reversal dialog is never rendered and a
+        // test that types into `#reversal-reason` fails on an empty wrapper rather than on a
+        // real disagreement.
+        return jsonResponse({
+            payment: {
+                id: 10,
+                client_id: 3,
+                client_name: CLIENT.label,
+                amount_cop: 300000,
+                received_on: '2026-09-15',
+                method: 'cash',
+                method_label: 'Efectivo',
+                reference: 'REC-10',
+                notes: null,
+                allocated_amount_cop: 200000,
+                unallocated_amount_cop: 100000,
+                reconciliation_state: 'partially_allocated',
+                reconciliation_state_label: 'Aplicado parcialmente',
+                requires_reconciliation: true,
+                is_voided: false,
+                voided_at: null,
+                void_reason: null,
+                allocations: [
+                    {
+                        id: 100,
+                        payment_id: 10,
+                        obligation_id: 51,
+                        amount_cop: 200000,
+                        is_reversed: false,
+                        is_active: true,
+                        reversed_at: null,
+                        reversed_by: null,
+                        reversal_reason: null,
+                        created_at: '2026-09-16T08:00:00-05:00',
+                        obligation_label: 'Septiembre 2026',
+                        company_name: 'Constructora Andina S.A.S.',
+                        due_on: '2026-10-10',
+                    },
+                ],
+            },
         });
     }
 
@@ -614,6 +664,50 @@ describe('§6 voiding a payment needs a reason of at least ten characters', () =
 });
 
 describe('§7 the reversal hint matches the rule the form applies', () => {
+    it('holds the same boundary the void flow does, at exactly 9 and 10', async () => {
+        // §4 of R4. The reversal dialog carried its own literal `10`, in a file that already
+        // imports the shared predicate for the void flow. Both were 10, so it worked — until
+        // somebody changed `REASON_MIN_LENGTH` and the void moved while the reversal did not.
+        //
+        // The boundary is asserted on both dialogs in one example on purpose: the claim is that
+        // they agree, and two separate examples each proving their own boundary would pass even
+        // if the two disagreed with each other.
+        const { wrapper } = mountPage(PaymentListPage, [
+            'payments.view',
+            'payments.allocate',
+            'payments.void',
+        ]);
+
+        await flushPromises();
+
+        // Open both dialogs at once. They are independent forms, and a test that opened one,
+        // asserted and moved on could not compare them.
+        await clickButton(wrapper, 'Anular pago');
+
+        // The reversal form lives inside the history dialog, behind a per-allocation button.
+        await clickButton(wrapper, 'Historial');
+        await clickButton(wrapper, 'Revertir');
+
+        expect(wrapper.find('#reversal-reason').exists()).toBe(true);
+
+        for (const [length, expected] of [
+            [9, true],
+            [10, false],
+        ] as const) {
+            const text = 'x'.repeat(length);
+
+            // Nine characters of digits is nine trimmed characters; the length is what is under
+            // test, so it is built rather than typed, and asserted so a typo cannot weaken it.
+            expect(text.trim().length).toBe(length);
+
+            await typeInto(wrapper, '#void-reason', text);
+            expect(confirmDisabled(wrapper, '#void-reason', 'Anular pago')).toBe(expected);
+
+            await typeInto(wrapper, '#reversal-reason', text);
+            expect(confirmDisabled(wrapper, '#reversal-reason', 'Revertir')).toBe(expected);
+        }
+    });
+
     it('describes the ten-character minimum, not merely the need for a reason', async () => {
         const { wrapper } = mountPage(PaymentListPage, [
             'payments.view',
@@ -630,6 +724,55 @@ describe('§7 the reversal hint matches the rule the form applies', () => {
         expect(history).toContain('al menos 10 caracteres');
         expect(history).not.toContain('Sin motivo no se revierte');
     });
+});
+
+/**
+ * The reason minimum is implemented once, not once per dialog.
+ *
+ * ## Why this needs a source check at all
+ *
+ * The boundary example above cannot catch this defect, and it is worth being explicit about
+ * why rather than pretending otherwise. A literal `reversalReason.trim().length < 10` and
+ * `reasonIsLongEnough(reversalReason)` behave **identically** for every possible input while
+ * both values are 10. There is no input that separates them, so no behavioural test can fail
+ * against the duplicated version. I verified that: with the literal restored, all fourteen
+ * examples in this file still pass.
+ *
+ * So what this asserts is the *shape* of the code, not its behaviour. The duplication is only
+ * dangerous the day `REASON_MIN_LENGTH` changes, and on that day the failure is a dialog that
+ * quietly starts accepting a reason the server refuses — which is precisely the bug R3 §6 closed
+ * and then R4 §4 found still present in one place.
+ *
+ * The alternative to this check is not a better test; it is discovering the drift in
+ * production. The regex is crude on purpose and scoped tightly: it reads the page's own source
+ * and looks for a comparison against a bare number anywhere near a reason field.
+ */
+it('implements the reason minimum once, in the shared module', () => {
+    const source: string = paymentListSource;
+
+    // Comments removed first, and for the same reason `EndToEndIsolationTest` removes them from
+    // `run-e2e.sh`: the paragraph above explains this defect by quoting the code it removed, so a
+    // scan that read the comments would trip over its own explanation. Only full-line comments
+    // go; a trailing `//` after real code is still real code.
+    const code = source
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .filter((line: string) => !line.trim().startsWith('//'))
+        .join('\n');
+
+    // Every reason field in this file goes through the shared predicate. Named individually so
+    // a new dialog added without it fails here rather than drifting.
+    expect(source).toContain('reasonIsLongEnough(voidReason)');
+    expect(source).toContain('reasonIsLongEnough(reversalReason.value)');
+
+    // No bare number implements the rule. The module that *defines* the minimum is the one
+    // place a literal is correct, and it is not a page.
+    expect(code).not.toMatch(/reason[A-Za-z]*\.trim\(\)\.length\s*</);
+    expect(code).not.toMatch(/length\s*[<>]=?\s*10\b/);
+
+    // And the constant is not re-declared here either.
+    expect(code).not.toMatch(/const\s+REASON_MIN_LENGTH\s*=/);
+    expect(code).not.toMatch(/REASON_MIN_LENGTH\s*=\s*\d+/);
 });
 
 // --- §12: a reason has to be long enough to be a reason ----------------------
