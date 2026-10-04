@@ -16,226 +16,310 @@ use Illuminate\Support\Collection;
  * ## The preview exists because generation is irreversible in practice
  *
  * Generating an obligation puts rows into the portfolio that payments will be made
- * against. An operator who triggers that by accident has to undo it with
- * adjustments, and the mistake is not obviously undoable from the screen that made
- * it. So the same question is answered twice: once for looking at, and once for
- * acting on.
+ * against. An operator who triggers that by accident has to undo it with adjustments,
+ * and the mistake is not obviously undoable from the screen that made it. So the same
+ * question is answered twice: once for looking at, and once for acting on.
  *
  * ## Read-only, strictly
  *
- * This service writes nothing. No obligations, no audit business events, no changes
- * to rules, rates or relationships. It is a calculation, and the fact that it can be
- * called on a live system without consequence is what makes it safe to show as a
- * confirmation step.
- *
- * `PreviewPeriodObligations` recomputes the candidates inside the transaction
- * rather than trusting this result: between an operator reading a preview and
- * confirming it, a rate may have been added or a relationship closed, and the
- * authoritative answer is the one computed under the lock.
+ * This service writes nothing. No obligations, no audit business events, no changes to
+ * rules, rates or relationships. `PreviewPeriodObligations` recomputes the candidates
+ * inside the transaction rather than trusting this result: between an operator reading a
+ * preview and confirming it, a rate may have been added or a relationship closed, and
+ * the authoritative answer is the one computed under the lock.
  *
  * ## What a candidate is
  *
- * An A02 relationship that **intersects** the month. Not one that is open during
- * the month, and not one that is open at the end of it: somebody who started on the
- * twentieth was working for that company for part of the month, and the month is
- * billed to the company they worked for.
+ * An A02 relationship **segment** that intersects the month, under the half-open
+ * convention A02 already uses:
  *
- *     [started_on, ended_on)  ∩  [month, next month)  is not empty
+ *     [started_on, ended_on)  ∩  [month, next month)  ≠ ∅
  *
  * which is
  *
  *     started_on < next_month  AND  (ended_on IS NULL OR ended_on > month)
+ *     AND (ended_on IS NULL OR started_on < ended_on)
  *
- * The same half-open convention as A02, inherited rather than reinvented.
+ * The third clause is the one that was missing. The intersection formula assumes both
+ * intervals are non-empty, and a same-day transfer produces a row with
+ * `started_on = ended_on`, which is an **empty** interval: it covers no day at all. The
+ * old query accepted it and billed for it, which is how a transfer on the fifteenth could
+ * leave both the source and the destination company owing money for a day on which the
+ * client worked for exactly one of them.
+ *
+ * ## One candidate per client and company, not per segment
+ *
+ * Segments are collapsed by `BillingCandidate`: non-overlapping ones become a single
+ * candidate carrying all its provenance, and overlapping ones stay a blocker because
+ * there is no honest answer to which company the debt belongs to. See that class for the
+ * whole argument.
+ *
+ * ## An existing obligation is never a blocker
+ *
+ * This is the correction that matters most for month closing. A generated obligation
+ * quotes the rate and the cutoff rule that were current when it was written, and those
+ * decisions are immutable. If an operator later corrects a rate, or a relationship
+ * closes, the configuration behind an obligation that already exists can legitimately
+ * stop being resolvable *as current input* — and that must not stop the operator
+ * generating the months' remaining missing obligations.
+ *
+ * So for a pair that already has an obligation, every configuration finding is reported
+ * as a warning. Only a pair with **no** obligation can be blocked, and it is blocked by
+ * what is missing for it.
+ *
+ * ## Bounded queries
+ *
+ * The configuration for the whole month is resolved in four queries regardless of how
+ * many candidates there are — see `BatchedConfigResolver`. A hundred relationships
+ * issue four queries, not four hundred.
  */
 final class ObligationCandidateBuilder
 {
+    public function __construct(
+        private readonly BatchedConfigResolver $config = new BatchedConfigResolver,
+    ) {}
+
     /**
-     * Every A02 relationship that intersects the month, with the client and company
-     * attached so the preview can name them.
+     * Every A02 relationship segment that intersects the month, non-empty ones only.
      *
-     * One query. The alternative, fetching assignments and loading clients and
-     * companies afterwards, is the N+1 this screen cannot afford: a month with two
-     * hundred relationships would issue four hundred queries to draw a table.
+     * One query, with the client and the company attached, because the preview has to
+     * name them and loading them afterwards would be two queries per row.
      *
      * @return Collection<int, ClientCompanyAssignment>
      */
-    public function candidatesFor(MonthlyPeriod $period): Collection
+    public function segmentsFor(MonthlyPeriod $period): Collection
     {
         $month = $period->month();
         $endExclusive = $month->endsOnExclusive();
 
         return ClientCompanyAssignment::query()
             ->with(['client', 'company'])
-            // Intersects the month. See the class docblock for the inequality.
+            // Intersects the month: see the class docblock for the two inequalities.
             ->where('started_on', '<', $endExclusive)
             ->where(function ($query) use ($month): void {
                 $query->whereNull('ended_on')
                     ->orWhere('ended_on', '>', $month->startsOn());
             })
-            // Two open relationships to the same company are refused by A02, so this
-            // ordering cannot change the result. It is here so the candidate list is
-            // deterministic for the preview and for the tests.
+            // Non-empty. `[started_on, ended_on)` with both equal is the empty
+            // interval, and an empty interval intersects nothing. Without this a
+            // same-day transfer or close produced a billing candidate for a day on
+            // which the client worked for at most one of the two companies.
+            ->where(function ($query): void {
+                $query->whereNull('ended_on')
+                    ->orWhereColumn('started_on', '<', 'ended_on');
+            })
+            // Deterministic for the preview, the collapse and the tests.
             ->orderBy('client_id')
             ->orderBy('company_id')
+            ->orderBy('started_on')
             ->orderBy('id')
             ->get();
     }
 
     /**
+     * The month's candidates: one per client and company, with provenance.
+     *
+     * @return Collection<string, BillingCandidate> keyed by `client:company`
+     */
+    public function candidatesFor(MonthlyPeriod $period): Collection
+    {
+        return BillingCandidate::collapse($this->segmentsFor($period));
+    }
+
+    /**
      * Full preview of what generation would do.
+     *
+     * The counts are published as four separate, non-overloaded numbers plus a count of
+     * findings, because the interface used to derive "existing" by subtracting
+     * `blocker_count` from `candidate_count` — and `blocker_count` was a count of
+     * *findings*, so a single candidate missing both a rate and a cutoff contributed two
+     * to it and the subtraction went negative.
      *
      * @return array<string, mixed>
      */
-    public function preview(MonthlyPeriod $period, bool $missingOnly = false): array
+    public function preview(MonthlyPeriod $period): array
     {
         $month = $period->month();
-        $cutoffs = new CutoffResolver;
-        $rates = new RateResolver;
 
         $existing = MonthlyObligation::query()
             ->where('period_id', $period->id)
             ->get()
             ->keyBy(fn (MonthlyObligation $obligation): string => $obligation->client_id.':'.$obligation->company_id);
 
+        $candidates = $this->candidatesFor($period);
+
+        $pairs = $candidates
+            ->map(fn (BillingCandidate $c): array => [$c->clientId, $c->companyId])
+            ->values()
+            ->all();
+
+        $rates = $this->config->rates($pairs, $month);
+        $cutoffs = $this->config->cutoffs($pairs, $month);
+
         $rows = [];
         $blockers = [];
         $warnings = [];
-        $totalAmount = 0;
+
+        $candidateCount = 0;
+        $existingCount = 0;
+        $creatableCount = 0;
+        $blockedCount = 0;
         $resolvedCount = 0;
+        $creatableAmount = 0;
+        $resolvedPortfolioAmount = 0;
 
-        $candidates = $this->candidatesFor($period);
+        foreach ($candidates as $candidate) {
+            $candidateCount++;
 
-        // How many relationships each pair contributes. One is normal; more than one
-        // means the source data cannot say whose debt this is.
-        $openByPair = $candidates
-            ->groupBy(fn (ClientCompanyAssignment $assignment): string => $assignment->client_id.':'.$assignment->company_id)
-            ->map(fn (Collection $group): int => $group->count())
-            ->all();
-
-        foreach ($candidates as $assignment) {
-            $clientId = $assignment->client_id;
-            $companyId = $assignment->company_id;
-            $key = $clientId.':'.$companyId;
-
+            $key = $candidate->key();
             $alreadyExists = $existing->has($key);
-            $context = $missingOnly && $alreadyExists;
 
-            // The candidate is resolved anyway: the preview reports what the month
-            // *is*, not only what it would gain, so an operator can see the whole
-            // picture and understand why a client is missing from the list to be
-            // generated.
-            $rate = $rates->resolve($clientId, $companyId, $month);
-            $cutoff = $cutoffs->resolve($clientId, $companyId, $month);
+            $rate = $rates[$key] ?? null;
+            $rule = $this->config->ruleFor($candidate->clientId, $candidate->companyId, $cutoffs);
+
+            $cutoff = $rule === null
+                ? ResolvedCutoff::missing($candidate->clientId, $candidate->companyId, $month)
+                : ResolvedCutoff::resolved(
+                    $rule->resolveFor($month),
+                    $rule,
+                    $candidate->clientId,
+                    $candidate->companyId,
+                    $month,
+                );
+
+            // Whether this row would cause a write. Generation only ever creates what is
+            // missing, so a row that already exists cannot block anything — see the
+            // class docblock.
+            $wouldWrite = ! $alreadyExists;
 
             $rowBlockers = [];
+            $rowWarnings = [];
 
-            // Whether this row would cause a write. When the obligation is already
-            // there and only missing ones are wanted, nothing is being created, so
-            // nothing about the current state of the client or the relationships can
-            // stop the month from being finished.
-            $wouldWrite = ! ($missingOnly && $alreadyExists);
-
-            // An inactive client or company is not a candidate for a new debt. The
-            // debt may well be real, but writing one against somebody who has been
-            // deactivated would be a new obligation created after the fact, and
-            // reactivating them should not silently multiply what they owe.
             $inactive = collect([
-                ['label' => 'cliente', 'inactive' => $assignment->client !== null && ! $assignment->client->isActive()],
-                ['label' => 'empresa', 'inactive' => $assignment->company !== null && ! $assignment->company->isActive()],
+                ['label' => 'cliente', 'inactive' => $candidate->client !== null && ! $candidate->client->isActive()],
+                ['label' => 'empresa', 'inactive' => $candidate->company !== null && ! $candidate->company->isActive()],
             ])->firstWhere('inactive', true);
 
             if ($inactive !== null) {
                 $finding = GenerationBlocker::inactiveReference(
-                    $clientId,
-                    $companyId,
+                    $candidate->clientId,
+                    $candidate->companyId,
                     $month->key(),
                     sprintf('La %s está inactiva.', $inactive['label']),
                 );
 
-                if ($wouldWrite) {
-                    $rowBlockers[] = $finding;
-                } else {
-                    $warnings[] = $finding->asWarning();
-                }
+                $wouldWrite ? $rowBlockers[] = $finding : $rowWarnings[] = $finding->asWarning();
             }
 
-            // Two overlapping open relationships to the same company are refused by a
-            // partial unique index on the assignments table, so this cannot be created
-            // through the interface or an import that respects it. It can still arrive
-            // with data migrated from elsewhere, and then there is no way to say which
-            // relationship the obligation belongs to. Blocking is the only honest
-            // answer, and the check stays in case the index is ever relaxed.
-            if (($openByPair[$key] ?? 0) > 1) {
-                $finding = GenerationBlocker::ambiguousRelationshipState(
-                    $clientId,
-                    $companyId,
+            if ($candidate->hasOverlap()) {
+                $finding = GenerationBlocker::overlappingRelationshipSegments(
+                    $candidate->clientId,
+                    $candidate->companyId,
                     $month->key(),
-                    $openByPair[$key],
+                    $candidate->overlappingAssignmentIds,
                 );
 
-                if ($wouldWrite) {
-                    $rowBlockers[] = $finding;
-                } else {
-                    $warnings[] = $finding->asWarning();
-                }
+                $wouldWrite ? $rowBlockers[] = $finding : $rowWarnings[] = $finding->asWarning();
+            }
+
+            // A month covered by a break in the employment record is ordinary. It is
+            // reported, because "two relationships" with no explanation reads as a data
+            // problem and it is not one.
+            if ($candidate->sourceCount() > 1 && ! $candidate->hasOverlap()) {
+                $rowWarnings[] = [
+                    'code' => 'multiple_non_overlapping_segments',
+                    'message' => sprintf(
+                        'El cliente %d trabajó para la empresa %d en %d tramos dentro de %s; '
+                        .'se factura una sola obligación que los reúne.',
+                        $candidate->clientId,
+                        $candidate->companyId,
+                        $candidate->sourceCount(),
+                        $month->key(),
+                    ),
+                    'context' => $candidate->provenance(),
+                ];
             }
 
             if ($rate === null) {
-                $rowBlockers[] = GenerationBlocker::missingRate(
-                    $clientId,
-                    $companyId,
+                $finding = GenerationBlocker::missingRate(
+                    $candidate->clientId,
+                    $candidate->companyId,
                     $month->key(),
-                    $assignment->client?->fullName(),
-                    $assignment->company?->displayName(),
+                    $candidate->client?->fullName(),
+                    $candidate->company?->displayName(),
                 );
+
+                $wouldWrite ? $rowBlockers[] = $finding : $rowWarnings[] = $finding->asWarning();
             }
 
             if ($cutoff->isMissing()) {
-                $rowBlockers[] = GenerationBlocker::missingCutoffRule(
-                    $clientId,
-                    $companyId,
+                $finding = GenerationBlocker::missingCutoffRule(
+                    $candidate->clientId,
+                    $candidate->companyId,
                     $month->key(),
-                    $assignment->client?->fullName(),
-                    $assignment->company?->displayName(),
+                    $candidate->client?->fullName(),
+                    $candidate->company?->displayName(),
                 );
+
+                $wouldWrite ? $rowBlockers[] = $finding : $rowWarnings[] = $finding->asWarning();
             }
 
             if ($alreadyExists) {
-                // Not a blocker: an existing obligation is the normal state of a
-                // month that has been generated. It is reported as a warning so the
-                // preview can say "these already exist and will not be touched".
-                $warnings[] = [
+                $rowWarnings[] = [
                     'code' => 'obligation_already_exists',
                     'message' => sprintf(
                         'Ya existe una obligación para el cliente %d y la empresa %d en %s; no se modificará.',
-                        $clientId,
-                        $companyId,
+                        $candidate->clientId,
+                        $candidate->companyId,
                         $month->key(),
                     ),
                     'context' => [
-                        'client_id' => $clientId,
-                        'company_id' => $companyId,
+                        'client_id' => $candidate->clientId,
+                        'company_id' => $candidate->companyId,
                         'obligation_id' => $existing->get($key)?->id,
                     ],
                 ];
             }
 
-            if ($rate !== null && $cutoff->isMissing() === false) {
+            // Whether the configuration behind this row is complete right now. Tracked
+            // on the row itself so `resolved_count` is a count of rows rather than a
+            // second traversal re-deriving the same condition.
+            $isResolved = $rate !== null && ! $cutoff->isMissing();
+
+            if ($isResolved) {
+                $resolvedPortfolioAmount += $rate->amount_cop;
                 $resolvedCount++;
-                $totalAmount += $rate->amount_cop;
+            }
+
+            if ($alreadyExists) {
+                $existingCount++;
+            } elseif ($rowBlockers === []) {
+                $creatableCount++;
+                $creatableAmount += $rate?->amount_cop ?? 0;
+            } else {
+                $blockedCount++;
             }
 
             foreach ($rowBlockers as $blocker) {
                 $blockers[] = $blocker->toArray();
             }
 
+            foreach ($rowWarnings as $warning) {
+                $warnings[] = $warning;
+            }
+
             $rows[] = [
-                'client_id' => $clientId,
-                'company_id' => $companyId,
-                'client_name' => $assignment->client?->fullName(),
-                'company_name' => $assignment->company?->displayName(),
-                'assignment_id' => $assignment->id,
+                'client_id' => $candidate->clientId,
+                'company_id' => $candidate->companyId,
+                'client_name' => $candidate->client?->fullName(),
+                'company_name' => $candidate->company?->displayName(),
+                // The single column the obligation carries. Null when several segments
+                // produced it, because the provenance table holds the complete set and
+                // picking one of them here would misattribute the debt.
+                'assignment_id' => $candidate->primaryAssignmentId(),
+                'source_assignment_ids' => $candidate->sourceAssignmentIds,
+                'source_count' => $candidate->sourceCount(),
+                'overlapping_assignment_ids' => $candidate->overlappingAssignmentIds,
                 'already_exists' => $alreadyExists,
                 'amount_cop' => $rate?->amount_cop,
                 'rate_id' => $rate?->id,
@@ -244,15 +328,34 @@ final class ObligationCandidateBuilder
                     fn (GenerationBlocker $blocker): array => $blocker->toArray(),
                     $rowBlockers,
                 ),
+                'warnings' => $rowWarnings,
+                'resolved' => $isResolved,
                 'will_be_created' => ! $alreadyExists && $rowBlockers === [],
             ];
         }
 
         return [
             'period' => $month->toArray(),
-            'candidate_count' => count($rows),
-            'creatable_count' => count(array_filter($rows, fn (array $row): bool => $row['will_be_created'] === true)),
-            'total_amount_cop' => $totalAmount,
+            // Four disjoint buckets that sum to `candidate_count`, so the interface can
+            // never derive a negative number from them.
+            'candidate_count' => $candidateCount,
+            'existing_candidate_count' => $existingCount,
+            'creatable_count' => $creatableCount,
+            'blocked_candidate_count' => $blockedCount,
+            // Findings, not rows. One blocked candidate with two findings counts twice
+            // here and once in `blocked_candidate_count`, which is the honest reading of
+            // both names.
+            'blocker_finding_count' => count($blockers),
+            // What this execution would write. Excludes existing obligations, whose
+            // amounts are already in the portfolio and would otherwise be reported as
+            // money about to be created.
+            'creatable_amount_cop' => $creatableAmount,
+            // The month as it currently stands once every candidate that can be resolved
+            // is counted. Named for what it is: a portfolio total, not a pending write.
+            'resolved_portfolio_amount_cop' => $resolvedPortfolioAmount,
+            // How many candidates have their configuration resolved, whether or not
+            // they will be written. Kept because it answers "how much of this month is
+            // fully specified", which the other four counts do not.
             'resolved_count' => $resolvedCount,
             'blocker_count' => count($blockers),
             'blockers' => $blockers,

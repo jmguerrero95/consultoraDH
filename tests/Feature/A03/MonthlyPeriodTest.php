@@ -318,3 +318,115 @@ it('keeps the two deliberate asymmetries in the role matrix', function (): void 
         expect(actingAsRole('Read Only')->can($permission))->toBeFalse();
     }
 });
+
+// --- A03-R1: the value object always represents the first day ----------------
+
+it('normalizes any date in a month to the first day', function (): void {
+    // The defect this fixes: `fromFirstDay` dropped the time but kept the day, so the
+    // object claimed to be a month while carrying 2026-10-15. A `MonthlyPeriod` that is
+    // not the first day of its month breaks every comparison against `period_month`.
+    expect(Month::fromFirstDay('2026-10-15')->startsOn()->format('Y-m-d'))->toBe('2026-10-01')
+        ->and(Month::fromFirstDay('2026-10-01')->startsOn()->format('Y-m-d'))->toBe('2026-10-01')
+        ->and(Month::fromFirstDay('2026-10-31')->startsOn()->format('Y-m-d'))->toBe('2026-10-01')
+        // The key follows, so a normalized instance still names its own month.
+        ->and(Month::fromFirstDay('2026-10-15')->key())->toBe('2026-10');
+});
+
+it('normalizes a date carrying a time to midnight on the first day', function (): void {
+    $month = Month::fromFirstDay(Carbon::parse('2026-10-15 14:30:45'));
+
+    expect($month->startsOn()->format('Y-m-d H:i:s'))->toBe('2026-10-01 00:00:00')
+        ->and($month->key())->toBe('2026-10');
+});
+
+it('normalizes through parse as well, so no path keeps a day', function (string $input, string $expected): void {
+    expect(Month::parse($input)->startsOn()->format('Y-m-d'))->toBe($expected);
+})->with([
+    'key' => ['2026-10', '2026-10-01'],
+    'first day' => ['2026-10-01', '2026-10-01'],
+    'mid month' => ['2026-10-15', '2026-10-01'],
+    'with time' => ['2026-10-15T23:59:59', '2026-10-01'],
+    'last day' => ['2026-10-31', '2026-10-01'],
+]);
+
+it('resolves October when September, October and November are all open', function (): void {
+    $resolver = app(MonthlyPeriodResolver::class);
+
+    $september = app(CreatePeriod::class)->execute(Month::fromKey('2026-09'), actingAsRole());
+    $october = app(CreatePeriod::class)->execute(Month::fromKey('2026-10'), actingAsRole());
+    $november = app(CreatePeriod::class)->execute(Month::fromKey('2026-11'), actingAsRole());
+
+    // The reproduction from the review. With the un-normalized value object the exact
+    // match was asked for `2026-10-15`, found nothing, and fell through to "newest
+    // open period" — which is November. Billing the wrong month is the failure this
+    // asserts against, so all three periods exist and November is deliberately the
+    // one the broken fallback would have chosen.
+    expect($resolver->current(Carbon::parse('2026-10-15'))->id)->toBe($october->id)
+        ->and($resolver->current(Carbon::parse('2026-10-15'))->id)->not->toBe($november->id)
+        ->and($resolver->current(Carbon::parse('2026-10-15'))->id)->not->toBe($september->id);
+
+    // The first of the month, with a time, is still October.
+    expect($resolver->current(Carbon::parse('2026-10-01 00:00:01'))->id)->toBe($october->id)
+        ->and($resolver->current(Carbon::parse('2026-10-31 23:59:59'))->id)->toBe($october->id);
+});
+
+it('falls back to the newest open period when October itself does not exist', function (): void {
+    $resolver = app(MonthlyPeriodResolver::class);
+
+    $september = app(CreatePeriod::class)->execute(Month::fromKey('2026-09'), actingAsRole());
+    $november = app(CreatePeriod::class)->execute(Month::fromKey('2026-11'), actingAsRole());
+
+    // With September and November open and no October row, there is nothing to match,
+    // so the documented fallback applies: the newest open period is where work
+    // happens. This is stated behaviour, not an accident.
+    expect($resolver->current(Carbon::parse('2026-10-15'))->id)->toBe($november->id)
+        ->and($resolver->current(Carbon::parse('2026-10-15'))->id)->not->toBe($september->id);
+});
+
+// --- A03-R1: an impossible month is a validation error, never a 500 ------------
+
+it('refuses an impossible month at the HTTP boundary with 422 and a field error', function (string $month): void {
+    $this->actingAs(actingAsRole());
+
+    $response = $this->postJson('/api/periods', ['period_month' => $month]);
+
+    // A 500 would mean `Carbon::parse` or PostgreSQL threw instead of the request
+    // being refused. The field has to be named, or the operator cannot tell what to
+    // correct.
+    $response->assertStatus(422)->assertJsonValidationErrors('period_month');
+
+    expect($response->json('errors.period_month.0'))->toBeString()->not->toBeEmpty();
+})->with([
+    'month zero' => ['2026-00'],
+    'month thirteen' => ['2026-13'],
+    'month ninety nine' => ['2026-99'],
+    'month negative shape' => ['2026-1'],
+    'year too small' => ['0001-01'],
+    'year too large' => ['9999-01'],
+]);
+
+it('refuses an impossible effective month for rates and cutoffs with 422', function (string $month): void {
+    $this->actingAs(actingAsRole());
+    $employer = a03_employerFor('imposible');
+    $client = $employer['client'];
+    $company = $employer['company'];
+
+    $this->postJson('/api/rates', [
+        'client_id' => $client->id,
+        'company_id' => $company->id,
+        'effective_month' => $month,
+        'amount_cop' => 235000,
+    ])->assertStatus(422)->assertJsonValidationErrors('effective_month');
+
+    $this->postJson('/api/cutoff-rules', [
+        'scope' => 'general',
+        'effective_month' => $month,
+        'cutoff_day' => 10,
+        'month_offset' => 1,
+    ])->assertStatus(422)->assertJsonValidationErrors('effective_month');
+})->with([
+    'month zero' => ['2026-00-01'],
+    'month thirteen' => ['2026-13-01'],
+    'month ninety nine' => ['2026-99-01'],
+    'not the first day' => ['2026-10-15'],
+]);

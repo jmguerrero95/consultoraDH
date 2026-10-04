@@ -4,11 +4,15 @@ declare(strict_types=1);
 
 namespace Database\Factories;
 
+use App\Domain\Billing\CutoffMonthOffset;
+use App\Domain\Billing\CutoffScope;
 use App\Domain\Billing\ObligationSource;
 use App\Domain\Periods\MonthlyPeriod as MonthValue;
 use App\Domain\Periods\PeriodStatus;
 use App\Models\Client;
+use App\Models\ClientCompanyRate;
 use App\Models\Company;
+use App\Models\CutoffRule;
 use App\Models\MonthlyObligation;
 use App\Models\MonthlyPeriod;
 use Illuminate\Database\Eloquent\Factories\Factory;
@@ -21,9 +25,6 @@ class MonthlyObligationFactory extends Factory
 {
     protected $model = MonthlyObligation::class;
 
-    /**
-     * @return array<string, mixed>
-     */
     /**
      * @return array<string, mixed>
      */
@@ -40,6 +41,9 @@ class MonthlyObligationFactory extends Factory
             'client_id' => Client::factory(),
             'company_id' => Company::factory(),
             'client_company_assignment_id' => null,
+            // Filled in by `configure()`. Null here means "not supplied by the caller",
+            // not "stored as null": a generated row must quote the configuration that
+            // produced it, and A03-R1's CHECK enforces that at the database.
             'rate_id' => null,
             'cutoff_rule_id' => null,
             // Whole pesos, and always a realistic magnitude. A factory that produced
@@ -56,6 +60,19 @@ class MonthlyObligationFactory extends Factory
     /**
      * A due date on the tenth of the month after the period, which is what a cutoff
      * of the tenth with a one-month offset produces.
+     *
+     * This is also where a `generated` row is given the configuration it quotes.
+     *
+     * A03-R1 made `rate_id` and `cutoff_rule_id` mandatory for `source = 'generated'`,
+     * which means a factory that produced a generated row without them was building
+     * something the domain now refuses to create. That refusal is correct — an amount
+     * with no rate behind it cannot be explained — so the factory has to supply the
+     * evidence rather than the constraint being loosened.
+     *
+     * `firstOrCreate` rather than `create`, because the uniqueness is on
+     * `(client, company, effective_month)` for a rate and on the scope identifiers plus
+     * `effective_month` for a cutoff: a test building several obligations for the same
+     * employer and month must reuse one decision rather than collide with itself.
      */
     public function configure(): static
     {
@@ -65,6 +82,49 @@ class MonthlyObligationFactory extends Factory
                     ->copy()
                     ->addMonthNoOverflow()
                     ->day(10);
+            }
+
+            // `source` is cast to the enum, so this is an enum comparison. Comparing
+            // against `->value` silently skipped the whole block, which is exactly the
+            // kind of quiet no-op that leaves a constraint failing with no explanation.
+            if ($obligation->source !== ObligationSource::Generated) {
+                return;
+            }
+
+            $effectiveMonth = ($obligation->period?->period_month ?? Carbon::now())->copy()->startOfMonth();
+
+            if ($obligation->rate_id === null) {
+                $rate = ClientCompanyRate::query()->firstOrCreate(
+                    [
+                        'client_id' => $obligation->client_id,
+                        'company_id' => $obligation->company_id,
+                        'effective_month' => $effectiveMonth->toDateString(),
+                    ],
+                    [
+                        'amount_cop' => $obligation->base_amount_cop > 0
+                            ? $obligation->base_amount_cop
+                            : 235000,
+                    ],
+                );
+
+                $obligation->rate_id = $rate->id;
+            }
+
+            if ($obligation->cutoff_rule_id === null) {
+                $rule = CutoffRule::query()->firstOrCreate(
+                    [
+                        'scope' => CutoffScope::General->value,
+                        'company_id' => null,
+                        'client_id' => null,
+                        'effective_month' => $effectiveMonth->toDateString(),
+                    ],
+                    [
+                        'cutoff_day' => 10,
+                        'month_offset' => CutoffMonthOffset::FollowingMonth->value,
+                    ],
+                );
+
+                $obligation->cutoff_rule_id = $rule->id;
             }
         });
     }

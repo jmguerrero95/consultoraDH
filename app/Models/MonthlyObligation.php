@@ -149,6 +149,30 @@ class MonthlyObligation extends Model
         return $this->hasMany(PaymentAllocation::class, 'obligation_id');
     }
 
+    /**
+     * What is still owed on this obligation.
+     *
+     * The same formula as `ObligationTotals`, reached from the model so a test or a caller
+     * can ask without assembling two aggregates by hand:
+     *
+     *     base + every adjustment − live allocations from payments that are not voided
+     *
+     * Derived, never stored, exactly like the rest of the money in this module. A voided
+     * payment's allocations stay in the database but stop counting, which is what makes a
+     * void take effect everywhere at once.
+     */
+    public function balance(): int
+    {
+        $adjustments = (int) $this->adjustments()->sum('delta_cop');
+        $paid = (int) PaymentAllocation::query()
+            ->where('obligation_id', $this->id)
+            ->whereNull('reversed_at')
+            ->whereHas('payment', fn ($query) => $query->whereNull('voided_at'))
+            ->sum('amount_cop');
+
+        return $this->base_amount_cop + $adjustments - $paid;
+    }
+
     public function month(): MonthValue
     {
         return MonthValue::fromFirstDay($this->period->period_month);

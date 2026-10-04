@@ -64,12 +64,31 @@ final class SchemaConstraint
     public const OBLIGATION_PERIOD_CLIENT_COMPANY = 'monthly_obligations_period_client_company_unique';
 
     /**
-     * One live allocation of a payment to an obligation.
+     * The live-pair allocation index, removed by A03-R1.
      *
-     * Partial: a reversed allocation is kept, and the pair is free again so a
-     * corrected allocation can be written without deleting the original.
+     * Kept as a constant, and kept in this file, rather than deleted: the code that
+     * translated a violation of it is gone too, and a name that vanishes from the
+     * schema list without explanation looks like an oversight to whoever reads the
+     * migration history next. `A03-R1` removed it because a payment may be applied to
+     * one obligation in several steps, which is an ordinary instalment workflow, and
+     * because the swallowed violation made `applyOldestFirst` skip a debt and pay a
+     * newer one instead. The conservation guarantees it stood in for are enforced by
+     * row locks in `ManagePayments`.
      */
-    public const ALLOCATION_LIVE_PAIR = 'payment_allocations_live_pair_unique';
+    public const REMOVED_ALLOCATION_LIVE_PAIR = 'payment_allocations_live_pair_unique';
+
+    /** One source relationship recorded once per obligation. */
+    public const OBLIGATION_SOURCE_ASSIGNMENT = 'obligation_source_assignments_pair_unique';
+
+    /**
+     * One period per calendar month.
+     *
+     * Partial-free and absolute: a month is opened once and stays. This index is the
+     * authority for creating a period, because a row lock cannot lock a row that does not
+     * exist yet — see `CreatePeriod`, which translates a violation of this into the same
+     * domain conflict a deliberate second attempt receives.
+     */
+    public const PERIOD_MONTH = 'monthly_periods_period_month_unique';
 
     /** One cutoff rule per scope per identifiers per effective month. */
     public const CUTOFF_RULE_GENERAL_MONTH = 'cutoff_rules_general_month_unique';
@@ -80,6 +99,23 @@ final class SchemaConstraint
 
     /** One rate per client, per company, per effective month. */
     public const RATE_CLIENT_COMPANY_MONTH = 'client_company_rates_client_company_month_unique';
+
+    /**
+     * Constraints that exist in the history but no longer in the schema.
+     *
+     * Separated from `all()` on purpose: `all()` is what the schema test asserts
+     * against, and listing a dropped index there would fail. Naming them here means the
+     * audit trail of what was removed and why stays in the same file as the constraints
+     * that remain.
+     *
+     * @return list<string>
+     */
+    public static function removed(): array
+    {
+        return [
+            self::REMOVED_ALLOCATION_LIVE_PAIR,
+        ];
+    }
 
     /**
      * Every one of them, for the tests that assert the schema matches this list.
@@ -95,8 +131,10 @@ final class SchemaConstraint
             self::AFFILIATION_OPEN_PER_TYPE,
             self::ASSIGNMENT_OPEN_PER_COMPANY,
 
+            self::PERIOD_MONTH,
+
             self::OBLIGATION_PERIOD_CLIENT_COMPANY,
-            self::ALLOCATION_LIVE_PAIR,
+            self::OBLIGATION_SOURCE_ASSIGNMENT,
 
             self::CUTOFF_RULE_GENERAL_MONTH,
             self::CUTOFF_RULE_COMPANY_MONTH,

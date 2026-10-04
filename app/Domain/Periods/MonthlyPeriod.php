@@ -39,15 +39,31 @@ final readonly class MonthlyPeriod
         public Carbon $firstDay,
     ) {}
 
+    /**
+     * Any date in a month, normalized to the first day of that month.
+     *
+     * The name says what it accepts and the class says what it returns, and the gap
+     * between the two used to be where a bug lived: `fromFirstDay('2026-10-15')`
+     * dropped the time and returned the fifteenth, so the object claimed to be a month
+     * while carrying a day nobody asked for. `MonthlyPeriodResolver` compares the
+     * result with `period_month`, so on the fifteenth of October it failed to match
+     * October and answered with November — the newest open period — which is exactly
+     * the wrong month to bill.
+     *
+     * So the invariant is enforced here rather than left to callers: **every** instance
+     * of this class is midnight on the first day of its month. `fromYearMonth` builds
+     * it directly, `fromKey` delegates, and `parse` ends up in this method, so there
+     * is one place where a day can be lost and it is now closed.
+     */
     public static function fromFirstDay(Carbon|string $date): self
     {
         $parsed = $date instanceof Carbon
             ? $date->copy()
             : Carbon::parse($date);
 
-        // A time component would make two rows for the same month unequal, and the
-        // column is a date, so the time is dropped here rather than at each write.
-        $parsed->startOfDay();
+        // `startOfMonth` also zeroes the time, so the dropped-time comment below is
+        // covered by it rather than by a second call.
+        $parsed->startOfMonth();
 
         return new self($parsed);
     }

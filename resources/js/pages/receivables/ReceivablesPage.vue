@@ -7,7 +7,7 @@ import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
 import { useDebouncedRef } from '@/composables/useDebouncedRef';
-import { fecha, pesos } from '@/composables/useFormatters';
+import { etiquetaMes, fecha, pesos } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 
@@ -150,6 +150,18 @@ function agingLabel(row: ReceivableRow): string {
     );
 
     return bucket?.label ?? row.aging_bucket;
+}
+
+/**
+ * The months this client still owes, named.
+ *
+ * `owed_periods` arrives as `YYYY-MM` keys because that is what the server aggregates and
+ * sorts on; a key is not a month name. Printed raw, this column said `2028-04` while the
+ * period list beside it said "Abril 2028" — the same month, written two ways, in two screens
+ * an operator uses to answer the same question.
+ */
+function owedPeriodsLabel(row: ReceivableRow): string {
+    return row.owed_periods.map(etiquetaMes).join(', ');
 }
 </script>
 
@@ -330,8 +342,15 @@ function agingLabel(row: ReceivableRow): string {
                                 <span v-else class="cdh-table__secondary">—</span>
                             </td>
                             <td data-label="Periodos debidos">
+                                <!--
+                                    Named the way every other screen names a month. The
+                                    server sends the key because a key is what it can
+                                    aggregate and sort on; printing `2028-04` here while
+                                    the period list says "Abril 2028" made one collection
+                                    look like a different month from another.
+                                -->
                                 <span v-if="row.owed_periods.length > 0">
-                                    {{ row.owed_periods.join(', ') }}
+                                    {{ owedPeriodsLabel(row) }}
                                 </span>
                                 <span v-else class="cdh-table__secondary">—</span>
                             </td>

@@ -13,6 +13,7 @@ use App\Domain\Periods\MonthlyPeriod as MonthValue;
 use App\Models\Client;
 use App\Models\MonthlyPeriod;
 use App\Models\Payment;
+use App\Support\Validation\SafeSearch;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -44,10 +45,19 @@ use Illuminate\Support\Facades\DB;
 /**
  * An aggregated list column, as a list.
  *
- * `json_agg` comes back from the driver already decoded, so this only has to cope
- * with the two shapes it can take: the value itself when there were rows, and null
- * when there were none. Casting with `(array)` is not enough — on a Postgres array
- * string it would produce a one element list holding the whole string.
+ * Three shapes have to be coped with, and A03-R1 added the third:
+ *
+ *   * **decoded** — `json_agg` without a `FILTER` comes back from the driver as a PHP
+ *     array, when there were rows.
+ *   * **null** — the `FILTER (WHERE ...)` matched nothing. "No company is owed" is an empty
+ *     list, never a list containing null.
+ *   * **a JSON string** — `json_agg` **with** a `FILTER` comes back as the text
+ *     `["2026-02"]` rather than as an array, because the filter changes the aggregate's type
+ *     as far as the driver is concerned. Decoding it as a Postgres array string instead
+ *     produced the single element `["2026-02"]`, which the interface then rendered as the
+ *     literal text of a month.
+ *
+ * `(array)` casting is not enough for any of them.
  *
  * @return list<string>
  */
@@ -62,6 +72,14 @@ function listFrom(mixed $value): array
     }
 
     if (is_string($value)) {
+        // JSON first: it is unambiguous, and a month key never needs unescaping.
+        $decoded = json_decode($value, true);
+
+        if (is_array($decoded)) {
+            return array_values(array_map(static fn (mixed $item): string => (string) $item, $decoded));
+        }
+
+        // Then the Postgres array literal, `{a,b}`, for the plain `array_agg` form.
         return array_values(array_map(
             static fn (string $item): string => trim(trim($item), '"'),
             array_filter(explode(',', trim(trim($value), '{}')), static fn (string $i): bool => $i !== ''),
@@ -80,7 +98,10 @@ final class ReceivablesService
      */
     public function clientAccount(Client $client, ?Carbon $asOf = null): array
     {
-        $asOf ??= now();
+        // §25. Every path folds to a calendar day. Comparing a debt due at midnight today
+        // against `now()` at 11:00 called it overdue during its own due date, while the SQL
+        // comparisons in the same service — which see dates, not instants — said it was not.
+        $asOf = $this->agingReference($asOf);
 
         $obligations = $this->obligationsQuery()
             // On the obligation, not on the joined assignment. The join is a left
@@ -96,10 +117,23 @@ final class ReceivablesService
         $rows = $obligations->map(fn (object $row): array => $this->hydrateRow($row, $asOf))->all();
 
         $outstanding = array_values(array_filter($rows, fn (array $row): bool => $row['balance_cop'] > 0));
-        $owedPeriods = array_map(fn (array $row): string => $row['period_key'], $outstanding);
+
+        // §22. Distinct, and only for money still owed. The account screen and the cartera
+        // list have to agree: the list already answered "which months are owed" this way,
+        // and the account was listing every month the client ever had, paid ones included.
+        $owedPeriods = array_values(array_unique(array_map(
+            fn (array $row): string => $row['period_key'],
+            $outstanding,
+        )));
         sort($owedPeriods);
 
-        $overdueCount = count(array_filter($outstanding, fn (array $row): bool => $row['is_overdue']));
+        // §24. Distinct late months, to match the cartera list and the domain language.
+        $overduePeriods = array_values(array_unique(array_map(
+            fn (array $row): string => $row['period_key'],
+            array_filter($outstanding, fn (array $row): bool => $row['is_overdue']),
+        )));
+
+        $overdueCount = count($overduePeriods);
 
         return [
             'client' => [
@@ -135,28 +169,59 @@ final class ReceivablesService
     /**
      * The receivables screen: a page of clients who owe something.
      *
+     * ## A row is a CLIENT, and the filters agree about that
+     *
+     * Every filter here is either about a client or is applied to the **client's aggregate**,
+     * because a cartera row is one client and `total`, `last_page` and the summary have to
+     * describe the same population as the rows do. Three corrections follow from that one
+     * sentence, and all three were wrong before A03-R1:
+     *
+     *   * `minimum_balance` / `maximum_balance` filtered individual obligations. A client
+     *     owing 600000 in January and 600000 in February has 1200000 outstanding; asking for
+     *     `minimum_balance=1000000` excluded them, because no *single* obligation reached
+     *     the figure. They are now compared against the sum the row displays.
+     *   * `traffic_light` was applied **after** `total` had been calculated, so the header
+     *     counted every debtor while the table showed a subset — including on the last page,
+     *     where the pager claimed pages that did not exist.
+     *   * `outstanding_only` defaulted to true while `settlement_state=paid` filtered for
+     *     settled obligations. The two contradict each other, so asking for paid
+     *     obligations always produced an empty screen and no explanation.
+     *
+     * ## The filters that belong to a client row
+     *
+     * `outstanding_only=false` means "include clients whose balance is zero", and when the
+     * caller asks for that, `total` counts the same rows. `settlement_state` is different:
+     * it names a *state of an obligation*, so asking for `paid` **implies** that the caller
+     * is not asking for a debtor list. Rather than refuse the combination, the default is
+     * dropped when a settlement state is present, because a filter that is silently
+     * contradictory is a filter that looks broken.
+     *
+     * ## Debt-specific figures come only from money still owed
+     *
+     * `owed_periods`, the company list and the oldest due date are derived with
+     * `FILTER (WHERE balance_cop > 0)`. Before A03-R1 they were aggregates over **every**
+     * obligation behind the client, so a January debt that had been paid in full still
+     * appeared in "owed periods", and an old company's name stayed in the "Empresas" column
+     * after the client had moved. Both told a collections operator the wrong thing about
+     * where the money is.
+     *
      * @param  array<string, mixed>  $filters
      * @return array{items: list<array<string, mixed>>, total: int, page: int, per_page: int, last_page: int}
      */
     public function list(array $filters, int $page, int $perPage): array
     {
-        $asOf = isset($filters['as_of']) && is_string($filters['as_of'])
-            ? Carbon::parse($filters['as_of'])->startOfDay()
-            : now();
+        $asOf = $this->agingReference($filters['as_of'] ?? null);
 
-        // The per-obligation figures first, then everything else. Postgres will not
-        // let a `where` or a `having` mention a select alias, so the derived figures
-        // are wrapped as a derived table: from here down, `balance_cop` and
-        // `paid_amount_cop` are ordinary columns of a real relation and can be
-        // filtered on, summed and grouped directly.
+        // The per-obligation figures first, then everything else. Postgres will not let a
+        // `where` or a `having` mention a select alias, so the derived figures are wrapped
+        // as a derived table: from here down, `balance_cop` and `paid_amount_cop` are
+        // ordinary columns of a real relation.
         $obligations = DB::query()->fromSub($this->obligationsQuery(), 'obligations');
 
-        if (isset($filters['client_id'])) {
-            $obligations->where('obligations.client_id', (int) $filters['client_id']);
-        }
-
-        if (isset($filters['company_id'])) {
-            $obligations->where('obligations.company_id', (int) $filters['company_id']);
+        foreach (['client_id', 'company_id'] as $key) {
+            if (isset($filters[$key])) {
+                $obligations->where('obligations.'.$key, (int) $filters[$key]);
+            }
         }
 
         if (isset($filters['period_from'])) {
@@ -168,152 +233,102 @@ final class ReceivablesService
         }
 
         if (($filters['settlement_state'] ?? null) !== null) {
-            $state = SettlementState::from((string) $filters['settlement_state']);
+            $state = SettlementState::tryFrom((string) $filters['settlement_state']);
 
-            // The state is derived, so it is filtered after the arithmetic rather than
-            // with a column: `settlement_state = 'paid'` is expressible as
-            // `balance = 0`, and expressing it as a column would mean storing the
-            // derived value this module refuses to store.
-            match ($state) {
-                SettlementState::Paid => $obligations->where('obligations.balance_cop', 0),
-                SettlementState::Pending => $obligations->where('obligations.balance_cop', '>', 0)
-                    ->where('obligations.paid_amount_cop', 0),
-                SettlementState::Partial => $obligations->where('obligations.balance_cop', '>', 0)
-                    ->where('obligations.paid_amount_cop', '>', 0),
-            };
+            if ($state !== null) {
+                // The state is derived, so it is filtered after the arithmetic rather than
+                // with a column: `settlement_state = 'paid'` is expressible as
+                // `balance = 0`.
+                match ($state) {
+                    SettlementState::Paid => $obligations->where('obligations.balance_cop', 0),
+                    SettlementState::Pending => $obligations->where('obligations.balance_cop', '>', 0)
+                        ->where('obligations.paid_amount_cop', 0),
+                    SettlementState::Partial => $obligations->where('obligations.balance_cop', '>', 0)
+                        ->where('obligations.paid_amount_cop', '>', 0),
+                };
+            }
         }
 
         if (($filters['aging_bucket'] ?? null) !== null) {
-            $bucket = AgingBucket::from((string) $filters['aging_bucket']);
-            $this->applyAgingFilter($obligations, $bucket, $asOf);
+            $bucket = AgingBucket::tryFrom((string) $filters['aging_bucket']);
+
+            if ($bucket !== null) {
+                $this->applyAgingFilter($obligations, $bucket, $asOf);
+            }
         }
 
-        // An overdue obligation is one still owing, past its date. A settled one is
-        // not late however long ago it fell due.
-        if (($filters['overdue'] ?? null) !== null) {
+        // §21. Only a **true** narrows. Absent and `false` are the same question.
+        if (($filters['overdue'] ?? false) === true) {
             $obligations->where('obligations.balance_cop', '>', 0)
                 ->where('obligations.due_on', '<', $asOf->format('Y-m-d'));
         }
 
-        if (isset($filters['minimum_balance'])) {
-            $obligations->where('obligations.balance_cop', '>=', (int) $filters['minimum_balance']);
-        }
-
-        if (isset($filters['maximum_balance'])) {
-            $obligations->where('obligations.balance_cop', '<=', (int) $filters['maximum_balance']);
-        }
-
         if (isset($filters['search']) && is_string($filters['search']) && trim($filters['search']) !== '') {
-            // The needle is lowercased as well as the column. Without that, typing
-            // "Ana" into the box would not match "Ana Maria", because the comparison
-            // is against `lower(first_names)` and the needle kept its capital.
-            $needle = '%'.mb_strtolower(trim((string) $filters['search'])).'%';
+            // Escaped and lowercased on both sides: `likeNeedle()` folds the needle and
+            // escapes the wildcards, and the columns are folded in SQL. Without the fold,
+            // typing "Ana" would not match "Ana María".
+            $needle = SafeSearch::likeNeedle($filters['search']);
 
             $obligations->where(function (QueryBuilder $query) use ($needle): void {
-                $query->whereRaw('lower(obligations.first_names) LIKE ?', [$needle])
-                    ->orWhereRaw('lower(obligations.last_names) LIKE ?', [$needle])
-                    ->orWhereRaw('obligations.document_number LIKE ?', [$needle]);
+                $query->whereRaw('lower(obligations.first_names) LIKE ?'.$this->likeEscape(), [$needle])
+                    ->orWhereRaw('lower(obligations.last_names) LIKE ?'.$this->likeEscape(), [$needle])
+                    ->orWhereRaw('lower(obligations.document_number) LIKE ?'.$this->likeEscape(), [$needle]);
             });
         }
 
-        // One query for the totals, so the page header and the rows cannot disagree.
-        $summaryRow = (clone $obligations)
-            ->selectRaw(
-                'count(distinct obligations.client_id) filter (where obligations.balance_cop > 0) as clients_count',
-            )
-            ->selectRaw('coalesce(sum(obligations.effective_amount_cop), 0) as total_effective_cop')
-            ->selectRaw('coalesce(sum(obligations.paid_amount_cop), 0) as total_paid_cop')
-            ->selectRaw('coalesce(sum(obligations.balance_cop), 0) as total_balance_cop')
-            ->selectRaw('coalesce(sum(CASE WHEN obligations.balance_cop > 0 AND obligations.due_on < ? THEN obligations.balance_cop ELSE 0 END), 0) as total_overdue_cop', [$asOf->format('Y-m-d')])
-            ->selectRaw('count(*) filter (where obligations.balance_cop > 0) as open_obligations_count')
-            ->selectRaw('count(*) filter (where obligations.balance_cop > 0 AND obligations.due_on < ? ) as overdue_obligations_count', [$asOf->format('Y-m-d')])
-            ->first();
+        $perClient = $this->groupedClients($obligations, $asOf);
 
-        // The header describes the filtered obligations whatever the list shows, so the
-        // two cannot answer different questions about the same month.
-        $total = (int) ($summaryRow->clients_count ?? 0);
+        // §27 A. The debtor-only default is dropped when the caller asks about settlement
+        // state, because `paid` and "must have a balance" cannot both hold. Asking for
+        // paid obligations without this produced an empty screen.
+        $outstandingOnly = (bool) ($filters['outstanding_only'] ?? true);
 
-        // The rows, one per client, with their figures aggregated. The per-client
-        // pagination is over distinct clients, which is what the screen shows, and it
-        // is computed with a grouped query rather than by loading every row and
-        // slicing in PHP.
-        $perClient = $obligations
-            ->selectRaw('obligations.client_id')
-            ->selectRaw('obligations.first_names, obligations.last_names, obligations.document_type, obligations.document_number')
-            ->selectRaw('coalesce(sum(obligations.balance_cop), 0) as balance_cop')
-            ->selectRaw('coalesce(sum(obligations.paid_amount_cop), 0) as paid_amount_cop')
-            ->selectRaw('coalesce(sum(CASE WHEN obligations.balance_cop > 0 AND obligations.due_on < ? THEN obligations.balance_cop ELSE 0 END), 0) as overdue_balance_cop', [$asOf->format('Y-m-d')])
-            ->selectRaw('count(*) filter (where obligations.balance_cop > 0) as open_obligations_count')
-            ->selectRaw('count(*) filter (where obligations.balance_cop > 0 AND obligations.due_on < ?) as overdue_obligations_count', [$asOf->format('Y-m-d')])
-            // json_agg rather than array_agg: the driver hands back a Postgres array as the
-            // string `{2026-01,2026-02}`, which is not a list of months and would be
-            // drawn on the screen as one piece of text.
-            ->selectRaw(
-                'json_agg(obligations.period_key order by obligations.period_key) as period_keys',
-            )
-            ->selectRaw('max(obligations.due_on) as oldest_due_on')
-            ->selectRaw('json_agg(distinct obligations.company_id) as company_ids')
-            ->selectRaw('json_agg(distinct obligations.legal_name) as company_names')
-            ->groupBy(
-                'obligations.client_id',
-                'obligations.first_names',
-                'obligations.last_names',
-                'obligations.document_type',
-                'obligations.document_number',
-            )
-            ->orderByDesc('balance_cop')
-            ->orderBy('obligations.document_number');
+        if (isset($filters['settlement_state']) && $filters['settlement_state'] === SettlementState::Paid->value) {
+            $outstandingOnly = false;
+        }
 
-        // Only the clients with something outstanding, unless the caller explicitly
-        // asks for everybody. Cartera is a list of debtors; a row with a zero balance
-        // is not one.
-        //
-        // Applied to the *aggregate*, after summing, and never to the individual
-        // obligations behind it. Filtering first would drop a settled month out of the
-        // arithmetic entirely, and the row would then report a smaller collected
-        // figure than the client actually paid — which is a receipt, not a projection.
-        if (($filters['outstanding_only'] ?? true) === true) {
+        if ($outstandingOnly) {
             $perClient->havingRaw('coalesce(sum(obligations.balance_cop), 0) > 0');
         }
 
-        if (($filters['traffic_light'] ?? null) !== null) {
-            $this->applyTrafficLightFilter($perClient, (string) $filters['traffic_light'], $asOf);
+        // §27 B. Compared against the aggregate the row displays, not against single
+        // obligations. A client owing 600000 twice has 1200000 outstanding and belongs in a
+        // `minimum_balance=1000000` result.
+        if (isset($filters['minimum_balance'])) {
+            $perClient->havingRaw('coalesce(sum(obligations.balance_cop), 0) >= ?', [(int) $filters['minimum_balance']]);
         }
+
+        if (isset($filters['maximum_balance'])) {
+            $perClient->havingRaw('coalesce(sum(obligations.balance_cop), 0) <= ?', [(int) $filters['maximum_balance']]);
+        }
+
+        if (($filters['traffic_light'] ?? null) !== null) {
+            $light = TrafficLight::tryFrom((string) $filters['traffic_light']);
+
+            if ($light !== null) {
+                $this->applyTrafficLightFilter($perClient, $light, $asOf);
+            }
+        }
+
+        // §27 C and D. `total` counts the rows **after** every filter, including the ones
+        // applied as `having` on the grouped query. Computed from the same grouped query, so
+        // the header and the pager cannot disagree — which is what made the last page of a
+        // traffic-light filter claim rows that were not there.
+        // Counting the grouped query as a subquery rather than adding a `count(*)` to it:
+        // the query already has a select list and a `group by`, and appending to that list
+        // would return one row **per client** whose first column is that client's name — so
+        // `value()` would report a character count, which is where a total of 18 came from
+        // when there were 5 debtors.
+        $total = (int) DB::query()
+            ->fromSub((clone $perClient), 'debtors')
+            ->count();
 
         $rows = $perClient
             ->forPage($page, $perPage)
             ->get();
 
         $items = $rows->map(function (object $row) use ($asOf): array {
-            $overdueCount = (int) $row->overdue_obligations_count;
-            $light = TrafficLight::forOverdueCount($overdueCount);
-
-            return [
-                'client_id' => (int) $row->client_id,
-                'full_name' => trim($row->first_names.' '.$row->last_names),
-                'document_label' => DocumentNumber::forDisplay(
-                    $row->document_number,
-                    DocumentType::from($row->document_type),
-                ),
-                'company_names' => listFrom($row->company_names ?? null),
-                'balance_cop' => (int) $row->balance_cop,
-                'paid_amount_cop' => (int) $row->paid_amount_cop,
-                'overdue_balance_cop' => (int) $row->overdue_balance_cop,
-                'open_obligations_count' => (int) $row->open_obligations_count,
-                'overdue_obligations_count' => $overdueCount,
-                'owed_periods' => listFrom($row->period_keys ?? null),
-                'oldest_due_on' => $row->oldest_due_on,
-                // From the due date to today, as everywhere else: the row is shown by
-                // its oldest debt, and the client's risk is the longest-standing one.
-                'aging_bucket' => AgingBucket::forDaysLate(
-                    $row->oldest_due_on === null
-                        ? 0
-                        : (int) Carbon::parse($row->oldest_due_on)->diffInDays($asOf, false)
-                )->value,
-                'traffic_light' => $light->value,
-                'traffic_light_label' => $light->label(),
-                'traffic_light_reason' => $light->meaning($overdueCount),
-            ];
+            return $this->describeDebtor($row, $asOf);
         })->all();
 
         return [
@@ -322,22 +337,120 @@ final class ReceivablesService
             'page' => $page,
             'per_page' => $perPage,
             'last_page' => max(1, (int) ceil($total / $perPage)),
-            'summary' => [
-                'outstanding_balance_cop' => (int) $summaryRow->total_balance_cop,
-                'overdue_balance_cop' => (int) $summaryRow->total_overdue_cop,
-                'total_effective_obligations_cop' => (int) $summaryRow->total_effective_cop,
-                'total_paid_cop' => (int) $summaryRow->total_paid_cop,
-                'clients_with_debt' => $total,
-                'open_obligations_count' => (int) $summaryRow->open_obligations_count,
-                'overdue_obligations_count' => (int) $summaryRow->overdue_obligations_count,
-                'unallocated_credit_cop' => $this->portfolioUnallocatedCredit(),
-                'payments_requiring_reconciliation' => Payment::query()
-                    ->whereNull('voided_at')
-                    ->whereRaw('amount_cop > ('
-                        .'select coalesce(sum(pa.amount_cop), 0) from payment_allocations pa '
-                        .'where pa.payment_id = payments.id and pa.reversed_at is null)')
-                    ->count(),
+            'summary' => $this->portfolioSummary($asOf),
+            'applied_filters' => [
+                // Published so the screen can state which question it is answering. A header
+                // card that does not follow the filter is worse than no card.
+                'overdue' => (bool) ($filters['overdue'] ?? false),
+                'outstanding_only' => $outstandingOnly,
+                'traffic_light' => $filters['traffic_light'] ?? null,
+                'settlement_state' => $filters['settlement_state'] ?? null,
+                'aging_bucket' => $filters['aging_bucket'] ?? null,
+                'as_of' => $asOf->format('Y-m-d'),
             ],
+        ];
+    }
+
+    /**
+     * One row per client, with every figure the screen shows.
+     *
+     * Separate from `list()` so the grouping and its columns are written once: the totals,
+     * the traffic-light filter, the balance filters and the page all read the same derived
+     * table, which is what stops them answering different questions.
+     */
+    private function groupedClients(QueryBuilder $obligations, Carbon $asOf): QueryBuilder
+    {
+        $outstanding = 'obligations.balance_cop > 0';
+
+        return $obligations
+            ->selectRaw('obligations.client_id')
+            ->selectRaw('obligations.first_names, obligations.last_names, obligations.document_type, obligations.document_number')
+            ->selectRaw('coalesce(sum(obligations.balance_cop), 0) as balance_cop')
+            ->selectRaw('coalesce(sum(obligations.paid_amount_cop), 0) as paid_amount_cop')
+            ->selectRaw('coalesce(sum(CASE WHEN '.$outstanding.' AND obligations.due_on < ? THEN obligations.balance_cop ELSE 0 END), 0) as overdue_balance_cop', [$asOf->format('Y-m-d')])
+            ->selectRaw('count(*) filter (where '.$outstanding.') as open_obligations_count')
+            ->selectRaw('count(*) filter (where '.$outstanding.' and obligations.due_on < ?) as overdue_obligations_count', [$asOf->format('Y-m-d')])
+            // §24. The semaphore answers "how many **months** are late", so it counts
+            // distinct periods and not rows. A client owing two companies in the same March
+            // is one month late, and counting rows called that two, which moved a yellow
+            // client to orange.
+            ->selectRaw(
+                'count(distinct obligations.period_key) filter (where '.$outstanding
+                .' and obligations.due_on < ?) as overdue_periods_count',
+                [$asOf->format('Y-m-d')],
+            )
+            // §22. Only periods with money still owed. A paid January is not an owed month,
+            // and listing it made a collections operator chase a debt that was settled.
+            ->selectRaw(
+                'json_agg(distinct obligations.period_key order by obligations.period_key) '
+                ."filter (where {$outstanding}) as owed_period_keys",
+            )
+            // §23. The **earliest** outstanding due date. This used to be `max(due_on)`, the
+            // newest date, published under the name `oldest_due_on` and rendered as
+            // "desde <date>": a client three months late was shown the date of their most
+            // recent month.
+            ->selectRaw('min(obligations.due_on) filter (where '.$outstanding.') as oldest_due_on')
+            // Companies and names only for outstanding debt, for the same reason: an old
+            // employer whose obligation was paid must not appear to be one they still owe.
+            ->selectRaw(
+                'json_agg(distinct obligations.company_id) filter (where '.$outstanding.') as company_ids',
+            )
+            ->selectRaw(
+                'json_agg(distinct obligations.legal_name order by obligations.legal_name) '
+                ."filter (where {$outstanding}) as company_names",
+            )
+            ->groupBy(
+                'obligations.client_id',
+                'obligations.first_names',
+                'obligations.last_names',
+                'obligations.document_type',
+                'obligations.document_number',
+            );
+    }
+
+    /**
+     * One grouped row as the interface reads it.
+     *
+     * @param  object<string, mixed>  $row
+     * @return array<string, mixed>
+     */
+    private function describeDebtor(object $row, Carbon $asOf): array
+    {
+        // §24: the light is a function of distinct late **periods**.
+        $overduePeriods = (int) ($row->overdue_periods_count ?? 0);
+        $light = TrafficLight::forOverdueCount($overduePeriods);
+
+        $oldestDueOn = $row->oldest_due_on;
+
+        return [
+            'client_id' => (int) $row->client_id,
+            'full_name' => trim($row->first_names.' '.$row->last_names),
+            'document_label' => DocumentNumber::forDisplay(
+                $row->document_number,
+                DocumentType::from($row->document_type),
+            ),
+            'company_ids' => array_map('intval', listFrom($row->company_ids ?? null)),
+            'company_names' => listFrom($row->company_names ?? null),
+            'balance_cop' => (int) $row->balance_cop,
+            'paid_amount_cop' => (int) $row->paid_amount_cop,
+            'overdue_balance_cop' => (int) $row->overdue_balance_cop,
+            'open_obligations_count' => (int) $row->open_obligations_count,
+            // Named as it is: the count of rows, kept because it is useful, and no longer
+            // what the semaphore is built from.
+            'overdue_obligations_count' => (int) ($row->overdue_obligations_count ?? 0),
+            'overdue_periods_count' => $overduePeriods,
+            'owed_periods' => listFrom($row->owed_period_keys ?? null),
+            'oldest_due_on' => $oldestDueOn,
+            'aging_bucket' => AgingBucket::forDaysLate(
+                $oldestDueOn === null
+                    ? 0
+                    : (int) Carbon::parse($oldestDueOn)->startOfDay()->diffInDays($asOf, false),
+            )->value,
+            'traffic_light' => $light->value,
+            'traffic_light_label' => $light->label(),
+            // The reason names **months**, which is what the light counts and what the label
+            // in `TrafficLight` already says.
+            'traffic_light_reason' => $light->meaning($overduePeriods),
         ];
     }
 
@@ -352,7 +465,7 @@ final class ReceivablesService
      */
     public function portfolioSummary(?Carbon $asOf = null): array
     {
-        $asOf ??= now();
+        $asOf = $this->agingReference($asOf);
 
         $row = DB::query()->fromSub($this->obligationsQuery(), 'obligations')
             ->selectRaw('coalesce(sum(obligations.effective_amount_cop), 0) as total_effective_cop')
@@ -366,12 +479,25 @@ final class ReceivablesService
 
         return [
             'total_effective_obligations_cop' => (int) $row->total_effective_cop,
+            // `applied` — money that has been matched to an obligation. **Not** money
+            // received. §40: the dashboard labelled this figure "Recaudado", and a client
+            // who paid 300000 with nothing allocated read as "collected: 0" on the day the
+            // money arrived, which is the opposite of what happened.
+            'total_applied_cop' => (int) $row->total_paid_cop,
             'total_paid_cop' => (int) $row->total_paid_cop,
             'outstanding_balance_cop' => (int) $row->total_balance_cop,
             'overdue_balance_cop' => (int) $row->total_overdue_cop,
             'clients_with_debt' => (int) $row->clients_with_debt,
             'open_obligations_count' => (int) $row->open_obligations_count,
             'overdue_obligations_count' => (int) $row->overdue_obligations_count,
+            // §40. Received, and the part of it not yet applied. Together with the applied
+            // figure these satisfy the conservation identity
+            //
+            //     received = applied + unallocated
+            //
+            // over non-voided payments, and a voided payment is excluded from both, because
+            // money that never arrived is not collected and not unapplied.
+            'total_received_cop' => $this->portfolioReceived(),
             'unallocated_credit_cop' => $this->portfolioUnallocatedCredit(),
             'payments_requiring_reconciliation' => Payment::query()
                 ->whereNull('voided_at')
@@ -380,6 +506,21 @@ final class ReceivablesService
                     .'where pa.payment_id = payments.id and pa.reversed_at is null)')
                 ->count(),
         ];
+    }
+
+    /**
+     * Money actually received: the sum of every payment that has not been voided.
+     *
+     * Deliberately simple. It is the top line of the ledger, not an allocation-aware figure,
+     * because "how much came in" is a question about payments and not about obligations. The
+     * applied figure is derived from allocations elsewhere, and the difference between the two
+     * is the credit a client is holding.
+     */
+    private function portfolioReceived(): int
+    {
+        return (int) Payment::query()
+            ->whereNull('voided_at')
+            ->sum('amount_cop');
     }
 
     // --- internals ------------------------------------------------------
@@ -441,6 +582,10 @@ final class ReceivablesService
      */
     private function hydrateRow(object $row, Carbon $asOf): array
     {
+        // Already a calendar day from `agingReference()`; repeated here so this method is
+        // safe to call from anywhere without depending on its caller.
+        $asOf = $asOf->copy()->startOfDay();
+
         $base = (int) $row->base_amount_cop;
         $effective = (int) $row->effective_amount_cop;
         $paid = (int) $row->paid_amount_cop;
@@ -528,21 +673,54 @@ final class ReceivablesService
      * the light is derived from a count of overdue rows and does not exist as a
      * column to filter on.
      */
-    private function applyTrafficLightFilter(QueryBuilder $query, string $light, Carbon $asOf): void
+    private function applyTrafficLightFilter(QueryBuilder $query, TrafficLight $light, Carbon $asOf): void
     {
-        // The date is passed in, not read out of the query's bindings. Reading it from
-        // there would use whichever placeholder happened to be bound first, which is
-        // whichever filter the caller supplied: the screen would count overdue rows
-        // against a date chosen by the sort order.
-        $overdue = 'count(*) filter (where obligations.balance_cop > 0 and obligations.due_on < ?)';
+        // The date is passed in, not read out of the query's bindings. Reading it from there
+        // would use whichever placeholder happened to be bound first, which is whichever
+        // filter the caller supplied: the screen would count overdue months against a date
+        // chosen by the sort order.
+        //
+        // `count(distinct period_key)` rather than `count(*)`: the domain language is
+        // "periodos vencidos", and two companies owing in one March is one late month. An
+        // unknown light can no longer arrive here — the request refuses it — so there is no
+        // `default` arm quietly meaning "red".
+        $lateMonths = 'count(distinct obligations.period_key) '
+            .'filter (where obligations.balance_cop > 0 and obligations.due_on < ?)';
+
         $date = $asOf->format('Y-m-d');
 
         match ($light) {
-            TrafficLight::Green->value => $query->havingRaw("{$overdue} = 0", [$date]),
-            TrafficLight::Yellow->value => $query->havingRaw("{$overdue} = 1", [$date]),
-            TrafficLight::Orange->value => $query->havingRaw("{$overdue} = 2", [$date]),
-            default => $query->havingRaw("{$overdue} >= 3", [$date]),
+            TrafficLight::Green => $query->havingRaw("{$lateMonths} = 0", [$date]),
+            TrafficLight::Yellow => $query->havingRaw("{$lateMonths} = 1", [$date]),
+            TrafficLight::Orange => $query->havingRaw("{$lateMonths} = 2", [$date]),
+            TrafficLight::Red => $query->havingRaw("{$lateMonths} >= 3", [$date]),
         };
+    }
+
+    /**
+     * A calendar date, never an instant.
+     *
+     * §25. `ObligationTotals` already folded its reference to a day and the SQL comparisons
+     * see dates, but the individual hydration compared a `due_on` at midnight against
+     * `now()` at whatever time it was — so at 11:00 a debt due **today** came out overdue
+     * while the same debt in the same response's summary did not. One debt, one answer.
+     */
+    private function agingReference(Carbon|string|null $asOf = null): Carbon
+    {
+        if ($asOf === null) {
+            return now()->startOfDay();
+        }
+
+        if (is_string($asOf)) {
+            return Carbon::parse($asOf)->startOfDay();
+        }
+
+        return $asOf->copy()->startOfDay();
+    }
+
+    private function likeEscape(): string
+    {
+        return SafeSearch::likeEscape();
     }
 
     /**

@@ -25,6 +25,18 @@ final readonly class AllocationOutcome
     ) {}
 
     /**
+     * Money received that no obligation has claimed yet.
+     *
+     * Named for what it is rather than exposed as a bare constructor property, because
+     * `remainingAvailable` could be read as either "left on the payment" or "left on the
+     * last debt". This is the payment.
+     */
+    public function unallocatedAmount(): int
+    {
+        return $this->remainingAvailable;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function toArray(): array

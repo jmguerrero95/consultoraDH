@@ -7,16 +7,17 @@ import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
 import AppModal from '@/components/ui/AppModal.vue';
 import { useDebouncedRef } from '@/composables/useDebouncedRef';
-import { fecha, hoy, pesos, pesosDesdeTexto } from '@/composables/useFormatters';
+import { fecha, fechaHora, hoy, pesos, pesosDesdeTexto } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
 
 import type {
+    AllocatableDebt,
     AutoAllocationPlan,
-    BillingVocabularyPayload,
-    ObligationSummary,
+    PaymentAllocationSummary,
     PaymentSummary,
+    PaymentVocabularyPayload,
     PossibleDuplicate,
 } from '@/types/api';
 
@@ -38,7 +39,7 @@ const canCreate = computed(() => auth.can('payments.create'));
 const canAllocate = computed(() => auth.can('payments.allocate'));
 const canVoid = computed(() => auth.can('payments.void'));
 
-const vocabulary = ref<BillingVocabularyPayload | null>(null);
+const vocabulary = ref<PaymentVocabularyPayload | null>(null);
 
 // --- Filters -----------------------------------------------------------------
 const search = ref('');
@@ -98,7 +99,9 @@ async function load(): Promise<void> {
 
 async function loadVocabulary(): Promise<void> {
     try {
-        vocabulary.value = await businessApi.receivables.vocabulary();
+        // The payments domain's own vocabulary: the receivables one made this screen
+        // depend on a permission it has no reason to need.
+        vocabulary.value = await businessApi.payments.vocabulary();
     } catch {
         // The filters are a convenience. An empty select is a lesser harm than a
         // screen that refuses to load because a label list was unavailable.
@@ -242,8 +245,113 @@ async function registerPayment(confirmDuplicate = false): Promise<void> {
 }
 
 // --- Applying a payment ------------------------------------------------------
+/*
+ * §17. Allocation history and reversal.
+ *
+ * The endpoint to undo an allocation was published while nothing in the interface could
+ * reach it, so correcting a misapplied payment meant writing a request by hand — and a
+ * correction an operator cannot perform is a correction that gets worked around in the
+ * ledger instead of in it.
+ *
+ * The history is deliberately not filtered. A reversed allocation stays in the list, marked
+ * as reversed, with the reason and the moment it happened: hiding it would make the record
+ * look like the money was never applied, which is a different history and a wrong one.
+ */
+const historyTarget = ref<PaymentSummary | null>(null);
+const historyBusy = ref(false);
+const historyError = ref<string | null>(null);
+
+const historyAllocations = computed<PaymentAllocationSummary[]>(
+    () => historyTarget.value?.allocations ?? [],
+);
+
+/** What reversing gives back, stated before the operator commits to it. */
+const reversalTarget = ref<PaymentAllocationSummary | null>(null);
+const reversalReason = ref('');
+const reversalBusy = ref(false);
+const reversalError = ref<string | null>(null);
+
+const reversalProblem = computed(() => {
+    if (reversalReason.value.trim().length < 10) {
+        return 'Explique el motivo de la reversa (mínimo 10 caracteres).';
+    }
+
+    return null;
+});
+
+async function openHistory(payment: PaymentSummary): Promise<void> {
+    historyTarget.value = payment;
+    historyError.value = null;
+    historyBusy.value = true;
+
+    try {
+        // Re-read rather than trust the row: the list does not carry allocations, and a
+        // stale history is worse than none for a screen whose whole job is the record.
+        const payload = await businessApi.payments.show(payment.id);
+
+        historyTarget.value = payload.payment;
+    } catch (caught) {
+        historyError.value =
+            caught instanceof ApiError ? caught.message : 'No se pudo cargar el historial.';
+    } finally {
+        historyBusy.value = false;
+    }
+}
+
+function closeHistory(): void {
+    historyTarget.value = null;
+}
+
+function askReverse(allocation: PaymentAllocationSummary): void {
+    reversalTarget.value = allocation;
+    reversalReason.value = '';
+    reversalError.value = null;
+}
+
+function closeReverse(): void {
+    reversalTarget.value = null;
+    reversalReason.value = '';
+    reversalError.value = null;
+}
+
+async function confirmReverse(): Promise<void> {
+    if (reversalTarget.value === null || reversalProblem.value !== null) {
+        return;
+    }
+
+    const paymentId = historyTarget.value?.id ?? null;
+
+    if (paymentId === null) {
+        return;
+    }
+
+    reversalBusy.value = true;
+    reversalError.value = null;
+
+    try {
+        const payload = await businessApi.payments.reverseAllocation(
+            reversalTarget.value.id,
+            reversalReason.value.trim(),
+        );
+
+        notice.value = payload.message;
+
+        // The server returns the re-read payment, so the row reflects the reversal without
+        // a second request — and the reversed allocation is still in `allocations`.
+        historyTarget.value = payload.payment;
+        reversalTarget.value = null;
+        reversalReason.value = '';
+
+        await load();
+    } catch (caught) {
+        reversalError.value =
+            caught instanceof ApiError ? caught.message : 'No se pudo revertir la aplicación.';
+    } finally {
+        reversalBusy.value = false;
+    }
+}
+
 const applyTarget = ref<PaymentSummary | null>(null);
-const applyObligations = ref<ObligationSummary[]>([]);
 const applyObligationId = ref<number | null>(null);
 const applyAmount = ref('');
 const applyBusy = ref(false);
@@ -251,16 +359,45 @@ const applyError = ref<string | null>(null);
 const applyPlan = ref<AutoAllocationPlan | null>(null);
 const planBusy = ref(false);
 
+const applyObligations = ref<AllocatableDebt[]>([]);
+
+/**
+ * What the operator typed, validated.
+ *
+ * **Not capped.** It used to be silently clamped to the payment's unapplied balance, which
+ * meant the field showed one number and the request sent another, and the cap was
+ * unreachable behind `applyProblem`. The value is now either acceptable or it is reported.
+ */
 const parsedApplyAmount = computed(() => {
     const parsed = pesosDesdeTexto(applyAmount.value);
 
-    if (parsed === null) {
-        return null;
+    return parsed === null || parsed <= 0 ? null : parsed;
+});
+
+/** What the operator typed against what is actually available. */
+const availableOnPayment = computed(() => applyTarget.value?.unallocated_amount_cop ?? 0);
+
+/** The selected debt, or null when none is chosen. */
+const selectedDebt = computed(
+    () => applyObligations.value.find((debt) => debt.obligation_id === applyObligationId.value) ?? null,
+);
+
+/**
+ * The amount to suggest: the smaller of what the payment has left and what the debt needs.
+ *
+ * §16. The modal used to default to the payment's whole unallocated balance, so a 300000
+ * payment opened against a 200000 debt arrived pre-filled with 300000 — a figure the server
+ * correctly refuses. The operator's first action would have been to delete most of it.
+ *
+ * Both limits are real and different in kind: the payment cannot give what it does not have,
+ * and the debt cannot absorb more than it owes. The remainder stays as credit either way.
+ */
+const suggestedApplyAmount = computed(() => {
+    if (selectedDebt.value === null) {
+        return availableOnPayment.value;
     }
 
-    // Capped rather than refused: an operator typing the client's whole balance into
-    // a payment that covers part of it means "as much as this payment reaches".
-    return Math.min(parsed, applyTarget.value?.unallocated_amount_cop ?? 0);
+    return Math.min(availableOnPayment.value, selectedDebt.value.balance_cop);
 });
 
 const applyProblem = computed(() => {
@@ -278,8 +415,15 @@ const applyProblem = computed(() => {
         return 'El valor debe ser mayor que cero.';
     }
 
-    if (parsed > (applyTarget.value?.unallocated_amount_cop ?? 0)) {
-        return `El pago sólo tiene ${pesos(applyTarget.value?.unallocated_amount_cop ?? 0)} sin aplicar.`;
+    if (parsed > availableOnPayment.value) {
+        return `El pago sólo tiene ${pesos(availableOnPayment.value)} sin aplicar.`;
+    }
+
+    if (selectedDebt.value !== null && parsed > selectedDebt.value.balance_cop) {
+        // Says which limit was reached. Without it an operator can only tell that "algo"
+        // is too much, and the two limits need different corrections.
+        return `Esa obligación sólo necesita ${pesos(selectedDebt.value.balance_cop)}. `
+            .concat('Aplique el resto a otra deuda o déjelo como anticipo.');
     }
 
     return null;
@@ -288,34 +432,38 @@ const applyProblem = computed(() => {
 async function openApply(payment: PaymentSummary): Promise<void> {
     applyTarget.value = payment;
     applyObligationId.value = null;
-    applyAmount.value = String(payment.unallocated_amount_cop);
+    applyAmount.value = '';
     applyError.value = null;
     applyPlan.value = null;
+
     await loadOpenDebts(payment.client_id);
+
+    // Suggested once the debts are known, since the suggestion depends on the selection.
+    applyAmount.value = String(suggestedApplyAmount.value);
 }
 
 /**
  * What this client still owes, oldest first.
  *
- * Read from the portfolio rather than kept here: a second copy of the debt would be
- * a second thing to get wrong.
+ * Read from the **payments** domain's own endpoint rather than from the client statement.
+ * §42: this loaded `clientAccount` through `receivables.view`, so `payments.allocate`
+ * silently depended on an unrelated read permission and a collections role without it could
+ * not use the button it had been granted. The endpoint publishes only what choosing a debt
+ * needs, so nothing about the portfolio leaks into a payment screen.
  */
 async function loadOpenDebts(clientId: number): Promise<void> {
     try {
-        const account = await businessApi.receivables.clientAccount(clientId);
+        const response = await businessApi.payments.allocatable(clientId);
 
-        // Only what still owes something. Applying to a settled obligation would be
-        // refused by the server, and offering it here would just be a way to find out.
-        applyObligations.value = account.obligations.filter(
-            (obligation) => obligation.balance_cop > 0,
-        );
+        // The endpoint already returns only debts with something outstanding.
+        applyObligations.value = response.items;
 
-        // Oldest first, which is the order the automatic application uses. An
-        // operator overriding it is choosing to deviate deliberately.
+        // Oldest first, which is the order the automatic application uses. An operator
+        // overriding it is choosing to deviate deliberately.
         applyObligations.value.sort((a, b) => (a.due_on ?? '').localeCompare(b.due_on ?? ''));
 
         if (applyObligations.value.length > 0) {
-            applyObligationId.value = applyObligations.value[0].id;
+            applyObligationId.value = applyObligations.value[0].obligation_id;
         }
     } catch (cause) {
         applyObligations.value = [];
@@ -323,6 +471,21 @@ async function loadOpenDebts(clientId: number): Promise<void> {
             cause instanceof ApiError ? cause.message : 'No fue posible cargar las obligaciones.';
     }
 }
+
+/**
+ * Re-suggest the amount when the selected debt changes.
+ *
+ * A payment of 300000 against a 200000 debt then a 90000 one should propose 200000 and then
+ * 90000. Leaving the first figure in place would make the second debt look like it needed
+ * more than it does.
+ */
+watch(applyObligationId, () => {
+    if (applyTarget.value === null) {
+        return;
+    }
+
+    applyAmount.value = String(suggestedApplyAmount.value);
+});
 
 async function submitAllocation(): Promise<void> {
     if (applyTarget.value === null || applyObligationId.value === null || parsedApplyAmount.value === null) {
@@ -585,6 +748,19 @@ const rangeLabel = computed(() => {
                             </td>
                             <td data-label="Acciones" class="cdh-table__actions">
                                 <div class="cdh-stack-2">
+                                    <!--
+                                        §17. The history is readable by anybody who may see
+                                        payments; only the reversal needs `payments.allocate`.
+                                    -->
+                                    <AppButton
+                                        v-if="!payment.is_voided"
+                                        variant="ghost"
+                                        size="sm"
+                                        @click="openHistory(payment)"
+                                    >
+                                        Historial
+                                    </AppButton>
+
                                     <AppButton
                                         v-if="canAllocate && !payment.is_voided && payment.unallocated_amount_cop > 0"
                                         variant="secondary"
@@ -682,7 +858,7 @@ const rangeLabel = computed(() => {
             <div class="mb-3">
                 <label class="cdh-form-label" for="payment-method-field">Medio</label>
                 <select id="payment-method-field" v-model="form.method" class="form-control">
-                    <option v-for="option in vocabulary?.payment_methods ?? []" :key="option.value" :value="option.value">
+                    <option v-for="option in vocabulary?.methods ?? []" :key="option.value" :value="option.value">
                         {{ option.label }}
                     </option>
                 </select>
@@ -802,7 +978,11 @@ const rangeLabel = computed(() => {
                     required
                 >
                     <option :value="null" disabled>Seleccione la obligación</option>
-                    <option v-for="row in applyObligations" :key="row.id" :value="row.id">
+                    <option
+                        v-for="row in applyObligations"
+                        :key="row.obligation_id"
+                        :value="row.obligation_id"
+                    >
                         {{ row.period_label }} — {{ row.company_name }} — vence
                         {{ fecha(row.due_on) }} — {{ pesos(row.balance_cop) }}
                     </option>
@@ -858,5 +1038,155 @@ const rangeLabel = computed(() => {
 
             <AppAlert v-if="voidError" variant="danger" :title="voidError" />
         </AppModal>
-    </section>
+
+        <!--
+            §17. The payment's history.
+
+            Every allocation the payment ever had, in one place: what it paid, which period
+            and company, whether it still counts, and — when it does not — why and when.
+            Reversed rows stay on the list on purpose. Removing them would present a
+            payment that was applied and then un-applied as one that was never applied.
+        -->
+        <AppModal
+            :open="historyTarget !== null"
+            wide
+            title="Historial del pago"
+            @close="closeHistory"
+        >
+                <template v-if="historyTarget">
+                <div class="cdh-stack-3">
+                    <div class="cdh-pager__range">
+                        {{ historyTarget.client_name }} · {{ fecha(historyTarget.received_on) }} ·
+                        {{ pesos(historyTarget.amount_cop) }} · {{ historyTarget.method_label }}
+                    </div>
+
+                    <div class="cdh-stack-2">
+                        <span>
+                            Aplicado:
+                            <strong>{{ pesos(historyTarget.allocated_amount_cop) }}</strong>
+                        </span>
+                        <span>
+                            Sin aplicar:
+                            <strong>{{ pesos(historyTarget.unallocated_amount_cop) }}</strong>
+                        </span>
+                        <span>{{ historyTarget.reconciliation_state_label }}</span>
+                    </div>
+
+                    <AppLoading v-if="historyBusy" label="Cargando el historial" />
+
+                    <AppAlert v-if="historyError" variant="danger" :title="historyError" />
+
+                    <AppEmptyState
+                        v-else-if="historyAllocations.length === 0"
+                        title="Este pago todavía no se ha aplicado a ninguna obligación"
+                    />
+
+                    <table v-else class="cdh-table">
+                        <thead>
+                            <tr>
+                                <th data-label="Periodo">Periodo</th>
+                                <th data-label="Empresa">Empresa</th>
+                                <th data-label="Valor">Valor</th>
+                                <th data-label="Estado">Estado</th>
+                                <th data-label="Motivo">Motivo</th>
+                                <th data-label="Acciones">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr
+                                v-for="allocation in historyAllocations"
+                                :key="allocation.id"
+                                :class="{ 'cdh-muted': allocation.is_reversed }"
+                            >
+                                <td data-label="Periodo">
+                                    {{ allocation.obligation_label ?? '—' }}
+                                    <span class="cdh-table__secondary">
+                                        {{ fecha(allocation.due_on) }}
+                                    </span>
+                                </td>
+                                <td data-label="Empresa">{{ allocation.company_name ?? '—' }}</td>
+                                <td data-label="Valor" class="cdh-table__numeric">
+                                    {{ pesos(allocation.amount_cop) }}
+                                </td>
+                                <td data-label="Estado">
+                                    <span v-if="allocation.is_reversed" class="cdh-badge cdh-badge--muted">
+                                        Revertida
+                                    </span>
+                                    <span v-else class="cdh-badge cdh-badge--ok">Activa</span>
+                                    <span class="cdh-table__secondary">
+                                        {{ fechaHora(allocation.created_at) }}
+                                    </span>
+                                    <span v-if="allocation.reversed_at" class="cdh-table__secondary">
+                                        Revertida el {{ fechaHora(allocation.reversed_at) }}
+                                    </span>
+                                </td>
+                                <td data-label="Motivo">
+                                    {{ allocation.reversal_reason ?? '—' }}
+                                </td>
+                                <td data-label="Acciones" class="cdh-table__actions">
+                                    <AppButton
+                                        v-if="canAllocate && allocation.is_active && !historyTarget?.is_voided"
+                                        variant="ghost"
+                                        size="sm"
+                                        @click="askReverse(allocation)"
+                                    >
+                                        Revertir
+                                    </AppButton>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                </template>
+        </AppModal>
+
+        <!--
+            The reversal is a separate confirmation rather than a second click on the row:
+            it moves money back into the payment's unapplied balance and re-opens the debt,
+            and neither is obvious from a button label.
+        -->
+        <AppModal
+            :open="reversalTarget !== null"
+            title="Revertir aplicación"
+            @close="closeReverse"
+        >
+                <template v-if="reversalTarget">
+                <div class="cdh-stack-3">
+                    <p>
+                        Se devolverán
+                        <strong>{{ pesos(reversalTarget.amount_cop) }}</strong>
+                        de
+                        <strong>{{ historyTarget?.client_name }}</strong> al saldo sin aplicar, y
+                        la obligación
+                        <strong>{{ reversalTarget.obligation_label }}</strong>
+                        volverá a estar pendiente.
+                    </p>
+
+                    <div>
+                        <label class="cdh-form-label" for="reversal-reason">Motivo</label>
+                        <textarea
+                            id="reversal-reason"
+                            v-model="reversalReason"
+                            class="form-control"
+                            rows="3"
+                            required
+                        ></textarea>
+                        <p class="cdh-form-hint">
+                            Queda en la auditoría. Sin motivo no se revierte.
+                        </p>
+                    </div>
+
+                    <AppAlert v-if="reversalError" variant="danger" :title="reversalError" />
+
+                    <AppButton
+                        variant="danger"
+                        :disabled="reversalBusy || reversalProblem !== null"
+                        @click="confirmReverse"
+                    >
+                        Revertir aplicación
+                    </AppButton>
+                </div>
+                </template>
+        </AppModal>
+</section>
 </template>

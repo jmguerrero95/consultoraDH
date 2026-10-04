@@ -663,6 +663,25 @@ Las cifras de la cartera tampoco se filtran a través de conteos. El panel muest
 la sección financiera únicamente cuando el rol puede leer el portafolio, y el
 vocabulario de la cartera responde `403` sin él.
 
+Y lo que sí se corrigió en A03-R1 es que **impartir** tampoco arrastra un permiso
+que no hace falta. Las deudas que un pago puede aplicar se leen por un endpoint
+propio de pagos —`GET /api/payments/clients/{client}/allocatable`, bajo
+`payments.allocate`— en vez de por la cuenta del cliente, que exige
+`receivables.view`. Un rol de cobranzas sin `receivables.view` podía así usar el
+botón que el propio sistema le concedía, y uno con `receivables.view` sin
+`payments.allocate` no puede mover dinero. Lo mismo ocurre al revés en la pantalla
+de configuración: `/settings/billing` contiene dos dominios permisos por separado
+y cada mitad se carga, se dibuja y se ofrece solo a quien puede leerla, de modo que
+un rol con `rates.view` recibe un `403` por las fechas de corte al abrir la página
+y además ve «Sin fechas de corte» sobre reglas que existen.
+
+La interfaz no es el control, y las pruebas de sonda lo dicen explícitamente: cada
+caso de §55 comprueba tres cosas en el cliente —ninguna llamada de fondo a un
+endpoint que el permiso no cubre, ninguna cifra financiera que el servidor retuvo
+y ningún `RouterLink` a una ruta que el guard negaría— y la misma matriz se
+comprueba contra la capa HTTP real en `tests/Feature/A03/PermissionBoundaryTest.php`,
+con los mismos usuarios mínimos y la interfaz por completo.
+
 ### El límite general por peticiones
 
 Toda ruta autenticada de la API pasa por el limitador `api`, **120 peticiones por

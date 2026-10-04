@@ -185,10 +185,19 @@ final class DashboardController extends Controller
 
         $summary = $this->receivables->portfolioSummary();
 
+        // §40. Money **received**, money **applied** and the credit in between are three
+        // different numbers, and the dashboard used to publish one of them under the label
+        // "Recaudado". A payment of 300000 with nothing allocated arrived in the bank and
+        // the dashboard said nothing had been collected.
+        //
+        // All three are published so the interface can say which one it is showing, and
+        // `received = applied + unallocated` holds over non-voided payments.
         $portfolio['financial'] = [
+            'total_received_cop' => $summary['total_received_cop'],
+            'total_applied_cop' => $summary['total_applied_cop'],
+            'unallocated_credit_cop' => $summary['unallocated_credit_cop'],
             'outstanding_balance_cop' => $summary['outstanding_balance_cop'],
             'overdue_balance_cop' => $summary['overdue_balance_cop'],
-            'total_paid_cop' => $summary['total_paid_cop'],
             'clients_with_debt' => $summary['clients_with_debt'],
             'payments_requiring_reconciliation' => $summary['payments_requiring_reconciliation'],
         ];

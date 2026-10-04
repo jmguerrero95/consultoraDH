@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\RequireAnyAbility;
 use App\Http\Middleware\SecurityHeaders;
 use App\Http\Middleware\TrustHosts;
 use App\Support\Security\TrustedHostsNotConfigured;
@@ -46,6 +47,11 @@ return Application::configure(basePath: dirname(__DIR__))
             // Ends the session of an account that is authenticated but no longer
             // active. It runs after `auth`, because it has a user to inspect.
             'user.active' => EnsureUserIsActive::class,
+
+            // `can:` means every ability listed. `anyAbility:` means at least one, for
+            // the routes that guard two independently permitted domains, such as
+            // /settings/billing and the generation preview.
+            'anyAbility' => RequireAnyAbility::class,
         ]);
 
         /*

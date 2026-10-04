@@ -7,12 +7,18 @@ import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
 import AppModal from '@/components/ui/AppModal.vue';
-import { fecha, pesos } from '@/composables/useFormatters';
+import { fecha, pesos, pesosDesdeTexto } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
 
-import type { AdjustmentSummary, ObligationSummary, PeriodSummary } from '@/types/api';
+import type {
+    AdjustmentSummary,
+    AdjustmentTypeKey,
+    AdjustmentTypeOption,
+    ObligationSummary,
+    PeriodSummary,
+} from '@/types/api';
 
 /**
  * The obligations of one month.
@@ -96,11 +102,59 @@ const adjustReason = ref('');
 const adjustBusy = ref(false);
 const adjustError = ref<string | null>(null);
 
-const ADJUSTMENT_TYPES = [
-    { value: 'correction', label: 'Corrección' },
-    { value: 'discount', label: 'Descuento' },
-    { value: 'surcharge', label: 'Recargo' },
-];
+/**
+ * The adjustment types, from the backend.
+ *
+ * The list was hardcoded here with three entries and omitted `credit`, so the type the API
+ * accepted was not the type the screen offered. Each option carries the direction it accepts,
+ * which is what lets the form state the amount the way an operator means it instead of
+ * guessing a sign.
+ */
+const adjustmentTypes = ref<AdjustmentTypeOption[]>([]);
+const ADJUSTMENT_TYPES = computed(() => adjustmentTypes.value);
+
+/**
+ * Load the types once.
+ *
+ * A failure is not announced: the form falls back to a short local list so an operator can
+ * still record a correction, and the button that matters — Revertir — does not depend on it.
+ * Losing the vocabulary must not cost somebody the ability to correct an amount.
+ *
+ * §55. The vocabulary endpoint is behind `obligations.adjust`, and this ran on arrival for
+ * every account that could open the screen at all — so a Collections or Read Only account
+ * reading a month's obligations asked for a list of types it has no authority to use, and
+ * was answered 403 on a screen that otherwise works. It is fetched only for an account that
+ * may actually record an adjustment, which is the only account whose dialog uses it.
+ */
+async function loadAdjustmentVocabulary(): Promise<void> {
+    if (!canAdjust.value) {
+        return;
+    }
+
+    try {
+        adjustmentTypes.value = (await businessApi.obligations.adjustmentVocabulary()).types;
+    } catch {
+        adjustmentTypes.value = [
+            { value: 'correction', label: 'Corrección', direction: 'either' },
+            { value: 'discount', label: 'Descuento', direction: 'decrease' },
+            { value: 'surcharge', label: 'Recargo', direction: 'increase' },
+            { value: 'credit', label: 'Crédito', direction: 'decrease' },
+        ];
+    }
+}
+
+/**
+ * Fetched when the permission appears, not only when the screen mounts.
+ *
+ * A `watch` rather than a call in `onMounted`, because the account's permissions are not
+ * always known at mount time and a one-shot call would then be permanently skipped for the
+ * one account that is allowed to adjust.
+ */
+watch(canAdjust, (allowed) => {
+    if (allowed) {
+        void loadAdjustmentVocabulary();
+    }
+}, { immediate: true });
 
 /**
  * The sign of the adjustment as it will be recorded.
@@ -109,14 +163,47 @@ const ADJUSTMENT_TYPES = [
  * "a discount of fifty thousand" is not "minus fifty thousand", and asking an
  * operator to type a minus sign invites a discounted amount to be added instead.
  */
+/**
+ * The signed amount as it will be recorded.
+ *
+ * ## The parser
+ *
+ * `pesosDesdeTexto`, the shared one. This used to use `Number.parseInt` after deleting dots
+ * and spaces, which made it the only money field in the application that accepted
+ * `"235000.50"` and stored `235000`: fifty pesos silently lost, and the field looked like it
+ * had worked. Every other money input rejects centavos.
+ *
+ * ## The sign
+ *
+ * It used to be forced here: `discount` negated, everything else made positive. That made a
+ * negative correction unrepresentable — you could not type `-5000` for a correction, because
+ * the sign was flipped to `+5000` — and it let a surcharge recorded as `-50000` become
+ * `+50000`, which is arithmetic disagreeing with its own label.
+ *
+ * Now the direction is decided by the type, and the interface states the amount the way an
+ * operator means it. `correction` takes the sign as typed; `discount` and `credit` are
+ * entered as a positive figure and reduced, because that is how a discount is written down;
+ * `surcharge` is entered as a positive figure and increases.
+ */
 const adjustDelta = computed(() => {
-    const parsed = Number.parseInt(adjustAmount.value.replace(/[.\s]/g, ''), 10);
+    const parsed = pesosDesdeTexto(adjustAmount.value);
 
-    if (!Number.isSafeInteger(parsed) || parsed === 0) {
+    if (parsed === null || parsed === 0) {
         return null;
     }
 
-    return adjustType.value === 'discount' ? -Math.abs(parsed) : Math.abs(parsed);
+    const type = adjustType.value as AdjustmentTypeKey;
+
+    if (type === 'discount' || type === 'credit') {
+        return -Math.abs(parsed);
+    }
+
+    if (type === 'surcharge') {
+        return Math.abs(parsed);
+    }
+
+    // Correction: the sign is the operator's.
+    return parsed;
 });
 
 const wouldGoNegative = computed(() => {
@@ -129,7 +216,7 @@ const wouldGoNegative = computed(() => {
 
 function openAdjust(obligation: ObligationSummary): void {
     adjustTarget.value = obligation;
-    adjustType.value = 'correction';
+    adjustType.value = ADJUSTMENT_TYPES.value[0]?.value ?? 'correction';
     adjustAmount.value = '';
     adjustReason.value = '';
     adjustError.value = null;
@@ -174,7 +261,7 @@ async function openAdjustments(obligation: ObligationSummary): Promise<void> {
     adjustmentsError.value = null;
 
     try {
-        adjustments.value = (await businessApi.obligations.adjustments(obligation.id)).adjustments;
+        adjustments.value = (await businessApi.obligations.adjustments(obligation.id)).items;
     } catch (cause) {
         adjustmentsError.value =
             cause instanceof ApiError ? cause.message : 'No fue posible cargar los ajustes.';
@@ -492,17 +579,32 @@ const rangeLabel = computed(() => {
                                 </td>
                                 <td data-label="Fecha">{{ fecha(adjustment.created_at) }}</td>
                                 <td data-label="Estado">
+                                    <!--
+                                        The state comes from the ledger's relation, not from
+                                        a `reversed_at` column that never existed. An original
+                                        that has been undone says so, and keeps its reason.
+                                    -->
                                     <span
-                                        v-if="adjustment.reversed_at"
+                                        v-if="adjustment.is_reversed"
                                         class="cdh-badge cdh-badge--neutral"
+                                        :title="adjustment.reversal_reason ?? undefined"
                                     >
                                         revertido
+                                    </span>
+                                    <span v-else-if="adjustment.is_reversal" class="cdh-badge cdh-badge--info">
+                                        reversión
                                     </span>
                                     <span v-else class="cdh-badge cdh-badge--info">vigente</span>
                                 </td>
                                 <td data-label="Acciones" class="cdh-table__actions">
+                                    <!--
+                                        `can_reverse` is published rather than derived here.
+                                        Deriving it from two booleans is what made the screen
+                                        offer a second reversal that the database then
+                                        refused.
+                                    -->
                                     <AppButton
-                                        v-if="canAdjust && adjustment.reversed_at === null && adjustment.reverses_adjustment_id === null"
+                                        v-if="canAdjust && adjustment.can_reverse"
                                         variant="ghost"
                                         size="sm"
                                         @click="askReversal(adjustment)"

@@ -334,6 +334,37 @@ base de pruebas end to end.
 > el estado de desarrollo antes y después para demostrar que no cambió. No hay
 > ningún paso de borrado de datos de negocio, porque no hay nada que borrar.
 >
+> Antes de arrancar la suite **espera a que la aplicación acepte un inicio de
+> sesión de verdad**, sondando `POST /api/auth/login` con las credenciales reales
+> y la cookie CSRF, igual que lo haría el navegador. Las cuentas se crean con
+> Artisan mientras el servidor ya responde, así que una ejecución que empieza de
+> inmediato puede llegar a la pantalla de acceso antes de que las cuentas existan:
+> el `POST` responde `500` y las cuarenta y dos pruebas fracasan todas por no
+> haber firmado sesión —una pared de fallos que parece un producto roto y es una
+> carrera del arnés. Un `200` de la página de acceso no probaría nada, porque esa
+> página es estática y contesta mientras las cuentas se siguen escribiendo.
+>
+> Y antes de eso **borra los contadores de inicio de sesión de esa misma
+> instancia**. El límite del producto —veinte intentos por dirección cada cinco
+> minutos, treinta por cuenta cada quince— es correcto y no se toca; lo
+> desechable son los contadores, que viven en el espacio de Redis del entorno de
+> extremo a extremo y no le pertenecen a nadie. Sin eso, una segunda ejecución
+> seguida no puede ni firmar sesión. El borrado es restrictivo como todo lo demás:
+> comprueba el número de base y el prefijo que resolvió la propia aplicación y se
+> niega si no son los de extremo a extremo, y borra **sólo** claves con ese
+> prefijo, porque `artisan cache:clear` vacía la base entera con `flushdb()` e
+> ignora el prefijo — que es justamente lo que existe para que una conexión mal
+> configurada no alcance las claves de otro espacio. La clave de desarrollo no se
+> toca, y lo que antes se resolvía con un `cache:clear` contra desarrollo no es
+> lo que ocurre aquí.
+>
+> La huella de desarrollo cubre trece tablas, no seis: A03 añadió siete —periodos,
+> fechas de corte, valores, obligaciones, ajustes, pagos y aplicaciones— y todas
+> guardan registros financieros. Y mide la base **configurada**, no una constante:
+> la afirmación es que la base de desarrollo no se escribió, y se calculaba sobre
+> un `consultora_dh` escrito a mano, así que a un desarrollador con otra base
+> configurada se le informaba que la suya estaba intacta por haber comprobado otra.
+>
 > El límite general de peticiones de la API es de 120 por minuto y por cuenta. Los
 > flujos de A03 recorren un mes financiero completo, que son cientos de peticiones
 > en un par de minutos, así que **sólo** `compose.e2e.yaml` lo sube a 2000.

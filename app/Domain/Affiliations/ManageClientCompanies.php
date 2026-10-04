@@ -7,6 +7,7 @@ namespace App\Domain\Affiliations;
 use App\Domain\Affiliations\Events\RelationshipClosed;
 use App\Domain\Affiliations\Events\RelationshipCreated;
 use App\Domain\Affiliations\Events\RelationshipTransferred;
+use App\Domain\Billing\BillingTopologyLock;
 use App\Domain\Shared\LocksRow;
 use App\Models\Client;
 use App\Models\ClientCompanyAssignment;
@@ -48,6 +49,10 @@ final class ManageClientCompanies
     /** Keep the open relationship and open this one, with a justification. */
     public const RESOLUTION_PARALLEL = 'parallel';
 
+    public function __construct(
+        private readonly BillingTopologyLock $topology = new BillingTopologyLock,
+    ) {}
+
     /**
      * Close every open relationship, then open this one.
      *
@@ -74,6 +79,33 @@ final class ManageClientCompanies
      *   'parallel'      keep the open relationship and open this one too, which
      *                   requires `$parallelReason`.
      */
+    /**
+     * A transaction that holds the shared billing-topology protocol.
+     *
+     * Every A02 write that can change what A03 would bill goes through here, so the
+     * serialisation is a property of the action rather than a convention somebody has to
+     * remember when adding the next one.
+     *
+     * Without it, generation can read a relationship that this transaction is about to
+     * close or transfer, and write a debt from a topology that stopped being true at the
+     * moment the financial transaction began. Period closing has the same exposure: it
+     * proves the month is complete, and a relationship that becomes effective during the
+     * proof would be missed by both.
+     *
+     * The review's rule is narrow on purpose: A02 is touched only where a **shared
+     * concurrency protocol** is required to protect A03's financial correctness, and
+     * nothing else about A02 changes.
+     *
+     * @template TReturn
+     *
+     * @param  callable(): TReturn  $callback
+     * @return TReturn
+     */
+    private function guardedTransaction(callable $callback): mixed
+    {
+        return $this->topology->run(fn (): mixed => DB::transaction($callback));
+    }
+
     public function link(
         Client $client,
         Company $company,
@@ -84,7 +116,7 @@ final class ManageClientCompanies
         string $resolution = self::RESOLUTION_ONLY_IF_NONE,
         ?string $parallelReason = null,
     ): ClientCompanyAssignment {
-        return DB::transaction(function () use (
+        return $this->guardedTransaction(function () use (
             $client, $company, $actor, $startedOn, $jobTitle, $notes,
             $resolution, $parallelReason
         ): ClientCompanyAssignment {
@@ -160,7 +192,7 @@ final class ManageClientCompanies
             throw new DomainException('La fecha de cierre no puede ser anterior al inicio de la relación.');
         }
 
-        DB::transaction(function () use ($assignment, $actor, $endedOn, $reason): void {
+        $this->guardedTransaction(function () use ($assignment, $actor, $endedOn, $reason): void {
             // Client first, then the history row: the documented order, everywhere.
             // Then the row itself, re-read, because the caller's copy may be stale.
             $this->lockClient($assignment->client);
@@ -203,7 +235,7 @@ final class ManageClientCompanies
             );
         }
 
-        return DB::transaction(function () use ($current, $to, $actor, $effectiveOn, $jobTitle, $notes) {
+        return $this->guardedTransaction(function () use ($current, $to, $actor, $effectiveOn, $jobTitle, $notes) {
             // Client, then destination company, then the relationship being moved.
             // The two keep their own names: they are different rows with different
             // keys, and conflating them reads an assignment that happens to share an

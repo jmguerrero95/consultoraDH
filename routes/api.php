@@ -18,6 +18,44 @@ use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------
+| Route-model parameters are numeric
+|--------------------------------------------------------------------------
+|
+| A03-R1. `/payments/vocabulary` and `/payments/{payment}` collided: the literal segment
+| was swallowed by the parameter and the request reached the database as a lookup for a
+| payment with the id "vocabulary", which is a 500 from PostgreSQL about an invalid bigint
+| rather than a vocabulary.
+|
+| Declaring a pattern per parameter would have left the next such route to collide the same
+| way, and there are many. Constraining the parameter **names** once here is the fix that
+| holds for routes that do not exist yet, and it also means a request for `/payments/abc`
+| is a 404 rather than a cast failure.
+|
+| Every parameter bound to a model in this API is a database identifier, so none of them can
+| legitimately be anything else. Adding a new model-bound route therefore cannot reintroduce
+| the collision.
+|
+*/
+foreach ([
+    'obligation',
+    'adjustment',
+    'assignment',
+    'affiliation',
+    'allocation',
+    'client',
+    'company',
+    'entity',
+    'payment',
+    'period',
+    'rate',
+    'rule',
+    'user',
+] as $parameter) {
+    Route::pattern($parameter, '[0-9]+');
+}
+
+/*
+|--------------------------------------------------------------------------
 | JSON API
 |--------------------------------------------------------------------------
 |
@@ -216,14 +254,44 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::get('/periods/current', [PeriodController::class, 'current'])->name('api.periods.current');
         Route::get('/periods/{period}', [PeriodController::class, 'show'])->name('api.periods.show');
 
-        // The preview is a calculation. It creates nothing and audits nothing, which
-        // is what makes it safe to call on a live system as a confirmation step.
-        Route::post('/periods/{period}/obligations/preview', [PeriodController::class, 'previewObligations'])
-            ->name('api.periods.obligations.preview');
-
         Route::get('/periods/{period}/obligations', [PeriodController::class, 'obligations'])
             ->name('api.periods.obligations.index');
     });
+
+    /*
+    | The generation preview, and the permission it deliberately accepts.
+    |
+    | The preview is a calculation: it creates nothing and audits nothing, which is what
+    | makes it safe to call on a live system as a confirmation step. It is also the
+    | confirmation step for `POST .../generate`, which needs `obligations.generate`.
+    |
+    | A03-R1 found the guard here required `periods.view` while the controller separately
+    | required `obligations.view`. That combination had one bad state and one bad
+    | consequence:
+    |
+    |   * a role holding `obligations.generate` but not `obligations.view` could press a
+    |     button whose confirmation dialog it was forbidden to open — the nonsensical
+    |     state of being able to act but not to see;
+    |   * a role holding `obligations.view` but not `periods.view` was refused a plan it
+    |     was entitled to read.
+    |
+    | The documented contract, and the one implemented here:
+    |
+    |   preview   requires `obligations.generate` OR `obligations.view`
+    |   generate  requires `obligations.generate`
+    |
+    | So a viewer can read the plan without being able to execute it — the interface
+    | hides the confirm button, and the server refuses the write independently — and a
+    | generator is never locked out of the confirmation it must pass through. The
+    | obligation amounts a preview publishes are `obligations.view` information, so both
+    | branches of the `any` are obligations permissions and neither widens who can read
+    | a client's debt.
+    |
+    | `periods.view` is deliberately NOT enough on its own, and not part of the `any`.
+    */
+    Route::middleware('anyAbility:obligations.generate,obligations.view')
+        ->post('/periods/{period}/obligations/preview', [PeriodController::class, 'previewObligations'])
+        ->name('api.periods.obligations.preview');
 
     Route::middleware('can:periods.create')->group(function (): void {
         Route::post('/periods', [PeriodController::class, 'store'])->name('api.periods.store');
@@ -254,6 +322,11 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:obligations.adjust')->group(function (): void {
         Route::post('/obligations/{obligation}/adjustments', [BillingConfigurationController::class, 'storeAdjustment'])
             ->name('api.obligations.adjustments.store');
+
+        // The types an operator may choose and the direction each accepts, from the same
+        // enum the domain enforces. See `adjustmentVocabulary()`.
+        Route::get('/obligation-adjustments/vocabulary', [BillingConfigurationController::class, 'adjustmentVocabulary'])
+            ->name('api.obligation-adjustments.vocabulary');
         Route::post('/obligation-adjustments/{adjustment}/reverse', [BillingConfigurationController::class, 'reverseAdjustment'])
             ->name('api.obligation-adjustments.reverse');
     });
@@ -288,6 +361,12 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:payments.view')->group(function (): void {
         Route::get('/payments', [PaymentController::class, 'index'])->name('api.payments.index');
         Route::get('/payments/{payment}', [PaymentController::class, 'show'])->name('api.payments.show');
+
+        // The payments domain's own vocabulary. The payments page used to read it from
+        // `/api/receivables/vocabulary`, which made recording a payment depend on a
+        // receivables permission an operator had no reason to hold. See `vocabulary()`.
+        Route::get('/payments/vocabulary', [PaymentController::class, 'vocabulary'])
+            ->name('api.payments.vocabulary');
     });
 
     Route::middleware('can:payments.create')->group(function (): void {
@@ -303,6 +382,12 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.payments.auto-allocate.preview');
         Route::post('/payments/{payment}/auto-allocate', [PaymentController::class, 'autoAllocate'])
             ->name('api.payments.auto-allocate');
+
+        // The debts this client could be applied to. Manual allocation used to load
+        // `clientAccount` through `receivables.view`, so `payments.allocate` silently
+        // depended on an unrelated permission. See `allocatable()`.
+        Route::get('/payments/clients/{client}/allocatable', [PaymentController::class, 'allocatable'])
+            ->name('api.payments.allocatable');
         Route::post('/payment-allocations/{allocation}/reverse', [PaymentController::class, 'reverseAllocation'])
             ->name('api.payment-allocations.reverse');
     });

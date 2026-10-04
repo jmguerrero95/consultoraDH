@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
     etiquetaMes,
     fecha,
+    fechaComoTexto,
     fechaHora,
     hoy,
     mesActual,
@@ -20,6 +21,7 @@ import {
  * matters most: the function that reads what an operator typed decides whether a
  * payment of 235000 is recorded, refused, or quietly recorded as something else.
  */
+
 
 describe('pesos', () => {
     it('writes whole pesos with Colombian separators', () => {
@@ -136,5 +138,48 @@ describe('fechas', () => {
 
     it('produces today as yyyy-mm-dd', () => {
         expect(hoy()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    });
+});
+
+describe('fecha no mueve un día por zona horaria', () => {
+    // §39. `new Date('2026-04-03')` is UTC midnight; in Colombia (UTC-05) that is the 2nd
+    // at 19:00, so a due date rendered through an instant showed the wrong day.
+    it.each([
+        ['2026-04-03', '3 abr 2026'],
+        ['2026-01-01', '1 ene 2026'],
+        ['2026-12-31', '31 dic 2026'],
+    ])('renders %s as itself', (iso, esperado) => {
+        expect(fecha(iso)).toBe(esperado);
+    });
+
+    it('reads the leading components of a timestamp as a calendar date', () => {
+        expect(fecha('2026-04-03T00:00:00.000000Z')).toBe('3 abr 2026');
+        expect(fecha('2026-04-03T23:30:00+00:00')).toBe('3 abr 2026');
+    });
+
+    it('extracts the date components without an instant', () => {
+        expect(fechaComoTexto('2026-04-03')).toBe('2026-04-03');
+        expect(fechaComoTexto('2026-04-03T10:00:00Z')).toBe('2026-04-03');
+        expect(fechaComoTexto('no es una fecha')).toBeNull();
+        expect(fechaComoTexto(null)).toBeNull();
+    });
+
+    it('returns an unparseable value unchanged rather than "Invalid Date"', () => {
+        expect(fecha('no es una fecha')).toBe('no es una fecha');
+        expect(fecha('')).toBe('—');
+        expect(fecha(null)).toBe('—');
+    });
+
+    // The assertion above is only meaningful if the process really is west of UTC, which is
+    // what makes the old implementation fail. Skipped elsewhere so the suite does not assert
+    // something it cannot reproduce.
+    const desplazado = new Date().getTimezoneOffset() > 0;
+
+    it.skipIf(!desplazado)('would have lost a day through an instant', () => {
+        const instant = new Date('2026-04-03');
+
+        expect(instant.toLocaleDateString('es-CO', { dateStyle: 'medium' })).not.toBe(
+            fecha('2026-04-03'),
+        );
     });
 });

@@ -103,4 +103,56 @@ final class AdjustmentRejected extends \RuntimeException
     {
         return new self('La obligación ya no existe.', 'obligation_not_found');
     }
+
+    /**
+     * A type and a direction the label does not describe.
+     *
+     * A03-R1. Before this the sign was a convention in the interface and a hint in the
+     * domain, so a `surcharge` of `-50000` became `+50000` and a negative correction could
+     * not be recorded at all. The refusal names the type and the direction it needed,
+     * because "invalid" would not tell an operator what to retype.
+     */
+    public static function directionForbidden(AdjustmentType $type, string $must): self
+    {
+        return new self(
+            sprintf(
+                'Un %s debe %s lo que se cobra, así que el valor no puede llevar el signo contrario. '
+                .'Use una corrección si necesita mover la cantidad en ese sentido.',
+                mb_strtolower($type->label()),
+                $must,
+            ),
+            'direction_forbidden',
+        );
+    }
+
+    /**
+     * Aliased onto the existing refusal so the message an operator already reads for a zero
+     * adjustment does not change when the direction contract started checking for it.
+     */
+    public static function deltaMustNotBeZero(): self
+    {
+        return self::zeroDelta();
+    }
+
+    /**
+     * `reversal` is written by the system, never chosen.
+     *
+     * Aliased onto the older, longer name so there is one message and one identity for the
+     * refusal rather than two phrasings that could drift.
+     */
+    public static function reversalIsNotSelectable(): self
+    {
+        return self::reversalIsNotAnOrdinaryAdjustment();
+    }
+
+    public static function unknownType(string $given): self
+    {
+        return new self(
+            sprintf(
+                'El tipo de ajuste «%s» no existe. Use corrección, descuento, recargo o crédito.',
+                $given,
+            ),
+            'unknown_adjustment_type',
+        );
+    }
 }

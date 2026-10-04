@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Companies\Actions;
 
+use App\Domain\Billing\BillingTopologyLock;
 use App\Domain\Companies\Events\CompanyStatusChanged;
 use App\Domain\Shared\RecordStatus;
 use App\Models\Company;
@@ -41,43 +42,61 @@ use Illuminate\Support\Facades\DB;
  */
 final class SetCompanyStatus
 {
+    /**
+     * A03-R1: deactivation changes billing eligibility, so it holds the shared protocol.
+     *
+     * Generation treats an inactive client or company as "not a candidate for new debt".
+     * Without this lock, generation can read a client as active, have that client
+     * deactivated before it commits, and write the obligation anyway — a debt created
+     * against eligibility that had already been withdrawn, at the exact moment it was
+     * withdrawn. The reverse order is safe: the protocol serialises both directions, so
+     * whoever takes the lock second sees the other's committed state.
+     *
+     * Reactivation is included deliberately. It makes the client a candidate again, which
+     * is a change to the candidate set just as much as deactivation is.
+     */
+    public function __construct(
+        private readonly BillingTopologyLock $topology = new BillingTopologyLock,
+    ) {}
+
     public function execute(Company $company, RecordStatus $to, User $actor): Company
     {
-        return DB::transaction(function () use ($company, $to, $actor): Company {
-            // Lock first, read again, and only then look at the relationships.
-            $locked = Company::query()->lockForUpdate()->findOrFail($company->id);
+        return $this->topology->run(fn (): mixed => DB::transaction(
+            function () use ($company, $to, $actor): Company {
+                // Lock first, read again, and only then look at the relationships.
+                $locked = Company::query()->lockForUpdate()->findOrFail($company->id);
 
-            if ($locked->status === $to) {
-                return $locked;
-            }
-
-            if ($to === RecordStatus::Inactive) {
-                // Counted here, not before: the count is part of the decision and the
-                // decision is made under the lock.
-                //
-                // The rows are pinned and then counted rather than counted with
-                // `lockForUpdate()` on an aggregate, because PostgreSQL refuses
-                // `FOR UPDATE` next to `count()`. Holding the company lock already
-                // serialises the relationship inserts that could change this number,
-                // since every one of them takes that lock first; pinning the rows as
-                // well keeps them from moving underneath this transaction.
-                $open = $locked->activeAssignments()
-                    ->lockForUpdate()
-                    ->get()
-                    ->count();
-
-                if ($open > 0) {
-                    throw CompanyHasActiveClients::forCompany($locked, $open);
+                if ($locked->status === $to) {
+                    return $locked;
                 }
-            }
 
-            $from = $locked->status->value;
+                if ($to === RecordStatus::Inactive) {
+                    // Counted here, not before: the count is part of the decision and the
+                    // decision is made under the lock.
+                    //
+                    // The rows are pinned and then counted rather than counted with
+                    // `lockForUpdate()` on an aggregate, because PostgreSQL refuses
+                    // `FOR UPDATE` next to `count()`. Holding the company lock already
+                    // serialises the relationship inserts that could change this number,
+                    // since every one of them takes that lock first; pinning the rows as
+                    // well keeps them from moving underneath this transaction.
+                    $open = $locked->activeAssignments()
+                        ->lockForUpdate()
+                        ->get()
+                        ->count();
 
-            $locked->forceFill(['status' => $to->value])->save();
+                    if ($open > 0) {
+                        throw CompanyHasActiveClients::forCompany($locked, $open);
+                    }
+                }
 
-            event(new CompanyStatusChanged($locked->refresh(), $actor, $from, $to->value));
+                $from = $locked->status->value;
 
-            return $locked->refresh();
-        });
+                $locked->forceFill(['status' => $to->value])->save();
+
+                event(new CompanyStatusChanged($locked->refresh(), $actor, $from, $to->value));
+
+                return $locked->refresh();
+            }));
     }
 }

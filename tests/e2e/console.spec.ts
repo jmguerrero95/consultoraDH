@@ -150,4 +150,92 @@ test.describe('the browser console', () => {
 
         expect(messages, `the console was not silent:\n${messages.join('\n')}`).toEqual([]);
     });
+
+    /**
+     * A03-R1: the financial screens, walked with a real month in them.
+     *
+     * Every A03 screen renders figures the server withholds from some roles and returns
+     * for others, which is the same kind of optional field that broke the directory
+     * screens — and the place where one of them threw was a row no journey had produced
+     * before, because no journey had made a month with two obligations in it.
+     *
+     * A month is opened first, through the API: an empty portfolio is a legitimate state
+     * but it does not exercise the arithmetic.
+     */
+    test('is quiet on every A03 financial screen', async ({ page }) => {
+        await signIn(page);
+
+        const token = (await page.context().cookies()).find((cookie) => cookie.name === 'XSRF-TOKEN')
+            ?.value;
+
+        const write = (path: string, data: Record<string, unknown>) =>
+            page.request.post(path, {
+                headers: token === undefined ? {} : { 'X-XSRF-TOKEN': decodeURIComponent(token) },
+                data,
+            });
+
+        // Far enough ahead that the due date is not yet due, so the cartera renders the
+        // debt as outstanding rather than as overdue.
+        const ahead = new Date();
+        ahead.setUTCDate(1);
+        ahead.setUTCMonth(ahead.getUTCMonth() + 40);
+
+        const month = `${ahead.getUTCFullYear()}-${String(ahead.getUTCMonth() + 1).padStart(2, '0')}`;
+
+        // Opened, or read if another journey in the run already opened it: this spec must
+        // not depend on which spec files ran before it, and a month that already exists is
+        // exactly as good for walking the screens.
+        const opened = await write('/api/periods', { period_month: month });
+
+        let periodId: number;
+
+        if (opened.status() === 201) {
+            periodId = ((await opened.json()) as { period: { id: number } }).period.id;
+        } else {
+            expect(
+                opened.status(),
+                `the month should either open or already exist: ${await opened.text()}`,
+            ).toBe(409);
+
+            const listed = await page.request.get('/api/periods?per_page=100');
+            const found = (
+                ((await listed.json()) as { items: Array<{ id: number; key: string }> }).items
+            ).find((period) => period.key === month);
+
+            expect(found, `the month ${month} should exist after opening it`).toBeDefined();
+            periodId = (found as { id: number }).id;
+        }
+
+        // A general cutoff for that month, so the configuration screen has a rule to draw
+        // and no journey depends on which months the others configured.
+        const cutoff = await write('/api/cutoff-rules', {
+            scope: 'general',
+            effective_month: `${month}-01`,
+            cutoff_day: 10,
+            month_offset: 1,
+        });
+
+        expect(
+            [201, 409].includes(cutoff.status()),
+            `the cutoff should be created or already exist: ${await cutoff.text()}`,
+        ).toBe(true);
+
+        const messages = await withConsole(page, async () => {
+            for (const screen of [
+                '/dashboard',
+                '/periods',
+                `/periods/${periodId}/obligations`,
+                '/settings/billing',
+                '/payments',
+                '/receivables',
+            ]) {
+                await page.goto(screen);
+
+                await expect(page.locator('body')).toBeVisible();
+                await page.waitForLoadState('networkidle');
+            }
+        });
+
+        expect(messages, `the console was not silent:\n${messages.join('\n')}`).toEqual([]);
+    });
 });

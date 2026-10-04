@@ -50,6 +50,10 @@ import type {
     SocialSecurityEntity,
     UpdateEmailPayload,
     UserPayload,
+    AdjustmentListPayload,
+    AdjustmentVocabularyPayload,
+    AllocatableResponse,
+    PaymentVocabularyPayload,
 } from '@/types/api';
 
 /**
@@ -347,19 +351,18 @@ export const businessApi = {
          * Read only, and the reason the confirmation dialog can list the blockers
          * rather than only reporting that something went wrong.
          */
-        previewObligations(id: number, missingOnly = true): Promise<GenerationPreviewPayload> {
-            return request('POST', `/api/periods/${id}/obligations/preview`, {
-                body: { missing_only: missingOnly },
-            });
+        /**
+         * What generation would do.
+         *
+         * Takes no flag: generation is unconditionally missing-only, so a second plan would
+         * be a promise the action does not keep.
+         */
+        previewObligations(id: number): Promise<GenerationPreviewPayload> {
+            return request('POST', `/api/periods/${id}/obligations/preview`);
         },
 
-        generateObligations(
-            id: number,
-            missingOnly = true,
-        ): Promise<GenerationResultPayload> {
-            return request('POST', `/api/periods/${id}/obligations/generate`, {
-                body: { missing_only: missingOnly },
-            });
+        generateObligations(id: number): Promise<GenerationResultPayload> {
+            return request('POST', `/api/periods/${id}/obligations/generate`);
         },
     },
 
@@ -371,8 +374,25 @@ export const businessApi = {
             return request('POST', `/api/obligations/${id}/adjustments`, { body: payload });
         },
 
-        adjustments(id: number): Promise<{ adjustments: AdjustmentSummary[] }> {
+        /**
+         * The adjustment ledger of one obligation.
+         *
+         * `items`, matching the backend. It used to be typed and read as `adjustments`, so
+         * the history modal received `undefined` from a request that had **succeeded** and
+         * reported "no fue posible cargar los ajustes".
+         */
+        adjustments(id: number): Promise<AdjustmentListPayload> {
             return request('GET', `/api/obligations/${id}/adjustments`);
+        },
+
+        /**
+         * The adjustment types and the direction each one accepts.
+         *
+         * From the same enum the domain enforces, so the dropdown cannot offer less than the
+         * API accepts — which is how `credit` went missing from the screen for a release.
+         */
+        adjustmentVocabulary(): Promise<AdjustmentVocabularyPayload> {
+            return request('GET', '/api/obligation-adjustments/vocabulary');
         },
 
         reverseAdjustment(
@@ -422,6 +442,30 @@ export const businessApi = {
             return request('POST', `/api/payments/${paymentId}/allocations`, { body: payload });
         },
 
+        /**
+         * The debts this client could be applied to.
+         *
+         * §42: manual allocation loaded the client statement through `receivables.view`, so
+         * `payments.allocate` depended on a permission a collections role has no reason to
+         * hold. This is the payments domain's own answer and it publishes only what choosing
+         * a debt needs.
+         */
+        allocatable(clientId: number): Promise<AllocatableResponse> {
+            return request('GET', `/api/payments/clients/${clientId}/allocatable`);
+        },
+
+        /**
+         * The payment vocabulary.
+         *
+         * §42, second half: the payments page populated its method select from
+         * `/api/receivables/vocabulary`, so a role with payments permissions and no
+         * receivables permission got an empty dropdown and could not record how money
+         * arrived.
+         */
+        vocabulary(): Promise<PaymentVocabularyPayload> {
+            return request('GET', '/api/payments/vocabulary');
+        },
+
         previewAutoAllocation(paymentId: number): Promise<{ plan: AutoAllocationPlan }> {
             return request('POST', `/api/payments/${paymentId}/auto-allocate/preview`);
         },
@@ -434,10 +478,25 @@ export const businessApi = {
             return request('POST', `/api/payments/${paymentId}/auto-allocate`);
         },
 
+        /**
+         * Undo one allocation, keeping it visible in the history.
+         *
+         * §17. The endpoint existed while the interface had no way to reach it, so correcting
+         * a misapplied payment meant writing a request by hand — and a correction an
+         * operator cannot perform tends to get worked around in the ledger instead of in it.
+         *
+         * `reason` is the record of why, and `confirm` is what the server demands for an
+         * action that moves money back: the allocation is not deleted, it is marked undone,
+         * so somebody reading the history later has to be able to tell the difference.
+         */
         reverseAllocation(
             allocationId: number,
             reason: string,
-        ): Promise<{ message: string; allocation: unknown; payment: PaymentSummary }> {
+        ): Promise<{
+            message: string;
+            allocation: { id: number; reversed_at: string | null; reversal_reason: string | null };
+            payment: PaymentSummary;
+        }> {
             return request('POST', `/api/payment-allocations/${allocationId}/reverse`, {
                 body: { reason, confirm: true },
             });

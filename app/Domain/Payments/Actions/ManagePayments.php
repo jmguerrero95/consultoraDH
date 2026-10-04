@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Payments\Actions;
 
 use App\Domain\Payments\AllocationOutcome;
+use App\Domain\Payments\AllocationPlanner;
 use App\Domain\Payments\Events\PaymentAllocated;
 use App\Domain\Payments\Events\PaymentAllocationReversed;
 use App\Domain\Payments\Events\PaymentAutoAllocated;
@@ -18,9 +19,6 @@ use App\Models\ObligationAdjustment;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
 use App\Models\User;
-use App\Support\Database\SchemaConstraint;
-use App\Support\Database\UniqueViolation;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -113,6 +111,30 @@ final class ManagePayments
     /**
      * Apply part of a payment to one obligation.
      *
+     * ## A payment may reach the same debt more than once
+     *
+     * There used to be a partial unique index on `(payment_id, obligation_id)` and a domain
+     * refusal behind it, both saying that a second live application was ambiguous. It is
+     * not ambiguous — it is an instalment:
+     *
+     *     payment 300000, obligation 200000
+     *     apply 80000    → 120000 still owed, 220000 still on the payment
+     *     apply 120000   → the same debt, from the same payment, now settled
+     *
+     * which is what a client with more money than one bill does. Both rows are individually
+     * auditable and individually reversible, and the balance is a sum, so the existing
+     * arithmetic already handled it correctly. What changed is that the index is gone and
+     * this method no longer treats the pair as a duplicate.
+     *
+     * The conservation guarantees the index used to stand in for are enforced by the locks
+     * below and by the two comparisons against freshly-read sums:
+     *
+     *     total live allocations on this payment   <= payment amount
+     *     total live money on this obligation       <= effective obligation amount
+     *
+     * Neither is expressible as a unique index: both compare an aggregate against a figure
+     * held on another row.
+     *
      * @throws PaymentRejected
      */
     public function allocate(Payment $payment, MonthlyObligation $obligation, int $amount, User $actor): PaymentAllocation
@@ -122,7 +144,6 @@ final class ManagePayments
         }
 
         return DB::transaction(function () use ($payment, $obligation, $amount, $actor): PaymentAllocation {
-            // The order, in the documented sequence.
             $client = $this->lockClient($payment->client);
 
             $lockedPayment = $this->lockPayment($payment);
@@ -133,9 +154,8 @@ final class ManagePayments
 
             $lockedObligation = $this->lockObligations([$obligation])[0];
 
-            // Same client, enforced in the domain and not merely assumed from the
-            // form. Money for one person cannot pay another person's debt, and no
-            // caller has a reason to do that deliberately.
+            // Same client, enforced in the domain and not merely assumed from the form.
+            // Money for one person cannot pay another person's debt.
             if ($lockedObligation->client_id !== $client->id) {
                 throw PaymentRejected::differentClient(
                     $lockedObligation->client_id,
@@ -143,33 +163,28 @@ final class ManagePayments
                 );
             }
 
+            // Both figures read after the locks, which is the only point at which they
+            // cannot move underneath the decision.
             $available = $this->availableOnPayment($lockedPayment);
+
             if ($amount > $available) {
                 throw PaymentRejected::exceedsPaymentBalance($amount, $available);
             }
 
             $remaining = $this->remainingOnObligation($lockedObligation);
+
             if ($amount > $remaining) {
                 throw PaymentRejected::exceedsObligationBalance($amount, $remaining);
             }
 
-            try {
-                $allocation = PaymentAllocation::query()->create([
-                    'payment_id' => $lockedPayment->id,
-                    'obligation_id' => $lockedObligation->id,
-                    'amount_cop' => $amount,
-                    'created_by' => $actor->id,
-                ]);
-            } catch (QueryException $e) {
-                // Two live allocations of the same payment to the same obligation. The
-                // domain already refuses that by reading the sum; the index refuses it
-                // for the interleaving case.
-                if (! UniqueViolation::isFor($e, SchemaConstraint::ALLOCATION_LIVE_PAIR)) {
-                    throw $e;
-                }
-
-                throw PaymentRejected::duplicateAllocation();
-            }
+            // No try/catch: there is no longer a constraint to race, and a swallowed
+            // violation is exactly how the oldest-first ordering used to be broken.
+            $allocation = PaymentAllocation::query()->create([
+                'payment_id' => $lockedPayment->id,
+                'obligation_id' => $lockedObligation->id,
+                'amount_cop' => $amount,
+                'created_by' => $actor->id,
+            ]);
 
             event(new PaymentAllocated($allocation, $actor));
 
@@ -180,15 +195,41 @@ final class ManagePayments
     /**
      * Apply what is left of a payment to the client's oldest outstanding obligations.
      *
-     * **Only ever called explicitly.** Never on payment creation: a payment that
-     * arrives when nothing is owed, or that covers more than is due, must stay
-     * unallocated until somebody decides where it goes. The operator chooses this,
-     * and the preview says what it would do before it does it.
+     * **Only ever called explicitly.** Never on payment creation: a payment that arrives
+     * when nothing is owed, or that covers more than is due, must stay unallocated until
+     * somebody decides where it goes.
      *
-     * The order is deterministic and is the point: oldest period first, then due
-     * date, then obligation id. An operator reconciling a backlog should get the
-     * same answer every time, and a sort that put the most recent month first would
-     * quietly change which debt is called paid.
+     * ## The decision is made after the locks, not before
+     *
+     * The earlier version chose which debts were outstanding, and then took the locks, and
+     * then re-read each one in turn. Between the choice and the write, a concurrent
+     * allocation could settle a debt that the scan had listed, and the loop would simply
+     * skip it — which is correct — but the reverse was not: a debt the scan had *excluded*
+     * could become outstanding before the commit, and this transaction would pay a newer
+     * month while an older one had been left out on the strength of a figure that was stale
+     * by then.
+     *
+     * So the order is now:
+     *
+     *     CLIENT → PAYMENT → all the client's obligation rows, ascending id
+     *            → batch the adjustments and the paid totals, once, for that set
+     *            → decide which are outstanding
+     *            → order them, allocate
+     *
+     * Lock order and business order stay separate concepts: the locks are taken in
+     * ascending id because that is what prevents a deadlock, and the debts are applied
+     * oldest-period-first because that is what the business means. An obligation that was
+     * excluded from the scan cannot appear afterwards, because the decision is made from
+     * figures read after every relevant lock is held.
+     *
+     * ## No swallowed conflicts
+     *
+     * The old loop caught a unique violation and `continue`d to the next debt. With a debt
+     * that already had a partial application from this same payment, that meant the oldest
+     * debt was skipped and a newer one paid — while the operator was told oldest-first had
+     * been applied. The index it was catching is gone, and so is the `continue`.
+     *
+     * @throws PaymentRejected
      */
     public function applyOldestFirst(Payment $payment, User $actor): AllocationOutcome
     {
@@ -207,87 +248,51 @@ final class ManagePayments
                 return new AllocationOutcome([], $available, 0);
             }
 
-            // Candidate obligations, oldest first. Ordered in SQL, and the locks are
-            // taken separately in ascending id, because the SQL order and the lock
-            // order are different things and the lock order is the one that must be
-            // stable.
+            // Every obligation this client has, locked in ascending id, before any figure
+            // is read. Locking the whole set rather than a scan's worth of rows is what
+            // makes "what is outstanding" a statement about the committed state.
             $candidates = MonthlyObligation::query()
                 ->where('client_id', $client->id)
-                ->orderByDesc('period_id')
-                ->orderBy('due_on')
-                ->orderBy('id')
+                ->with('period')
                 ->get();
 
-            // One composite key rather than a list of sort callbacks: oldest period
-            // first, then soonest due date, then id. Zero-padded so the string compare
-            // matches the date order, and the id last so two rows with the same period
-            // and due date still have one deterministic order. A payment applied to a
-            // backlog is a financial record, and "which one went first" must not
-            // depend on how the database felt like returning rows today.
-            $ordered = $candidates
-                ->sortBy(fn (MonthlyObligation $o): string => sprintf(
-                    '%s|%s|%010d',
-                    $this->periodKeyOf($o),
-                    $o->due_on->format('Y-m-d'),
-                    $o->id,
-                ))
-                ->values();
-
-            $outstanding = $ordered->filter(
-                fn (MonthlyObligation $o): bool => $this->remainingOnObligation($o) > 0
-            );
-
-            if ($outstanding->isEmpty()) {
+            if ($candidates->isEmpty()) {
                 return new AllocationOutcome([], $available, 0);
             }
 
-            $this->lockObligations($outstanding->all());
+            $locked = collect($this->lockObligations($candidates->all()));
+
+            // One batched pass over adjustments and one over live allocations, rather than
+            // two aggregate queries per candidate: a client with fifty months of history
+            // used to cost a hundred queries to decide what to do with one payment.
+            $remainingByObligation = $this->remainingFor($locked->all());
+
+            $planner = new AllocationPlanner;
+
+            $plan = $planner->plan($locked->all(), $remainingByObligation, $available);
 
             $applied = [];
-            $remainingAvailable = $available;
+            $spent = 0;
 
-            foreach ($outstanding as $obligation) {
-                if ($remainingAvailable <= 0) {
-                    break;
-                }
-
-                // Re-read after the lock: the figure used to choose this obligation
-                // was read before the lock was taken.
-                $obligation = $obligation->refresh();
-                $remaining = $this->remainingOnObligation($obligation);
-
-                if ($remaining <= 0) {
-                    continue;
-                }
-
-                $amount = min($remaining, $remainingAvailable);
-
-                try {
-                    $allocation = PaymentAllocation::query()->create([
-                        'payment_id' => $lockedPayment->id,
-                        'obligation_id' => $obligation->id,
-                        'amount_cop' => $amount,
-                        'created_by' => $actor->id,
-                    ]);
-                } catch (QueryException $e) {
-                    if (! UniqueViolation::isFor($e, SchemaConstraint::ALLOCATION_LIVE_PAIR)) {
-                        throw $e;
-                    }
-
-                    continue;
-                }
+            foreach ($plan as $step) {
+                $allocation = PaymentAllocation::query()->create([
+                    'payment_id' => $lockedPayment->id,
+                    'obligation_id' => $step['obligation']->id,
+                    'amount_cop' => $step['amount_cop'],
+                    'created_by' => $actor->id,
+                ]);
 
                 event(new PaymentAllocated($allocation, $actor));
 
                 $applied[] = $allocation;
-                $remainingAvailable -= $amount;
+                $spent += $step['amount_cop'];
             }
 
             if ($applied !== []) {
                 event(new PaymentAutoAllocated($lockedPayment->refresh(), $actor, count($applied)));
             }
 
-            return new AllocationOutcome($applied, $remainingAvailable, count($applied));
+            return new AllocationOutcome($applied, $available - $spent, count($applied));
         });
     }
 
@@ -490,12 +495,15 @@ final class ManagePayments
     }
 
     /**
-     * What is still owed on this obligation.
+     * What is still owed on one obligation.
      *
-     * The same formula as `ObligationTotals`, in the same place: base amount plus
-     * active adjustments, minus live allocations from payments that are not voided.
-     * A parity test holds this against the derived object, because a limit computed
-     * one way and a balance reported another is how money goes missing.
+     * The same formula as `ObligationTotals`: base amount plus every adjustment, minus
+     * live allocations from payments that are not voided. A parity test holds this against
+     * the derived object, because a limit computed one way and a balance reported another is
+     * how money goes missing.
+     *
+     * Used by the single-obligation paths, where two extra queries are cheaper than
+     * materialising a batch for one row. The multi-obligation paths use `remainingFor()`.
      */
     private function remainingOnObligation(MonthlyObligation $obligation): int
     {
@@ -517,11 +525,60 @@ final class ManagePayments
             ->sum('amount_cop');
     }
 
-    private function periodKeyOf(MonthlyObligation $obligation): string
+    /**
+     * What is still owed on every one of these obligations, in two queries.
+     *
+     * `base + adjustments - live non-voided allocations`, per obligation. Two grouped
+     * queries over the whole set rather than two per obligation: fifty obligations used to
+     * cost a hundred queries, and the number grew with the client's history rather than
+     * with the decision being made.
+     *
+     * Both figures are read **after** the obligation rows are locked, which is what makes
+     * the returned numbers authoritative rather than a snapshot taken while somebody else
+     * was allocating.
+     *
+     * @param  list<MonthlyObligation>  $obligations
+     * @return array<int, int> keyed by obligation id
+     */
+    private function remainingFor(array $obligations): array
     {
-        $month = $obligation->period;
+        $ids = array_map(static fn (MonthlyObligation $o): int => $o->id, $obligations);
 
-        return $month === null ? '' : $month->period_month->format('Y-m-d');
+        if ($ids === []) {
+            return [];
+        }
+
+        $adjustments = ObligationAdjustment::query()
+            ->whereIn('obligation_id', $ids)
+            ->groupBy('obligation_id')
+            ->selectRaw('obligation_id, sum(delta_cop) as total')
+            ->pluck('total', 'obligation_id');
+
+        $allocations = PaymentAllocation::query()
+            ->whereIn('obligation_id', $ids)
+            ->whereNull('reversed_at')
+            // Every live allocation counts, **including this payment's own earlier ones**.
+            //
+            // Excluding them was tried and is wrong. If a payment had already put 80000
+            // against a 200000 obligation, then ignoring that row would report 200000
+            // still owed and the next step would apply 200000 more — 280000 against a
+            // 200000 debt. The obligation's paid total has to be the whole truth, and the
+            // instalment case works precisely because the first step is counted.
+            ->whereHas('payment', fn ($query) => $query->whereNull('voided_at'))
+            ->groupBy('obligation_id')
+            ->selectRaw('obligation_id, sum(amount_cop) as total')
+            ->pluck('total', 'obligation_id');
+
+        $remaining = [];
+
+        foreach ($obligations as $obligation) {
+            $effective = $obligation->base_amount_cop + (int) ($adjustments[$obligation->id] ?? 0);
+            $paid = (int) ($allocations[$obligation->id] ?? 0);
+
+            $remaining[$obligation->id] = $effective - $paid;
+        }
+
+        return $remaining;
     }
 
     // --- input ----------------------------------------------------------

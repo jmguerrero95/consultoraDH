@@ -5,12 +5,14 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api;
 
 use App\Domain\Payments\Actions\ManagePayments;
+use App\Domain\Payments\AllocationPlanner;
 use App\Domain\Payments\PaymentMethod;
 use App\Domain\Payments\PaymentRejected;
 use App\Domain\Payments\ReconciliationState;
 use App\Domain\Receivables\ObligationPresenter;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Payments\AllocatePaymentRequest;
+use App\Http\Requests\Payments\ListPaymentsRequest;
 use App\Http\Requests\Payments\ReverseAllocationRequest;
 use App\Http\Requests\Payments\StorePaymentRequest;
 use App\Http\Requests\Payments\VoidPaymentRequest;
@@ -18,6 +20,7 @@ use App\Models\Client;
 use App\Models\MonthlyObligation;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
+use App\Support\Validation\SafeSearch;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -37,9 +40,10 @@ final class PaymentController extends Controller
         private readonly ObligationPresenter $presenter,
     ) {}
 
-    public function index(Request $request): JsonResponse
+    public function index(ListPaymentsRequest $request): JsonResponse
     {
-        abort_unless($request->user()?->can('payments.view'), 403, 'No tiene permisos para ver los pagos.');
+        // Authorization lives on the FormRequest, and the filters arrive validated and
+        // allowlisted: an unknown state or an impossible date is a 422 naming the field.
 
         // The allocated total is selected as an alias so the state filter can be
         // expressed against it. The reconciliation state is derived from the payment
@@ -63,22 +67,29 @@ final class PaymentController extends Controller
             ->select('payments.*')
             ->selectRaw("{$allocatedSql} as allocated_total");
 
-        if (($search = trim((string) $request->input('search', ''))) !== '') {
-            $needle = '%'.$search.'%';
+        $filters = $request->filters();
 
-            $query->whereHas('client', function ($clientQuery) use ($needle): void {
-                $clientQuery->whereRaw('lower(first_names) LIKE ?', [$needle])
-                    ->orWhereRaw('lower(last_names) LIKE ?', [$needle])
-                    ->orWhereRaw('document_number LIKE ?', [$needle]);
+        if (isset($filters['search'])) {
+            // Folded on both sides and escaped: `Ana` matches `Ana María`, and a typed `%`
+            // is a percent sign rather than "anything".
+            $needle = SafeSearch::likeNeedle($filters['search']);
+            $escape = SafeSearch::likeEscape();
+
+            $query->whereHas('client', function ($clientQuery) use ($needle, $escape): void {
+                $clientQuery->whereRaw('lower(first_names) LIKE ?'.$escape, [$needle])
+                    ->orWhereRaw('lower(last_names) LIKE ?'.$escape, [$needle])
+                    ->orWhereRaw('lower(document_number) LIKE ?'.$escape, [$needle]);
             });
         }
 
-        if (($method = $request->input('method')) !== null && $method !== '') {
-            $query->where('method', $method);
+        if (isset($filters['method'])) {
+            $query->where('method', $filters['method']);
         }
 
-        if (($state = $request->input('state')) !== null && $state !== '') {
-            match (ReconciliationState::from($state)) {
+        if (isset($filters['state'])) {
+            // `tryFrom`, not `from`: an unknown state can no longer reach this far, and a
+            // throw here would be a 500 for a mistyped filter.
+            match (ReconciliationState::tryFrom((string) $filters['state'])) {
                 ReconciliationState::Voided => $query->whereNotNull('voided_at'),
                 ReconciliationState::Unallocated => $query->whereNull('voided_at')
                     ->whereRaw("{$allocatedSql} = 0"),
@@ -89,23 +100,28 @@ final class PaymentController extends Controller
             };
         }
 
-        if (($from = $request->input('date_from')) !== null && $from !== '') {
-            $query->where('received_on', '>=', Carbon::parse($from)->startOfDay());
+        if (isset($filters['date_from'])) {
+            $query->where('received_on', '>=', Carbon::parse($filters['date_from'])->startOfDay());
         }
 
-        if (($to = $request->input('date_to')) !== null && $to !== '') {
-            $query->where('received_on', '<=', Carbon::parse($to)->endOfDay());
+        if (isset($filters['date_to'])) {
+            $query->where('received_on', '<=', Carbon::parse($filters['date_to'])->endOfDay());
         }
 
         // "Requiring reconciliation" is: not voided, and with money not yet applied.
-        if ($request->boolean('requires_reconciliation')) {
+        //
+        // Only a **true** narrows. The interface sends the literal string `false` for an
+        // unchecked box, and this used to apply the restriction whenever the key was present
+        // — so the default payments screen listed only payments that still had unapplied
+        // money, and a fully reconciled client looked like they had paid nothing.
+        if (($filters['requires_reconciliation'] ?? false) === true) {
             $query->whereNull('voided_at')
                 ->whereRaw("{$allocatedSql} < payments.amount_cop");
         }
 
         $payments = $query->orderByDesc('received_on')
             ->orderByDesc('id')
-            ->paginate($this->perPage($request));
+            ->paginate($request->perPage());
 
         return response()->json([
             'items' => $payments->getCollection()
@@ -131,7 +147,26 @@ final class PaymentController extends Controller
         abort_unless($request->user()?->can('payments.view'), 403, 'No tiene permisos para ver los pagos.');
 
         return response()->json([
-            'payment' => $this->describe($payment, detailed: true),
+            'payment' => $this->describe($this->loadForDetail($payment), detailed: true),
+        ]);
+    }
+
+    /**
+     * A payment with its allocations and their obligations ready to present.
+     *
+     * §44. Every path that renders the detail — show, allocate, reverse and void — used to
+     * reach each allocation's obligation through a lazy load, so a payment with thirty
+     * allocations issued thirty queries for the obligation, plus its period, client and
+     * company, before the presenter batched anything. Loading the whole shape once here is
+     * what makes the detail cost independent of how many allocations there are.
+     */
+    private function loadForDetail(Payment $payment): Payment
+    {
+        return $payment->loadMissing([
+            'client',
+            'allocations.obligation.period',
+            'allocations.obligation.client',
+            'allocations.obligation.company',
         ]);
     }
 
@@ -164,7 +199,7 @@ final class PaymentController extends Controller
 
         return response()->json([
             'message' => sprintf('Se registró un pago de %s pesos.', number_format($payment->amount_cop, 0, ',', '.')),
-            'payment' => $this->describe($payment, detailed: true),
+            'payment' => $this->describe($this->loadForDetail($payment), detailed: true),
             // Sent back so an operator can decide about applying it, without having
             // to remember the amount they just typed.
             'unallocated_amount_cop' => $payment->amount_cop,
@@ -193,7 +228,7 @@ final class PaymentController extends Controller
                 'amount_cop' => $allocation->amount_cop,
                 'obligation_id' => $allocation->obligation_id,
             ],
-            'payment' => $this->describe($payment->refresh(), detailed: true),
+            'payment' => $this->describe($this->loadForDetail($payment->refresh()), detailed: true),
             'obligation' => $this->presenter->describe($obligation->refresh()),
         ], 201);
     }
@@ -242,7 +277,7 @@ final class PaymentController extends Controller
                     ? 'Se aplicó el pago a la obligación.'
                     : sprintf('Se aplicó el pago a %d obligaciones.', $outcome->appliedCount)),
             'result' => $outcome->toArray(),
-            'payment' => $this->describe($payment->refresh(), detailed: true),
+            'payment' => $this->describe($this->loadForDetail($payment->refresh()), detailed: true),
         ]);
     }
 
@@ -277,7 +312,7 @@ final class PaymentController extends Controller
 
         return response()->json([
             'message' => 'Se anuló el pago. Los saldos se actualizaron y las aplicaciones se conservan.',
-            'payment' => $this->describe($voided, detailed: true),
+            'payment' => $this->describe($this->loadForDetail($voided), detailed: true),
         ]);
     }
 
@@ -326,21 +361,140 @@ final class PaymentController extends Controller
             return $base;
         }
 
+        // §44. Every allocation's obligation was presented one at a time, and each
+        // presentation reads the period, the client, the company, the adjustments and the
+        // allocations — so a payment with thirty allocations cost a hundred queries to draw
+        // a history list.
+        //
+        // `describeMany()` presents the whole set against two grouped queries, so the cost
+        // is bounded by the page rather than growing per row.
+        $described = $allocations->isEmpty()
+            ? collect()
+            : $this->presenter->describeMany(
+                $allocations->map(fn (PaymentAllocation $a): MonthlyObligation => $a->obligation),
+            )->keyBy('id');
+
         return $base + [
             'allocations' => $allocations->map(fn (PaymentAllocation $allocation): array => [
                 'id' => $allocation->id,
+                'payment_id' => $allocation->payment_id,
                 'obligation_id' => $allocation->obligation_id,
                 'amount_cop' => $allocation->amount_cop,
+                // Both states, because the history has to show a reversed row as reversed and
+                // still keep it visible. §17: nothing is hidden.
                 'is_reversed' => $allocation->isReversed(),
+                'is_active' => ! $allocation->isReversed(),
                 'reversed_at' => $allocation->reversed_at?->toIso8601String(),
+                'reversed_by' => $allocation->reversed_by,
                 'reversal_reason' => $allocation->reversal_reason,
-                'obligation' => $this->presenter->describe($allocation->obligation),
+                'created_at' => $allocation->created_at?->toIso8601String(),
+                'obligation' => $described->get($allocation->obligation_id),
+                // Flat copies of what the row shows in a table, so the interface does not
+                // have to reach three levels into the nested obligation for a column.
+                'obligation_label' => $described->get($allocation->obligation_id)['period_label'] ?? null,
+                'company_name' => $described->get($allocation->obligation_id)['company_name'] ?? null,
+                'due_on' => $described->get($allocation->obligation_id)['due_on'] ?? null,
             ])->all(),
         ];
     }
 
     /**
+     * The payment vocabulary the list screen needs: payment methods.
+     *
+     * §42. The payments page used to populate its method select from
+     * `/api/receivables/vocabulary`, so a role holding `payments.view` and
+     * `payments.create` but **not** `receivables.view` — a perfectly ordinary collections
+     * account — got an empty dropdown and could not record how the money arrived. The
+     * payments domain publishes its own vocabulary; the receivables screen keeps its own for
+     * its own filters, and neither screen depends on the other's permission.
+     */
+    public function vocabulary(Request $request): JsonResponse
+    {
+        abort_unless($request->user()?->can('payments.view'), 403, 'No tiene permisos para ver los pagos.');
+
+        return response()->json([
+            'methods' => array_map(
+                fn (PaymentMethod $method): array => ['value' => $method->value, 'label' => $method->label()],
+                PaymentMethod::cases(),
+            ),
+            'reconciliation_states' => array_map(
+                fn (ReconciliationState $state): array => ['value' => $state->value, 'label' => $state->label()],
+                ReconciliationState::cases(),
+            ),
+        ]);
+    }
+
+    /**
+     * The debts this payment could be applied to, for a client.
+     *
+     * §42. Manual allocation used to load `clientAccount` through `receivables.view`, so
+     * `payments.allocate` silently depended on an unrelated read permission and a collections
+     * role without it could not use the button it was granted.
+     *
+     * This is the payment domain's own answer, guarded by `payments.allocate`, and it
+     * publishes **only what allocating needs**: the obligation id, its month, the company and
+     * the balance still owed. No statement, no aging, no portfolio figure — none of it is
+     * needed to choose a debt, and none of it is what this permission is about.
+     */
+    public function allocatable(Request $request, Client $client): JsonResponse
+    {
+        abort_unless($request->user()?->can('payments.allocate'), 403, 'No tiene permisos para aplicar pagos.');
+
+        $obligations = MonthlyObligation::query()
+            ->where('client_id', $client->id)
+            ->with(['period', 'company'])
+            ->orderBy('period_id')
+            ->orderBy('due_on')
+            ->orderBy('id')
+            ->get();
+
+        $described = $this->presenter->describeMany($obligations)->keyBy('id');
+
+        $rows = [];
+
+        foreach ($obligations as $obligation) {
+            $totals = $described->get($obligation->id);
+
+            if (($totals['balance_cop'] ?? 0) <= 0) {
+                continue;
+            }
+
+            $rows[] = [
+                'obligation_id' => $obligation->id,
+                'period_id' => $obligation->period_id,
+                'period_key' => $totals['period_key'] ?? null,
+                'period_label' => $totals['period_label'] ?? null,
+                'company_id' => $obligation->company_id,
+                'company_name' => $obligation->company?->displayName(),
+                'due_on' => $totals['due_on'] ?? null,
+                'balance_cop' => $totals['balance_cop'] ?? 0,
+            ];
+        }
+
+        return response()->json([
+            'client_id' => $client->id,
+            'items' => $rows,
+        ]);
+    }
+
+    /**
      * The oldest-first plan, computed without writing.
+     *
+     * ## The same planner the execution uses
+     *
+     * This used to be a second implementation of the same arithmetic: it sorted with its own
+     * composite key and capped each contribution with its own loop. Two implementations of
+     * one rule is two chances to disagree, and they did — the execution caught a unique
+     * violation and moved to the next debt, so the plan shown here could promise to finish
+     * the oldest month while the action paid a newer one.
+     *
+     * It now builds the same `AllocationPlanner` plan the action builds, from the same
+     * balances, so "what you were shown" and "what runs" are the same list of steps. The
+     * execution recomputes it under its locks, which is what makes the second copy
+     * authoritative; this copy is the promise.
+     *
+     * One deliberate difference remains: the preview does not lock, so it is allowed to be
+     * stale. The interface says as much, and the button it opens re-reads before writing.
      *
      * @return array<string, mixed>
      */
@@ -350,62 +504,56 @@ final class PaymentController extends Controller
 
         $candidates = MonthlyObligation::query()
             ->where('client_id', $payment->client_id)
-            ->with(['period'])
-            ->get()
-            // One composite key, so the order is the one the application uses:
-            // oldest period, then soonest due date, then id. A list of sort callbacks
-            // is not a multi-key sort, and getting this wrong would promise a plan
-            // that is not the plan.
-            ->sortBy(fn (MonthlyObligation $o): string => sprintf(
-                '%s|%s|%010d',
-                $o->period?->period_month->format('Y-m-d') ?? '',
-                $o->due_on?->format('Y-m-d') ?? '',
-                $o->id,
-            ))
-            ->values();
+            ->with('period')
+            ->get();
 
-        // The figures for every candidate in two grouped queries rather than two per
-        // candidate. A client with a long history would otherwise pay for the whole
-        // history to be summed in order to preview one payment.
+        if ($candidates->isEmpty() || $available <= 0) {
+            return [
+                'payment_id' => $payment->id,
+                'available_cop' => $available,
+                'allocations' => [],
+                'would_apply_count' => 0,
+                'would_apply_cop' => 0,
+                'would_remain_unallocated_cop' => $available,
+            ];
+        }
+
+        // Two grouped queries for the whole set, rather than two per candidate.
         $described = $this->presenter->describeMany($candidates)->keyBy('id');
 
-        $planned = [];
-        $remaining = $available;
+        $remainingByObligation = [];
 
         foreach ($candidates as $obligation) {
-            if ($remaining <= 0) {
-                break;
-            }
+            $remainingByObligation[$obligation->id] = (int) $described[$obligation->id]['balance_cop'];
+        }
 
+        $plan = (new AllocationPlanner)->plan($candidates->all(), $remainingByObligation, $available);
+
+        $planned = [];
+
+        foreach ($plan as $step) {
+            $obligation = $step['obligation'];
             $totals = $described[$obligation->id];
-            $balance = (int) $totals['balance_cop'];
-
-            if ($balance <= 0) {
-                continue;
-            }
-
-            $amount = min($balance, $remaining);
-            $remaining -= $amount;
 
             $planned[] = [
                 'obligation_id' => $obligation->id,
                 'period_key' => $totals['period_key'],
                 'period_label' => $totals['period_label'] ?? null,
                 'due_on' => $obligation->due_on?->format('Y-m-d'),
-                'balance_cop' => $balance,
-                'would_apply_cop' => $amount,
+                'balance_cop' => $step['remaining_cop'] + $step['amount_cop'],
+                'would_apply_cop' => $step['amount_cop'],
             ];
         }
 
         return [
             'payment_id' => $payment->id,
             'available_cop' => $available,
-            // The whole plan is published, not only its totals: an operator deciding
-            // whether to apply a payment has to see which months it would touch.
+            // The whole plan is published, not only its totals: an operator deciding whether
+            // to apply a payment has to see which months it would touch.
             'allocations' => $planned,
             'would_apply_count' => count($planned),
             'would_apply_cop' => array_sum(array_column($planned, 'would_apply_cop')),
-            'would_remain_unallocated_cop' => $remaining,
+            'would_remain_unallocated_cop' => $available - array_sum(array_column($planned, 'would_apply_cop')),
         ];
     }
 

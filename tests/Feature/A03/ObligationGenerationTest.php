@@ -251,7 +251,10 @@ it('writes nothing when previewing', function (): void {
         ->assertOk()
         ->assertJsonPath('preview.candidate_count', 1)
         ->assertJsonPath('preview.can_generate', true)
-        ->assertJsonPath('preview.total_amount_cop', $employer['rate']->amount_cop);
+        // `creatable_amount_cop`, not the old overloaded `total_amount_cop`: the question
+        // a preview has to answer is "how much money will this write", and the amount an
+        // already-generated obligation holds is not money about to be created.
+        ->assertJsonPath('preview.creatable_amount_cop', $employer['rate']->amount_cop);
 
     // A preview is a calculation. Nothing about the business changed.
     expect([
@@ -444,7 +447,9 @@ it('still collects the months already generated before a client went inactive', 
 
     // The existing obligation stands: it was written while the relationship was
     // active, and debt does not evaporate because a directory record changed.
-    $preview = app(ObligationCandidateBuilder::class)->preview($period, missingOnly: true);
+    // No `missing_only`: generation is unconditionally missing-only, and the preview has
+    // one shape for every caller.
+    $preview = app(ObligationCandidateBuilder::class)->preview($period);
     expect(collect($preview['blockers'])->pluck('code')->all())->not->toContain('inactive_or_invalid_reference')
         ->and(collect($preview['warnings'])->pluck('code')->all())->toContain('inactive_or_invalid_reference');
 

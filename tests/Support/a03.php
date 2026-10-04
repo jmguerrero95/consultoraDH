@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 use App\Domain\Billing\CutoffMonthOffset;
 use App\Domain\Billing\CutoffScope;
+use App\Domain\Payments\PaymentMethod;
 use App\Domain\Periods\MonthlyPeriod as MonthValue;
 use App\Domain\Receivables\ObligationPresenter;
 use App\Models\Client;
@@ -22,6 +23,7 @@ use App\Models\Company;
 use App\Models\CutoffRule;
 use App\Models\MonthlyObligation;
 use App\Models\MonthlyPeriod;
+use App\Models\Payment;
 use App\Models\User;
 
 /**
@@ -223,4 +225,87 @@ function a03_clientRule(
         'month_offset' => $offset->value,
         'effective_month' => MonthValue::fromKey($effectiveMonth)->startsOn(),
     ]);
+}
+
+/**
+ * A payment for one client, ready to be applied.
+ *
+ * `amountCop` is the money that arrived. Not created as allocated, because an unapplied
+ * payment is a legitimate state and several of the tests need to start there.
+ */
+function a03_payablePayment(int $amountCop, ?array $employer = null, string $receivedOn = '2026-10-15'): Payment
+{
+    $employer ??= a03_employerFor('solo-cliente');
+
+    return Payment::factory()->create([
+        'client_id' => $employer['client']->id,
+        'amount_cop' => $amountCop,
+        'received_on' => $receivedOn,
+        'method' => PaymentMethod::BankTransfer->value,
+    ]);
+}
+
+/**
+ * The auto-allocation plan, through the endpoint an operator uses.
+ *
+ * Goes over HTTP on purpose: the parity the task asks for in §15 is between what the
+ * preview **publishes** and what the action writes, and calling the private method directly
+ * would not prove the response shape agrees with the plan.
+ *
+ * @return array<string, mixed>
+ */
+function previewAutoAllocationPlan(Payment $payment, User $actor): array
+{
+    return test()
+        ->actingAs($actor)
+        ->postJson("/api/payments/{$payment->id}/auto-allocate/preview")
+        ->assertOk()
+        ->json('plan');
+}
+
+/**
+ * A rate for one client and company from a given month.
+ *
+ * Separate from `a03_employer` because several tests need a relationship **without** the
+ * rate: that is what makes a candidate blocked, and a helper that always supplied one
+ * would remove the possibility of testing it.
+ */
+function a03_companyRate(
+    Client $client,
+    Company $company,
+    int $amountCop,
+    string $effectiveMonth = '2026-01',
+): ClientCompanyRate {
+    return ClientCompanyRate::factory()->create([
+        'client_id' => $client->id,
+        'company_id' => $company->id,
+        'effective_month' => MonthValue::fromKey($effectiveMonth)->startsOn(),
+        'amount_cop' => $amountCop,
+    ]);
+}
+
+/**
+ * The general cutoff rule, created once per effective month.
+ *
+ * `firstOrCreate` for the same reason `a03_employer` uses it: two candidates in one month
+ * must share one general rule, because the database rightly refuses a second one.
+ */
+function a03_generalCutoff(
+    int $day = 10,
+    CutoffMonthOffset $offset = CutoffMonthOffset::FollowingMonth,
+    string $effectiveMonth = '2026-01',
+): CutoffRule {
+    return CutoffRule::query()->firstOrCreate(
+        [
+            'scope' => CutoffScope::General->value,
+            'company_id' => null,
+            'client_id' => null,
+            'effective_month' => MonthValue::fromKey($effectiveMonth)->startsOn(),
+        ],
+        [
+            'cutoff_day' => $day,
+            'month_offset' => $offset->value,
+            'created_by' => null,
+        ],
+    );
 }

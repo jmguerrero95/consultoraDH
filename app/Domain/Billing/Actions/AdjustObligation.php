@@ -72,13 +72,13 @@ final class AdjustObligation
             throw AdjustmentRejected::reasonRequired();
         }
 
-        if ($deltaCop === 0) {
-            throw AdjustmentRejected::zeroDelta();
-        }
-
-        if ($type->isReversal()) {
-            throw AdjustmentRejected::reversalIsNotAnOrdinaryAdjustment();
-        }
+        // The type's direction contract, enforced here rather than in the FormRequest.
+        //
+        // A03-R1: the sign used to be a convention in the interface, so a surcharge entered
+        // as `-50000` was stored as `+50000` and a negative correction could not be written
+        // at all. This is the same refusal the importer needs, and the importer has no
+        // FormRequest.
+        $type->assertDirection($deltaCop);
 
         return DB::transaction(function () use ($obligation, $type, $deltaCop, $reason, $actor): ObligationAdjustment {
             $locked = $this->lock($obligation);

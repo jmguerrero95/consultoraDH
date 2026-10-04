@@ -3,6 +3,7 @@ import type { RouteRecordRaw, Router, RouterHistory } from 'vue-router';
 
 import AdminLayout from '@/layouts/AdminLayout.vue';
 import { useAuthStore } from '@/stores/auth';
+import { puedeEntrar } from '@/router/permissions';
 
 /**
  * Routes of the single page application.
@@ -28,6 +29,24 @@ declare module 'vue-router' {
          * exists so nobody is shown a screen that would answer 403.
          */
         permission?: string;
+        /**
+         * Every one of these is required.
+         *
+         * For a screen that genuinely needs several authorities, where a single
+         * `permission` would understate it: `/periods/:id/obligations` reads the period and
+         * its obligations, so it needs both `periods.view` and `obligations.view`.
+         */
+        permissionsAll?: string[];
+        /**
+         * At least one of these is required.
+         *
+         * For a screen built from **independently permitted** domains, where requiring all of
+         * them locks out a legitimate user and requiring none of them shows data the server
+         * will refuse. `/settings/billing` holds cutoffs and rates, separately permitted:
+         * requiring both locked a rates-only role out of a page it may use, and the
+         * component then fired a background request for a tab it had no permission to read.
+         */
+        permissionsAny?: string[];
         /**
          * Title used by the document and by the topbar. Optional because a
          * layout record renders no page of its own; the matched child supplies
@@ -170,7 +189,13 @@ const routes: RouteRecordRaw[] = [
                 name: 'periods.obligations',
                 component: () => import('@/pages/periods/PeriodObligationsPage.vue'),
                 props: true,
-                meta: { title: 'Obligaciones del periodo', permission: 'obligations.view' },
+                // Both, and named: the page requests the period detail as well as the
+                // obligations list, so `obligations.view` alone let somebody in and then
+                // 403 on the first request the screen made.
+                meta: {
+                    title: 'Obligaciones del periodo',
+                    permissionsAll: ['periods.view', 'obligations.view'],
+                },
             },
             {
                 path: 'payments',
@@ -216,7 +241,9 @@ const routes: RouteRecordRaw[] = [
                         icon: 'bi-sliders2-vertical',
                         order: 89,
                     },
-                    permission: 'cutoffs.view',
+                    // At least one, not `cutoffs.view`: the page holds two independently
+                    // permitted domains and a rates-only role is entitled to its half.
+                    permissionsAny: ['cutoffs.view', 'rates.view'],
                 },
             },
             {
@@ -310,7 +337,11 @@ export function createAppRouter(history: RouterHistory = createWebHistory()): Ro
 
         // Presentation, not authorisation: the server answers 403 regardless.
         // Redirecting here stops somebody being shown a screen they cannot use.
-        if (to.meta.permission !== undefined && !auth.can(to.meta.permission)) {
+        //
+        // The three forms are read in order and a route declares at most one of them, so the
+        // question "what does this route need?" has one answer per route rather than three
+        // interacting conditions.
+        if (!puedeEntrar(to.meta, (permission) => auth.can(permission))) {
             return { name: 'forbidden' };
         }
 

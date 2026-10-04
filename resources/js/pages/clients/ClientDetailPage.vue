@@ -877,8 +877,9 @@ Editar
                             >
                                 {{ pesos(financials.summary.overdue_balance_cop) }}
                             </p>
+                            <!-- §26: the reference date for aging, not a statement date. -->
                             <p class="cdh-stat__hint">
-                                {{ formatDate(financials.as_of) }}
+                                Antigüedad evaluada al {{ formatDate(financials.as_of) }}
                             </p>
                         </article>
                     </div>

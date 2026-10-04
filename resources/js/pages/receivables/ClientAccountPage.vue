@@ -6,7 +6,7 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
-import { fecha, pesos } from '@/composables/useFormatters';
+import { etiquetaMes, fecha, pesos } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 
@@ -176,7 +176,7 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
                 v-if="account.summary.owed_periods.length > 0"
                 variant="info"
                 title="Periodos que debe"
-                :description="account.summary.owed_periods.join(', ')"
+                :description="account.summary.owed_periods.map(etiquetaMes).join(', ')"
                 class="mb-4"
             />
 
@@ -266,8 +266,19 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
             </div>
 
             <p class="cdh-form-hint mt-3">
-                Consulta al día de {{ fecha(account.as_of) }}. Las cifras se calculan en el
-                momento: no hay saldos guardados que puedan quedar desactualizados.
+                <!--
+                    §26. This date changes which obligations count as overdue and how old
+                    they are. It does **not** reconstruct the account as it stood then: a
+                    payment, an adjustment or a reversal made today still participates
+                    whatever this date says.
+
+                    So the label names what it is. "Consulta al día de" reads like a statement
+                    closed on that date, and an auditor comparing two of these would draw a
+                    conclusion the numbers do not support.
+                -->
+                Antigüedad evaluada al {{ fecha(account.as_of) }}. Los saldos, los pagos y los
+                ajustes de hoy están incluidos en todo caso; esta fecha sólo cambia qué se
+                cuenta como vencido y qué antigüedad se le calcula.
             </p>
         </template>
     </section>

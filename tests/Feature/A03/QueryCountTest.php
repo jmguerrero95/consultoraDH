@@ -207,3 +207,81 @@ it('answers a month of obligations in a fixed number of queries', function (): v
 
     expect($queries)->toBeLessThanOrEqual(8);
 });
+
+/*
+ * §53. The rest of the growth checks.
+ *
+ * Each states the property that matters — the query count must not grow by one per
+ * displayed row — as a *difference* between a small and a large set rather than as an exact
+ * number. An exact count fails every time somebody adds a column, which is how query-count
+ * suites end up deleted. A growth invariant still catches the regression that matters:
+ * somebody reintroducing a lazy load inside a loop.
+ */
+
+it('does not cost more per candidate to preview a hundred than ten', function (): void {
+    foreach (range(1, 10) as $index) {
+        a03_employerFor("preview-{$index}");
+    }
+
+    $period = a03_openPeriod(now()->addMonth()->format('Y-m'));
+
+    $this->actingAs(userWithPermissions(['obligations.view', 'obligations.generate']));
+    $this->postJson("/api/periods/{$period->id}/obligations/preview")->assertOk();
+
+    $small = a03_queries(fn () => $this->postJson(
+        "/api/periods/{$period->id}/obligations/preview",
+    )->assertOk());
+
+    // Ninety more employers for the same month.
+    foreach (range(11, 100) as $index) {
+        a03_employerFor("preview-{$index}");
+    }
+
+    $large = a03_queries(fn () => $this->postJson(
+        "/api/periods/{$period->id}/obligations/preview",
+    )->assertOk());
+
+    // This is the one that used to be an N+1: every candidate reached for its own rate and
+    // its own cutoff rule. BatchedConfigResolver is why ten and a hundred cost the same.
+    expect($large)->toBeLessThanOrEqual($small + 8);
+});
+it('does not cost more per debt to auto-allocate fifty than five', function (): void {
+    $payments = app(ManagePayments::class);
+    $employer = a03_employerFor('auto-pequeno');
+
+    foreach (range(1, 5) as $month) {
+        a03_payable(50000, now()->subMonths($month)->format('Y-m'), $employer);
+    }
+
+    $small = $payments->register(
+        $employer['client'],
+        ['amount_cop' => 250000, 'received_on' => now()->format('Y-m-d'), 'method' => 'cash'],
+        actingAsRole(),
+    );
+
+    $this->actingAs(userWithPermissions(['payments.allocate']));
+    $this->postJson("/api/payments/{$small->id}/auto-allocate/preview")->assertOk();
+
+    $five = a03_queries(fn () => $this->postJson(
+        "/api/payments/{$small->id}/auto-allocate/preview",
+    )->assertOk());
+
+    // Forty-five more debts for one client.
+    foreach (range(6, 50) as $month) {
+        a03_payable(50000, now()->subMonths($month)->format('Y-m'), $employer);
+    }
+
+    $big = $payments->register(
+        $employer['client'],
+        ['amount_cop' => 2500000, 'received_on' => now()->format('Y-m-d'), 'method' => 'cash'],
+        actingAsRole(),
+    );
+
+    $this->postJson("/api/payments/{$big->id}/auto-allocate/preview")->assertOk();
+
+    $fifty = a03_queries(fn () => $this->postJson(
+        "/api/payments/{$big->id}/auto-allocate/preview",
+    )->assertOk());
+
+    expect($fifty)->toBeLessThanOrEqual($five + 10);
+});

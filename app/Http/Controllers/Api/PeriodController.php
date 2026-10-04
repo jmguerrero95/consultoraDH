@@ -21,12 +21,14 @@ use App\Domain\Receivables\ObligationPresenter;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Periods\ClosePeriodRequest;
 use App\Http\Requests\Periods\GenerateObligationsRequest;
+use App\Http\Requests\Periods\PreviewObligationsRequest;
 use App\Http\Requests\Periods\ReopenPeriodRequest;
 use App\Http\Requests\Periods\StorePeriodRequest;
 use App\Models\MonthlyObligation;
 use App\Models\MonthlyPeriod;
 use App\Models\ObligationAdjustment;
 use App\Models\PaymentAllocation;
+use App\Models\User;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -66,9 +68,16 @@ final class PeriodController extends Controller
         // once. Summarising each row on its own would run four queries per period,
         // which on a year of months is 196 queries to draw a list, and the cost grows
         // with the history rather than with the page size.
-        $totals = $this->periodTotals(
-            $periods->getCollection()->map(fn (MonthlyPeriod $period): int => $period->id)->all(),
-        );
+        $withMoney = $this->maySeeMoney($request->user());
+
+        // Only computed when it will be published: a caller without the permission gets no
+        // monetary keys, so running two grouped queries per page for figures nobody may see
+        // would be paying for a secret.
+        $totals = $withMoney
+            ? $this->periodTotals(
+                $periods->getCollection()->map(fn (MonthlyPeriod $period): int => $period->id)->all(),
+            )
+            : [];
 
         // The current period travels with the list because the screen shows it in its
         // header, above the table. Asking for it separately would be a second request
@@ -78,9 +87,13 @@ final class PeriodController extends Controller
 
         return response()->json($this->paginated(
             $periods,
-            fn (MonthlyPeriod $period): array => $this->summarise($period, totals: $totals[$period->id] ?? null),
+            fn (MonthlyPeriod $period): array => $this->summarise(
+                $period,
+                totals: $totals[$period->id] ?? null,
+                withMoney: $withMoney,
+            ),
         ) + [
-            'current' => $current === null ? null : $this->summarise($current, detailed: true),
+            'current' => $current === null ? null : $this->summarise($current, detailed: true, withMoney: $withMoney),
         ]);
     }
 
@@ -172,7 +185,7 @@ final class PeriodController extends Controller
 
         return response()->json([
             'message' => sprintf('El periodo %s quedó abierto.', $period->label()),
-            'period' => $this->summarise($period),
+            'period' => $this->summarise($period, withMoney: $this->maySeeMoney($request->user())),
         ], 201);
     }
 
@@ -225,27 +238,24 @@ final class PeriodController extends Controller
      * carries no parameters that could change anything. There is no audit entry for
      * this endpoint, because nothing business-visible happened.
      */
-    public function previewObligations(GenerateObligationsRequest $request, MonthlyPeriod $period): JsonResponse
+    public function previewObligations(PreviewObligationsRequest $request, MonthlyPeriod $period): JsonResponse
     {
-        $this->authorizeFinancial($request, 'obligations.view');
-
-        // The same flag generation takes, honoured here too. A preview that always
-        // hid the existing obligations would promise a smaller set of writes than the
-        // button would then perform, which is the one thing a preview must not do.
+        // The preview carries no flag any more: generation is unconditionally
+        // missing-only, so there is no second plan to choose between. The existing
+        // obligations are shown for context — a preview that hid them would promise a
+        // smaller set of writes than the button then performs, which is the one thing a
+        // preview must never do — and `will_be_created` on each row says which of them
+        // would actually be written.
         return response()->json([
-            'period' => $this->summarise($period),
-            'preview' => $this->candidates->preview($period, missingOnly: $request->missingOnly()),
+            'period' => $this->summarise($period, withMoney: $this->maySeeMoney($request->user())),
+            'preview' => $this->candidates->preview($period),
         ]);
     }
 
     public function generateObligations(GenerateObligationsRequest $request, MonthlyPeriod $period): JsonResponse
     {
         try {
-            $result = app(GeneratePeriodObligations::class)->execute(
-                $period,
-                $request->user(),
-                $request->missingOnly(),
-            );
+            $result = app(GeneratePeriodObligations::class)->execute($period, $request->user());
         } catch (GenerationBlocked $e) {
             // Nothing was written. The blockers come back so the operator can fix the
             // configuration and try again, rather than discovering it one client at a
@@ -266,7 +276,11 @@ final class PeriodController extends Controller
             // has not decided what it is saying.
             'message' => $this->generationMessage($result),
             'result' => $result->toArray(),
-            'period' => $this->summarise($period->refresh(), detailed: true),
+            'period' => $this->summarise(
+                $period->refresh(),
+                detailed: true,
+                withMoney: $this->maySeeMoney($request->user()),
+            ),
         ]);
     }
 
@@ -323,21 +337,31 @@ final class PeriodController extends Controller
     /**
      * @param  array{adjustments: int, paid: int}|null  $totals  precomputed for a list
      */
-    private function summarise(MonthlyPeriod $period, bool $detailed = false, ?array $totals = null): array
+    /**
+     * A period as the caller is allowed to see it.
+     *
+     * ## The monetary keys are obligations, not period metadata
+     *
+     * §37. `periods.view` publishes who may see that a month exists and what state it is in.
+     * It does not publish what the month is worth: `obligation_count`,
+     * `total_base_cop`, `total_effective_cop`, `total_paid_cop` and `total_balance_cop` are
+     * all derived from obligations, and A03 separates read authorities precisely so that
+     * knowing what a client owes is not implied by being able to see a calendar.
+     *
+     * So the five keys are **omitted** when the caller lacks `obligations.view`, rather than
+     * sent as zero. A zero would be a lie in the other direction: it would say the month is
+     * worth nothing, which is a financial statement this permission does not entitle anybody
+     * to. Absent means "not published", and the interface renders no column.
+     *
+     * The aggregates themselves are only computed when they will be published, so a caller
+     * without the permission does not pay for two subqueries per row either.
+     *
+     * @param  array{adjustments: int, paid: int}|null  $totals  precomputed for a list
+     * @return array<string, mixed>
+     */
+    private function summarise(MonthlyPeriod $period, bool $detailed = false, ?array $totals = null, bool $withMoney = true): array
     {
-        $base = (int) ($period->total_base_cop ?? $period->obligations()->sum('base_amount_cop'));
-        $adjustments = $totals['adjustments'] ?? (int) ObligationAdjustment::query()
-            ->whereIn('obligation_id', $period->obligations()->select('id'))
-            ->sum('delta_cop');
-        $paid = $totals['paid'] ?? (int) PaymentAllocation::query()
-            ->whereIn('obligation_id', $period->obligations()->select('id'))
-            ->whereNull('reversed_at')
-            ->whereHas('payment', fn ($query) => $query->whereNull('voided_at'))
-            ->sum('amount_cop');
-
-        $effective = $base + $adjustments;
-
-        return [
+        $summary = [
             'id' => $period->id,
             'key' => $period->key(),
             'label' => $period->label(),
@@ -350,18 +374,63 @@ final class PeriodController extends Controller
             'closed_at' => $period->closed_at?->toIso8601String(),
             'reopened_at' => $period->reopened_at?->toIso8601String(),
             'last_reopen_reason' => $period->last_reopen_reason,
+            // Generation metadata is about the period itself, not about what was billed, so
+            // it stays with `periods.view`.
             'generation_performed_at' => $period->generation_performed_at?->toIso8601String(),
-            'obligation_count' => (int) ($period->obligations_count ?? $period->obligations()->count()),
-            'total_base_cop' => $base,
-            'total_effective_cop' => $effective,
-            'total_paid_cop' => $paid,
-            'total_balance_cop' => $effective - $paid,
-        ] + ($detailed ? [
-            'accepts_structural_change' => $period->isOpen(),
-            // Spelled out because "closed" reads like "untouchable" and it is not:
-            // money still moves against a closed month.
-            'accepts_financial_activity' => $period->status->acceptsFinancialActivity(),
-        ] : []);
+        ];
+
+        if ($withMoney) {
+            $base = (int) ($period->total_base_cop ?? $period->obligations()->sum('base_amount_cop'));
+            $adjustments = $totals['adjustments'] ?? (int) ObligationAdjustment::query()
+                ->whereIn('obligation_id', $period->obligations()->select('id'))
+                ->sum('delta_cop');
+            $paid = $totals['paid'] ?? (int) PaymentAllocation::query()
+                ->whereIn('obligation_id', $period->obligations()->select('id'))
+                ->whereNull('reversed_at')
+                ->whereHas('payment', fn ($query) => $query->whereNull('voided_at'))
+                ->sum('amount_cop');
+
+            $effective = $base + $adjustments;
+
+            $summary += [
+                'obligation_count' => (int) ($period->obligations_count ?? $period->obligations()->count()),
+                'total_base_cop' => $base,
+                'total_effective_cop' => $effective,
+                'total_paid_cop' => $paid,
+                'total_balance_cop' => $effective - $paid,
+            ];
+        }
+
+        if ($detailed) {
+            $summary += [
+                'accepts_structural_change' => $period->isOpen(),
+                // Spelled out because "closed" reads like "untouchable" and it is not:
+                // money still moves against a closed month.
+                'accepts_financial_activity' => $period->status->acceptsFinancialActivity(),
+            ];
+        }
+
+        return $summary;
+    }
+
+    /**
+     * Whether this caller may see a period's monetary figures.
+     *
+     * A method rather than an inline `can()`, because four endpoints answer "how much is
+     * this month worth" and the rule has to be the same rule in all four.
+     */
+    private function maySeeMoney(?User $user): bool
+    {
+        // Either obligations authority qualifies.
+        //
+        // `obligations.generate` counts because somebody who may write a month's obligations
+        // has to be able to see what they wrote and what they are about to write — the
+        // generation preview exists to show them amounts before they commit to them, so
+        // withholding the figures would make the authority unusable.
+        //
+        // `periods.view` alone does not. That is the whole point of §37: a role that may see
+        // the calendar is not thereby entitled to what the months are worth.
+        return ($user?->can('obligations.view') ?? false) || ($user?->can('obligations.generate') ?? false);
     }
 
     private function obligationsService(): ObligationPresenter

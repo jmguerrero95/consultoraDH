@@ -4,6 +4,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router';
 
 import AppWordmark from '@/components/brand/AppWordmark.vue';
 import { useAuthStore } from '@/stores/auth';
+import { puedeEntrar } from '@/router/permissions';
 
 import type { RouteRecordNormalized } from 'vue-router';
 
@@ -46,7 +47,7 @@ const entries = computed(() => {
         // Every entry declares the permission it needs, so a new screen appears
         // in the menu by adding its route record and nothing else.
         .filter((record) =>
-            record.meta.permission === undefined ? true : auth.can(record.meta.permission),
+            puedeEntrar(record.meta, (permission) => auth.can(permission)),
         )
         .sort((a, b) => (a.meta.nav?.order ?? 0) - (b.meta.nav?.order ?? 0));
 });

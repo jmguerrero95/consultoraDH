@@ -134,12 +134,43 @@ export function etiquetaMes(key: string): string {
     return `${meses[indice]} ${anio}`;
 }
 
-/** An ISO date for display, without the time. */
+/**
+ * A **calendar date** for display.
+ *
+ * ## The trap this avoids
+ *
+ * `new Date('2026-04-03')` is not "April 3rd". JavaScript parses a bare ISO date at **UTC
+ * midnight**, and `toLocaleDateString` then renders that instant in the browser's own zone.
+ * In Colombia (UTC-05) that instant is the previous evening, so a financial due date of
+ * `2026-04-03` was displayed as April 2nd — on a screen whose entire purpose is telling an
+ * operator when money is due.
+ *
+ * The fix is to never route a calendar-only value through an instant. The components are
+ * read as text and formatted as text, so nothing can shift them by a day.
+ *
+ * ## What this function accepts
+ *
+ * A value whose first ten characters are `YYYY-MM-DD`. That covers `2026-04-03` and
+ * `2026-04-03T00:00:00.000000Z`, which is how the API sends some timestamps. For a
+ * **timestamp** the date is still the leading part of the string, and a timestamp whose time
+ * of day matters belongs in `fechaHora()`, which is where a real instant is wanted.
+ *
+ * A value that is not a date at all is returned unchanged, so a broken record is visible as
+ * what it is rather than as "Invalid Date".
+ */
 export function fecha(iso: string | null | undefined): string {
     if (!iso) {
         return '—';
     }
 
+    const soloFecha = fechaComoTexto(iso);
+
+    if (soloFecha !== null) {
+        return formatearFecha(soloFecha);
+    }
+
+    // Not `YYYY-MM-DD` at the front: a real instant, or something broken. Parsing it is safe
+    // because a full timestamp carries its own offset and cannot shift.
     const parsed = new Date(iso);
 
     if (Number.isNaN(parsed.getTime())) {
@@ -147,6 +178,50 @@ export function fecha(iso: string | null | undefined): string {
     }
 
     return parsed.toLocaleDateString('es-CO', { dateStyle: 'medium' });
+}
+
+/**
+ * The `YYYY-MM-DD` components of a value, or null when it does not start with them.
+ *
+ * Read as **text**, deliberately: `slice` on a string cannot involve a time zone, which is
+ * the entire reason this exists.
+ */
+export function fechaComoTexto(iso: string | null | undefined): string | null {
+    if (!iso || typeof iso !== 'string') {
+        return null;
+    }
+
+    const coincidencia = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+
+    return coincidencia === null ? null : `${coincidencia[1]}-${coincidencia[2]}-${coincidencia[3]}`;
+}
+
+/**
+ * Format `YYYY-MM-DD` as `3 abr 2026`, in Spanish, without touching a time zone.
+ *
+ * The month names are the same list `etiquetaMes()` uses rather than `Intl`, because the
+ * short `Intl` month depends on the browser's locale data and has been seen rendering
+ * differently for the same date.
+ */
+function formatearFecha(iso: string): string {
+    const [, anio, mes, dia] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso) ?? [];
+
+    if (!anio) {
+        return iso;
+    }
+
+    const meses = [
+        'ene', 'feb', 'mar', 'abr', 'may', 'jun',
+        'jul', 'ago', 'sep', 'oct', 'nov', 'dic',
+    ];
+
+    const indice = Number.parseInt(mes, 10) - 1;
+
+    if (Number.isNaN(indice) || indice < 0 || indice > 11) {
+        return iso;
+    }
+
+    return `${Number.parseInt(dia, 10)} ${meses[indice]} ${anio}`;
 }
 
 export function fechaHora(iso: string | null | undefined): string {

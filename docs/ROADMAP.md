@@ -68,12 +68,52 @@ reversión, registro de pagos, aplicaciones y anulaciones, cuenta por cobrar,
 antigüedad, semáforo y estado de cuenta por cliente.
 
 Entregado: **16 permisos** (`periods.*`, `cutoffs.*`, `rates.*`, `obligations.*`,
-`payments.*`, `receivables.view`), siete tablas, veintiuna restricciones `CHECK` y
-veintisiete llaves foráneas —trece con `RESTRICT` y catorce de auditoría con
-`SET NULL`—, ocho flujos de extremo a extremo y
+`payments.*`, `receivables.view`), ocho tablas, veintidós restricciones `CHECK` y
+veintinueve llaves foráneas —dieciséis con `RESTRICT` y trece de auditoría con
+`SET NULL`—, diecinueve flujos de extremo a extremo del módulo y
 cuatro pantallas nuevas más el panel y la pestaña *Cuenta* de la ficha del cliente.
 
 Detalle en [docs/TASKS/A03.md](TASKS/A03.md).
+
+**A03-R1** corrigió los defectos de una auditoría externa del `7af0f9f`, agrupados
+por dónde aparecían:
+
+- **El mes.** La normalización perdía el día —`15-10-2026 10:00` se leía como
+  `2026-10-15`, y el día quince de octubre el resultado era `2026-10-01`—, el
+  «periodo actual» se resolvía por la fila más nueva en vez de por el mes
+  calendario, y abrir dos veces el mismo mes se apoyaba en un
+  `ON CONFLICT DO NOTHING` que respondía `201` a una carrera e informaba una
+  apertura que no había ocurrido.
+- **La relación.** La intersección mensual omitía la cláusula que excluye un
+  intervalo vacío, de modo que una transferencia del mismo día —`started_on =
+  ended_on`— se facturaba como un día de trabajo en las dos empresas; dos tramos
+  no solapados del mismo par se trataban como un bloqueo en vez de agruparse en
+  una obligación con su procedencia completa; y esa procedencia se perdía porque
+  una sola columna no puede representar varios tramos.
+- **El dinero.** Generar y cerrar un mes no se serializaban contra A02, que es de
+  donde sale la topología que se lee; la previsualización contaba importes que la
+  ejecución no escribía; el semáforo contaba filas de obligación en vez de
+  periodos vencidos; `as_of` no era la reconstrucción histórica que su nombre
+  prometía; la evidencia de configuración podía ser nula y podía borrarse en
+  cascada con `SET NULL`; y un pago de 300 000 contra una deuda de 200 000 no podía
+  pagarse en dos veces porque un índice único sobre `(payment_id,
+  obligation_id)` lo prohibía.
+- **Las palabras.** «Recaudado» era una sola cifra para tres preguntas distintas —
+  recibido, aplicado y anticipo—; los totales del panel mostraban la cifra
+  equivocada; `overdue=false` filtraba en vez de *no* filtrar, igual que
+  `requires_reconciliation`; y la cartera no mostraba por defecto lo no vencido
+  que el negocio pedía.
+- **Las pantallas.** El panel ofrecía enlaces a rutas que su propio guard negaba;
+  la lista de pagos exigía un permiso de cartera que no tenía por qué ver;
+  `/settings/billing` pedía las dos mitades que puede leer y ninguna más; las
+  listas de clientes y empresas de las fechas de corte quedaban vacías hasta que
+  se escribía algo en el buscador; y las fechas sin hora se corrían un día por el
+  huso.
+- **La operación.** La suite de navegador firmaba contra cuentas que quizá todavía
+  no existían, y la huella de datos de desarrollo no cubría ni el directorio ni el
+  dinero.
+
+Detalle en [docs/TASKS/A03-R1-REMEDIATION.md](TASKS/A03-R1-REMEDIATION.md).
 
 No entregado, y fuera de alcance por diseño: importación desde Excel, planillas,
 exportación a PDF, facturación electrónica, automatización recurrente,

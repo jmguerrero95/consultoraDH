@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
  * One signed correction to an obligation's effective amount.
@@ -73,28 +74,75 @@ class ObligationAdjustment extends Model
     /**
      * @return BelongsTo<User, $this>
      */
+    /**
+     * The row that reverses this one.
+     *
+     * The other end of the self-reference. Without it, "has this been undone?" can only be
+     * answered by scanning every adjustment, which is why the published API published
+     * `reversed_at` columns that do not exist in the schema.
+     *
+     * @return HasOne<self, $this>
+     */
+    public function reversedBy(): HasOne
+    {
+        return $this->hasOne(self::class, 'reverses_adjustment_id');
+    }
+
+    /**
+     * @return BelongsTo<User, $this>
+     */
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    /**
+     * Whether this row is the reversal of another.
+     *
+     * True only for the row the system writes when somebody undoes something. It is not a
+     * state an original passes through; it is a different row.
+     */
     public function isReversal(): bool
     {
-        return $this->type === AdjustmentType::Reversal;
+        return $this->reverses_adjustment_id !== null;
     }
 
     /**
-     * An adjustment that has not been undone.
+     * Whether this adjustment is still in force.
      *
-     * A reversal is itself active: it counts in the balance, with the opposite
-     * sign. "Active" therefore means "counted", not "not a reversal".
+     * An adjustment is in force when **no** reversal row points at it. The earlier version
+     * asked a different question — "am I not myself a reversal?" — which describes the shape
+     * of the row rather than whether its effect survives, and so reported an original that
+     * had been undone as still active. The interface then offered to reverse it a second
+     * time, and the second reversal was refused by the unique index on
+     * `reverses_adjustment_id` while the screen insisted it was possible.
+     *
+     * The answer comes from the relation, never from a marker column: the database has no
+     * `reversed_at` on this table, because a reversal is a row and not a state.
      */
     public function isActive(): bool
     {
-        return $this->reverses_adjustment_id === null
-            || ObligationAdjustment::query()
-                ->where('reverses_adjustment_id', $this->id)
-                ->doesntExist();
+        return $this->reversedBy === null;
+    }
+
+    /**
+     * The reversal row that undoes this one, if it has been undone.
+     */
+    public function reversal(): ?self
+    {
+        return $this->reversedBy;
+    }
+
+    /**
+     * Whether somebody may reverse this adjustment again.
+     *
+     * False for a row that is already undone, and false for a reversal row itself: reversing
+     * a reversal is not a thing this ledger does, because the correct response to undoing a
+     * correction is to write a new correction.
+     */
+    public function canBeReversed(): bool
+    {
+        return ! $this->isReversal() && $this->isActive();
     }
 
     /**

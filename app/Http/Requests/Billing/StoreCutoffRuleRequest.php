@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Requests\Billing;
 
 use App\Domain\Billing\CutoffScope;
+use App\Support\Validation\FirstDayOfMonth;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
@@ -33,7 +34,9 @@ final class StoreCutoffRuleRequest extends FormRequest
             'scope' => ['required', Rule::in(array_column(CutoffScope::cases(), 'value'))],
             'company_id' => ['nullable', 'integer', 'exists:companies,id'],
             'client_id' => ['nullable', 'integer', 'exists:clients,id'],
-            'effective_month' => ['required', 'string', 'regex:/^\d{4}-\d{2}-01$/'],
+            // Rejects 2026-13-01 as well as a mid-month date: a regex checked the
+            // shape and let the impossible month through to Carbon.
+            'effective_month' => ['required', 'string', new FirstDayOfMonth],
             'cutoff_day' => ['required', 'integer', 'min:1', 'max:31'],
             'month_offset' => ['required', 'integer', 'min:0', 'max:1'],
             'notes' => ['nullable', 'string', 'max:2000'],
@@ -49,6 +52,7 @@ final class StoreCutoffRuleRequest extends FormRequest
             'scope.required' => 'Debe indicar el alcance de la regla.',
             'effective_month.required' => 'Debe indicar el mes desde el que aplica la regla.',
             'effective_month.regex' => 'El mes de vigencia debe ser el primer día del mes, como 2026-01-01.',
+            'effective_month.string' => 'El mes de vigencia debe escribirse como texto, como 2026-01-01.',
             'cutoff_day.required' => 'Debe indicar el día de corte.',
             'cutoff_day.min' => 'El día de corte debe estar entre 1 y 31.',
             'cutoff_day.max' => 'El día de corte debe estar entre 1 y 31. En meses cortos se usa el último día.',

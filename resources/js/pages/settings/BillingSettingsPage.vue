@@ -6,7 +6,9 @@ import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
 import AppModal from '@/components/ui/AppModal.vue';
+import LookupFeedback from '@/components/ui/LookupFeedback.vue';
 import { useDebouncedRef } from '@/composables/useDebouncedRef';
+import { useLookupOptions } from '@/composables/useLookupOptions';
 import { mesActual, pesos, pesosDesdeTexto } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
@@ -31,19 +33,97 @@ const auth = useAuthStore();
 const canManageCutoffs = computed(() => auth.can('cutoffs.manage'));
 const canManageRates = computed(() => auth.can('rates.manage'));
 
-const tab = ref<'cutoffs' | 'rates'>('cutoffs');
+/**
+ * The two domains this screen holds, separately permitted.
+ *
+ * The route admits an account holding *either* — §35, because requiring both locked a
+ * rates-only role out of a page it is entitled to use. That was the fix for the route and it
+ * was incomplete: the page then loaded **both** lists on arrival, so the same rates-only role
+ * got a 403 for the cutoffs it may not read, an error banner saying it could not load them,
+ * and an empty cutoff table reading "Sin fechas de corte" — a false statement, since the rules
+ * exist and this account simply may not see them.
+ *
+ * So each half of the screen is loaded, drawn and offered only to an account allowed to read
+ * it. Nothing here is a substitute for the server, which refuses the same request regardless;
+ * it is what keeps the interface from asking for what it is not entitled to and from
+ * reporting a permission boundary as missing data.
+ */
+const canViewCutoffs = computed(() => auth.can('cutoffs.view'));
+const canViewRates = computed(() => auth.can('rates.view'));
+
+/**
+ * The tab the screen opens on: the first one this account may actually read.
+ */
+function firstReadableTab(): 'cutoffs' | 'rates' {
+    return canViewCutoffs.value ? 'cutoffs' : 'rates';
+}
+
+const tab = ref<'cutoffs' | 'rates'>(firstReadableTab());
 const loading = ref(true);
 const error = ref<string | null>(null);
 const notice = ref<string | null>(null);
 
 // --- Cutoff rules ------------------------------------------------------------
 const rules = ref<CutoffRuleSummary[]>([]);
+
+/**
+ * Independent pagination for each list.
+ *
+ * §33. The backend returned fifty rules and the page rendered them with no navigation, so
+ * after fifty the newest rules were simply not on screen — and the list is ordered newest
+ * first, so the decision an operator had just made was the first to disappear.
+ *
+ * Two independent states rather than one shared `page`, because the two lists are separate
+ * questions and paging one must not move the other.
+ */
+const rulePage = ref(1);
+const rulePerPage = ref(25);
+const ruleTotal = ref(0);
+const ruleLastPage = ref(1);
+
+const ratePage = ref(1);
+const ratePerPage = ref(25);
+const rateTotal = ref(0);
+const rateLastPage = ref(1);
+
+const ruleRange = computed(() =>
+    rango(ruleTotal.value, rulePage.value, rulePerPage.value),
+);
+const rateRange = computed(() =>
+    rango(rateTotal.value, ratePage.value, ratePerPage.value),
+);
+
+/** `1–25 de 300`, or an em dash when there is nothing to show. */
+function rango(total: number, page: number, perPage: number): string {
+    if (total === 0) {
+        return '—';
+    }
+
+    const desde = (page - 1) * perPage + 1;
+    const hasta = Math.min(total, page * perPage);
+
+    return `${desde}–${hasta} de ${total}`;
+}
 const ruleSearch = ref('');
 const settledRuleSearch = useDebouncedRef(ruleSearch, 300);
 
 async function loadRules(): Promise<void> {
     try {
-        rules.value = (await businessApi.billing.cutoffRules({ search: settledRuleSearch.value })).items;
+        const payload = await businessApi.billing.cutoffRules({
+            search: settledRuleSearch.value,
+            page: rulePage.value,
+            per_page: rulePerPage.value,
+        });
+
+        rules.value = payload.items;
+        ruleTotal.value = payload.pagination.total;
+        ruleLastPage.value = Math.max(1, payload.pagination.last_page);
+
+        // A page that no longer exists after deleting the last row on it: step back rather
+        // than showing an empty table.
+        if (rulePage.value > ruleLastPage.value) {
+            rulePage.value = ruleLastPage.value;
+        }
     } catch (cause) {
         rules.value = [];
         error.value = cause instanceof ApiError ? cause.message : 'No fue posible cargar las fechas de corte.';
@@ -65,29 +145,48 @@ const ruleForm = ref({
     companySearch: '',
 });
 
-const clientOptions = ref<Array<{ id: number; label: string }>>([]);
-const companyOptions = ref<Array<{ id: number; label: string }>>([]);
+// A search changes which page 1 means, so it goes back to the first one. Leaving it on
+// page 4 and typing a search produced an empty table with a pager.
+watch(settledRuleSearch, () => {
+    rulePage.value = 1;
+});
 
-async function searchClientOptions(): Promise<void> {
-    try {
-        const payload = await businessApi.clients.list({ search: ruleForm.value.clientSearch, per_page: 25 });
-        clientOptions.value = payload.clients.map((client) => ({ id: client.id, label: client.full_name }));
-    } catch {
-        clientOptions.value = [];
-    }
-}
+/**
+ * The company and client lists behind the two selects.
+ *
+ * §48 A configures a three-level cutoff hierarchy through this screen, and it could not be
+ * done: the lists were loaded by a `watch` on the search text, which does not fire for a box
+ * that has not been typed into, so opening the dialog offered an empty list. Both are opened
+ * with `restart()` — an empty list that the operator can use, rather than one that appears
+ * only once they guess a search term.
+ */
+const {
+    options: ruleClientOptions,
+    loading: ruleClientsLoading,
+    failed: ruleClientsFailed,
+    restart: restartRuleClients,
+} = useLookupOptions(
+    computed(() => ruleForm.value.clientSearch),
+    async (term) => {
+        const payload = await businessApi.clients.list({ search: term, per_page: 25 });
 
-async function searchCompanyOptions(): Promise<void> {
-    try {
-        const payload = await businessApi.companies.list({ search: ruleForm.value.companySearch, per_page: 25 });
-        companyOptions.value = payload.companies.map((company) => ({ id: company.id, label: company.display_name }));
-    } catch {
-        companyOptions.value = [];
-    }
-}
+        return payload.clients.map((client) => ({ id: client.id, label: client.full_name }));
+    },
+);
 
-watch(() => ruleForm.value.clientSearch, () => void searchClientOptions());
-watch(() => ruleForm.value.companySearch, () => void searchCompanyOptions());
+const {
+    options: ruleCompanyOptions,
+    loading: ruleCompaniesLoading,
+    failed: ruleCompaniesFailed,
+    restart: restartRuleCompanies,
+} = useLookupOptions(
+    computed(() => ruleForm.value.companySearch),
+    async (term) => {
+        const payload = await businessApi.companies.list({ search: term, per_page: 25 });
+
+        return payload.companies.map((company) => ({ id: company.id, label: company.display_name }));
+    },
+);
 
 const ruleCanSave = computed(() => {
     if (ruleForm.value.cutoffDay < 1 || ruleForm.value.cutoffDay > 31) {
@@ -118,6 +217,12 @@ function openRuleDialog(): void {
         companyId: null,
         companySearch: '',
     };
+
+    // Both lists start from this session's empty search rather than from whatever the
+    // previous one left behind, and are fetched without waiting for anything to be typed.
+    restartRuleClients();
+    restartRuleCompanies();
+
     ruleOpen.value = true;
 }
 
@@ -129,7 +234,16 @@ async function saveRule(): Promise<void> {
         const result = await businessApi.billing.storeCutoffRule({
             scope: ruleForm.value.scope,
             client_id: ruleForm.value.scope === 'client' ? ruleForm.value.clientId : null,
-            company_id: ruleForm.value.scope === 'company' ? ruleForm.value.companyId : null,
+            // A `client` rule names a company as well. The domain models it as CLIENT +
+            // COMPANY precisely because a client can be attached to several employers at
+            // once, each of which may count its own contribution on its own date.
+            //
+            // Sending null here — which is what this did — produced a rule the domain
+            // refused (`scope_needs_company`), so the exception could not be created at all;
+            // and in the published schema a null company made it look as though it applied
+            // to every employer the client ever had.
+            company_id:
+                ruleForm.value.scope === 'general' ? null : ruleForm.value.companyId,
             effective_month: ruleForm.value.effectiveMonth,
             cutoff_day: ruleForm.value.cutoffDay,
             month_offset: ruleForm.value.monthOffset,
@@ -194,9 +308,26 @@ const rates = ref<RateSummary[]>([]);
 const rateSearch = ref('');
 const settledRateSearch = useDebouncedRef(rateSearch, 300);
 
+watch(settledRateSearch, () => {
+    ratePage.value = 1;
+});
+
+
 async function loadRates(): Promise<void> {
     try {
-        rates.value = (await businessApi.billing.rates({ search: settledRateSearch.value })).items;
+        const payload = await businessApi.billing.rates({
+            search: settledRateSearch.value,
+            page: ratePage.value,
+            per_page: ratePerPage.value,
+        });
+
+        rates.value = payload.items;
+        rateTotal.value = payload.pagination.total;
+        rateLastPage.value = Math.max(1, payload.pagination.last_page);
+
+        if (ratePage.value > rateLastPage.value) {
+            ratePage.value = rateLastPage.value;
+        }
     } catch (cause) {
         rates.value = [];
         error.value = cause instanceof ApiError ? cause.message : 'No fue posible cargar los valores.';
@@ -216,35 +347,37 @@ const rateForm = ref({
     notes: '',
 });
 
-const rateClientOptions = ref<Array<{ id: number; label: string }>>([]);
-const rateCompanyOptions = ref<Array<{ id: number; label: string }>>([]);
+/**
+ * The same two lists, for the rate dialog. One implementation, so the empty-until-you-type
+ * failure cannot come back on the other half of the screen.
+ */
+const {
+    options: rateClientOptions,
+    loading: rateClientsLoading,
+    failed: rateClientsFailed,
+    restart: restartRateClients,
+} = useLookupOptions(
+    computed(() => rateForm.value.clientSearch),
+    async (term) => {
+        const payload = await businessApi.clients.list({ search: term, per_page: 25 });
 
-async function searchRateClients(): Promise<void> {
-    try {
-        const payload = await businessApi.clients.list({ search: rateForm.value.clientSearch, per_page: 25 });
-        rateClientOptions.value = payload.clients.map((client) => ({ id: client.id, label: client.full_name }));
-    } catch {
-        rateClientOptions.value = [];
-    }
-}
+        return payload.clients.map((client) => ({ id: client.id, label: client.full_name }));
+    },
+);
 
-async function searchRateCompanies(): Promise<void> {
-    try {
-        const payload = await businessApi.companies.list({
-            search: rateForm.value.companySearch,
-            per_page: 25,
-        });
-        rateCompanyOptions.value = payload.companies.map((company) => ({
-            id: company.id,
-            label: company.display_name,
-        }));
-    } catch {
-        rateCompanyOptions.value = [];
-    }
-}
+const {
+    options: rateCompanyOptions,
+    loading: rateCompaniesLoading,
+    failed: rateCompaniesFailed,
+    restart: restartRateCompanies,
+} = useLookupOptions(
+    computed(() => rateForm.value.companySearch),
+    async (term) => {
+        const payload = await businessApi.companies.list({ search: term, per_page: 25 });
 
-watch(() => rateForm.value.clientSearch, () => void searchRateClients());
-watch(() => rateForm.value.companySearch, () => void searchRateCompanies());
+        return payload.companies.map((company) => ({ id: company.id, label: company.display_name }));
+    },
+);
 
 const parsedRateAmount = computed(() => pesosDesdeTexto(rateForm.value.amount));
 const rateAmountProblem = computed(() => {
@@ -283,6 +416,10 @@ function openRateDialog(): void {
         amount: '',
         notes: '',
     };
+
+    restartRateClients();
+    restartRateCompanies();
+
     rateOpen.value = true;
 }
 
@@ -358,18 +495,36 @@ async function saveRateEdit(): Promise<void> {
 }
 
 // --- Loading -----------------------------------------------------------------
+/**
+ * Load only what this account may read.
+ *
+ * See `canViewCutoffs`. The `Promise.all` over both lists is what produced a 403 — and a
+ * banner reporting it as a failure to load — for whichever of the two domains the account
+ * holds no permission for.
+ */
 async function loadAll(): Promise<void> {
     loading.value = true;
     error.value = null;
 
-    await Promise.all([loadRules(), loadRates()]);
+    await Promise.all([
+        canViewCutoffs.value ? loadRules() : Promise.resolve(),
+        canViewRates.value ? loadRates() : Promise.resolve(),
+    ]);
 
     loading.value = false;
 }
 
 onMounted(() => void loadAll());
-watch(settledRuleSearch, () => void loadRules());
-watch(settledRateSearch, () => void loadRates());
+watch(settledRuleSearch, () => {
+    if (canViewCutoffs.value) {
+        void loadRules();
+    }
+});
+watch(settledRateSearch, () => {
+    if (canViewRates.value) {
+        void loadRates();
+    }
+});
 watch(tab, () => void loadAll());
 </script>
 
@@ -393,7 +548,7 @@ watch(tab, () => void loadAll());
             </AppButton>
 
             <AppButton
-                v-else-if="canManageRates"
+                v-else-if="tab === 'rates' && canManageRates"
                 icon="bi-plus-lg"
                 @click="openRateDialog"
             >
@@ -404,8 +559,14 @@ watch(tab, () => void loadAll());
         <AppAlert v-if="error" variant="danger" :title="error" class="mb-4" />
         <AppAlert v-if="notice" variant="success" :title="notice" class="mb-4" />
 
-        <div class="cdh-tabs mb-4" role="tablist">
+        <!--
+            Only the tabs this account may read. A tab whose list it may not read is not a
+            shortcut to an empty table: it is a claim, in the interface's own voice, that
+            there is nothing configured.
+        -->
+        <div v-if="canViewCutoffs || canViewRates" class="cdh-tabs mb-4" role="tablist">
             <button
+                v-if="canViewCutoffs"
                 type="button"
                 role="tab"
                 class="cdh-tab"
@@ -416,6 +577,7 @@ watch(tab, () => void loadAll());
                 Fechas de corte
             </button>
             <button
+                v-if="canViewRates"
                 type="button"
                 role="tab"
                 class="cdh-tab"
@@ -429,7 +591,7 @@ watch(tab, () => void loadAll());
 
         <AppLoading v-if="loading" label="Cargando configuración" />
 
-        <template v-else-if="tab === 'cutoffs'">
+        <template v-else-if="tab === 'cutoffs' && canViewCutoffs">
             <div class="cdh-filters" role="search">
                 <div class="cdh-filters__field cdh-filters__field--grow">
                     <label class="cdh-form-label" for="rules-search">Buscar</label>
@@ -502,10 +664,31 @@ watch(tab, () => void loadAll());
                         </tr>
                     </tbody>
                 </table>
+
+                <!-- §33: the list has to be navigable, or the newest rules vanish. -->
+                <nav class="cdh-pager" aria-label="Paginación de fechas de corte">
+                    <p class="cdh-pager__range">{{ ruleRange }}</p>
+                    <AppButton
+                        variant="ghost"
+                        size="sm"
+                        :disabled="rulePage <= 1"
+                        @click="rulePage -= 1"
+                    >
+                        Anterior
+                    </AppButton>
+                    <AppButton
+                        variant="ghost"
+                        size="sm"
+                        :disabled="rulePage >= ruleLastPage"
+                        @click="rulePage += 1"
+                    >
+                        Siguiente
+                    </AppButton>
+                </nav>
             </div>
         </template>
 
-        <template v-else>
+        <template v-else-if="tab === 'rates' && canViewRates">
             <div class="cdh-filters" role="search">
                 <div class="cdh-filters__field cdh-filters__field--grow">
                     <label class="cdh-form-label" for="rates-search">Buscar</label>
@@ -566,6 +749,26 @@ watch(tab, () => void loadAll());
                         </tr>
                     </tbody>
                 </table>
+
+                <nav class="cdh-pager" aria-label="Paginación de valores">
+                    <p class="cdh-pager__range">{{ rateRange }}</p>
+                    <AppButton
+                        variant="ghost"
+                        size="sm"
+                        :disabled="ratePage <= 1"
+                        @click="ratePage -= 1"
+                    >
+                        Anterior
+                    </AppButton>
+                    <AppButton
+                        variant="ghost"
+                        size="sm"
+                        :disabled="ratePage >= rateLastPage"
+                        @click="ratePage += 1"
+                    >
+                        Siguiente
+                    </AppButton>
+                </nav>
             </div>
         </template>
 
@@ -599,16 +802,32 @@ watch(tab, () => void loadAll());
                     class="form-control form-control-sm mb-2"
                     type="search"
                     placeholder="Buscar cliente"
+                    autocomplete="off"
                 />
                 <select id="rule-client" v-model="ruleForm.clientId" class="form-control">
                     <option :value="null" disabled>Seleccione un cliente</option>
-                    <option v-for="client in clientOptions" :key="client.id" :value="client.id">
+                    <option v-for="client in ruleClientOptions" :key="client.id" :value="client.id">
                         {{ client.label }}
                     </option>
                 </select>
+                <LookupFeedback
+                    :loading="ruleClientsLoading"
+                    :failed="ruleClientsFailed"
+                    empty="clientes"
+                />
             </div>
 
-            <div v-if="ruleForm.scope === 'company'" class="mb-3">
+            <!--
+                Shown for a `client` scope too: the exception is client **and** company, and
+                an operator who could not see this field had no way to say which employer it
+                was for.
+
+                The client's own select is labelled "Cliente" and not "Cliente y empresa" on
+                purpose. Naming a client field after the pair it belongs to made it read as
+                though choosing a client here also chose the employer, which is what the field
+                directly below it is for.
+            -->
+            <div v-if="ruleForm.scope === 'company' || ruleForm.scope === 'client'" class="mb-3">
                 <label class="cdh-form-label" for="rule-company">Empresa</label>
                 <input
                     id="rule-company-search"
@@ -616,13 +835,19 @@ watch(tab, () => void loadAll());
                     class="form-control form-control-sm mb-2"
                     type="search"
                     placeholder="Buscar empresa"
+                    autocomplete="off"
                 />
                 <select id="rule-company" v-model="ruleForm.companyId" class="form-control">
                     <option :value="null" disabled>Seleccione una empresa</option>
-                    <option v-for="company in companyOptions" :key="company.id" :value="company.id">
+                    <option v-for="company in ruleCompanyOptions" :key="company.id" :value="company.id">
                         {{ company.label }}
                     </option>
                 </select>
+                <LookupFeedback
+                    :loading="ruleCompaniesLoading"
+                    :failed="ruleCompaniesFailed"
+                    empty="empresas"
+                />
             </div>
 
             <div class="mb-3">
@@ -747,6 +972,7 @@ watch(tab, () => void loadAll());
                     class="form-control form-control-sm mb-2"
                     type="search"
                     placeholder="Buscar cliente"
+                    autocomplete="off"
                 />
                 <select id="rate-client" v-model="rateForm.clientId" class="form-control">
                     <option :value="null" disabled>Seleccione un cliente</option>
@@ -754,6 +980,7 @@ watch(tab, () => void loadAll());
                         {{ client.label }}
                     </option>
                 </select>
+                <LookupFeedback :loading="rateClientsLoading" :failed="rateClientsFailed" empty="clientes" />
             </div>
 
             <div class="mb-3">
@@ -764,6 +991,7 @@ watch(tab, () => void loadAll());
                     class="form-control form-control-sm mb-2"
                     type="search"
                     placeholder="Buscar empresa"
+                    autocomplete="off"
                 />
                 <select id="rate-company" v-model="rateForm.companyId" class="form-control">
                     <option :value="null" disabled>Seleccione una empresa</option>
@@ -771,6 +999,11 @@ watch(tab, () => void loadAll());
                         {{ company.label }}
                     </option>
                 </select>
+                <LookupFeedback
+                    :loading="rateCompaniesLoading"
+                    :failed="rateCompaniesFailed"
+                    empty="empresas"
+                />
             </div>
 
             <div class="mb-3">

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Requests\Billing;
 
+use App\Support\Validation\FirstDayOfMonth;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -27,7 +28,9 @@ final class StoreRateRequest extends FormRequest
         return [
             'client_id' => ['required', 'integer', 'exists:clients,id'],
             'company_id' => ['required', 'integer', 'exists:companies,id'],
-            'effective_month' => ['required', 'string', 'regex:/^\d{4}-\d{2}-01$/'],
+            // Rejects 2026-13-01 as well as a mid-month date: a regex checked the
+            // shape and let the impossible month through to Carbon.
+            'effective_month' => ['required', 'string', new FirstDayOfMonth],
             'amount_cop' => ['required', 'integer', 'min:1'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ];
@@ -43,6 +46,7 @@ final class StoreRateRequest extends FormRequest
             'amount_cop.integer' => 'El valor debe ser un número entero de pesos, sin decimales.',
             'amount_cop.min' => 'El valor debe ser mayor que cero.',
             'effective_month.regex' => 'El mes de vigencia debe ser el primer día del mes, como 2026-01-01.',
+            'effective_month.string' => 'El mes de vigencia debe escribirse como texto, como 2026-01-01.',
         ];
     }
 

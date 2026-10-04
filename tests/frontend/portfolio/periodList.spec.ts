@@ -168,7 +168,9 @@ describe('PeriodListPage', () => {
 
         const { wrapper, auth } = mountPage();
 
-        auth.setUser({ permissions: ['periods.view'] } as AuthUser);
+        // `obligations.view` is what makes the monetary keys appear. The account also holds
+        // `periods.view`, which is what admits it to the list at all.
+        auth.setUser({ permissions: ['periods.view', 'obligations.view'] } as AuthUser);
 
         await flushPromises();
 
@@ -349,4 +351,41 @@ describe('PeriodListPage', () => {
 
         expect(wrapper.text()).toContain('No fue posible cargar los periodos');
     });
+});
+
+/**
+ * §37. A period's money is obligation data, and `periods.view` alone does not include it.
+ *
+ * The server omits those keys in that case. Rendering zeroes would state that every month is
+ * worth nothing, which is a financial claim the permission does not cover — so the interface
+ * shows a dash and says why.
+ */
+it('withholds a period\'s figures from a calendar-only role instead of showing zeroes', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+        jsonResponse({
+            items: [
+                // No monetary keys at all: this is what the server sends without
+                // `obligations.view`, and the interface has to cope with their absence
+                // rather than with a zero.
+                period({ obligation_count: undefined, total_effective_cop: undefined }),
+            ],
+            pagination: { total: 1, current_page: 1, last_page: 1, per_page: 25, from: 1, to: 1 },
+            current: period({ id: 1, obligation_count: undefined, total_effective_cop: undefined }),
+        }),
+    );
+
+    const { wrapper, auth } = mountPage();
+
+    // Only `periods.view`: enough to open the screen, not to see what the months are worth.
+    auth.setUser({ permissions: ['periods.view'] } as AuthUser);
+
+    await flushPromises();
+
+    const text = wrapper.text();
+
+    expect(text).toContain('Octubre 2026');
+    expect(text).toContain('Requiere permiso para ver las obligaciones');
+    expect(text).toContain('Sin permiso para ver las cifras del periodo');
+    // And no invented figure anywhere.
+    expect(text).not.toContain('235.000');
 });

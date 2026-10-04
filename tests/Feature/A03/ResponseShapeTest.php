@@ -96,16 +96,37 @@ it('publishes the keys the generation preview reads', function (): void {
         ->json();
 
     expect_keys($preview, ['period', 'preview'], 'the generation preview');
+    // The four disjoint buckets plus a separate count of findings.
+    //
+    // `blocker_count` used to be the interface's basis for deriving "how many already
+    // exist" as `candidate_count - creatable_count - blocker_count`, and it counted
+    // *findings*: a candidate missing both a rate and a cutoff contributed two, so the
+    // subtraction went negative. The four buckets now sum to `candidate_count` exactly,
+    // and `blocker_finding_count` is a count of findings under its own honest name.
     expect_keys($preview['preview'], [
-        'period', 'candidate_count', 'creatable_count', 'resolved_count',
-        'blocker_count', 'total_amount_cop', 'can_generate',
-        'candidates', 'blockers', 'warnings',
+        'period',
+        'candidate_count',
+        'existing_candidate_count',
+        'creatable_count',
+        'blocked_candidate_count',
+        'blocker_finding_count',
+        'creatable_amount_cop',
+        'resolved_portfolio_amount_cop',
+        'resolved_count',
+        'can_generate',
+        'candidates',
+        'blockers',
+        'warnings',
     ], 'the generation plan');
 
     expect_keys($preview['preview']['candidates'][0], [
-        'client_id', 'company_id', 'client_name', 'company_name', 'assignment_id',
+        'client_id', 'company_id', 'client_name', 'company_name',
+        // `assignment_id` is nullable now: it is the single relationship only when there
+        // is exactly one, and the complete set travels in `source_assignment_ids`.
+        'assignment_id', 'source_assignment_ids', 'source_count',
+        'overlapping_assignment_ids',
         'amount_cop', 'cutoff', 'rate_id', 'already_exists', 'will_be_created',
-        'blockers',
+        'blockers', 'warnings', 'resolved',
     ], 'a preview candidate');
 
     // What the cutoff resolved to, so the screen can show the due date that would
@@ -147,11 +168,25 @@ it('publishes the keys the adjustments screen reads', function (): void {
 
     // The screen has to be able to tell a live adjustment from a cancelled one, or it
     // will offer to reverse it a second time.
+    //
+    // The state is derived from the reversal **relation**, not from marker columns. The
+    // published shape used to carry `reversed_at`, `reversed_by` and `reversal_reason`,
+    // none of which exists in the schema: a reversal is a row with
+    // `reverses_adjustment_id`, so those keys were permanently null and an undone original
+    // looked identical to a live one. §19 replaces them with the truth of the ledger.
     expect_keys($list['items'][0], [
         'id', 'obligation_id', 'type', 'type_label', 'delta_cop', 'reason',
-        'reverses_adjustment_id', 'reversed_at', 'reversed_by', 'reversal_reason',
+        'reverses_adjustment_id',
+        'is_reversal', 'is_reversed', 'reversed_by_adjustment_id',
+        'reversal_created_at', 'reversal_reason',
+        'can_reverse', 'is_active',
         'created_at',
     ], 'an adjustment row');
+
+    // And the fictional keys must be gone, not merely optional: keeping them would keep the
+    // interface reading a field that can never hold a value.
+    expect($list['items'][0])->not->toHaveKey('reversed_at')
+        ->and($list['items'][0])->not->toHaveKey('reversed_by');
 });
 
 it('publishes the keys the payments screen reads', function (): void {
@@ -289,8 +324,21 @@ it('publishes the financial position on the dashboard', function (): void {
 
     // Only for a role that may read the portfolio: an absent section means withheld,
     // and the interface must not draw a withheld figure as a zero.
+    //
+    // §40. Received, applied and unallocated are three different numbers, and the
+    // dashboard used to publish the applied one under the label "Recaudado" — so a 300000
+    // payment that had not been allocated yet read as nothing collected.
     expect_keys($dashboard['portfolio']['financial'], [
-        'outstanding_balance_cop', 'overdue_balance_cop', 'total_paid_cop',
+        'total_received_cop',
+        'total_applied_cop',
+        'unallocated_credit_cop',
+        'outstanding_balance_cop', 'overdue_balance_cop',
         'clients_with_debt', 'payments_requiring_reconciliation',
     ], 'the dashboard financial position');
+
+    // The conservation identity, over non-voided payments.
+    $financial = $dashboard['portfolio']['financial'];
+
+    expect($financial['total_received_cop'])
+        ->toBe($financial['total_applied_cop'] + $financial['unallocated_credit_cop']);
 });

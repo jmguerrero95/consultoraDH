@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
@@ -8,8 +8,21 @@ import AppLoading from '@/components/ui/AppLoading.vue';
 import { pesos } from '@/composables/useFormatters';
 import { api } from '@/services/api';
 import { ApiError } from '@/services/http';
+import { useAuthStore } from '@/stores/auth';
 
 import type { DashboardPayload, ServiceCheck } from '@/types/api';
+
+const auth = useAuthStore();
+
+/**
+ * Whether the payments screen is reachable for this account.
+ *
+ * §41. The financial section is shown to anybody who may read the portfolio, but one of its
+ * cards pointed at `/payments`, whose own guard requires `payments.view`. A receivables-only
+ * role was given a link that led straight to a red "forbidden" screen, which teaches
+ * people that the dashboard lies. The card is rendered as a plain stat instead.
+ */
+const puedeVerPagos = computed(() => auth.can('payments.view'));
 
 /**
  * A01 dashboard.
@@ -283,21 +296,73 @@ onMounted(load);
                             <p class="cdh-stat__hint">Obligaciones que ya pasaron su vencimiento</p>
                         </RouterLink>
 
+                        <!--
+                            §41. The link target needs `payments.view`, which a role holding
+                            only `receivables.view` does not have: it was offered a navigation
+                            link that the router guard immediately refused. Rendered as a
+                            plain stat in that case, with no dead link anywhere.
+                        -->
                         <RouterLink
+                            v-if="puedeVerPagos"
                             :to="{ name: 'payments' }"
                             class="cdh-stat cdh-stat--link"
                             aria-label="Ver los pagos"
                         >
                             <p class="cdh-stat__label">
-                                <i class="bi bi-check2-circle" aria-hidden="true" />
-                                <span>Recaudado</span>
+                                <i class="bi bi-wallet2" aria-hidden="true" />
+                                <span>Recibido</span>
                             </p>
-                            <p class="cdh-stat__value">{{ pesos(data.portfolio.financial.total_paid_cop) }}</p>
+                            <p class="cdh-stat__value">
+                                {{ pesos(data.portfolio.financial.total_received_cop) }}
+                            </p>
+                            <p class="cdh-stat__hint">
+                                Dinero que ha llegado, aplicado o sin aplicar
+                            </p>
+                        </RouterLink>
+
+                        <article v-else class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-wallet2" aria-hidden="true" />
+                                <span>Recibido</span>
+                            </p>
+                            <p class="cdh-stat__value">
+                                {{ pesos(data.portfolio.financial.total_received_cop) }}
+                            </p>
+                            <p class="cdh-stat__hint">Dinero que ha llegado</p>
+                        </article>
+
+                        <!--
+                            §40. "Recaudado" was the applied figure wearing the wrong label:
+                            a payment of 300000 that had not been allocated yet read as
+                            nothing collected. Received, applied and credit are now three
+                            separate figures, because they are three separate questions.
+                        -->
+                        <article class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-check2-circle" aria-hidden="true" />
+                                <span>Aplicado a obligaciones</span>
+                            </p>
+                            <p class="cdh-stat__value">
+                                {{ pesos(data.portfolio.financial.total_applied_cop) }}
+                            </p>
                             <p class="cdh-stat__hint">
                                 {{ data.portfolio.financial.payments_requiring_reconciliation }} pagos por
                                 conciliar
                             </p>
-                        </RouterLink>
+                        </article>
+
+                        <article class="cdh-stat">
+                            <p class="cdh-stat__label">
+                                <i class="bi bi-hourglass-split" aria-hidden="true" />
+                                <span>Anticipos sin aplicar</span>
+                            </p>
+                            <p class="cdh-stat__value">
+                                {{ pesos(data.portfolio.financial.unallocated_credit_cop) }}
+                            </p>
+                            <p class="cdh-stat__hint">
+                                Dinero recibido cuya deuda todavía no se ha asignado
+                            </p>
+                        </article>
                     </div>
                 </div>
             </section>

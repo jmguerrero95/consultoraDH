@@ -93,10 +93,31 @@ function mountPage(component: unknown) {
     return { wrapper, auth: useAuthStore() };
 }
 
-function findAction(wrapper: ReturnType<typeof mount>, label: string) {
+/**
+ * One modal, found by its title.
+ *
+ * `AppModal` keeps its `<dialog>` and heading in the DOM even while closed — the browser
+ * hides it, the markup stays — so a page-wide `text()` or `find('dialog textarea')` would
+ * happily read the first closed dialog on the screen instead of the open one.
+ */
+function dialogByTitle(wrapper: ReturnType<typeof mount>, title: string) {
     return wrapper
+        .findAll('dialog')
+        .find((d) => d.find('h2').exists() && d.find('h2').text().trim() === title);
+}
+
+function findAction(wrapper: ReturnType<typeof mount>, label: string) {
+    const button = wrapper
         .findAll('table button')
         .find((candidate) => candidate.text().replace(/\s+/g, ' ').trim().startsWith(label));
+
+    // A button the operator cannot find is the failure being tested, not a setup problem,
+    // so say which one was missing instead of failing later on an undefined wrapper.
+    if (!button) {
+        throw new Error(`No se encontró el botón "${label}"`);
+    }
+
+    return button;
 }
 
 beforeEach(() => {
@@ -332,6 +353,173 @@ describe('PaymentListPage', () => {
 
         expect(afterInput?.attributes('disabled')).toBeUndefined();
     });
+
+    /**
+     * §17. The allocation history, and the reversal that the interface used to make
+     * impossible.
+     *
+     * A reversed allocation has to stay on the list. Removing it would present a payment
+     * that was applied and then un-applied as one that never was applied, which is a
+     * different history — and the wrong one to hand somebody reconciling a month.
+     */
+    it('shows the allocation history and reverses one allocation through the interface', async () => {
+        let reversed = false;
+
+        const detail = () =>
+            payment({
+                allocated_amount_cop: reversed ? 0 : 300000,
+                unallocated_amount_cop: reversed ? 300000 : 0,
+                allocations: [
+                    {
+                        id: 77,
+                        payment_id: 10,
+                        obligation_id: 5,
+                        amount_cop: 300000,
+                        is_reversed: reversed,
+                        is_active: !reversed,
+                        reversed_at: reversed ? '2026-10-05T14:00:00+00:00' : null,
+                        reversed_by: reversed ? 1 : null,
+                        reversal_reason: reversed ? 'Se aplicó a la obligación equivocada' : null,
+                        created_at: '2026-10-02T10:00:00+00:00',
+                        obligation_label: 'Octubre 2026',
+                        company_name: 'Servicios Alfa S.A.S.',
+                        due_on: '2026-10-15',
+                    },
+                ],
+            });
+
+        mockApi((url, init) => {
+            if (url.includes('/api/payment-allocations/') && init?.method === 'POST') {
+                reversed = true;
+
+                return jsonResponse({
+                    message: 'Se revirtió la aplicación.',
+                    allocation: {
+                        id: 77,
+                        reversed_at: '2026-10-05T14:00:00+00:00',
+                        reversal_reason: 'Se aplicó a la obligación equivocada',
+                    },
+                    payment: detail(),
+                });
+            }
+
+            if (url.includes('/api/payments/10') && init?.method !== 'POST') {
+                return jsonResponse({ payment: detail() });
+            }
+
+            return jsonResponse({
+                items: [payment()],
+                pagination: { total: 1, current_page: 1, last_page: 1, per_page: 25, from: 1, to: 1 },
+            });
+        });
+
+        const { wrapper, auth } = mountPage(PaymentListPage);
+
+        auth.setUser({ permissions: ['payments.view', 'payments.allocate'] } as AuthUser);
+
+        await flushPromises();
+
+        (await findAction(wrapper, 'Historial')).trigger('click');
+        await flushPromises();
+
+        // The header, the allocations, the obligation and the amounts.
+        const opened = dialogByTitle(wrapper, 'Historial del pago')?.text() ?? '';
+
+        expect(opened).toContain('Ana María Gómez');
+        expect(opened).toContain('Octubre 2026');
+        expect(opened).toContain('Servicios Alfa S.A.S.');
+        expect(opened).toContain('300.000');
+        expect(opened).toContain('Activa');
+
+        await findAction(wrapper, 'Revertir').trigger('click');
+        await flushPromises();
+
+        const dialog = dialogByTitle(wrapper, 'Revertir aplicación');
+
+        expect(dialog).toBeDefined();
+
+        const confirmButton = () =>
+            dialog
+                ?.findAll('button')
+                .find((b) => b.text().trim() === 'Revertir aplicación');
+
+        // A reason is required: an undo with no stated cause is indistinguishable from a
+        // mistake in the ledger.
+        expect(confirmButton()?.attributes('disabled')).toBeDefined();
+
+        await dialog?.find('textarea').setValue('Se aplicó a la obligación equivocada');
+        await flushPromises();
+
+        expect(confirmButton()?.attributes('disabled')).toBeUndefined();
+
+        await confirmButton()?.trigger('click');
+        await flushPromises();
+
+        const history = dialogByTitle(wrapper, 'Historial del pago')?.text() ?? '';
+
+        // The money went back, and the row is still there — marked reverted, with its reason.
+        expect(reversed).toBe(true);
+        expect(history).toContain('Revertida');
+        expect(history).toContain('Se aplicó a la obligación equivocada');
+        expect(history).toContain('300.000');
+        // And the reversal button is gone, because there is nothing active left to reverse.
+        expect(history).not.toContain('Revertir');
+    });
+
+    /**
+     * §17. Reading a payment's history is part of seeing payments, so it does not need the
+     * allocation permission; undoing one does.
+     */
+    it('lets a payments-only role read the history but not reverse anything', async () => {
+        mockApi((url, init) => {
+            if (url.includes('/api/payments/10') && init?.method !== 'POST') {
+                return jsonResponse({
+                    payment: payment({
+                        allocations: [
+                            {
+                                id: 77,
+                                payment_id: 10,
+                                obligation_id: 5,
+                                amount_cop: 300000,
+                                is_reversed: false,
+                                is_active: true,
+                                reversed_at: null,
+                                reversed_by: null,
+                                reversal_reason: null,
+                                created_at: '2026-10-02T10:00:00+00:00',
+                                obligation_label: 'Octubre 2026',
+                                company_name: 'Servicios Alfa S.A.S.',
+                                due_on: '2026-10-15',
+                            },
+                        ],
+                    }),
+                });
+            }
+
+            return jsonResponse({
+                items: [payment()],
+                pagination: { total: 1, current_page: 1, last_page: 1, per_page: 25, from: 1, to: 1 },
+            });
+        });
+
+        const { wrapper, auth } = mountPage(PaymentListPage);
+
+        auth.setUser({ permissions: ['payments.view'] } as AuthUser);
+
+        await flushPromises();
+
+        (await findAction(wrapper, 'Historial')).trigger('click');
+        await flushPromises();
+
+        const history = dialogByTitle(wrapper, 'Historial del pago')?.text() ?? '';
+
+        expect(history).toContain('Octubre 2026');
+        expect(history).toContain('Servicios Alfa S.A.S.');
+
+        // The history is readable; the reversal is not offered.
+        expect(history).not.toContain('Revertir');
+    });
+
 });
 
 /** A tiny helper so the mock above reads clearly. */
@@ -400,7 +588,11 @@ describe('ReceivablesPage', () => {
         // A colour with no reason is a judgement about a person. The reason is what
         // makes it a statement about the debt.
         expect(text).toContain('1 periodo vencido');
-        expect(text).toContain('2026-09');
+        // The month is named the way the rest of the module names it. It used to print the
+        // raw `2026-09`, so the same collection read as a different month here than on the
+        // period list beside it.
+        expect(text).toContain('Septiembre 2026');
+        expect(text).not.toContain('2026-09');
         expect(text).toContain('235.000');
     });
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Requests\Periods;
 
 use App\Domain\Periods\MonthlyPeriod;
+use App\Support\Validation\FirstDayOfMonth;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -31,7 +32,9 @@ final class StorePeriodRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'period_month' => ['required', 'string', 'regex:/^\d{4}-\d{2}$/'],
+            // Not `regex`: the shape is checked as well as the calendar position, so
+            // 2026-13 is a 422 with this field named rather than a 500 from Carbon.
+            'period_month' => ['required', 'string', new FirstDayOfMonth],
         ];
     }
 
@@ -43,6 +46,7 @@ final class StorePeriodRequest extends FormRequest
         return [
             'period_month.required' => 'Debe indicar el periodo a abrir.',
             'period_month.regex' => 'El periodo debe escribirse como AAAA-MM, por ejemplo 2026-10.',
+            'period_month.string' => 'El periodo debe escribirse como texto, por ejemplo 2026-10.',
         ];
     }
 

@@ -11,6 +11,7 @@ use App\Domain\Payments\PaymentMethod;
 use App\Domain\Periods\PeriodStatus;
 use App\Domain\Receivables\ReceivablesService;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Receivables\ListReceivablesRequest;
 use App\Models\Client;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -28,37 +29,18 @@ final class ReceivableController extends Controller
         private readonly ReceivablesService $receivables,
     ) {}
 
-    public function index(Request $request): JsonResponse
+    public function index(ListReceivablesRequest $request): JsonResponse
     {
-        abort_unless($request->user()?->can('receivables.view'), 403, 'No tiene permisos para ver la cartera.');
-
-        $filters = array_filter([
-            'search' => $request->input('search'),
-            'company_id' => $request->input('company_id'),
-            'client_id' => $request->input('client_id'),
-            'period_from' => $request->input('period_from'),
-            'period_to' => $request->input('period_to'),
-            'settlement_state' => $request->input('settlement_state'),
-            'aging_bucket' => $request->input('aging_bucket'),
-            'traffic_light' => $request->input('traffic_light'),
-            'minimum_balance' => $request->input('minimum_balance'),
-            'maximum_balance' => $request->input('maximum_balance'),
-            'as_of' => $request->input('as_of'),
-            // `outstanding_only` defaults to true: cartera is a list of debtors, and a
-            // row with a zero balance is not one. It can be turned off explicitly.
-            'outstanding_only' => $request->has('outstanding_only')
-                ? $request->boolean('outstanding_only')
-                : true,
-        ], fn (mixed $value): bool => $value !== null && $value !== '');
-
-        if ($request->has('overdue')) {
-            $filters['overdue'] = $request->boolean('overdue');
-        }
-
-        $page = max(1, (int) $request->integer('page', 1));
-        $perPage = max(1, min(100, (int) $request->integer('per_page', 25)));
-
-        return response()->json($this->receivables->list($filters, $page, $perPage));
+        // The filters arrive validated and allowlisted: an unknown traffic light or an
+        // impossible month is a 422 naming the field, not a `ValueError` from an enum and not
+        // a query that quietly returns every debtor.
+        //
+        // `filters()` is where `overdue=false` stops meaning "overdue only".
+        return response()->json($this->receivables->list(
+            $request->filters(),
+            $request->page(),
+            $request->perPage(),
+        ));
     }
 
     /**

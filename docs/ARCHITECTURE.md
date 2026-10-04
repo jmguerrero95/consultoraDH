@@ -330,6 +330,19 @@ cuál estaba en vigor en cada mes. Un periodo se factura con la regla y el valor
 que aplicaban **al inicio de ese mes**, y la obligación guarda `rate_id` y
 `cutoff_rule_id` para que la instantánea sea evidencia y no coincidencia.
 
+La evidencia se conserva como evidencia: la llave de `cutoff_rule_id` es `RESTRICT`,
+y una restricción `CHECK` parcial exige que toda fila generada nombre las dos
+columnas. El `CHECK` y no un `NOT NULL` porque `manual_correction` —una obligación
+escrita a mano— existe precisamente para el caso en que no hay configuración detrás:
+su procedencia es lo que el operador escribió, y exigirle una regla sería exigirle
+una mentira.
+
+La procedencia **topológica** se guarda aparte, en `obligation_source_assignments`:
+una fila por tramo de relación que componen la obligación. Una obligación puede
+reunir varios tramos no solapados del mismo par —una salida y un reingreso dentro
+del mes— y en ese caso la columna de un solo tramo queda en `NULL` en vez de
+elegir uno y atribuirle la deuda entera.
+
 La consecuencia es que corregir una decisión pasada no es una edición: es
 agregar una decisión nueva con vigencia posterior. Si el mes ya se facturó, el
 servidor se niega a cambiar la fila que usó y responde `409` diciendo qué periodos
@@ -353,18 +366,65 @@ dinero: los pagos y los ajustes de ese mes siguen siendo válidos.
 
 ### El orden de los bloqueos
 
-Cuando dos transacciones del libro se tocan, el orden importa más que la
-corrección, porque dos operaciones correctas en orden inverso se bloquean entre sí:
+Bloquear la fila del periodo serializa dos operaciones que **ambas hablan del mes**.
+No serializa nada contra el directorio, que es de donde sale la topología que la
+generación lee. De ahí salen tres carreras reales, que ninguna se arregla con un
+bloqueo de mes:
+
+- la generación lee una relación que intersecta octubre y otra transacción la
+  cierra o la transfiere retroactivamente antes de que la generación confirme;
+- la generación ve un cliente y una empresa activos, y otra transacción los
+  desactiva antes de confirmar;
+- el cierre de periodo demuestra que «no falta nada» y otra petición inserta una
+  relación con vigencia en ese mismo mes, de modo que el periodo se cierra
+  incompleto y nada puede generar ahí después sin reabrirlo.
+
+Por eso existe **un protocolo compartido de topología** (`BillingTopologyLock`): un
+bloqueo consultivo de transacción de PostgreSQL, con **una sola clave fija**, que
+**todos** los participantes toman **antes de cualquier otro bloqueo**. Cerrar,
+generar, abrir relación, cerrar relación, transferir, cambiar el estado de un
+cliente o de una empresa participan en él.
+
+La clave única no es una simplificación, es la propiedad que elimina el interbloqueo:
+como todo el mundo toma la misma clave primero, nunca hay dos tenedores y nunca hay
+un segundo bloqueo al que esperar. La alternativa —ordenar cada fila participante
+y bloquearlas todas— no puede funcionar aquí: A02 cambia una relación por vez, así
+que tendría que bloquear todos los clientes, empresas y relaciones que *podría*
+tocar, en un orden global, y la generación tendría que bloquear el mismo conjunto
+sin saber de antemano qué relaciones intersectan el mes. Adivinar el conjunto es
+justo el fallo.
+
+El precio es que meses distintos y clientes distintos se serializan entre sí durante
+una escritura financiera corta. A la escala de este sistema son unos milisegundos, y
+la alternativa es escribir una deuda a partir de una relación que ya estaba cerrada.
+
+El orden completo, entonces:
 
 | Operación | Orden |
 | --- | --- |
-| Estructural de un periodo | periodo → filas candidatas y de referencia |
-| Pago | cliente → pago → obligaciones ascendente por id → aplicaciones |
+| Topología (todos) | **bloqueo consultivo, primero, siempre** |
+| Generar un mes | topología → periodo → valores y reglas citados ascendente por id → inserciones |
+| Cerrar un mes | topología → periodo → candidatos y referencias |
+| Abrir un periodo | topología → periodo |
+| Pago | topología → cliente → pago → obligaciones ascendente por id → aplicaciones |
 | Ajuste | obligación → aplicaciones |
 
 Y en cada caso, la cifra que se usó para **elegir** se vuelve a leer después de
-tomar el bloqueo. Sin eso, dos operadores pueden decidir sobre números que el
-otro ya dejó viejos.
+tomar el bloqueo. Sin eso, dos operadores pueden decidir sobre números que el otro
+ya dejó viejos.
+
+**La configuración se bloquea, no solo se lee.** La generación bloquea, en orden
+ascendente por id, los valores y las reglas de corte que va a citar, y **vuelve a
+leerlos después del bloqueo**; solo escribe si lo releído sigue describiendo lo
+mismo. Leer sin bloquear deja esta carrera abierta: la previsualización calcula el
+importe con una tasa que otra transacción cambia antes de que se escriba la
+obligación, y la obligación resultante cita una evidencia que no produjo su importe.
+
+La previsualización no es una excepción: `PreviewPeriodObligations` **recalcula los
+candidatos dentro de la transacción**, dentro de los mismos bloqueos, en vez de
+confiarse en lo que se leyó sin ellos. Entre que un operador lee una previsualización
+y la confirma, puede haberse añadido un valor o cerrado una relación, y la respuesta
+que vale es la calculada bajo el bloqueo.
 
 ## 7. Base de datos
 

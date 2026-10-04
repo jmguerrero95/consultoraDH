@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
@@ -40,8 +40,44 @@ const canReopen = computed(() => auth.can('periods.reopen'));
 const canGenerate = computed(() => auth.can('obligations.generate'));
 const canSeeObligations = computed(() => auth.can('obligations.view'));
 
+/**
+ * Whether this account may see what a period is worth.
+ *
+ * Mirrors the server's rule exactly: `obligations.view` **or** `obligations.generate`.
+ * Somebody who may write a month's obligations has to see what they wrote; `periods.view`
+ * alone is not enough, and that is the whole point of §37.
+ */
+const puedeVerDinero = computed(
+    () => auth.can('obligations.view') || auth.can('obligations.generate'),
+);
+
 // --- Data --------------------------------------------------------------------
 const periods = ref<PeriodSummary[]>([]);
+
+/**
+ * Pagination over the months.
+ *
+ * §38. The backend paginates at twenty-five and this page sent no page number and rendered
+ * no navigation, so the first page was all there ever was. A monthly financial application
+ * passes twenty-five months within two years, at which point the oldest months — the ones
+ * most likely to be under discussion — became unreachable with no indication that anything
+ * was missing.
+ */
+const page = ref(1);
+const perPage = ref(25);
+const total = ref(0);
+const lastPage = ref(1);
+
+const rangeLabel = computed(() => {
+    if (total.value === 0) {
+        return '—';
+    }
+
+    const desde = (page.value - 1) * perPage.value + 1;
+    const hasta = Math.min(total.value, page.value * perPage.value);
+
+    return `${desde}–${hasta} de ${total.value}`;
+});
 const current = ref<PeriodSummary | null>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
@@ -57,7 +93,7 @@ async function load(): Promise<void> {
     error.value = null;
 
     try {
-        const payload = await businessApi.periods.list();
+        const payload = await businessApi.periods.list({ page: page.value, per_page: perPage.value });
 
         // A response that arrived after a newer request started is stale.
         if (current_request !== requestId) {
@@ -65,6 +101,13 @@ async function load(): Promise<void> {
         }
 
         periods.value = payload.items;
+        total.value = payload.pagination.total;
+        lastPage.value = Math.max(1, payload.pagination.last_page);
+
+        // Deleting or opening something can empty the last page.
+        if (page.value > lastPage.value) {
+            page.value = lastPage.value;
+        }
         current.value = payload.current;
     } catch (cause) {
         if (current_request !== requestId) {
@@ -118,7 +161,6 @@ const preview = ref<GenerationPreviewPayload | null>(null);
 const previewOpen = ref(false);
 const previewBusy = ref(false);
 const previewError = ref<string | null>(null);
-const missingOnly = ref(true);
 const generateBusy = ref(false);
 
 async function openPreview(period: PeriodSummary): Promise<void> {
@@ -128,7 +170,7 @@ async function openPreview(period: PeriodSummary): Promise<void> {
     previewOpen.value = true;
 
     try {
-        preview.value = await businessApi.periods.previewObligations(period.id, missingOnly.value);
+        preview.value = await businessApi.periods.previewObligations(period.id);
     } catch (cause) {
         previewError.value =
             cause instanceof ApiError
@@ -138,12 +180,6 @@ async function openPreview(period: PeriodSummary): Promise<void> {
         previewBusy.value = false;
     }
 }
-
-watch(missingOnly, () => {
-    if (previewOpen.value && preview.value !== null) {
-        void openPreview(preview.value.period);
-    }
-});
 
 async function generate(): Promise<void> {
     if (preview.value === null) {
@@ -156,7 +192,6 @@ async function generate(): Promise<void> {
     try {
         const result: GenerationResultPayload = await businessApi.periods.generateObligations(
             preview.value.period.id,
-            missingOnly.value,
         );
 
         previewOpen.value = false;
@@ -241,27 +276,44 @@ async function reopenPeriod(): Promise<void> {
     }
 }
 
+/**
+ * The four buckets, read rather than derived.
+ *
+ * The previous sentence computed "already exists" as
+ * `candidate_count - creatable_count - blocker_count`, and `blocker_count` was a count of
+ * **findings**: a single candidate missing both a rate and a cutoff contributed two, so the
+ * subtraction could produce a negative number of existing obligations on a screen whose job is
+ * to say what is about to happen.
+ *
+ * The four published buckets are disjoint and sum to `candidate_count`, so nothing here has
+ * to be inferred.
+ */
 const generationSummary = computed(() => {
     if (plan.value === null) {
         return '';
     }
 
-    const { creatable_count, candidate_count, blocker_count, total_amount_cop } = plan.value;
+    const {
+        creatable_count,
+        existing_candidate_count,
+        blocked_candidate_count,
+        creatable_amount_cop,
+    } = plan.value;
+
     const partes = [
         `${creatable_count} ${creatable_count === 1 ? 'obligación nueva' : 'obligaciones nuevas'}`,
     ];
 
-    const alreadyExists = candidate_count - creatable_count - blocker_count;
-
-    if (alreadyExists > 0) {
-        partes.push(`${alreadyExists} ya existentes`);
+    if (existing_candidate_count > 0) {
+        partes.push(`${existing_candidate_count} ya existentes`);
     }
 
-    if (blocker_count > 0) {
-        partes.push(`${blocker_count} bloqueadas`);
+    if (blocked_candidate_count > 0) {
+        partes.push(`${blocked_candidate_count} bloqueadas`);
     }
 
-    return `${partes.join(' · ')} — ${pesos(total_amount_cop)}`;
+    // The amount that would actually be written, not the month's resolved total.
+    return `${partes.join(' · ')} — ${pesos(creatable_amount_cop)}`;
 });
 </script>
 
@@ -318,10 +370,18 @@ const generationSummary = computed(() => {
                         <span>Por facturar</span>
                     </p>
                     <p class="cdh-stat__value">
-                        {{ pesos(current ? current.total_balance_cop : 0) }}
+                        {{ puedeVerDinero ? pesos(current?.total_balance_cop) : '—' }}
                     </p>
                     <p class="cdh-stat__hint">
-                        {{ current ? current.obligation_count : 0 }} obligaciones en el periodo
+                        <!--
+                            No permission means no figure, and an em dash rather than a
+                            zero: "0 pesos por facturar" is a financial statement, and
+                            `periods.view` alone does not entitle anybody to make one.
+                        -->
+                        <template v-if="puedeVerDinero">
+                            {{ current?.obligation_count ?? 0 }} obligaciones en el periodo
+                        </template>
+                        <template v-else>Requiere permiso para ver las obligaciones</template>
                     </p>
                 </article>
 
@@ -372,17 +432,28 @@ const generationSummary = computed(() => {
                                 </span>
                                 <span v-else class="cdh-table__secondary">Sin generar</span>
                             </td>
-                            <td data-label="Obligaciones" class="cdh-table__numeric">
-                                {{ period.obligation_count }}
-                            </td>
-                            <td data-label="Facturado" class="cdh-table__numeric">
-                                {{ pesos(period.total_effective_cop) }}
-                            </td>
-                            <td data-label="Recaudado" class="cdh-table__numeric">
-                                {{ pesos(period.total_paid_cop) }}
-                            </td>
-                            <td data-label="Saldo" class="cdh-table__numeric">
-                                {{ pesos(period.total_balance_cop) }}
+                            <!--
+                                §37. The whole financial block is conditional. The server
+                                omits these keys without an obligations permission, and a
+                                column of zeroes would be a claim that every month is worth
+                                nothing.
+                            -->
+                            <template v-if="puedeVerDinero">
+                                <td data-label="Obligaciones" class="cdh-table__numeric">
+                                    {{ period.obligation_count }}
+                                </td>
+                                <td data-label="Facturado" class="cdh-table__numeric">
+                                    {{ pesos(period.total_effective_cop) }}
+                                </td>
+                                <td data-label="Aplicado" class="cdh-table__numeric">
+                                    {{ pesos(period.total_paid_cop) }}
+                                </td>
+                                <td data-label="Saldo" class="cdh-table__numeric">
+                                    {{ pesos(period.total_balance_cop) }}
+                                </td>
+                            </template>
+                            <td v-else colspan="4" class="cdh-table__secondary">
+                                Sin permiso para ver las cifras del periodo
                             </td>
                             <td data-label="Acciones" class="cdh-table__actions">
                                 <div class="cdh-stack-2">
@@ -430,6 +501,27 @@ const generationSummary = computed(() => {
                         </tr>
                     </tbody>
                 </table>
+
+                <!-- §38: without this the months past the first page do not exist. -->
+                <nav class="cdh-pager" aria-label="Paginación de periodos">
+                    <p class="cdh-pager__range">{{ rangeLabel }}</p>
+                    <AppButton
+                        variant="ghost"
+                        size="sm"
+                        :disabled="page <= 1"
+                        @click="page -= 1"
+                    >
+                        Anterior
+                    </AppButton>
+                    <AppButton
+                        variant="ghost"
+                        size="sm"
+                        :disabled="page >= lastPage"
+                        @click="page += 1"
+                    >
+                        Siguiente
+                    </AppButton>
+                </nav>
             </div>
         </template>
 
@@ -478,18 +570,18 @@ const generationSummary = computed(() => {
             <template v-else-if="plan">
                 <p class="cdh-form-hint">{{ generationSummary }}</p>
 
-                <label class="cdh-form-label" for="generation-missing-only">
-                    <input
-                        id="generation-missing-only"
-                        v-model="missingOnly"
-                        class="form-check-input"
-                        type="checkbox"
-                    />
-                    Solo las que faltan
-                    <span class="cdh-form-hint">
-                        No modifica las obligaciones que ya existen.
-                    </span>
-                </label>
+                <!--
+                    There was a "Solo las que faltan" checkbox here. It is gone because it
+                    could not do anything: generation is unconditionally missing-only, and an
+                    obligation is never regenerated. A control that cannot change the outcome
+                    is worse than no control, because an operator can reasonably believe they
+                    chose to rewrite a month. The sentence below says what actually happens
+                    instead.
+                -->
+                <p class="cdh-form-hint">
+                    Se generarán únicamente las obligaciones que faltan. Las que ya existen no
+                    se modifican.
+                </p>
 
                 <AppAlert
                     v-if="blockedPreview"

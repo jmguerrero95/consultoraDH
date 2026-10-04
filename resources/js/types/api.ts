@@ -65,10 +65,20 @@ export interface PortfolioPayload {
      * portfolio, exactly as it withholds the counts. An absent figure means withheld
      * and is never drawn as a zero.
      */
+    /**
+     * The financial position.
+     *
+     * §40: received, applied and unallocated are three different numbers, and the dashboard
+     * published the applied one under the label "Recaudado" — so a 300000 payment that had not
+     * been allocated yet read as nothing collected. `received = applied + unallocated` holds
+     * over non-voided payments.
+     */
     financial?: {
+        total_received_cop: number;
+        total_applied_cop: number;
+        unallocated_credit_cop: number;
         outstanding_balance_cop: number;
         overdue_balance_cop: number;
-        total_paid_cop: number;
         clients_with_debt: number;
         payments_requiring_reconciliation: number;
     };
@@ -419,7 +429,27 @@ export type ReconciliationStateKey =
     | 'fully_allocated'
     | 'voided';
 
-export type AdjustmentTypeKey = 'correction' | 'discount' | 'surcharge';
+/**
+ * The types an operator may choose.
+ *
+ * `credit` was missing from this union while the API accepted it, so the screen offered three
+ * of the four. `reversal` is absent on purpose: it is what the system writes when somebody
+ * undoes something, and there is no such thing as choosing one.
+ */
+export type AdjustmentTypeKey = 'correction' | 'discount' | 'surcharge' | 'credit';
+
+/** Which way a type may move the amount. Published by the vocabulary endpoint. */
+export type AdjustmentDirection = 'decrease' | 'increase' | 'either';
+
+export interface AdjustmentTypeOption {
+    value: AdjustmentTypeKey;
+    label: string;
+    direction: AdjustmentDirection;
+}
+
+export interface AdjustmentVocabularyPayload {
+    types: AdjustmentTypeOption[];
+}
 
 export interface PeriodSummary {
     id: number;
@@ -435,11 +465,17 @@ export interface PeriodSummary {
     reopened_at: string | null;
     last_reopen_reason: string | null;
     generation_performed_at: string | null;
-    obligation_count: number;
-    total_base_cop: number;
-    total_effective_cop: number;
-    total_paid_cop: number;
-    total_balance_cop: number;
+    /**
+     * Obligation-derived figures. Present only with `obligations.view` or
+     * `obligations.generate`, and **absent** otherwise — not zero, because a zero would claim
+     * the month is worth nothing, which is a financial statement this permission does not
+     * entitle anybody to make.
+     */
+    obligation_count?: number;
+    total_base_cop?: number;
+    total_effective_cop?: number;
+    total_paid_cop?: number;
+    total_balance_cop?: number;
     accepts_structural_change?: boolean;
     accepts_financial_activity?: boolean;
 }
@@ -487,10 +523,42 @@ export interface AdjustmentSummary {
     delta_cop: number;
     reason: string;
     reverses_adjustment_id: number | null;
-    reversed_at: string | null;
-    reversed_by: number | null;
+    /**
+     * The ledger's truth about this row, derived from the reversal **relation**.
+     *
+     * The published shape used to carry `reversed_at`, `reversed_by` and `reversal_reason`,
+     * none of which exists in the schema: a reversal is a new row with
+     * `reverses_adjustment_id` pointing back, so those keys were permanently null and an
+     * adjustment that had been undone looked identical to a live one. A03-R1 removed them and
+     * publishes what the row actually is.
+     */
+    /** This row undoes another. */
+    is_reversal: boolean;
+    /** Some row undoes this one. */
+    is_reversed: boolean;
+    /** The id of that row. */
+    reversed_by_adjustment_id: number | null;
+    /** When it was written. */
+    reversal_created_at: string | null;
+    /** Why, which lives on the reversal row. */
     reversal_reason: string | null;
+    /** Whether a second reversal is even possible. Published, not derived by the interface. */
+    can_reverse: boolean;
+    /** Whether this adjustment is still in force. */
+    is_active: boolean;
     created_at: string;
+}
+
+/**
+ * The adjustment list envelope.
+ *
+ * `items`, not `adjustments`. The backend has always published `items`; the interface asked
+ * for `adjustments`, so the history modal received `undefined` on a request that had
+ * succeeded.
+ */
+export interface AdjustmentListPayload {
+    items: AdjustmentSummary[];
+    adjustments_total_cop: number;
 }
 
 export interface GenerationFinding {
@@ -504,8 +572,19 @@ export interface ObligationCandidate {
     company_id: number;
     client_name: string | null;
     company_name: string | null;
-    assignment_id: number;
-    /** The snapshot that would be written, and null when the configuration is missing. */
+    /**
+     * The single relationship, when exactly one produced this candidate.
+     *
+     * Null when several did: a client who worked for a company, left and was rehired inside
+     * the month has two segments and one obligation, and claiming one of them would
+     * misattribute the debt. The complete set is in `source_assignment_ids`.
+     */
+    assignment_id: number | null;
+    /** Every segment behind this candidate, ascending. */
+    source_assignment_ids: number[];
+    source_count: number;
+    /** Non-empty only when the segments contradict each other, which blocks the month. */
+    overlapping_assignment_ids: number[];
     amount_cop: number | null;
     /**
      * The rule that resolved this candidate, and what it produced. Null `due_on`
@@ -524,15 +603,33 @@ export interface ObligationCandidate {
     already_exists: boolean;
     will_be_created: boolean;
     blockers: GenerationFinding[];
+    warnings: GenerationFinding[];
+    /** Whether the configuration behind this row is resolved right now. */
+    resolved: boolean;
 }
 
 export interface GenerationPreview {
     period: { key: string; label: string };
+    /**
+     * Four disjoint buckets that sum to `candidate_count`.
+     *
+     * The interface used to derive "already exists" as
+     * `candidate_count - creatable_count - blocker_count`, and `blocker_count` counted
+     * **findings**: one candidate missing both a rate and a cutoff contributed two, so the
+     * subtraction could go negative. These four cannot.
+     */
     candidate_count: number;
+    existing_candidate_count: number;
     creatable_count: number;
+    blocked_candidate_count: number;
+    /** Findings, not rows. One blocked candidate with two findings counts twice here. */
+    blocker_finding_count: number;
+    /** What this execution would write. Excludes obligations that already exist. */
+    creatable_amount_cop: number;
+    /** The month's resolved total, existing rows included. A portfolio figure, not a write. */
+    resolved_portfolio_amount_cop: number;
+    /** How many candidates have their configuration resolved, written or not. */
     resolved_count: number;
-    blocker_count: number;
-    total_amount_cop: number;
     /** False when at least one blocker stands: the month cannot be generated yet. */
     can_generate: boolean;
     candidates: ObligationCandidate[];
@@ -545,12 +642,22 @@ export interface GenerationPreviewPayload {
     preview: GenerationPreview;
 }
 
+/**
+ * What generation wrote.
+ *
+ * `total_amount_cop` is the sum of the rows **this execution inserted**, so it agrees with
+ * `created`. It used to carry the month's resolved total, which meant a run that created
+ * nothing could report a large non-zero amount.
+ */
 export interface GenerationResultPayload {
     message: string;
     result: {
         created: number;
-        skipped: number;
+        /** Candidates that already had an obligation and were left untouched. */
+        existing: number;
+        considered: number;
         total_amount_cop: number;
+        nothing_to_do: boolean;
     };
     period: PeriodSummary;
 }
@@ -576,22 +683,81 @@ export interface PaymentSummary {
     allocations?: PaymentAllocationSummary[];
 }
 
+/**
+ * One allocation of a payment to an obligation.
+ *
+ * Mirrors what `/api/payments/{id}` returns. The previous declaration listed
+ * `obligation_label`, `reversed_by` and `created_at` as if they were the only keys, omitted
+ * the nested obligation and `is_reversed`, and so could not describe a reversed row at all.
+ *
+ * A reversed allocation stays in this list: it is the record of what somebody did, and
+ * hiding it would make the history incomplete.
+ */
 export interface PaymentAllocationSummary {
     id: number;
     payment_id: number;
     obligation_id: number;
-    obligation_label?: string | null;
     amount_cop: number;
+    is_reversed: boolean;
+    is_active: boolean;
     reversed_at: string | null;
     reversed_by: number | null;
     reversal_reason: string | null;
     created_at: string;
+    /** The full obligation, for a detail row. */
+    obligation: ObligationSummary;
+    /**
+     * Flat copies of what the obligation shows.
+     *
+     * Published by the server so a table column does not have to reach three levels into a
+     * nested object, and so the values come from the same batched description rather than
+     * being re-derived in the interface.
+     */
+    obligation_label: string | null;
+    company_name: string | null;
+    due_on: string | null;
+}
+
+/**
+ * A debt a payment could be applied to.
+ *
+ * The minimum needed to choose one: no statement, no aging, no portfolio figure. This is not
+ * the receivables screen and it is guarded by `payments.allocate`, not by
+ * `receivables.view`.
+ */
+export interface AllocatableDebt {
+    obligation_id: number;
+    period_id: number;
+    period_key: string | null;
+    period_label: string | null;
+    company_id: number;
+    company_name: string | null;
+    due_on: string | null;
+    balance_cop: number;
+}
+
+export interface AllocatableResponse {
+    client_id: number;
+    items: AllocatableDebt[];
 }
 
 export interface PaymentListPayload {
     items: PaymentSummary[];
     pagination: Pagination;
-    filters?: Record<string, string | null>;
+    /**
+     * The payment vocabulary, from the payments domain.
+     *
+     * It used to be `filters`, and nothing read that; the page fetched
+     * `/api/receivables/vocabulary` instead, which made recording a payment depend on a
+     * permission a collections account has no reason to hold.
+     */
+    methods: VocabularyOption[];
+    reconciliation_states?: VocabularyOption[];
+}
+
+export interface PaymentVocabularyPayload {
+    methods: VocabularyOption[];
+    reconciliation_states: VocabularyOption[];
 }
 
 /** A payment that looks like one already recorded, offered for confirmation. */
@@ -632,12 +798,26 @@ export interface ReceivableRow {
     client_id: number;
     full_name: string;
     document_label: string;
+    /**
+     * The companies this client currently owes.
+     *
+     * Derived from balances still outstanding, so a former employer whose debt was settled
+     * does not appear to be part of the current balance.
+     */
     company_names: string[];
+    company_ids: number[];
     balance_cop: number;
     paid_amount_cop: number;
     overdue_balance_cop: number;
     open_obligations_count: number;
+    /** Rows that are late. Named as rows, so it is not confused with the semaphore. */
     overdue_obligations_count: number;
+    /**
+     * Distinct late months. This is what the semaphore counts and what its label says:
+     * two companies owing in one March is one late month.
+     */
+    overdue_periods_count: number;
+    /** Only the months with money still owed, deduplicated. */
     owed_periods: string[];
     oldest_due_on: string | null;
     aging_bucket: AgingBucketKey;
@@ -661,10 +841,29 @@ export interface ReceivablesTotals {
 export interface ReceivablesListPayload {
     items: ReceivableRow[];
     summary: ReceivablesTotals;
+    /**
+     * `total` counts the rows **after** every filter, including those applied as a `having`
+     * on the grouped query — so the pager cannot offer a page of clients that were filtered
+     * out.
+     */
     total: number;
     page: number;
     per_page: number;
     last_page: number;
+    /**
+     * The question this response is answering.
+     *
+     * Published so the summary cards can state it rather than appearing to describe the whole
+     * portfolio while the table shows a subset.
+     */
+    applied_filters: {
+        overdue: boolean;
+        outstanding_only: boolean;
+        traffic_light: string | null;
+        settlement_state: string | null;
+        aging_bucket: string | null;
+        as_of: string;
+    };
 }
 
 export interface ClientAccountPayload {

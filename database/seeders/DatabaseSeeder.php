@@ -79,11 +79,17 @@ final class DatabaseSeeder extends Seeder
         /*
          | The A03 permissions.
          |
-         | Fifteen, one per decision somebody can make about money. They are not
+         | Sixteen, one per decision somebody can make about money. They are not
          | grouped into a single `finance.view` / `finance.manage` because the
          | decisions are genuinely different: reading a client's debt is not the
          | same authority as closing a month, and not the same as being able to
          | write off a debt.
+         |
+         | Fifteen were specified; `obligations.generate` is the sixteenth and was
+         | added because it is the authority to decide *what somebody is billed*, which
+         | none of the others expresses. It was not a flag inside `obligations.adjust`,
+         | because correcting one obligation is not the same act as writing a month's
+         | obligations in bulk. See docs/TASKS/A03.md §1.3.
          */
         'periods.view',
         'periods.create',
