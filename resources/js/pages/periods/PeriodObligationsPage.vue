@@ -11,6 +11,7 @@ import { fecha, pesos, pesosDesdeTexto } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
+import { reasonIsLongEnough, REASON_MIN_LENGTH_HINT } from '@/validation/reasons';
 
 import type {
     AdjustmentSummary,
@@ -35,20 +36,6 @@ import type {
 
 const props = defineProps<{ id: string }>();
 
-/**
- * The shortest reason the server accepts.
- *
- * `StoreAdjustmentRequest` and `reverseAdjustment` both declare
- * `['required', 'string', 'min:10', 'max:1000']`. The dialogs used to gate on "not empty"
- * instead, so an operator could type a word, press the button, and be told the reason was
- * too short — a round trip to be told something the form already knew, arriving as an error
- * under the dialog they were filling in.
- *
- * Ten is not arbitrary: it is long enough that "se aplicó de más" does not qualify as a
- * reason, and short enough that nobody who wants to explain themselves is stopped. It is
- * written here once so the two dialogs cannot drift from the server, and from each other.
- */
-const REASON_MIN_LENGTH = 10;
 
 const auth = useAuthStore();
 const canAdjust = computed(() => auth.can('obligations.adjust'));
@@ -489,7 +476,7 @@ const rangeLabel = computed(() => {
             :busy="adjustBusy"
             :disabled="
                 adjustDelta === null ||
-                adjustReason.trim().length < REASON_MIN_LENGTH ||
+                !reasonIsLongEnough(adjustReason) ||
                 wouldGoNegative
             "
             @confirm="submitAdjustment"
@@ -533,10 +520,7 @@ const rangeLabel = computed(() => {
                     rows="3"
                     required
                 ></textarea>
-                <p class="cdh-form-hint">
-                    Queda en la auditoría, así que hace falta un motivo de al menos
-                    {{ REASON_MIN_LENGTH }} caracteres.
-                </p>
+                <p class="cdh-form-hint">{{ REASON_MIN_LENGTH_HINT }}</p>
             </div>
 
             <AppAlert
@@ -649,7 +633,7 @@ const rangeLabel = computed(() => {
             title="Revertir ajuste"
             confirm-label="Revertir"
             :busy="reversalBusy"
-            :disabled="reversalReason.trim().length < REASON_MIN_LENGTH"
+            :disabled="!reasonIsLongEnough(reversalReason)"
             destructive
             @confirm="reverseAdjustment"
             @cancel="reversalTarget = null"
@@ -669,10 +653,7 @@ const rangeLabel = computed(() => {
                     rows="3"
                     required
                 ></textarea>
-                <p class="cdh-form-hint">
-                    Queda en la auditoría, así que hace falta un motivo de al menos
-                    {{ REASON_MIN_LENGTH }} caracteres.
-                </p>
+                <p class="cdh-form-hint">{{ REASON_MIN_LENGTH_HINT }}</p>
             </div>
 
             <AppAlert v-if="reversalError" variant="danger" :title="reversalError" />

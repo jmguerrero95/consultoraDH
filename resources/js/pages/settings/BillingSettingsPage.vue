@@ -637,10 +637,29 @@ watch(tab, () => void loadAll());
                                 <span class="cdh-table__primary">{{ rule.scope_label }}</span>
                             </td>
                             <td data-label="Aplica a" class="cdh-table__wide">
+                                <!--
+                                    §3 of R3, and R1 §31. A `client` rule is a client **and** an
+                                    employer, because one person can be attached to several
+                                    employers at once, each counting their own contribution on
+                                    their own date. This cell read
+                                    `client_name ?? company_name`, so for a client rule — where
+                                    `client_name` always exists — the employer was dropped and the
+                                    row said only the person's name. That reads as an exception
+                                    applying to that person everywhere, which is the one thing it
+                                    does not do, and an operator comparing two rows for the same
+                                    client at different employers could not tell them apart.
+
+                                    Both halves come from the fields the API already publishes, so
+                                    this costs no extra request. R2 had already made the *form*
+                                    ask for both; only the list was still hiding one.
+                                -->
                                 <span v-if="rule.scope === 'general'" class="cdh-table__secondary">
                                     Todos los clientes
                                 </span>
-                                <span v-else>{{ rule.client_name ?? rule.company_name }}</span>
+                                <span v-else-if="rule.scope === 'client'">
+                                    {{ rule.client_name }} — {{ rule.company_name }}
+                                </span>
+                                <span v-else>{{ rule.company_name }}</span>
                             </td>
                             <td data-label="Vigencia">{{ rule.effective_month_label }}</td>
                             <td data-label="Vencimiento">

@@ -21,6 +21,7 @@ use App\Domain\Receivables\ObligationPresenter;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Periods\ClosePeriodRequest;
 use App\Http\Requests\Periods\GenerateObligationsRequest;
+use App\Http\Requests\Periods\ListPeriodObligationsRequest;
 use App\Http\Requests\Periods\PreviewObligationsRequest;
 use App\Http\Requests\Periods\ReopenPeriodRequest;
 use App\Http\Requests\Periods\StorePeriodRequest;
@@ -32,7 +33,6 @@ use App\Models\User;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Carbon;
 
 /**
  * Monthly periods, and the obligations generated into them.
@@ -224,7 +224,21 @@ final class PeriodController extends Controller
                 .'los pagos y los ajustes siguen permitidos.',
                 $closed->label(),
             ),
-            'period' => $this->summarise($closed, detailed: true),
+            // §5 (R3). `withMoney` was left at its default of `true`, as it had been in
+            // `current()` and `show()` before R2. So holding `periods.close` — which is a
+            // structural authority, and deliberately separate from `obligations.view` —
+            // was enough to read `total_base_cop`, `total_paid_cop` and the balance of the
+            // month being closed.
+            //
+            // That is the leak §37 exists to prevent, reached through the one endpoint an
+            // operator uses at the end of every month. The gate is now the same rule in all
+            // seven places a period is published, and it is still `maySeeMoney()`: no second
+            // policy, and no change to what `periods.close` itself authorises.
+            'period' => $this->summarise(
+                $closed,
+                detailed: true,
+                withMoney: $this->maySeeMoney($request->user()),
+            ),
         ]);
     }
 
@@ -242,7 +256,14 @@ final class PeriodController extends Controller
                 .'y genere las obligaciones que falten.',
                 $reopened->label(),
             ),
-            'period' => $this->summarise($reopened, detailed: true),
+            'period' => $this->summarise(
+                $reopened,
+                detailed: true,
+                // §5 (R3). Same omission as in `close()`, and the same gate. Reopening is
+                // `periods.reopen`, also a structural authority; reading what the month is
+                // worth is `obligations.view`.
+                withMoney: $this->maySeeMoney($request->user()),
+            ),
         ]);
     }
 
@@ -299,7 +320,7 @@ final class PeriodController extends Controller
         ]);
     }
 
-    public function obligations(Request $request, MonthlyPeriod $period): JsonResponse
+    public function obligations(ListPeriodObligationsRequest $request, MonthlyPeriod $period): JsonResponse
     {
         $this->authorizeFinancial($request, 'obligations.view');
 
@@ -310,13 +331,13 @@ final class PeriodController extends Controller
             ->orderBy('company_id')
             ->paginate($this->perPage($request));
 
-        // §7. `$request->date('as_of')` answers `null` for anything it cannot parse, so an
-        // unreadable reference date was dropped rather than refused and the month was
-        // reported "as of today" — which is a different answer to the question that was
-        // asked. Validated instead: an `as_of` that cannot be read is a 422, so the
-        // interface can say so, rather than showing figures for a day the operator did
-        // not ask about.
-        $asOf = $this->referenceDate($request);
+        // §7, and §4 of R3. `$request->date('as_of')` answered `null` for anything it could
+        // not parse, so an unreadable reference date was dropped rather than refused and the
+        // month was reported "as of today" — a different answer to the question that was
+        // asked. R2 replaced that with a private `abort(422, $message)`, which had the right
+        // status and no `errors` envelope; the request class does it properly now, the same
+        // way the receivables list and the client account already did.
+        $asOf = $request->asOf() ?? now();
 
         // Presented in one pass, so the adjustments and the payments of a whole page
         // come from two grouped queries rather than two for every row.
@@ -452,35 +473,6 @@ final class PeriodController extends Controller
         // `periods.view` alone does not. That is the whole point of §37: a role that may see
         // the calendar is not thereby entitled to what the months are worth.
         return ($user?->can('obligations.view') ?? false) || ($user?->can('obligations.generate') ?? false);
-    }
-
-    /**
-     * The reference date for the month, or today.
-     *
-     * Rejects rather than falls back, unlike `Request::date()`: the fallback is silent, and
-     * a silently-ignored filter is a wrong answer rather than no answer. Bounded to
-     * `Y-m-d` because the interface sends that and nothing else is worth guessing at.
-     */
-    private function referenceDate(Request $request): Carbon
-    {
-        $asOf = $request->query('as_of');
-
-        if ($asOf === null || $asOf === '') {
-            return now();
-        }
-
-        $validated = validator(
-            ['as_of' => $asOf],
-            ['as_of' => ['required', 'string', 'date_format:Y-m-d']],
-            ['as_of.date_format' => 'La fecha de referencia debe ser una fecha como 2026-04-10.'],
-            ['as_of' => 'fecha de referencia'],
-        );
-
-        if ($validated->fails()) {
-            abort(422, $validated->errors()->first('as_of'));
-        }
-
-        return Carbon::parse((string) $asOf)->startOfDay();
     }
 
     private function obligationsService(): ObligationPresenter

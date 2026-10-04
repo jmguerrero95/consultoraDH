@@ -92,7 +92,17 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
             </div>
 
             <div class="cdh-stack-2">
-                <label class="cdh-visually-hidden" for="account-as-of">Corte de la consulta</label>
+                <!--
+                    §9 of R3. "Corte de la consulta" told a screen-reader user the date was a
+                    statement cutoff. It is not: the paragraph at the foot of the page is
+                    explicit that today's payments and adjustments still participate, and a
+                    label that says otherwise makes the screen mean two different things to
+                    two people on the same page. The label names the real measurement, which is
+                    the same wording the visible paragraph uses.
+                -->
+                <label class="cdh-visually-hidden" for="account-as-of">
+                    Mora evaluada al
+                </label>
                 <input
                     id="account-as-of"
                     v-model="asOf"
@@ -142,8 +152,19 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
                     >
                         {{ pesos(account.summary.overdue_balance_cop) }}
                     </p>
+                    <!--
+                        §2 of R3. This hint said "N obligaciones" while the server was
+                        publishing the count of late **months** in that field: one client owing
+                        two employers in one March was told "1 obligación" when two debts were
+                        late. Both figures are now published under the name that matches them,
+                        and the sentence states both, because the difference is the difference
+                        between one problem and two.
+                    -->
                     <p class="cdh-stat__hint">
-                        {{ account.summary.overdue_obligations_count }} obligaciones
+                        {{ account.summary.overdue_obligations_count }} obligaciones ·
+                        {{ account.summary.overdue_periods_count }}
+                        {{ account.summary.overdue_periods_count === 1 ? 'periodo' : 'periodos' }}
+                        vencido{{ account.summary.overdue_periods_count === 1 ? '' : 's' }}
                     </p>
                 </article>
 

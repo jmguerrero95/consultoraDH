@@ -880,8 +880,23 @@ export interface ClientAccountPayload {
         overdue_balance_cop: number;
         unallocated_credit_cop: number;
         open_obligations_count: number;
+        /**
+         * Rows that are late. Named as rows so it is not read as a count of months, and
+         * counted the same way `ReceivableRow.overdue_obligations_count` is.
+         */
         overdue_obligations_count: number;
+        /**
+         * Distinct late months, and the number the semaphore is built from. Two employers
+         * owing in one March is two late obligations and one late month; the account used to
+         * publish the month count under the "obligations" name as well, so both fields
+         * carried the same figure and only one of the two names could be true.
+         */
+        overdue_periods_count: number;
         owed_periods: string[];
+        owed_period_count: number;
+        traffic_light: TrafficLightKey;
+        traffic_light_label: string;
+        traffic_light_reason: string;
     };
     obligations: Array<
         ObligationSummary & {

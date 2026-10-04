@@ -19,8 +19,6 @@ Detalle en [TASKS/A01.md](TASKS/A01.md).
 
 ---
 
-## Tareas pendientes
-
 ### A02 — Clientes, empresas, afiliaciones e historial ✅
 
 **Completada.** Alcance: alta y gestión de clientes, empresas, afiliaciones (EPS,
@@ -60,6 +58,8 @@ esperar el bloqueo; un traspaso registrado como creación según el endpoint usa
 un `parallel` sin nada con lo que ser paralelo; y un traspaso de una relación en
 paralelo que dejaba el solapamiento sin autorizar.
 
+---
+
 ### A03 — Periodos, cortes, obligaciones, pagos y cartera — **completada**
 
 Alcance entregado: periodos mensuales, fechas de corte con vigencia, valores con
@@ -70,7 +70,7 @@ antigüedad, semáforo y estado de cuenta por cliente.
 Entregado: **16 permisos** (`periods.*`, `cutoffs.*`, `rates.*`, `obligations.*`,
 `payments.*`, `receivables.view`), ocho tablas, veintidós restricciones `CHECK` y
 veintinueve llaves foráneas —dieciséis con `RESTRICT` y trece de auditoría con
-`SET NULL`—, diecinueve flujos de extremo a extremo del módulo y
+`SET NULL`—, dieciocho flujos de extremo a extremo del módulo y
 cuatro pantallas nuevas más el panel y la pestaña *Cuenta* de la ficha del cliente.
 
 Detalle en [docs/TASKS/A03.md](TASKS/A03.md).
@@ -115,9 +115,71 @@ por dónde aparecían:
 
 Detalle en [docs/TASKS/A03-R1-REMEDIATION.md](TASKS/A03-R1-REMEDIATION.md).
 
+**A03-R2** corrigió los trece hallazgos que dejó la auditoría de R1, más uno que
+no estaba en ella. Los trece fueron, sobre todo, pantallas que respondían otra
+pregunta de la que se les había hecho:
+
+- **El dinero hacia quien no le correspondía.** `periods.current` y
+  `periods.show` no aplicaban el filtro de permiso que sí aplicaba la lista, así
+  que un rol con `periods.view` leía los importes del mes.
+- **Encabezados que describían otra cosa.** La lista de cartera resumía la
+  cartera completa sobre una tabla filtrada, y al corregirlo apareció un 500
+  latente: los filtros de rango de periodo llamaban a `parse()` sobre el modelo
+  en lugar del objeto de valor, de modo que `period_from` y `period_to` nunca
+  funcionaron.
+- **Dos búsquedas que nunca funcionaron.** La de valores emitía
+  `lower(clients.first_names)` sobre una consulta sin esa tabla —PostgreSQL
+  contestaba «missing FROM-clause entry»— y era un 500 para cualquier término. La
+  de fechas de corte no leía el `search` que la pantalla enviaba, y paginaba con
+  un 50 fijo detrás de un paginador que decía 25.
+- **Un nombre en dos columnas**, así que `Ana María Gómez` no encontraba a nadie
+  y la pantalla de facturación no podía elegir por nombre al cliente de una
+  regla.
+- **Un hallazgo que la auditoría no contenía** y que apareció al escribir la
+  prueba del anterior: las bases de datos usan la colación `C`, que no pliega
+  mayúsculas acentuadas, de modo que `Única` no era encontrable por `Única` ni
+  por `unica`. Ahora `unaccent` y una única comparación escrita en un solo lugar.
+- Y con la misma causa, un defecto más: el término se escapaba dos veces, así que
+  `a_b` no encontraba nada.
+
+Detalle en [docs/TASKS/A03-R2-REMEDIATION.md](TASKS/A03-R2-REMEDIATION.md).
+
+**A03-R3** cerró los últimos hallazgos sobre ese commit:
+
+- `close` y `reopen` seguían publicando importes con `withMoney` por omisión, de
+  modo que `periods.close` o `periods.reopen` sin permiso de obligaciones bastaba
+  para leer el mes que se acababa de cerrar o reabrir.
+- La cuenta del cliente publicaba el número de **periodos** vencidos bajo el
+  nombre de `overdue_obligations_count`: dos deudas vencidas en un mismo mes se
+  leían como una. Ahora se cuentan y se nombran por separado, y el semáforo sigue
+  usando el número de meses, que es lo que R1 §24 estableció.
+- La fila de una regla de corte de alcance `client` mostraba `client_name ??
+  company_name`, así que el empleador desaparecía y la excepción parecía regir
+  para esa persona en todas partes.
+- `as_of` inválido en las obligaciones del periodo ya no se sustituía por hoy,
+  pero lo hacía con un `abort()` propio: ahora usa el mismo `FormRequest` y el
+  mismo sobre de `errors` que los otros dos endpoints que aceptan la fecha.
+- El `down()` de la migración de `unaccent`.dropaba una extensión compartida que
+  esa migración no puede saber si creó. Ahora es un no-op documentado.
+- Tres diálogos (anular pago, revertir aplicación, reabrir periodo) ofrecían una
+  acción que el servidor rechazaba: bastaba un carácter. Ahora el mínimo vive en
+  un módulo compartido, igual que la validación del servidor.
+- «Corte de la consulta» describía un corte contable que el sistema no recalcula;
+  ahora dice «Mora evaluada al», que es lo que la fecha hace.
+- Y `EndToEndIsolationTest`, que llevaba rojo desde R2: buscaba
+  `artisan cache:clear` en el archivo entero del runner, donde la cadena sólo
+  aparece en comentarios que explican su eliminación. Ahora separa código de
+  comentario, y se prueba a sí misma.
+
+Detalle en [docs/TASKS/A03-R3-REMEDIATION.md](TASKS/A03-R3-REMEDIATION.md).
+
 No entregado, y fuera de alcance por diseño: importación desde Excel, planillas,
 exportación a PDF, facturación electrónica, automatización recurrente,
 pasarelas de pago, portal, asistente de IA y MCP.
+
+---
+
+## Tareas pendientes
 
 ### A04 — Importación y normalización de Excel, reconstrucción de historial
 
@@ -213,7 +275,7 @@ Prepara: el resto del sistema.
 
 1. **Ningún módulo se implementa antes de tiempo.** Cada tarea entrega algo que
    se usa; no se dejan tablas, permisos ni pantallas vacías «para después».
-2. **Las pruebas accompanyan a la funcionalidad.** Un entregable sin pruebas no
+2. **Las pruebas acompañan a la funcionalidad.** Un entregable sin pruebas no
    está terminado.
 3. **La documentación se actualiza en la misma tarea.** Una tarea que deja
    documentación obsoleta está a medio hacer.

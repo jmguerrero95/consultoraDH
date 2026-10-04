@@ -11,6 +11,7 @@ import { fecha, fechaHora, hoy, pesos, pesosDesdeTexto } from '@/composables/use
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
+import { reasonIsLongEnough, REASON_MIN_LENGTH, REASON_MIN_LENGTH_HINT } from '@/validation/reasons';
 
 import type {
     AllocatableDebt,
@@ -273,7 +274,7 @@ const reversalError = ref<string | null>(null);
 
 const reversalProblem = computed(() => {
     if (reversalReason.value.trim().length < 10) {
-        return 'Explique el motivo de la reversa (mínimo 10 caracteres).';
+        return `Explique el motivo de la reversa (mínimo ${REASON_MIN_LENGTH} caracteres).`;
     }
 
     return null;
@@ -1013,7 +1014,7 @@ const rangeLabel = computed(() => {
             title="Anular pago"
             confirm-label="Anular pago"
             :busy="voidBusy"
-            :disabled="voidReason.trim() === ''"
+            :disabled="!reasonIsLongEnough(voidReason)"
             destructive
             @confirm="voidPayment"
             @cancel="voidTarget = null"
@@ -1033,7 +1034,13 @@ const rangeLabel = computed(() => {
                     rows="3"
                     required
                 ></textarea>
-                <p class="cdh-form-hint">Queda en la auditoría. Sin motivo no se anula.</p>
+                <!--
+                    §6 of R3. This button was enabled by any non-empty reason while
+                    `VoidPaymentRequest` requires ten characters, so one character armed a
+                    destructive action and the server refused it after the round trip. The
+                    check is now the shared one, the same every other reason dialog uses.
+                -->
+                <p class="cdh-form-hint">{{ REASON_MIN_LENGTH_HINT }}</p>
             </div>
 
             <AppAlert v-if="voidError" variant="danger" :title="voidError" />
@@ -1171,9 +1178,15 @@ const rangeLabel = computed(() => {
                             rows="3"
                             required
                         ></textarea>
-                        <p class="cdh-form-hint">
-                            Queda en la auditoría. Sin motivo no se revierte.
-                        </p>
+                        <!--
+                            §7 of R3. The disabled state was already correct — the reversal
+                            needs ten characters — but this said "sin motivo no se revierte",
+                            which is a different rule. The reason *was* there; it was not yet
+                            long enough, and a hint describing a rule the form does not apply
+                            leaves a disabled button looking broken. The copy and the gate now
+                            come from the same place.
+                        -->
+                        <p class="cdh-form-hint">{{ REASON_MIN_LENGTH_HINT }}</p>
                     </div>
 
                     <AppAlert v-if="reversalError" variant="danger" :title="reversalError" />

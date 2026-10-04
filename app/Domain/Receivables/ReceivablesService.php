@@ -132,7 +132,32 @@ final class ReceivablesService
             array_filter($outstanding, fn (array $row): bool => $row['is_overdue']),
         )));
 
-        $overdueCount = count($overduePeriods);
+        // §24, and §2 of R3. Two different questions, two different numbers — and until
+        // now one number published under both names:
+        //
+        //   overdue_obligations_count  how many DEBTS are late  → count the rows
+        //   overdue_periods_count      how many MONTHS are late → count the distinct keys
+        //
+        // March, one client owing two employers: two obligations are late and one month is.
+        // `overdue_obligations_count` was handed the month count, so a card labelled
+        // "obligaciones" said 1 where there were 2. Both figures were the same number, so
+        // the name and the number it carried could not both be right, and the "obligaciones"
+        // name is the one a collections operator reads as a count of debts.
+        //
+        // Not cosmetic here: this is the screen where somebody decides whether to call one
+        // person about one problem or two.
+        $overdueObligations = array_values(array_filter(
+            $outstanding,
+            fn (array $row): bool => $row['is_overdue'],
+        ));
+
+        $overduePeriodCount = count($overduePeriods);
+
+        // The semaphore answers "how many months are late" and stays on the month count. A
+        // client owing two employers in the same March is one month late; counting rows
+        // called that two and moved a yellow client to orange. That is R1 §24, unchanged
+        // here — what was wrong were the names of the two counts around it.
+        $trafficLight = TrafficLight::forOverdueCount($overduePeriodCount);
 
         return [
             'client' => [
@@ -145,21 +170,21 @@ final class ReceivablesService
                 'total_effective_obligations_cop' => $this->sum($rows, 'effective_amount_cop'),
                 'total_paid_cop' => $this->sum($rows, 'paid_amount_cop'),
                 'outstanding_balance_cop' => $this->sum($outstanding, 'balance_cop'),
-                'overdue_balance_cop' => $this->sum(
-                    array_filter($outstanding, fn (array $row): bool => $row['is_overdue']),
-                    'balance_cop',
-                ),
+                'overdue_balance_cop' => $this->sum($overdueObligations, 'balance_cop'),
                 'unallocated_credit_cop' => $this->unallocatedCreditFor($client),
                 'open_obligations_count' => count($outstanding),
-                'overdue_obligations_count' => $overdueCount,
+                // Rows, scoped to money still owed — the same scope the cartera list uses, so
+                // the two screens cannot report different figures for the same client.
+                'overdue_obligations_count' => count($overdueObligations),
+                'overdue_periods_count' => $overduePeriodCount,
                 // The exact months, not "3 months late". A person asking "which
                 // months do you owe me" needs the months; a count cannot be turned
                 // back into them.
                 'owed_periods' => $owedPeriods,
                 'owed_period_count' => count($owedPeriods),
-                'traffic_light' => TrafficLight::forOverdueCount($overdueCount)->value,
-                'traffic_light_label' => TrafficLight::forOverdueCount($overdueCount)->label(),
-                'traffic_light_reason' => TrafficLight::forOverdueCount($overdueCount)->meaning($overdueCount),
+                'traffic_light' => $trafficLight->value,
+                'traffic_light_label' => $trafficLight->label(),
+                'traffic_light_reason' => $trafficLight->meaning($overduePeriodCount),
             ],
             'obligations' => $rows,
         ];

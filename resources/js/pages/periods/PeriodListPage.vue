@@ -10,6 +10,7 @@ import { fechaHora, mesActual, pesos } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
+import { reasonIsLongEnough, REASON_MIN_LENGTH_HINT } from '@/validation/reasons';
 
 import type {
     GenerationPreviewPayload,
@@ -696,7 +697,7 @@ const generationSummary = computed(() => {
             title="Reabrir periodo"
             confirm-label="Reabrir periodo"
             :busy="reopenBusy"
-            :disabled="reopenReason.trim() === ''"
+            :disabled="!reasonIsLongEnough(reopenReason)"
             @confirm="reopenPeriod"
             @cancel="reopenTarget = null"
         >
@@ -714,7 +715,16 @@ const generationSummary = computed(() => {
                     rows="3"
                     required
                 ></textarea>
-                <p class="cdh-form-hint">Queda en la auditoría. Sin motivo no se reabre.</p>
+                <!--
+                    §8 of R3. `ReopenPeriodRequest` requires ten characters; this enabled the
+                    button on any non-empty text, so reopening a month failed after the round
+                    trip for a reason the form could have known. Same shared check as the
+                    payment and adjustment dialogs.
+
+                    Closing is deliberately not mentioned: it takes no reason, so it has no
+                    minimum to state.
+                -->
+                <p class="cdh-form-hint">{{ REASON_MIN_LENGTH_HINT }}</p>
             </div>
 
             <AppAlert v-if="reopenError" variant="danger" :title="reopenError" />

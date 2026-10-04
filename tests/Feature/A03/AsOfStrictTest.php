@@ -80,15 +80,47 @@ it('refuses an unreadable reference date on the month\'s obligations', function 
 
     $period = MonthlyPeriod::query()->where('period_month', '2026-10-01')->firstOrFail();
 
-    $response = $this->actingAs(userWithPermissions(['obligations.view', 'periods.view']))
-        ->getJson("/api/periods/{$period->id}/obligations?as_of=".urlencode($date));
+    // §4 of R3. This asserted only the status code and the word "fecha", which a hand-rolled
+    // `abort(422, $message)` in the controller satisfied — and that response has no `errors`
+    // envelope at all, so a client could not tell which input had been rejected. The endpoint
+    // now takes `ListPeriodObligationsRequest`, like the two receivables endpoints, and the
+    // standard field error is asserted here so it cannot go back to a bare message.
+    $this->actingAs(userWithPermissions(['obligations.view', 'periods.view']))
+        ->getJson("/api/periods/{$period->id}/obligations?as_of=".urlencode($date))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('as_of');
 
-    // The period's obligations read the reference date through their own validator rather than
-    // the request's, so the failure is a 422 with a message rather than a null-coalesce to
-    // `now()`.
-    expect($response->status())->toBe(422)
-        ->and($response->getContent())->toContain('fecha de referencia');
+    expect($this->actingAs(userWithPermissions(['obligations.view', 'periods.view']))
+        ->getJson("/api/periods/{$period->id}/obligations?as_of=".urlencode($date))
+        ->json('errors.as_of.0'))->toContain('fecha de referencia');
 })->with(unreadableDates());
+
+it('answers the three reference-date surfaces in the same validation shape', function (): void {
+    // The finding behind §4: three endpoints validate one field, and one of them did it in a
+    // different shape. A caller cannot branch on "was it rejected" and get a consistent
+    // answer, and the inconsistent one was the period's.
+    $employer = a03_employer();
+    a03_payable(250000, '2026-10', $employer);
+
+    $period = MonthlyPeriod::query()->where('period_month', '2026-10-01')->firstOrFail();
+
+    $this->actingAs(userWithPermissions(['receivables.view', 'obligations.view', 'periods.view']));
+
+    $endpoints = [
+        'GET /api/receivables' => '/api/receivables?as_of=2026-13-01',
+        'GET /api/clients/{id}/account' => '/api/clients/'.$employer['client']->id.'/account?as_of=2026-13-01',
+        'GET /api/periods/{id}/obligations' => "/api/periods/{$period->id}/obligations?as_of=2026-13-01",
+    ];
+
+    foreach ($endpoints as $label => $url) {
+        $response = $this->getJson($url)->assertStatus(422)->assertJsonValidationErrors('as_of');
+
+        // The same envelope, the same field, the same sentence. A caller that reads
+        // `errors.as_of` works against all three.
+        expect($response->json('errors'), $label)->toHaveKey('as_of')
+            ->and($response->json('errors.as_of.0'), $label)->toContain('fecha de referencia');
+    }
+});
 
 it('honours a reference date that can be read, and it changes the answer', function (): void {
     $employer = a03_employer();

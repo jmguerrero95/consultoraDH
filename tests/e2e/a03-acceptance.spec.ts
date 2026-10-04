@@ -270,9 +270,36 @@ test.describe('A03 acceptance risks', () => {
         await expect(
             row(page, 'Por empresa').getByText('Comercial A03 11 S.A.S.'),
         ).toBeVisible();
-        await expect(
-            row(page, 'Excepción por cliente').getByText('Cobro 11 Prueba A03'),
-        ).toBeVisible();
+
+        // §3 of R3, and R1 §31. The client exception is a client **and** an employer, because
+        // one person can be attached to several employers at once, each counting their own
+        // contribution on their own date. This row used to assert only that the client's name
+        // appeared — which is exactly what the broken cell showed, because it printed the
+        // client and dropped the employer.
+        //
+        // So the assertion is on the cell as one piece of text: the client, the employer, and
+        // nothing in between but the separator. A row that says only "Cobro 11 Prueba A03"
+        // would read as an exception that applies to that person everywhere, and an operator
+        // comparing two rules for the same client at different employers could not tell them
+        // apart from the screen.
+        const clientRow = row(page, 'Excepción por cliente');
+
+        await expect(clientRow).toHaveCount(1);
+        await expect(clientRow).toContainText('Cobro 11 Prueba A03');
+        await expect(clientRow).toContainText('Comercial A03 11 S.A.S.');
+
+        // Both halves, in the same cell, and not merely somewhere in the row: the scope and the
+        // effective month are in other columns, so a row-level assertion could be satisfied by
+        // the employer appearing in a column this change is not about.
+        await expect(clientRow.locator('td[data-label="Aplica a"]')).toHaveText(
+            'Cobro 11 Prueba A03 — Comercial A03 11 S.A.S.',
+        );
+
+        // And the company rule is not given a client it does not have: `??` would have made a
+        // company rule print a client name if one were ever present, so the absence is part of
+        // the contract rather than an accident.
+        await expect(row(page, 'Por empresa').locator('td[data-label="Aplica a"]'))
+            .toHaveText('Comercial A03 11 S.A.S.');
 
         const period = await openPeriod(page, month);
 
@@ -575,7 +602,11 @@ test.describe('A03 acceptance risks', () => {
         await page.goto('/receivables');
         await page.getByRole('searchbox', { name: 'Buscar' }).fill('Cobro 16');
 
-        // The search is a fragment of one name column, so it finds the client by name.
+        // The client's name no longer matches at all, so the list is genuinely empty rather
+        // than showing a row the search failed to filter. Before R2 §11 the search matched
+        // each name column on its own, so a name spanning both was unmatchable — this
+        // assertion depended on the row being absent for the unrelated reason that the
+        // client had been paid off.
         await expect(page.getByText('Sin coincidencias')).toBeVisible();
         await expect(row(page, 'Cobro 16 Prueba A03')).toHaveCount(0);
     });
@@ -1238,10 +1269,11 @@ async function registerPaymentThroughUi(
 
     const form = dialog(page, 'Registrar pago');
 
-    // By a fragment of one name column, because that is what the directory search matches: a
-    // single `%term%` per column, so a whole name spanning first and last names matches
-    // nothing at all. The option is then chosen by value, so the fragment finding a few
-    // candidates is harmless.
+    // Any part of the name finds the client, and so does the whole of it: since R2 §11 the
+    // search compares `lower(unaccent(first || ' ' || last))` as well as each column, so a
+    // name spanning both is matchable and a fragment is not a workaround any more. The
+    // option is chosen by value afterwards, so the search finding a few candidates is
+    // harmless either way.
     await form.getByRole('searchbox', { name: 'Buscar cliente' }).fill(search);
 
     const clientSelect = form.getByLabel('Cliente');

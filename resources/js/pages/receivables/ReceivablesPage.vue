@@ -248,7 +248,14 @@ function owedPeriodsLabel(row: ReceivableRow): string {
             </div>
 
             <div class="cdh-filters__field">
-                <label class="cdh-form-label" for="cartera-as-of">Al día de</label>
+                <!--
+                    §9 of R3. "Al día de" is the phrase R1 §26 named and forbade: a date that
+                    sounds like a statement cutoff, for a figure that is not one. Today's
+                    payments and adjustments still move these balances, so the only thing this
+                    date chooses is which debts count as late. Same wording as the client
+                    account, so the two screens name the same control the same way.
+                -->
+                <label class="cdh-form-label" for="cartera-as-of">Mora evaluada al</label>
                 <input
                     id="cartera-as-of"
                     v-model="asOf"

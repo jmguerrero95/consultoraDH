@@ -7,11 +7,13 @@ periodos, pagos y documentos.
 administrador —clientes, afiliaciones, cortes, cartera, planillas, novedades,
 documentos y reportes— se concentra en un solo lugar, con trazabilidad.
 
-> **Estado actual: A01 — base técnica.**
-> La autenticación, la seguridad, los permisos, la auditoría y las pantallas
-> administrativas ya funcionan. Los módulos de negocio todavía **no** existen;
-> el panel inicial lo indica de forma explícita en lugar de mostrar datos
-> inventados. Consulte [docs/ROADMAP.md](docs/ROADMAP.md) para el plan.
+> **Estado actual: A03 — periodos, cortes, obligaciones, pagos y cartera.**
+> A01 (base técnica, autenticación, permisos, auditoría), A02 (clientes,
+> empresas, afiliaciones e historial) y A03 (el dominio financiero) están
+> implementados y probados. La planilla, los documentos, el portal y las
+> automatizaciones **todavía no** existen: el panel lo indica de forma
+> explícita en lugar de mostrar datos inventados. Consulte
+> [docs/ROADMAP.md](docs/ROADMAP.md) para el plan.
 
 ---
 
@@ -29,8 +31,10 @@ Un sistema de gestión interna con tres grupos de requisitos:
   en PDF, reportería dinámica, automatizaciones, asistente de IA e integración
   por MCP / OpenCode.
 
-A01 no implementa ninguno de esos módulos. Construye la base técnica que los
-sostendrá correctamente.
+De esos tres grupos, A02 implementa el primero (clientes, empresas,
+afiliaciones y su historial) y A03 el núcleo financiero del primero (periodos,
+fechas de corte, obligaciones, ajustes, pagos y cartera). El servicio al
+cliente y la analítica con integración siguen sin empezar: son A08 a A14.
 
 ## 2. Arquitectura en una frase
 
@@ -253,7 +257,7 @@ docker compose exec node npm run build       # build de producción
 # Estilo del backend
 docker compose exec app vendor/bin/pint --test
 
-# Interfaz de extremo a extremo (crea dos cuentas temporales y las elimina)
+# Interfaz de extremo a extremo (crea tres cuentas temporales y las elimina)
 ./scripts/run-e2e.sh
 ```
 
@@ -264,11 +268,18 @@ La guía completa está en [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 ```
 consultora-dh/
 ├── app/
-│   ├── Domain/           # Lógica de negocio: auditoría, autenticación, usuarios,
-│   │                     # clientes, empresas, afiliaciones, calidad de datos
+│   ├── Domain/           # Lógica de negocio, un directorio por dominio:
+│   │                     #   Audit, Auth, Profile, Users  (A01)
+│   │                     #   Clients, Companies, Affiliations, DataQuality  (A02)
+│   │                     #   Periods, Billing, Payments, Receivables  (A03)
+│   │                     #   Shared
 │   ├── Http/             # Controladores, Form Requests, middleware, recursos
-│   ├── Models/           # User, AuditEvent, Client, Company, ClientCompanyAssignment,
-│   │                     # ClientAffiliation, SocialSecurityEntity
+│   ├── Models/           # User, AuditEvent  ·  Client, Company,
+│   │                     # ClientCompanyAssignment, ClientAffiliation,
+│   │                     # SocialSecurityEntity  ·  MonthlyPeriod, CutoffRule,
+│   │                     # ClientCompanyRate, MonthlyObligation,
+│   │                     # ObligationSourceAssignment, ObligationAdjustment,
+│   │                     # Payment, PaymentAllocation
 │   └── Providers/        # Proveedores de servicios
 ├── bootstrap/            # Arranque: rutas, middleware, manejo de errores
 ├── config/               # Configuración (incluye security.php)
@@ -307,23 +318,37 @@ las elimina al terminar:
 El cuarto flujo necesita dos cuentas a propósito: un administrador no puede
 demostrar que una petición sin permiso es rechazada.
 
-### 9.2 Los ocho flujos de A03 en las pruebas
+### 9.2 Los flujos de A03 en las pruebas
+
+A03 tiene **dieciocho** recorridos de navegador: nueve en
+`a03-acceptance.spec.ts` y nueve en `billing.spec.ts`, que camina un mes
+completo de punta a punta.
+
+Los nueve de aceptación, nombrados por el riesgo que cubren:
 
 | Flujo | Qué demuestra |
 | --- | --- |
-| A. Configuración y apertura | Una fecha de corte y un valor, y el mes abierto sin generar nada |
-| B. Generación | La previsualización antes de escribir, y que escribir exactamente eso |
-| C. Bloqueo | Sin configuración no se genera nada, y el diálogo nombra la relación y lo que falta |
-| D. Anticipo | Un pago registrado sin aplicar se muestra como dinero tenido, no como error, y no altera el saldo |
-| E. Más antiguo primero | Un pago cubre el mes más antiguo y el siguiente, y los saldos siguen |
-| F. Corrección | Un ajuste con motivo suma al importe generado sin tocar la instantánea |
-| G. Anulación | Anular un pago devuelve todos los saldos y conserva las aplicaciones |
-| H. Cierre y permisos | Cerrar y reabrir con motivo, y Collections no puede decidir lo que se factura |
+| A. Jerarquía de cortes | Las tres reglas —general, empresa y cliente con empresa— configuradas **por la pantalla**, y que gana la más específica |
+| B. Aplicación manual | Un pago parcial aplicado a mano, y el resto queda debiendo |
+| C. Aplicación repetida | El mismo pago aplicado dos veces a la misma deuda la salda, porque una cuota es una cuota |
+| E. El cliente sale de la cartera | Una deuda saldada deja de figurar, en la fila y en el conteo |
+| F. Anticipo entre meses | Un anticipo se arrastra al mes siguiente y se aplica el resto antiguo |
+| G. Sólo lectura | Una cuenta de sólo lectura ve todas las pantallas de A03 y no cambia nada |
+| H. Cartera y semáforo | Saldo pendiente, filtro de vencidos y la explicación del semáforo |
+| I. Historia de ajustes | Abrir la historia, revertir uno, y que la historia conserve las dos filas |
+| J. Fecha sin hora | Un valor con sólo fecha no se corre un día por el huso |
+
+Los nueve de `billing.spec.ts` recorren el ciclo completo: configuración,
+generación, bloqueos, pago sin aplicar, aplicación del más antiguo al más
+reciente, corrección con ajuste, anulación, reversión de una aplicación con su
+historia, cierre y reapertura, y los límites de permisos de Collections.
 
 Cada flujo crea su propia empresa, cliente, relación y valor, con la relación
-**acotada a su propio mes**, y ninguna aserción depende de la posición de una
-fila ni de un nombre de mes escrito en el archivo de pruebas.
-```
+**acotada a su propio mes** —una relación sin fecha de fin cubre todos los
+meses desde que empezó, y acotarla es lo que evita que un flujo aparezca como
+candidato en el mes de otro—, y ninguna aserción depende de la posición de
+una fila ni de un nombre de mes escrito en el archivo de pruebas: los meses los
+nombra el servidor.
 
 ## 10. Detener el entorno
 
@@ -369,6 +394,9 @@ Los detalles y la lista completa están en [docs/SECURITY.md](docs/SECURITY.md).
 | [docs/TASKS/A01.md](docs/TASKS/A01.md) | Qué se entregó en A01 |
 | [docs/TASKS/A02.md](docs/TASKS/A02.md) | Clientes, empresas, afiliaciones e historial |
 | [docs/TASKS/A03.md](docs/TASKS/A03.md) | Periodos, obligaciones, ajustes, pagos y cartera |
+| [docs/TASKS/A03-R1-REMEDIATION.md](docs/TASKS/A03-R1-REMEDIATION.md) | Corrección financiera, concurrencia y contrato de A03 |
+| [docs/TASKS/A03-R2-REMEDIATION.md](docs/TASKS/A03-R2-REMEDIATION.md) | Cierre de los hallazgos de auditoría de A03 |
+| [docs/TASKS/A03-R3-REMEDIATION.md](docs/TASKS/A03-R3-REMEDIATION.md) | Cierre final de los hallazgos de A03 |
 
 ## 13. Licencia
 
