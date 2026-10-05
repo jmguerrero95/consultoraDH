@@ -31,17 +31,22 @@ declare(strict_types=1);
  * quietly reported "0 sheets, looks fine" against a missing file would be worse than useless.
  */
 
-require __DIR__.'/../vendor/autoload.php';
-
-$app = require __DIR__.'/../bootstrap/app.php';
-$app->make(Kernel::class)->bootstrap();
-
 use App\Domain\Imports\BlindenLegacyWorkbookParser;
 use App\Domain\Imports\HistoryReconstructor;
 use App\Domain\Imports\ImportActionType;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\SensitiveSourceRedactor;
 use Illuminate\Contracts\Console\Kernel;
+
+// The imports are above the executable code on purpose. Pint's `fully_qualified_strict_types`
+// rule rewrites a fully-qualified class name to a short one and moves its `use` to where it
+// sorts — which, in a script, put it *after* the first `require`. The class then did not
+// resolve and the script died on `Kernel::class`. Ordering them here is what makes the
+// formatter and the script agree.
+require __DIR__.'/../vendor/autoload.php';
+
+$app = require __DIR__.'/../bootstrap/app.php';
+$app->make(Kernel::class)->bootstrap();
 
 $path = $argv[1] ?? (__DIR__.'/../.local-fixtures/EMPRESA BLINDEN AÑO 2026.xlsx');
 
