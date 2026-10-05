@@ -45,6 +45,50 @@ final readonly class RetirementNote
         public string $kind,
     ) {}
 
+    /**
+     * Rebuild from what staging recorded.
+     *
+     * ## Why the note is not re-detected
+     *
+     * The rebuild path re-ran `detect()` on the redacted novelty text. That *usually* agreed with
+     * the first pass, and usually is not the same as always: the month the note named had been
+     * resolved once — with the year taken from the sheet, per §8.2's rule — and re-running the
+     * detection resolves it a second time from text that no longer carries the original casing or
+     * spacing the author used. `retirement_month_token` and `retirement_day_count` were stored
+     * and never read, so §8.2's most dangerous cell was re-derived on every rebuild.
+     *
+     * `dayCount` is carried verbatim and is **never** turned into a date here or anywhere else
+     * in this class — see the class docblock.
+     *
+     * @param  string|null  $resolvedMonthKey  the `YYYY-MM` the parse concluded
+     * @param  string|null  $evidence  the redacted novelty, shown to a reviewer
+     */
+    public static function fromStored(?string $resolvedMonthKey, ?int $dayCount, ?string $evidence): ?self
+    {
+        if ($resolvedMonthKey === null || trim($resolvedMonthKey) === '') {
+            return null;
+        }
+
+        $month = MonthlyPeriod::fromKey(trim($resolvedMonthKey));
+
+        return new self(
+            max(1, (int) $dayCount),
+            $month->key(),
+            // The stored key is **already resolved**: §8.2's "año inferido únicamente por
+            // contexto de hoja" happened once, at parse time, and this is the answer it produced.
+            //
+            // So no inference runs a second time. The previous version passed the key back into
+            // `SheetMonth::resolveMentionedMonth()`, which expects a folded month *name* — a
+            // `2026-03` matches no name, the month came back null, and §8.2's boundary
+            // derivation silently stopped producing one. That is the same class of defect as
+            // re-running `RetirementNote::detect()` on a rebuild: the parse's conclusion was
+            // being recomputed instead of restored, and the recomputation disagreed.
+            $month,
+            (string) $evidence,
+            $dayCount === null ? self::KIND_UNDATED : self::KIND_DATED,
+        );
+    }
+
     public const KIND_DATED = 'dated';
 
     public const KIND_UNDATED = 'undated';

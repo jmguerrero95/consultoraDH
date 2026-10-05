@@ -33,7 +33,7 @@ final readonly class SheetMonth
 {
     private function __construct(
         public MonthlyPeriod $month,
-        public string $sheetName,
+        public ?string $sheetName,
     ) {}
 
     /**
@@ -70,6 +70,26 @@ final readonly class SheetMonth
     }
 
     /** January..December, in Spanish, folded. `DICIEMBRE` and `DIC` are both December. */
+    /**
+     * Rebuild from a stored `YYYY-MM` key.
+     *
+     * `rebuild-plan` has to reconstruct a sheet's month from the database, and the staged
+     * `sheet_month` column is a `date` while `retirement_month_token` is a `YYYY-MM` string.
+     * Reconstructing the key by hand in every caller is how a caller ends up with a month whose
+     * year and sheet disagree, so the round trip lives here next to `key()`.
+     */
+    public static function fromKey(string $key): ?self
+    {
+        if (preg_match('/^(?<year>\d{4})-(?<month>0[1-9]|1[0-2])$/', trim($key), $matches) !== 1) {
+            return null;
+        }
+
+        return new self(
+            MonthlyPeriod::fromKey($key),
+            null,
+        );
+    }
+
     public static function monthNumber(string $foldedName): ?int
     {
         return match ($foldedName) {

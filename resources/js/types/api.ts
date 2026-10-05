@@ -1015,12 +1015,68 @@ export type ImportActionType =
     | 'close_affiliation'
     | 'create_rate';
 
-export type ImportActionState = 'planned' | 'applied' | 'skipped';
+/**
+ * §12.3's three terminal states for one action.
+ *
+ * `failed` is A04-R1. The external audit found `ImportActionState::Failed` declared and written
+ * by nothing, while an action whose payload could not be written was skipped silently, counted
+ * as a success, and left `planned` — and the batch still reached `applied`. So the union has to
+ * name the state the interface will render as an error.
+ */
+export type ImportActionState = 'planned' | 'applied' | 'skipped' | 'failed';
 
 export type ImportRetirementPolicy = 'manual_only' | 'month_end_boundary';
 
 /** Date precision, as §8.3 defines it. `month` is never shown as an exact day. */
 export type DatePrecision = 'day' | 'month' | 'unknown';
+
+/**
+ * §5.5's closed set of answers, mirrored from `IssueResolutionDecision`.
+ *
+ * The backend owns the whitelist and validates against it; this union is what lets
+ * `vue-tsc` reject a screen that offers a decision the API will refuse. A04-R1 replaced a
+ * `string` with this, after the audit found `resolution.decision` accepted as `string|max:64`
+ * and the only whitelist lived in a `.vue` file where a crafted request bypassed it entirely.
+ */
+export type IssueResolutionDecision =
+    | 'accept_source'
+    | 'skip_row'
+    | 'use_suggested_date'
+    | 'set_date'
+    | 'ignore_date'
+    | 'map_entity'
+    | 'create_entity'
+    | 'skip_affiliation'
+    | 'treat_as_duplicate_of'
+    | 'keep_both'
+    | 'use_company_nit'
+    | 'link_existing_company'
+    | 'choose_arl_source'
+    | 'close_on_disappearance'
+    | 'keep_open'
+    | 'split_overlap_at'
+    | 'accept_existing'
+    | 'overwrite_with_source'
+    | 'accept_source_amount'
+    | 'link_existing_client'
+    | 'set_risk_class';
+
+/**
+ * One decision's value shape, as §17.4's dialog needs it.
+ *
+ * `value_schema` is the server's, not a hand-written table: the audit's finding was that the
+ * browser held its own copy of which decisions exist and what they take, so the two could
+ * disagree. Deriving the control from `value_schema` means the dialog cannot offer a field the
+ * validator will refuse.
+ */
+export interface ImportIssueDecision {
+    value: IssueResolutionDecision;
+    label: string;
+    value_schema: Record<string, 'date' | 'precision' | 'positive_integer' | 'risk_class' | 'entity_name' | 'entity_type' | 'source_key' | 'tax_id' | 'optional_single_char' | 'optional_text' | 'arl_source'>;
+    requires_value: boolean;
+    /** Whether answering this clears the blocker. §5.3's `blocking` column. */
+    resolves: boolean;
+}
 
 export interface ImportSummary {
     monthly_sheets?: number;
@@ -1037,7 +1093,10 @@ export interface ImportSummary {
     plan?: ImportPlanCounts;
     unresolved_blockers?: number;
     retirement_policy?: ImportRetirementPolicy;
+    /** A04-R1: the decisions in force when the plan was built. §13. */
+    decisions?: { schema: number; total: number; by_decision: Record<string, number>; skipped_rows: number; created_entities: number };
     applied?: Record<string, number>;
+    skipped?: number;
 }
 
 export interface ImportPlanCounts {
@@ -1068,10 +1127,30 @@ export interface LegacyImport {
     summary: ImportSummary;
 }
 
+/**
+ * §5.4's plan identity.
+ *
+ * A04-R1. The audit found `apply` accepted **no request body**, so nothing tied the write to the
+ * plan a reviewer had read: a rebuild between the preview and the click was applied silently.
+ * These two fields are what the confirmation dialog submits and the server compares.
+ *
+ * Both are needed. The revision orders builds; the digest says whether the *content* is the same
+ * one. A rebuild that changes nothing keeps the digest and advances the revision, so §17.4's
+ * "refrescar plan sin perder el resto" does not invalidate an open approval.
+ */
+export interface ImportPlanIdentity {
+    revision: number;
+    digest: string | null;
+    built_at: string | null;
+    decisions: ImportSummary['decisions'];
+    interpretation_policy: ImportRetirementPolicy | null;
+}
+
 export interface LegacyImportDetail extends LegacyImport {
     rows: number;
     issues: { total: number; blocking: number };
     actions: number;
+    plan: ImportPlanIdentity;
     /** §17.5's disabled-Apply flag. The server enforces it again. */
     applicable: boolean;
 }
@@ -1092,22 +1171,39 @@ export interface ImportRow {
     /** Already redacted by the parser. Never the original. */
     affiliation_date_raw: string | null;
     affiliation_date: string | null;
+    /** A04-R1: the precision travels with the date, and `month` is never shown as a day. */
     affiliation_date_precision: DatePrecision | null;
+    /** A04-R1: §8.1's suggestion, so the review dialog has something to apply. */
+    affiliation_date_suggestion: string | null;
+    /** A04-R1: the parse's own diagnosis, restored rather than re-derived on a rebuild. */
+    affiliation_date_problem: string | null;
     monthly_amount_cop: number | null;
+    /** A04-R1: §10's blank-versus-invalid distinction. */
+    amount_problem: string | null;
     eps_token: string | null;
     afp_token: string | null;
     ccf_token: string | null;
     arl_token: string | null;
+    /** A04-R1: §9.4's two evidence sources, separately — the dialog needs both to ask. */
+    arl_token_title: string | null;
+    arl_token_row: string | null;
+    arl_evidence: 'title' | 'header' | 'conflict' | null;
+    arl_permitted_risks: number[] | null;
     arl_risk_class: number | null;
     job_title: string | null;
+    /** A04-R1: §9.1's per-cell outcome, so "observed negative" is distinguishable from absent. */
+    entity_states: Record<string, { token: string; problem: string | null }> | null;
     novelty: string | null;
+    retirement_month_token: string | null;
     retirement_day_count: number | null;
+    /** A04-R1: §13's provenance identity, stable across a re-parse. */
+    source_key: string;
     parse_state: 'staged' | 'blocked' | 'invalid' | 'duplicate' | null;
 }
 
 export interface ImportIssue {
     id: number;
-    legacy_import_row_id: number | null;
+    row_id: number | null;
     code: string;
     severity: 'info' | 'warning' | 'error';
     blocking: boolean;
@@ -1115,9 +1211,42 @@ export interface ImportIssue {
     message: string;
     /** Sanitised: positions and codes, never a source value. */
     context: Record<string, unknown> | null;
+    /** A04-R1: §5.3's stable identity, so the screen can tell an open question from an answered one. */
+    fingerprint: string;
+    is_resolved: boolean;
     resolved_by: number | null;
     resolved_at: string | null;
     resolution: Record<string, unknown> | null;
+    /** A04-R1: the answer in the reviewer's own words, for the "ya respondida" state. */
+    resolution_summary: string | null;
+    /** A04-R1: the backend's whitelist, rendered as one dialog per code. §17.4. */
+    allowed_decisions: ImportIssueDecision[];
+}
+
+/** §17.5: what a reviewer sees when they expand an action to its evidence. Positions only. */
+export interface ImportActionEvidence {
+    sheets: string[];
+    rows: number[];
+    cells: string[];
+}
+
+/**
+ * A04-R1: what the plan assumed about existing data when it was built.
+ *
+ * The audit's TOCTOU finding: the comparison §11 requires was made once, at plan time, and never
+ * re-checked — so a row created by hand between the preview and the click was either overwritten
+ * or silently treated as the import's own write. These are re-read under the same lock that does
+ * the writing.
+ */
+export interface ImportActionPreconditions {
+    target_exists?: boolean;
+    open_at_start?: boolean;
+    open_affiliation_exists?: boolean;
+    accepted_conflict?: boolean;
+    approved_fields?: string[];
+    conflict?: string;
+    differs?: string[];
+    observed?: Record<string, string | number | null>;
 }
 
 export interface ImportAction {
@@ -1126,18 +1255,37 @@ export interface ImportAction {
     action_type: ImportActionType;
     natural_key: string;
     payload: Record<string, unknown>;
-    /** §13: the staged rows this action was derived from. */
+    /** §13's fingerprint, shown in the audit trail and written on the domain record. */
+    batch_fingerprint: string;
+    /**
+     * §13: the staged rows this action was derived from.
+     *
+     * A04-R1 made these real `legacy_import_rows.id` values, verified by a database trigger.
+     * They held Excel row numbers before, which collide across the ten sheet-months and match no
+     * row in the database.
+     */
     source_row_ids: number[];
+    /** A04-R1: the human-readable form, so the dialog does not have to re-query. */
+    source_evidence: ImportActionEvidence | null;
+    preconditions: ImportActionPreconditions | null;
     state: ImportActionState;
     target_type: string | null;
     target_id: number | null;
     skip_reason: string | null;
+    failure_message: string | null;
 }
 
 export interface ImportPlan {
     counts: ImportPlanCounts;
+    /** §17.5's Crear / Actualizar / Sin cambios / Bloqueados. */
     counts_by_type: Record<string, number>;
     applicable: boolean;
+    /** A04-R1: what the confirmation dialog submits back to `apply`. */
+    plan_revision: number;
+    plan_digest: string | null;
+    plan_built_at: string | null;
+    plan_decisions: ImportSummary['decisions'];
+    interpretation_policy: ImportRetirementPolicy | null;
     actions: ImportAction[];
 }
 
@@ -1157,7 +1305,7 @@ export interface ImportRowsPayload {
 
 export interface ImportIssuesPayload {
     data: ImportIssue[];
-    meta: { current_page: number; last_page: number; total: number };
+    meta: { current_page: number; last_page: number; per_page: number; total: number };
 }
 
 export interface ImportPlanPayload {

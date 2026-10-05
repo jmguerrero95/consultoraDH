@@ -457,6 +457,24 @@ El tercero es el que §5.4 y §17.5 hacen explícito: `legacy_import_actions` **
 la pantalla lo lee. La previsualización no recalcula una explicación paralela, porque dos
 cálculos del mismo plan divergen en cuanto el primero se queda obsoleto.
 
+Pero leer las mismas filas no basta si el conjunto de filas puede cambiar entre la lectura y la
+escritura. A04-R1 le añade una **identidad**: `legacy_imports` lleva `plan_revision` y
+`plan_digest` —SHA-256 del contenido visible del plan, en orden de ordinal— y `apply` los exige
+en el cuerpo de la petición.
+
+```text
+la pantalla muestra (revisión 4, digest abc…)
+       ↓ el revisor confirma
+apply envía {plan_revision: 4, plan_digest: "abc…"}
+       ↓
+no coincide → 409 stale_plan, no se escribe nada
+```
+
+El digest decide **si** el plan es el revisado; la revisión registra **cuál** construcción es.
+Una reconstrucción que no cambia nada conserva el digest y avanza la revisión, así que refrescar
+el plan no invalida una aprobación en curso. La auditoría encontró que `apply` no aceptaba
+cuerpo alguno, de modo que nada unía la confirmación del revisor con las filas que se escribían.
+
 ### La ruta privada la construye el modelo
 
 `imports/{uuid}/source.xlsx`. El controlador escribe usando
@@ -466,6 +484,15 @@ directorio, toda subida terminaba en `failed` con «el archivo ya no está en el
 un archivo que acababa de llegar. Es la clase de bug que sólo aparece cuando los dos lados
 se ejercitan por primera vez en la misma ejecución, que es exactamente lo que hace un
 E2E de subida.
+
+Corregir la ruta no bastó: el **disco** también tenía tres respuestas. El upload usaba el disco
+por defecto inyectado por Laravel, `absolutePath()` usaba `imports.disk`, y `cancel()` usaba el
+disco por defecto otra vez. Con `IMPORT_DISK` igual a `FILESYSTEM_DISK` funcionaba, que es
+exactamente por lo que se entregó; con las dos variables distintas, toda importación fallaba y
+la cancelación dejaba el libro en el servidor.
+
+`ImportFileStore` es ahora el único lugar que elige disco, y el modelo sigue siendo el único
+que construye la dirección.
 
 ### La precisión acompaña a la fecha, no se deduce de ella
 

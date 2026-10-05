@@ -41,6 +41,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $affiliation_date
  * @property int|null $monthly_amount_cop
  * @property string $fingerprint
+ * @property string $source_key
  * @property ImportRowState $parse_state
  */
 #[Fillable([
@@ -79,7 +80,19 @@ use Illuminate\Support\Carbon;
     'retirement_day_count',
     'normalized_payload',
     'fingerprint',
+    'source_key',
     'parse_state',
+    'company_verification_digit',
+    'company_title_raw',
+    'affiliation_date_suggestion',
+    'affiliation_date_problem',
+    'amount_problem',
+    'email_problem',
+    'arl_token_title',
+    'arl_token_row',
+    'arl_evidence',
+    'arl_permitted_risks',
+    'entity_states',
 ])]
 class LegacyImportRow extends Model
 {
@@ -98,6 +111,9 @@ class LegacyImportRow extends Model
             'retirement_day_count' => 'integer',
             'normalized_payload' => 'array',
             'parse_state' => ImportRowState::class,
+            'affiliation_date_suggestion' => 'date',
+            'arl_permitted_risks' => 'array',
+            'entity_states' => 'array',
         ];
     }
 
@@ -117,5 +133,34 @@ class LegacyImportRow extends Model
     public function sourceReference(): string
     {
         return sprintf('%s · fila %d', $this->sheet_name, $this->source_row_number);
+    }
+
+    /**
+     * The line's identity, independent of what it says.
+     *
+     * SHA-256 of `sheet_name|sheet_month|source_row_number|block_index`. Position only, so it
+     * survives a re-parse and a re-stage — which `fingerprint` does not, because that one is
+     * over the *meaning* and changes as soon as a value does. §13 provenance and §18's issue
+     * identity both need the version that survives.
+     */
+    public static function sourceKeyFor(string $sheetName, string $sheetMonthKey, int $sourceRowNumber, int $blockIndex): string
+    {
+        return hash('sha256', implode('|', [$sheetName, $sheetMonthKey, (string) $sourceRowNumber, (string) $blockIndex]));
+    }
+
+    /** §9.4: which of the two ARL sources this line's provider came from. */
+    public function arlEvidence(): ?string
+    {
+        return $this->arl_evidence;
+    }
+
+    /**
+     * The entity outcomes this line asserted, as §9.1 read them.
+     *
+     * @return array<string, array{token: string, problem: string|null}>
+     */
+    public function entityStates(): array
+    {
+        return is_array($this->entity_states) ? $this->entity_states : [];
     }
 }

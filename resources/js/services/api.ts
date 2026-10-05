@@ -19,6 +19,7 @@ import type {
     ImportPlanPayload,
     ImportRetirementPolicy,
     ImportRowsPayload,
+    IssueResolutionDecision,
     LegacyImport,
     LegacyImportDetail,
     AdjustmentSummary,
@@ -197,19 +198,56 @@ export const api = {
             });
         },
 
+        /**
+         * Answer one finding.
+         *
+         * A04-R1: `decision` is a closed union and `value` is `Record<string, unknown>` matching
+         * that decision's schema, rather than `string`. The audit found the endpoint validated
+         * `resolution.decision` as `string|max:64` and `resolution.value` as `nullable`, wrote
+         * both into a JSON column, and **nothing in the application ever read the column** — so
+         * any payload resolved any blocker and the plan was built from untransformed data while
+         * the screen reported the batch as ready.
+         *
+         * The value keys are not a union here on purpose: they depend on which decision was
+         * chosen, and `value_schema` arrives from the server with each issue, so the dialog
+         * derives the fields from the same declaration the validator uses.
+         */
         resolveIssue(
             id: number,
             issueId: number,
-            resolution: { decision: string; value?: unknown; note?: string | null },
-        ): Promise<{ message: string }> {
+            resolution: { decision: IssueResolutionDecision; value?: Record<string, unknown> | null; note?: string | null },
+        ): Promise<{
+            message: string;
+            data: {
+                issue: { id: number; fingerprint: string; blocking: boolean; resolved_at: string | null; resolution: Record<string, unknown>; summary: string };
+                /** §5.5: an approved entity mapping is reusable, and the reviewer is told so. */
+                reusable_mapping: { type: string; source_key: string; social_security_entity_id: number } | null;
+            };
+        }> {
             return request('POST', `/api/imports/${id}/issues/${issueId}/resolve`, { body: { resolution } });
         },
 
+        /**
+         * Answer many findings at once.
+         *
+         * A04-R1: each issue is validated individually, and the ones that could not be answered
+         * come back with their reason. The previous version was one `update()` over the ids: one
+         * payload, no validation, and the same resolution written to issues of different codes —
+         * so one answer could settle a date question and an entity question at once, and a
+         * partial success looked complete.
+         *
+         * `207` when some were refused, which is why the return type carries `refused`.
+         */
         bulkResolve(
             id: number,
             issueIds: number[],
-            resolution: { decision: string; value?: unknown; note?: string | null },
-        ): Promise<{ message: string; resolved: number }> {
+            resolution: { decision: IssueResolutionDecision; value?: Record<string, unknown> | null; note?: string | null },
+        ): Promise<{
+            message: string;
+            resolved: number;
+            resolved_ids: number[];
+            refused: { id: number; code: string | null; message: string; code_reason: string }[];
+        }> {
             return request('POST', `/api/imports/${id}/issues/bulk-resolve`, {
                 body: { issue_ids: issueIds, resolution },
             });
@@ -220,15 +258,30 @@ export const api = {
         },
 
         /**
-         * Apply the persisted plan.
+         * Apply the persisted plan, confirming which revision.
          *
-         * Synchronous on purpose: the operator pressing Apply needs to know whether it
-         * happened before the dialog closes. A 409 carries `code` — `already_applied`,
-         * `unresolved_blockers`, `wrong_state` or `nothing_to_apply` — and each one means
-         * something different about what to do next.
+         * ## Why the identity is a required argument
+         *
+         * A04-R1. The external audit found this method took **no body at all**, so nothing tied
+         * the write to the plan a reviewer had read: a resolution in another tab, or the plan job
+         * finishing late, meant the operator approved one set of actions and a different set was
+         * written, with nothing logged. §5.4 forbids exactly that — "no reconstruir una
+         * explicación distinta a la que realmente aplicará el backend".
+         *
+         * So `identity` is mandatory and is typed from `GET /plan`. A caller that does not have a
+         * plan to confirm has nothing to apply, which is a compile error rather than a runtime
+         * surprise.
+         *
+         * A 409 carries `code`: `already_applied`, `unresolved_blockers`, `wrong_state`,
+         * `nothing_to_apply`, `cancelled`, and — new here — `stale_plan`, `plan_rebuilt` and
+         * `plan_not_confirmed`. Each means something different about what to do next, and the last
+         * three all mean the same first step: reload the plan and read it again.
          */
-        apply(id: number): Promise<{ message: string; data: LegacyImportDetail }> {
-            return request('POST', `/api/imports/${id}/apply`);
+        apply(
+            id: number,
+            identity: { plan_revision: number; plan_digest: string },
+        ): Promise<{ message: string; data: LegacyImportDetail }> {
+            return request('POST', `/api/imports/${id}/apply`, { body: identity });
         },
 
         cancel(id: number): Promise<{ message: string }> {
@@ -792,19 +845,56 @@ export const businessApi = {
             });
         },
 
+        /**
+         * Answer one finding.
+         *
+         * A04-R1: `decision` is a closed union and `value` is `Record<string, unknown>` matching
+         * that decision's schema, rather than `string`. The audit found the endpoint validated
+         * `resolution.decision` as `string|max:64` and `resolution.value` as `nullable`, wrote
+         * both into a JSON column, and **nothing in the application ever read the column** — so
+         * any payload resolved any blocker and the plan was built from untransformed data while
+         * the screen reported the batch as ready.
+         *
+         * The value keys are not a union here on purpose: they depend on which decision was
+         * chosen, and `value_schema` arrives from the server with each issue, so the dialog
+         * derives the fields from the same declaration the validator uses.
+         */
         resolveIssue(
             id: number,
             issueId: number,
-            resolution: { decision: string; value?: unknown; note?: string | null },
-        ): Promise<{ message: string }> {
+            resolution: { decision: IssueResolutionDecision; value?: Record<string, unknown> | null; note?: string | null },
+        ): Promise<{
+            message: string;
+            data: {
+                issue: { id: number; fingerprint: string; blocking: boolean; resolved_at: string | null; resolution: Record<string, unknown>; summary: string };
+                /** §5.5: an approved entity mapping is reusable, and the reviewer is told so. */
+                reusable_mapping: { type: string; source_key: string; social_security_entity_id: number } | null;
+            };
+        }> {
             return request('POST', `/api/imports/${id}/issues/${issueId}/resolve`, { body: { resolution } });
         },
 
+        /**
+         * Answer many findings at once.
+         *
+         * A04-R1: each issue is validated individually, and the ones that could not be answered
+         * come back with their reason. The previous version was one `update()` over the ids: one
+         * payload, no validation, and the same resolution written to issues of different codes —
+         * so one answer could settle a date question and an entity question at once, and a
+         * partial success looked complete.
+         *
+         * `207` when some were refused, which is why the return type carries `refused`.
+         */
         bulkResolve(
             id: number,
             issueIds: number[],
-            resolution: { decision: string; value?: unknown; note?: string | null },
-        ): Promise<{ message: string; resolved: number }> {
+            resolution: { decision: IssueResolutionDecision; value?: Record<string, unknown> | null; note?: string | null },
+        ): Promise<{
+            message: string;
+            resolved: number;
+            resolved_ids: number[];
+            refused: { id: number; code: string | null; message: string; code_reason: string }[];
+        }> {
             return request('POST', `/api/imports/${id}/issues/bulk-resolve`, {
                 body: { issue_ids: issueIds, resolution },
             });
@@ -815,15 +905,30 @@ export const businessApi = {
         },
 
         /**
-         * Apply the persisted plan.
+         * Apply the persisted plan, confirming which revision.
          *
-         * Synchronous on purpose: the operator pressing Apply needs to know whether it
-         * happened before the dialog closes. A 409 carries `code` — `already_applied`,
-         * `unresolved_blockers`, `wrong_state` or `nothing_to_apply` — and each one means
-         * something different about what to do next.
+         * ## Why the identity is a required argument
+         *
+         * A04-R1. The external audit found this method took **no body at all**, so nothing tied
+         * the write to the plan a reviewer had read: a resolution in another tab, or the plan job
+         * finishing late, meant the operator approved one set of actions and a different set was
+         * written, with nothing logged. §5.4 forbids exactly that — "no reconstruir una
+         * explicación distinta a la que realmente aplicará el backend".
+         *
+         * So `identity` is mandatory and is typed from `GET /plan`. A caller that does not have a
+         * plan to confirm has nothing to apply, which is a compile error rather than a runtime
+         * surprise.
+         *
+         * A 409 carries `code`: `already_applied`, `unresolved_blockers`, `wrong_state`,
+         * `nothing_to_apply`, `cancelled`, and — new here — `stale_plan`, `plan_rebuilt` and
+         * `plan_not_confirmed`. Each means something different about what to do next, and the last
+         * three all mean the same first step: reload the plan and read it again.
          */
-        apply(id: number): Promise<{ message: string; data: LegacyImportDetail }> {
-            return request('POST', `/api/imports/${id}/apply`);
+        apply(
+            id: number,
+            identity: { plan_revision: number; plan_digest: string },
+        ): Promise<{ message: string; data: LegacyImportDetail }> {
+            return request('POST', `/api/imports/${id}/apply`, { body: identity });
         },
 
         cancel(id: number): Promise<{ message: string }> {

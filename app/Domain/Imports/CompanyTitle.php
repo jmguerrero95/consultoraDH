@@ -88,16 +88,32 @@ final readonly class CompanyTitle
      * Staging keeps the NIT, the display name and the ARL provider separately, so this reads all
      * three back rather than trying to re-parse a string that is no longer there.
      */
-    public static function fromStored(?string $taxId, ?string $name, ?string $arlProvider = null): self
-    {
+    public static function fromStored(
+        ?string $taxId,
+        ?string $name,
+        ?string $arlProvider = null,
+        array $permittedRisks = [],
+        ?string $verificationDigit = null,
+        ?string $taxIdProblem = null,
+        ?string $raw = null,
+    ): self {
+        $cleanName = $name === null || trim($name) === '' ? null : mb_substr(trim($name), 0, 180);
+        $cleanTaxId = $taxId === null || trim($taxId) === '' ? null : trim($taxId);
+
         return new self(
-            trim((string) $name).'',
-            $name === null || trim($name) === '' ? null : mb_substr(trim($name), 0, 180),
-            $taxId === null || trim($taxId) === '' ? null : trim($taxId),
-            null,
-            $taxId === null || trim($taxId) === '' ? 'missing' : null,
+            $raw ?? trim((string) $name),
+            $cleanName,
+            $cleanTaxId,
+            $verificationDigit === null || trim($verificationDigit) === '' ? null : trim($verificationDigit),
+            // Explicit when the caller knows, inferred otherwise. The audit's finding: staging
+            // stored no `taxIdProblem`, so `fromStored()` inferred `'missing'` from a null NIT and
+            // a title whose NIT was *invalid* rebuilt as *missing* — and §7.2's "same base,
+            // different check digit" conflict was undetectable after a rebuild.
+            $taxIdProblem ?? ($cleanTaxId === null ? 'missing' : null),
             $arlProvider === null || trim($arlProvider) === '' ? null : trim($arlProvider),
-            [],
+            // §9.4's `RIESGOS 1,2,3`. `fromStored()` used to return `[]`, losing the allow-list
+            // on every rebuild.
+            array_values(array_map('intval', $permittedRisks)),
         );
     }
 

@@ -34,6 +34,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property string $natural_key
  * @property array<string, mixed> $payload
  * @property list<int>|null $source_row_ids
+ * @property array<string, mixed>|null $source_evidence
+ * @property array<string, mixed>|null $preconditions
  * @property string $batch_fingerprint
  * @property ImportActionState $state
  */
@@ -44,6 +46,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'natural_key',
     'payload',
     'source_row_ids',
+    'source_evidence',
+    'preconditions',
     'batch_fingerprint',
     'state',
     'target_type',
@@ -63,6 +67,8 @@ class LegacyImportAction extends Model
             'action_type' => ImportActionType::class,
             'payload' => 'array',
             'source_row_ids' => 'array',
+            'source_evidence' => 'array',
+            'preconditions' => 'array',
             'state' => ImportActionState::class,
             'target_id' => 'integer',
         ];

@@ -84,4 +84,28 @@ enum AuditAction: string
     case PaymentAllocationReversed = 'payment.allocation_reversed';
     case PaymentAutoAllocated = 'payment.auto_allocated';
     case PaymentVoided = 'payment.voided';
+
+    // --- A04: imports --------------------------------------------------------
+    //
+    // §13: "Emitir eventos de auditoría por cambios de dominio importantes" and "La acción
+    // batch `import.applied` debe incluir conteos agregados."
+    //
+    // The four A02/A03 domain actions an import performs already emit their own events —
+    // `RelationshipCreated`, `AffiliationCreated`, `RateCreated` — through the same domain
+    // services an operator's manual change goes through. What the batch needs on top is one
+    // event that says *this batch* wrote them, with the counts and the plan revision, so
+    // "which import put this relationship here" is answerable from the trail alone rather than
+    // by guessing from timestamps.
+    //
+    // Before this, an import wrote nothing of its own: the audit trail recorded thousands of
+    // domain events with no link to the batch that caused them, and no record that an import
+    // had been applied at all.
+
+    case ImportUploaded = 'import.uploaded';
+    case ImportParsed = 'import.parsed';
+    case IssueResolved = 'import.issue_resolved';
+    case PlanBuilt = 'import.plan_built';
+    case ImportApplied = 'import.applied';
+    case ImportCancelled = 'import.cancelled';
+    case ImportFailed = 'import.failed';
 }

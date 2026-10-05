@@ -99,6 +99,14 @@ function detail(overrides: Partial<LegacyImportDetail> = {}): LegacyImportDetail
         rows: 2560,
         issues: { total: 59, blocking: 59 },
         actions: 0,
+        // A04-R1: §5.4's identity, required on the detail payload.
+        plan: {
+            revision: 3,
+            digest: 'd'.repeat(64),
+            built_at: '2026-10-04T12:05:00Z',
+            decisions: undefined,
+            interpretation_policy: 'manual_only',
+        },
         applicable: false,
         ...overrides,
     } as LegacyImportDetail;
@@ -120,34 +128,72 @@ function row(overrides: Partial<ImportRow> = {}): ImportRow {
         last_names: 'PEREZ',
         affiliation_date_raw: '01/03/2026',
         affiliation_date: '2026-03-01',
+        // A04-R1: the precision travels with the date, and the suggestion and the parse's own
+        // diagnosis are restored rather than re-derived on a rebuild.
         affiliation_date_precision: 'month',
+        affiliation_date_suggestion: null,
+        affiliation_date_problem: null,
         monthly_amount_cop: 1200000,
+        amount_problem: null,
         eps_token: 'SALUD TOTAL',
         afp_token: 'PORVENIR',
         ccf_token: 'COMFENSACION',
         arl_token: 'POSITIVA',
+        // A04-R1: §9.4's two evidence sources, separately — the dialog needs both to ask which
+        // one to believe when they contradict.
+        arl_token_title: 'POSITIVA',
+        arl_token_row: null,
+        arl_evidence: 'title',
+        arl_permitted_risks: [1, 2],
         arl_risk_class: 1,
         job_title: 'AUXILIAR',
+        entity_states: null,
         novelty: null,
+        retirement_month_token: null,
         retirement_day_count: null,
+        source_key: 'a'.repeat(64),
         parse_state: 'staged',
         ...overrides,
     };
 }
 
+/**
+ * §5.3's `row_id`, A04-R1's `fingerprint`, and the server's whitelist.
+ *
+ * `allowed_decisions` is the change that matters: the page used to hold its own `switch` of
+ * decision names that **did not exist in the backend** — `accept_absence`, `correct_date`,
+ * `keep_first`, `acknowledge` — none of which the API would accept, while the API accepted any
+ * string at all. The list now arrives from `IssueResolution::allowedFor()`.
+ */
 function issue(overrides: Partial<ImportIssue> = {}): ImportIssue {
     return {
         id: 1,
-        legacy_import_row_id: null,
+        row_id: null,
         code: 'invalid_affiliation_date',
         severity: 'error',
         blocking: true,
         field: 'affiliation_date',
         message: 'Fecha de afiliación «31/02/2026» (impossible_date).',
-        context: { sheet: 'ENERO 2026', row: 3 },
+        context: { sheet: 'ENERO 2026', row: 3, source_key: 'a'.repeat(64) },
+        fingerprint: 'b'.repeat(64),
+        is_resolved: false,
         resolved_by: null,
         resolved_at: null,
         resolution: null,
+        resolution_summary: null,
+        allowed_decisions: [
+            { value: 'accept_source', label: 'Usar el valor del archivo', value_schema: {}, requires_value: false, resolves: true },
+            { value: 'skip_row', label: 'Excluir esta fila', value_schema: {}, requires_value: false, resolves: true },
+            { value: 'use_suggested_date', label: 'Usar la fecha sugerida', value_schema: {}, requires_value: false, resolves: true },
+            {
+                value: 'set_date',
+                label: 'Escribir la fecha',
+                value_schema: { date: 'date', precision: 'precision' },
+                requires_value: true,
+                resolves: true,
+            },
+            { value: 'ignore_date', label: 'Dejar la fecha desconocida', value_schema: {}, requires_value: false, resolves: true },
+        ],
         ...overrides,
     };
 }
@@ -157,6 +203,12 @@ function plan(overrides: Partial<ImportPlan> = {}): ImportPlan {
         counts: { create: 8, update: 0, unchanged: 1, applied: 0, blocked: 2, total: 9 },
         counts_by_type: { create_company: 1, create_client: 2, create_rate: 3 },
         applicable: false,
+        // A04-R1: §5.4's identity, which the Apply dialog submits back.
+        plan_revision: 3,
+        plan_digest: 'd'.repeat(64),
+        plan_built_at: '2026-10-04T12:05:00Z',
+        plan_decisions: undefined,
+        interpretation_policy: 'manual_only',
         actions: [],
         ...overrides,
     };
@@ -421,6 +473,10 @@ describe('ImportDetailPage', () => {
                             target_type: null,
                             target_id: null,
                             skip_reason: null,
+                            batch_fingerprint: 'c'.repeat(64),
+                            source_evidence: { sheets: ['ENERO 2026'], rows: [3, 4], cells: ['ENERO 2026 · fila 3'] },
+                            preconditions: { target_exists: false },
+                            failure_message: null,
                         },
                     ],
                 },
@@ -457,9 +513,48 @@ describe('ImportDetailPage', () => {
 
         const options = wrapper.findAll('#resolution-decision option').map((option) => option.text());
 
-        expect(options).toContain('use_suggested_date');
-        expect(options).toContain('correct_date');
-        expect(options).not.toContain('authorise_parallel');
+        // A04-R1. This test used to assert `correct_date` and the absence of
+        // `authorise_parallel` — two names that existed only in the page's own `switch` and were
+        // never accepted by the API, while the API accepted any string at all. The options now
+        // come from the issue's `allowed_decisions`, which the server derives from
+        // `IssueResolutionDecision::allowedFor()`.
+        expect(options).toContain('Usar la fecha sugerida');
+        expect(options).toContain('Escribir la fecha');
+        expect(options).toContain('Dejar la fecha desconocida');
+
+        // §8.5's parallel is a decision about a *different* code, so a date finding must not
+        // offer it. This is the property the old test was reaching for, against the wrong list.
+        expect(options).not.toContain('Cortar el solapamiento en esa fecha');
+
+        // And the values are the server's, so a dialog cannot offer a field the validator refuses.
+        expect(JSON.stringify(issue().allowed_decisions)).toContain('"value_schema"');
+    });
+
+    it('renders one input per field the chosen decision declares', async () => {
+        const wrapper = await mountDetail(baseHandlers(), ['imports.view', 'imports.review']);
+
+        await flushPromises();
+
+        await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes('Incidencias'))?.trigger('click');
+        await flushPromises();
+
+        await wrapper.findAll('button').find((element) => element.text() === 'Resolver')?.trigger('click');
+        await flushPromises();
+
+        // A `set_date` answer needs a date and a precision. The previous dialog had no value
+        // inputs at all — it sent `{decision, note}` — so every decision that needs a value
+        // could not be expressed, and the server refused the payload.
+        await wrapper.find('#resolution-decision').setValue('set_date');
+        await flushPromises();
+
+        expect(wrapper.find('#resolution-date').exists()).toBe(true);
+        expect(wrapper.find('#resolution-precision').exists()).toBe(true);
+
+        // `accept_source` needs nothing, so no inputs appear.
+        await wrapper.find('#resolution-decision').setValue('accept_source');
+        await flushPromises();
+
+        expect(wrapper.find('#resolution-date').exists()).toBe(false);
     });
 
     it('hides the resolve action from a role without imports.review', async () => {

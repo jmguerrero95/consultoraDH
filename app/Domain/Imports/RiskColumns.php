@@ -61,6 +61,50 @@ final readonly class RiskColumns
 
     public const UNKNOWN_TOKEN = 'unknown_token';
 
+    /**
+     * Rebuild from what staging recorded.
+     *
+     * ## Why `decide()` cannot be reused here
+     *
+     * The rebuild path called `decide($staged->risk_raw, $staged->job_title)`, which runs §9.4's
+     * arbitration *again* on two columns that had already lost the P/Q order. `risk_raw` is the
+     * winning cell's text and `job_title` the loser's, so the second pass was asked "which of
+     * these two is the risk?" with both answers already resolved, and it could reach the
+     * opposite conclusion from the first pass on the very same file.
+     *
+     * §9.4's mapping (`UNO→1 … CINCO→5`, a typo produces a suggestion and never a correction)
+     * belongs to the parse. A rebuild restores `riskClass` and keeps the raw text for the review
+     * screen.
+     *
+     * @param  int|null  $riskClass  1..5 as the parse concluded, or NULL when it concluded none
+     */
+    public static function restore(?int $riskClass, ?string $riskRaw, ?string $jobTitle): self
+    {
+        $raw = $riskRaw === null || trim($riskRaw) === '' ? null : trim($riskRaw);
+
+        if ($riskClass === null) {
+            // A row with a raw token and no class is the §9.4 typo case: `UMO` arrives as
+            // `unknown_token`, and the suggestion is the raw text itself.
+            return new self(
+                null,
+                $raw,
+                $jobTitle === null || trim($jobTitle) === '' ? null : trim($jobTitle),
+                $raw === null ? self::NONE : self::UNKNOWN_TOKEN,
+                $raw === null ? null : 'unknown_risk_token',
+            );
+        }
+
+        return new self(
+            $riskClass,
+            $raw,
+            $jobTitle === null || trim($jobTitle) === '' ? null : trim($jobTitle),
+            // The verdict is not recoverable from three columns, and nothing reads it after the
+            // parse, so it says "resolved" rather than claiming a column it cannot name.
+            self::RESOLVED_P,
+            null,
+        );
+    }
+
     /** The five words the source uses for a risk class, folded. */
     private const RISK_WORDS = [
         'UNO' => 1,

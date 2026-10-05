@@ -44,13 +44,31 @@ final class ImportNotApplicable extends \RuntimeException
         );
     }
 
-    /** The import is not in the one state from which Apply is allowed. */
-    public static function wrongState(LegacyImport $import, LegacyImportStatus $required): self
+    /**
+     * The import is not in a state this operation may run from.
+     *
+     * ## Why the message is not apply-specific any more
+     *
+     * This class is now the single place a state transition can be refused — `ImportLifecycle`
+     * throws it for every transition, not only for Apply — so a sentence that said "sólo se
+     * puede aplicar desde…" produced this, from a *staging* call, on a batch in `queued`:
+     *
+     * > "Esta importación está en «En cola» y sólo se puede aplicar desde «En revisión»."
+     *
+     * which is three different mistakes in one line: apply was never mentioned, `review` was
+     * named as the source state when the enum's `queued` row does not reach it, and an operator
+     * reading it had no way to tell what to do.
+     *
+     * Both states are named plainly, and the caller that knows which operation it is can add its
+     * own sentence — which is what `reason` is for.
+     */
+    public static function wrongState(LegacyImport $import, LegacyImportStatus $required, ?string $operation = null): self
     {
         return new self(
             sprintf(
-                'Esta importación está en «%s» y sólo se puede aplicar desde «%s».',
-                $import->status?->label() ?? $import->status,
+                'Esta importación está en «%s»%s y sólo puede pasar a «%s».',
+                $import->status?->label() ?? (string) $import->status,
+                $operation === null ? '' : ' ('.$operation.')',
                 $required->label(),
             ),
             'wrong_state',
@@ -75,6 +93,52 @@ final class ImportNotApplicable extends \RuntimeException
         return new self(
             'El plan no tiene acciones pendientes: todo lo que traía el archivo ya existe igual.',
             'nothing_to_apply',
+        );
+    }
+
+    /** A person cancelled the batch; nothing may move it again. */
+    public static function cancelled(LegacyImport $import): self
+    {
+        return new self(
+            'Esta importación fue cancelada. No se puede aplicar.',
+            'cancelled',
+        );
+    }
+
+    /**
+     * §5.4: the plan that would run is not the plan that was reviewed.
+     *
+     * ## Why this is a distinct refusal and not `wrong_state`
+     *
+     * The batch is perfectly applicable — it is `ready`, it has no blockers and it has a plan.
+     * What is wrong is that the plan *moved* between the reviewer reading it and pressing
+     * Apply: another tab resolved an issue, or the plan job finished late.
+     *
+     * The audit found `apply` accepted no request body at all, so this could not be detected:
+     * the reviewer approved one set of changes and a different set was written, with nothing
+     * logged. §5.4 forbids exactly that — "no reconstruir una explicación distinta a la que
+     * realmente aplicará el backend".
+     *
+     * @param  array{code: string, revision: int, digest: string}  $detail  from
+     *                                                                      `ImportPlanIdentity::explainMismatch()`, which distinguishes "the content changed"
+     *                                                                      from "it was rebuilt to the same content" — different next steps for the operator.
+     */
+    public static function stalePlan(LegacyImport $import, array $detail): self
+    {
+        return new self(
+            match ($detail['code']) {
+                'plan_not_confirmed' => 'No se confirmó qué revisión del plan se iba a aplicar. Recargue y revise el plan antes de aplicar.',
+                'plan_rebuilt' => sprintf(
+                    'El plan se reconstruyó (revisión %d) sin cambiar su contenido. Recargue para confirmar la revisión actual.',
+                    $detail['revision'],
+                ),
+                default => sprintf(
+                    'El plan cambió después de que lo revisara: ahora es la revisión %d y la que se revisó ya no es la que se aplicaría. '
+                    .'Recargue y revise el plan de nuevo.',
+                    $detail['revision'],
+                ),
+            },
+            $detail['code'],
         );
     }
 

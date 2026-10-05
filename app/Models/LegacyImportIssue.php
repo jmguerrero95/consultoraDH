@@ -34,6 +34,7 @@ use Illuminate\Support\Carbon;
  * @property bool $blocking
  * @property int|null $row_id
  * @property Carbon|null $resolved_at
+ * @property string $fingerprint
  */
 #[Fillable([
     'legacy_import_id',
@@ -47,6 +48,7 @@ use Illuminate\Support\Carbon;
     'resolved_by',
     'resolved_at',
     'resolution',
+    'fingerprint',
 ])]
 class LegacyImportIssue extends Model
 {

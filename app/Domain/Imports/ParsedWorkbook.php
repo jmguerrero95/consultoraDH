@@ -96,6 +96,38 @@ final class ParsedWorkbook
      */
     public function addRow(SourcePersonRow $row): void
     {
+        // §9.4 rule 3, raised per *block* rather than per line.
+        //
+        // The title and the header disagree about one company's ARL provider, so every person
+        // under that title has the same disagreement. §5.3 is explicit that a question about a
+        // company gets one dialog: "this NIT is wrong" asked twenty-four times is how a review
+        // takes a day and gets abandoned halfway. So `addBlockIssue()` deduplicates by the
+        // company key, and the first line of the block raises it.
+        $this->addBlockIssue(
+            $row,
+            LegacyImportIssue::CompanyArlMetadataConflict,
+            static function () use ($row): ?array {
+                $conflict = $row->arlProviderConflict();
+
+                if ($conflict === null) {
+                    return null;
+                }
+
+                [$title, $header] = $conflict;
+
+                return [
+                    'severity' => LegacyIssueSeverity::Error,
+                    'blocking' => true,
+                    'message' => 'El título de la empresa dice que su ARL es «'.$title.'» y la columna de la fila dice «'
+                        .$header.'». §9.4 da prioridad al título, así que hace falta confirmar cuál vale.',
+                    'context' => [
+                        'title_provider' => $title,
+                        'header_provider' => $header,
+                    ],
+                ];
+            },
+        );
+
         $fingerprint = $row->fingerprint();
         $naturalKey = $row->naturalKey();
 
@@ -171,6 +203,52 @@ final class ParsedWorkbook
 
     /** @var array<string, int> natural key => the row number that first carried it */
     private array $naturalKeys = [];
+
+    /** @var array<string, true> block keys whose block-level finding has already been raised */
+    private array $blockIssuesRaised = [];
+
+    /**
+     * Raise a finding about a company block, once.
+     *
+     * §5.3: "Una fila por hallazgo, no un hallazgo por fila". A finding whose subject is a
+     * company — its NIT, its ARL metadata, its identity conflict — is asked once for the block,
+     * however many people are under it.
+     *
+     * The context carries `company_block_key` and no `source_key`, which is what makes
+     * `StageLegacyImport::identityFor()` classify it as a company finding and key it on the
+     * company rather than on the line that happened to raise it. That key is also what lets a
+     * resolution survive the next re-parse: a line-level key would move with the line.
+     *
+     * @param  callable(): ?array{severity: LegacyIssueSeverity, blocking: bool, message: string, context: array<string, mixed>}|null  $attributes
+     */
+    private function addBlockIssue(SourcePersonRow $row, LegacyImportIssue $code, callable $attributes): void
+    {
+        $blockKey = $row->company->blockKey();
+
+        if (isset($this->blockIssuesRaised[$blockKey.'|'.$code->value])) {
+            return;
+        }
+
+        $resolved = $attributes();
+
+        if ($resolved === null) {
+            return;
+        }
+
+        $this->blockIssuesRaised[$blockKey.'|'.$code->value] = true;
+
+        $this->addIssue($code, $row->sheetName, $row->sourceRowNumber, null, [
+            ...$resolved,
+            'field' => $code === LegacyImportIssue::CompanyArlMetadataConflict ? 'arl_token' : null,
+            'context' => [
+                ...$resolved['context'],
+                'company_block_key' => $blockKey,
+                'company_tax_id' => $row->company->taxId,
+                'sheet' => $row->sheetName,
+                'row' => $row->sourceRowNumber,
+            ],
+        ]);
+    }
 
     public function addIssue(
         LegacyImportIssue $code,

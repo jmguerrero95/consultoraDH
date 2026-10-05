@@ -26,8 +26,14 @@ use Illuminate\Support\Carbon;
  */
 final class HistoryReconstructor
 {
+    /**
+     * @param  ImportDecisionSet|null  $decisions  the human answers in force for this import.
+     *                                             NULL for §19's verifier, which runs the *untransformed* reconstruction on purpose:
+     *                                             it reports what the file says, not what a reviewer decided.
+     */
     public function __construct(
         private readonly ImportRetirementPolicy $retirementPolicy = ImportRetirementPolicy::ManualOnly,
+        private readonly ?ImportDecisionSet $decisions = null,
     ) {}
 
     /**
@@ -135,7 +141,12 @@ final class HistoryReconstructor
                 $groups[$key]['months'][] = $row->sheetMonthKey;
             }
 
-            $groups[$key]['source_rows'][] = $row->sourceRowNumber;
+            // §13's provenance. `legacy_import_rows.id`, never the Excel row number: row 42
+            // exists in each of the ten sheet-months, so the number collides, matches nothing in
+            // the database, and made `array_unique()` lossy. See `SourcePersonRow::provenanceIds()`.
+            foreach ($row->provenanceIds() as $stagedId) {
+                $groups[$key]['source_rows'][] = $stagedId;
+            }
 
             // The latest retirement note wins. Two months disagreeing about one departure is a
             // contradiction the row-level issues already flagged, and the more recent
@@ -254,26 +265,59 @@ final class HistoryReconstructor
     /**
      * Clients observed at two companies at once.
      *
-     * ## Why the test is shared months and not interval overlap
+     * ## §8.5 says the test is the rebuilt intervals
      *
-     * §8.5 says being seen at several companies in the same month does *not* mean a parallel,
-     * "en el archivo real aparece masivamente durante retiros/traslados", and it is emphatic
-     * enough to repeat the warning. So the first cut of this method tested the rebuilt
-     * intervals, and it reported **782** overlaps in the real file against 320 identities.
+     * The specification is two sentences, and they have to be read together:
      *
-     * That number is the bug, and the reason is structural: most episodes carry no closure
-     * evidence, so most intervals are open, and two open intervals overlap by definition. The
-     * test was therefore measuring "this person's first relationship was never closed", which
-     * is true of almost every episode in any workbook and says nothing about parallelism.
+     * > "Mismo cliente observado en varias empresas el mismo mes NO significa automáticamente
+     * > paralelismo: en el archivo real aparece masivamente durante retiros/traslados."
      *
-     * The evidence that actually distinguishes a parallel is co-observation: the person is in
-     * the payroll of two employers in one month, which cannot be a sequential transfer. A
-     * non-overlapping pair is a transfer or a disappearance, and both already have their own
-     * question — a disappearance raises `relationship_disappeared_without_retirement`, and a
-     * gap raises nothing because there is nothing to explain.
+     * > "**Después de reconstruir intervalos**: no hay solapamiento → normal; solapamiento real
+     * > → `overlapping_company_history` blocker."
      *
-     * The second condition keeps an overlap visible when both ends are dated and genuinely
-     * intersect, which is the case a month-level test cannot see.
+     * So the warning is about co-observation *as a substitute* for the test, and the test is the
+     * intervals. The previous implementation had it the other way round — it treated a shared
+     * month as the trigger and consulted the intervals only as a narrow extra case — which
+     * inverts §8.5 and produces the opposite failure: a genuine overlap between two episodes
+     * that were never co-observed in one sheet (a re-hire whose start date nobody typed, next to
+     * an earlier episode that ends inside it) is invisible.
+     *
+     * ## Why "real overlap" is not `overlaps()`
+     *
+     * `HistoricalInterval::overlaps()` returns `true` for any pair where either side is open,
+     * because two unbounded spans cannot be proven disjoint. That is correct for the
+     * intersection logic and useless as a finding: most episodes in any workbook carry no
+     * closure evidence, so most intervals are open, and testing raw overlap raised **782**
+     * `overlapping_company_history` blockers against 320 identities in the real file — a queue
+     * nobody reads, which is the same failure §8.5's warning is about, reached by the other
+     * route.
+     *
+     * So the overlap has to be *affirmative*, which means it needs a **bounded** piece of
+     * evidence. Two cases qualify:
+     *
+     * 1. both episodes are closed and their intervals intersect — the boundaries are known and
+     *    they overlap, so nothing about it is an artefact of a missing end;
+     * 2. one is closed and the other's dated start falls strictly inside it — the open side
+     *    began while the other was still running, which is an intersection the missing end
+     *    cannot explain.
+     *
+     * ## Why "both open, and seen together" is *not* a third case
+     *
+     * A04-R1 first shipped three cases, and case 3 was "both episodes are open and were observed
+     * in an overlapping month". Against the real workbook it reported **427** overlaps for 320
+     * identities — and §19's verifier, once it was printing counts rather than booleans, said so.
+     *
+     * That is §8.5's own warning arriving through the other door. The specification says
+     * co-observation "aparece masivamente durante retiros/traslados", and this shape is exactly
+     * that: two unbounded episodes whose months happen to overlap. Two open intervals overlap by
+     * definition, so asserting it says only that neither relationship was ever closed — which is
+     * true of almost every episode in any workbook and tells a reviewer nothing about a parallel.
+     *
+     * The principle is §8.4's, applied symmetrically: **absence of evidence is not evidence of
+     * ending, and it is not evidence of overlap either.** An overlap needs somebody's dated
+     * boundary; co-observation is a question, and §8.4 already raises it as
+     * `relationship_disappeared_without_retirement`. So case 3 is gone, and `sharedMonths` is
+     * carried on {@see CompanyOverlap} as evidence for whoever answers that question.
      *
      * @param  list<RelationshipEpisode>  $episodes
      * @return list<CompanyOverlap>
@@ -306,13 +350,16 @@ final class HistoryReconstructor
                         continue;
                     }
 
-                    $shared = $this->sharedMonths($first, $second);
-
-                    if ($shared === [] && ! $this->bothClosedAndIntersecting($first, $second)) {
+                    if (! $this->genuineOverlap($first, $second)) {
                         continue;
                     }
 
-                    $found[] = new CompanyOverlap($clientKey, $first, $second, $shared);
+                    $found[] = new CompanyOverlap(
+                        $clientKey,
+                        $first,
+                        $second,
+                        $this->sharedMonths($first, $second),
+                    );
                 }
             }
         }
@@ -320,14 +367,49 @@ final class HistoryReconstructor
         return $found;
     }
 
-    /** Whether both episodes have a dated end and those ends intersect. */
-    private function bothClosedAndIntersecting(RelationshipEpisode $a, RelationshipEpisode $b): bool
+    /**
+     * §8.5's "solapamiento real": an affirmative intersection of the rebuilt intervals.
+     *
+     * See this method's docblock for why that is not `$a->interval->overlaps($b->interval)` and
+     * why it is not "they share a month". The three cases are, in order of how much they
+     * depend on the evidence:
+     *
+     * 1. both closed and intersecting;
+     * 2. one closed, the other's dated start strictly inside it.
+     *
+     * Two open episodes are never an overlap on their own; see this method's docblock for the
+     * 427 blockers that cost before that was established.
+     */
+    private function genuineOverlap(RelationshipEpisode $a, RelationshipEpisode $b): bool
     {
-        if ($a->interval->isOpen() || $b->interval->isOpen()) {
-            return false;
+        $first = $a->interval;
+        $second = $b->interval;
+
+        if ($first->start !== null && $second->start !== null && strcmp($first->start->toDateString(), $second->start->toDateString()) > 0) {
+            [$first, $second] = [$second, $first];
         }
 
-        return $a->interval->overlaps($b->interval);
+        // 1. Both closed. The boundaries are known and they intersect, so the overlap cannot be
+        //    an artefact of a missing end date.
+        if (! $first->isOpen() && ! $second->isOpen()) {
+            return $first->overlaps($second);
+        }
+
+        // 2. One closed and the other dated: if the open one *began* while the closed one was
+        //    still running, that is an intersection the missing end cannot explain.
+        $closed = $first->isOpen() ? ($second->isOpen() ? null : $second) : $first;
+        $open = $closed === $first ? $second : $first;
+
+        if ($closed !== null && $open->start !== null && $closed->end !== null) {
+            return $open->start->lt($closed->end);
+        }
+
+        // 3. Both open. Refused, deliberately — see this method's docblock. `overlaps()` would
+        //    say yes by definition, and "both were seen in one month" is §8.5's warning about
+        //    retirements and transfers rather than evidence of a parallel. The disappearance
+        //    that a real sequential move leaves behind is raised by `findDisappearances()`, which
+        //    is the question a reviewer actually needs to answer.
+        return false;
     }
 
     /**
@@ -384,6 +466,8 @@ final class HistoryReconstructor
                         ? ArlRiskLevel::read($row->risk->riskClass, (string) ($row->risk->riskRaw ?? ''))
                         : null,
                     'row' => $row->sourceRowNumber,
+                    // §13's provenance: real staged ids.
+                    'source_rows' => $row->provenanceIds(),
                 ];
             }
         }
@@ -426,7 +510,39 @@ final class HistoryReconstructor
         /** @var list<array<string, mixed>> $run */
         $run = [];
 
-        $closeRun = function (bool $isLast) use (&$run, &$segments): void {
+        /**
+         * Close the run that just ended.
+         *
+         * `$boundaryMonth` is the month the *next* run opens in, and §9.5 says the previous
+         * segment closes "en la misma frontera" — the same boundary the next one opens on.
+         *
+         * ## The bug this fixes
+         *
+         * The previous version closed at `MonthlyPeriod::fromKey(end($months))->endsOnExclusive()`
+         * — the exclusive end of the run's **last observed** month. That is the wrong boundary
+         * whenever a month is missing from the file between two observations of the same stream:
+         *
+         * ```text
+         *  ENERO   EPS A
+         *  (no FEBRERO row for this client)
+         *  MARZO   EPS B
+         * ```
+         *
+         * A's run is `[ENERO]`, so its end was derived as end-of-January-exclusive = **1 Feb**,
+         * and B opened on **1 Mar**. February belonged to no segment at all: not A, which ended
+         * before it, and not B, which started after it. The audit's finding, exactly:
+         * "`Jan=A, Mar=B` ⇒ A ends `2026-02-01`, leaving February uncovered. Correct is
+         * `2026-03-01`."
+         *
+         * The gap is invisible in the review screen — two contiguous-looking segments, no
+         * warning — and it is a hole in somebody's health history that A03 will read as "no EPS
+         * that month". Deriving the boundary from the change rather than from the last sighting
+         * is what §9.5 asks for: the change is first *seen* in March, and the monthly snapshot
+         * can only say the change happened at March's start, not that A stopped in February.
+         *
+         * @param  string|null  $boundaryMonth  null for the last run, which stays open
+         */
+        $closeRun = function (?string $boundaryMonth) use (&$run, &$segments): void {
             if ($run === []) {
                 return;
             }
@@ -449,8 +565,11 @@ final class HistoryReconstructor
             // §9.5 forbids two open affiliations of one type and a person who is still
             // affiliated at the end of the file has not stopped. Closing it would mean the
             // import invented an end date, and then there would be no open affiliation at all.
-            if (! $isLast) {
-                $interval = $interval->endingOn(MonthlyPeriod::fromKey((string) end($months))->endsOnExclusive());
+            if ($boundaryMonth !== null) {
+                $interval = $interval->endingOn(
+                    MonthlyPeriod::fromKey($boundaryMonth)->startsOn(),
+                    HistoricalInterval::MONTH,
+                );
             }
 
             $segments[] = new AffiliationSegment(
@@ -467,7 +586,12 @@ final class HistoryReconstructor
                 $interval,
                 $months,
                 $first['risk'],
-                array_map(static fn (array $entry): int => (int) $entry['row'], $run),
+                // §13: real staged row ids, deduplicated. The Excel row number stays in the
+                // entries for the review screen's "sheet · fila" label, but it is not provenance.
+                array_values(array_unique(array_merge(...array_map(
+                    static fn (array $entry): array => $entry['source_rows'],
+                    $run,
+                ) ?: [[]]))),
             );
 
             $run = [];
@@ -480,14 +604,31 @@ final class HistoryReconstructor
             /** @var SourceEntityToken $token */
             $token = $entry['token'];
 
+            // §17.4's `skip_affiliation`: a person confirmed that this cell must not become an
+            // affiliation even though it named something. Treated as a refusal, so it *closes* a
+            // segment rather than silently not producing one — which is the difference between
+            // "this person left their EPS" and "this column is not something to read".
+            $type = $entry['type'];
+
+            if ($this->decisions?->skipsAffiliation($type, $token->token) === true) {
+                $token = SourceEntityToken::restore(
+                    $type,
+                    $token->token,
+                    SourceEntityToken::OUTCOME_NEGATIVE,
+                    new SensitiveSourceRedactor,
+                );
+            }
+
             if ($previousToken !== null && $previousToken->sameAs($token)) {
                 $run[] = $entry;
 
                 continue;
             }
 
-            // Every run but the one being replaced is now a past segment, so it closes.
-            $closeRun(false);
+            // The run being replaced closes at the boundary the *next* run opens on. See
+            // `$closeRun`'s docblock: deriving it from this run's last observed month left the
+            // months between two observations covered by nothing at all.
+            $closeRun((string) $month);
 
             $entry['open_unknown'] = $isFirstSegment;
             $isFirstSegment = false;
@@ -496,7 +637,8 @@ final class HistoryReconstructor
             $previousToken = $token;
         }
 
-        $closeRun(true);
+        // The last run has no successor, so it stays open.
+        $closeRun(null);
 
         return $segments;
     }
@@ -535,6 +677,7 @@ final class HistoryReconstructor
                 // printed preview and the INSERT cannot disagree.
                 'amount' => number_format($row->amount, 0, '.', ''),
                 'row' => $row->sourceRowNumber,
+                'source_rows' => $row->provenanceIds(),
             ];
         }
 
@@ -566,7 +709,10 @@ final class HistoryReconstructor
                     MonthlyPeriod::fromKey((string) $run[0]['month']),
                     (string) $previousAmount,
                     array_column($run, 'month'),
-                    array_map(static fn (array $entry): int => (int) $entry['row'], $run),
+                    array_values(array_unique(array_merge(...array_map(
+                        static fn (array $entry): array => $entry['source_rows'],
+                        $run,
+                    ) ?: [[]]))),
                 );
 
                 $run = [];

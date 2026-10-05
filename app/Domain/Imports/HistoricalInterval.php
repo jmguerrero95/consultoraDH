@@ -81,6 +81,86 @@ final readonly class HistoricalInterval implements \JsonSerializable
         return new self(null, self::UNKNOWN, $end?->copy(), $end === null ? null : self::DAY);
     }
 
+    /**
+     * Rebuild from the four stored values, enforcing the rules §8.3 states.
+     *
+     * ## Why this is validated here
+     *
+     * An interval is persisted as four independent columns and read back as four independent
+     * keys. The audit found two writers reading them separately, each with its own default:
+     *
+     * ```php
+     * 'started_on_precision' => $interval['start_precision'] ?? HistoricalInterval::UNKNOWN,
+     * 'ended_on_precision'   => $interval['end_precision'] ?? null,
+     * ```
+     *
+     * so `unknown`/`null` were reachable in combinations that mean nothing — a start with
+     * `precision = unknown` *and* a date, an open interval that declared an end precision, a
+     * monthly boundary on the 17th. Each of those is a boundary the database cannot represent
+     * honestly, and each would have been written silently.
+     *
+     * Four rules, from §8.3:
+     *
+     * 1. `precision = unknown` means undated, so `start` must be null;
+     * 2. a month-precision boundary is the first of its month;
+     * 3. no end means no end precision — an open span's other edge does not exist, so declaring
+     *    a precision for it is claiming something about a date that is not there;
+     * 4. every precision is one of the three known values.
+     *
+     * @param  string|null  $start  null when `$startPrecision` is `unknown`
+     * @param  string|null  $end  null when the span is open
+     *
+     * @throws \InvalidArgumentException when the four values are not a well-formed interval
+     */
+    public static function fromStored(
+        ?string $start,
+        string $startPrecision,
+        ?string $end,
+        ?string $endPrecision,
+    ): self {
+        if (! in_array($startPrecision, [self::DAY, self::MONTH, self::UNKNOWN], true)) {
+            throw new \InvalidArgumentException("Precisión de inicio desconocida: «{$startPrecision}».");
+        }
+
+        if ($startPrecision === self::UNKNOWN) {
+            if ($start !== null) {
+                throw new \InvalidArgumentException('Un inicio de precisión «unknown» no puede tener fecha.');
+            }
+
+            return new self(null, self::UNKNOWN, $end === null ? null : Carbon::parse($end), $endPrecision);
+        }
+
+        if ($start === null) {
+            throw new \InvalidArgumentException("Un inicio de precisión «{$startPrecision}» necesita fecha.");
+        }
+
+        if ($startPrecision === self::MONTH && substr($start, 8, 2) !== '01') {
+            throw new \InvalidArgumentException('Un inicio de precisión mensual debe ser el primer día del mes.');
+        }
+
+        if ($end === null) {
+            if ($endPrecision !== null) {
+                throw new \InvalidArgumentException('Un intervalo abierto no puede declarar precisión de fin.');
+            }
+
+            return new self(Carbon::parse($start), $startPrecision, null, null);
+        }
+
+        if (! in_array($endPrecision, [self::DAY, self::MONTH], true)) {
+            throw new \InvalidArgumentException('Precisión de fin desconocida: «'.($endPrecision ?? 'null').'».');
+        }
+
+        if ($endPrecision === self::MONTH && substr($end, 8, 2) !== '01') {
+            throw new \InvalidArgumentException('Un fin de precisión mensual debe ser el primer día del mes.');
+        }
+
+        if ($end <= $start) {
+            throw new \InvalidArgumentException('El fin de un intervalo debe ser posterior a su inicio.');
+        }
+
+        return new self(Carbon::parse($start), $startPrecision, Carbon::parse($end), $endPrecision);
+    }
+
     /** A copy with a different end, used when a policy or a resolution supplies one. */
     public function endingOn(Carbon $end, string $precision = self::MONTH): self
     {

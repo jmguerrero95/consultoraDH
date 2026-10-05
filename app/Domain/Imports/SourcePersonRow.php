@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Imports;
 
 use App\Domain\Affiliations\SocialSecurityEntityType;
+use App\Models\LegacyImportRow;
 
 /**
  * One person, on one sheet, in one company block.
@@ -39,6 +40,7 @@ use App\Domain\Affiliations\SocialSecurityEntityType;
 final readonly class SourcePersonRow
 {
     /**
+     * @param  int|null  $stagedRowId  `legacy_import_rows.id`, when this row came from staging
      * @param  array<string, SourceEntityToken>  $entities  by `SocialSecurityEntityType` value
      * @param  array<string, string>  $metadata  operator, payroll, reference, phone, address
      */
@@ -62,6 +64,21 @@ final readonly class SourcePersonRow
         public ?string $email,
         public ?string $emailProblem,
         public array $metadata,
+        /**
+         * §13's provenance link.
+         *
+         * NULL on the parse path, where the row has not been staged yet — the stager creates it.
+         * Set on the rebuild path, where the row came out of `legacy_import_rows` and this is
+         * what makes `legacy_import_actions.source_row_ids` point at real rows instead of at
+         * Excel row numbers.
+         *
+         * The audit's finding: "`source_row_ids` holds **Excel row numbers**, not
+         * `legacy_import_rows.id` … Values collide across the 10 sheet-months; `array_unique`
+         * makes it lossy. No DTO carries the staging id." `StageLegacyImport` collected the ids
+         * into `$rowIds` and then never passed them on, so this field is what finally carries
+         * them.
+         */
+        public ?int $stagedRowId = null,
     ) {}
 
     /**
@@ -152,6 +169,7 @@ final readonly class SourcePersonRow
      *
      * @param  array<string, SourceEntityToken>  $entities
      * @param  array<string, string>  $metadata
+     * @param  int|null  $stagedRowId  §13's provenance link; see the constructor
      */
     public static function fromValues(
         string $sheetName,
@@ -172,6 +190,7 @@ final readonly class SourcePersonRow
         ?string $email,
         ?string $emailProblem,
         array $metadata = [],
+        ?int $stagedRowId = null,
     ): self {
         return new self(
             $sheetName,
@@ -193,7 +212,39 @@ final readonly class SourcePersonRow
             $email,
             $emailProblem,
             $metadata,
+            $stagedRowId,
         );
+    }
+
+    /**
+     * The line's identity by position, stable across re-parses.
+     *
+     * The same value `LegacyImportRow::sourceKeyFor()` computes, exposed here so the stager and
+     * the reconstructor cannot drift apart: an issue keyed on one hash and a row keyed on
+     * another would make a resolution unreachable for reasons nobody can see.
+     */
+    public function sourceKey(): string
+    {
+        return LegacyImportRow::sourceKeyFor(
+            $this->sheetName,
+            $this->sheetMonthKey,
+            $this->sourceRowNumber,
+            $this->blockIndex,
+        );
+    }
+
+    /**
+     * §13's provenance for an action derived from this row.
+     *
+     * `legacy_import_rows.id` when the row came from staging, and **an empty list** otherwise —
+     * never the Excel row number. A bare row number collides across the ten sheet-months and
+     * matches nothing in the database, so it is not a weaker link but a wrong one.
+     *
+     * @return list<int>
+     */
+    public function provenanceIds(): array
+    {
+        return $this->stagedRowId === null ? [] : [$this->stagedRowId];
     }
 
     /**
@@ -328,6 +379,49 @@ final readonly class SourcePersonRow
         }
 
         return false;
+    }
+
+    /**
+     * §9.4's third rule: the title and the header name different ARL providers.
+     *
+     * ```text
+     * 1. explicit ARL provider in the company title;
+     * 2. header ARL if there is no explicit provider;
+     * 3. if both exist and contradict, issue `company_arl_metadata_conflict`.
+     * ```
+     *
+     * This is the comparison the previous implementation made impossible: it applied the
+     * priority with `??` at staging time and stored one merged `arl_token`, so a disagreement
+     * and an agreement produced the same column and rule 3 was unreachable. §18 lists the code
+     * and the audit found zero call sites for it.
+     *
+     * Both values are returned rather than a boolean, because §17.4's dialog has to show the
+     * reviewer what each side said before they pick one.
+     *
+     * A refusal in column R is not a second opinion: `NO CAJA` there says the person has no
+     * ARL, which is §9.1's negative evidence rather than a competing provider name.
+     *
+     * @return array{0: string, 1: string}|null `[title, header]`, or null when they agree or only one exists
+     */
+    public function arlProviderConflict(): ?array
+    {
+        $title = $this->company->arlProvider;
+        $header = $this->entities[SocialSecurityEntityType::Arl->value]->token;
+
+        $title = $title === null || trim($title) === '' ? null : trim($title);
+        $header = $header === null || trim($header) === '' ? null : trim($header);
+
+        if ($header !== null && SourceEntityToken::isNegativePhrase($header)) {
+            $header = null;
+        }
+
+        if ($title === null || $header === null) {
+            return null;
+        }
+
+        // Folded, so `POSITIVA` and `Positiva ` are the same provider and do not raise a
+        // conflict nobody can act on.
+        return SheetMonth::fold($title) === SheetMonth::fold($header) ? null : [$title, $header];
     }
 
     /** The person's name, for search and display, without asserting it is their name. */

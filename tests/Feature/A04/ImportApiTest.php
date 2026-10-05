@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Domain\Audit\AuditRecorder;
 use App\Domain\Imports\ImportPlanBuilder;
 use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\LegacyImportStatus;
@@ -161,7 +162,10 @@ it('rebuilding the plan twice does not duplicate actions', function () {
     $this->actingAs($this->user)->postJson("/api/imports/{$import->id}/rebuild-plan")->assertStatus(202);
 
     // Run the job synchronously so the assertion is about the builder, not the queue.
-    (new BuildLegacyImportPlan($import->id))->handle(app(ImportPlanBuilder::class));
+    (new BuildLegacyImportPlan($import->id))->handle(
+        app(ImportPlanBuilder::class),
+        app(AuditRecorder::class),
+    );
 
     $after = LegacyImportAction::query()->where('legacy_import_id', $import->id)->count();
 
@@ -174,7 +178,9 @@ it('applies the plan and writes the masters it promised', function () {
     $planned = $import->actions()->where('state', 'planned')->count();
     expect($planned)->toBeGreaterThan(0);
 
-    $this->actingAs($this->user)->postJson("/api/imports/{$import->id}/apply")->assertOk();
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import))
+        ->assertOk();
 
     $import->refresh();
 
@@ -197,11 +203,13 @@ it('applies the plan and writes the masters it promised', function () {
 it('refuses to apply twice and leaves the data alone', function () {
     $import = plannedImport(stagedImport($this->user));
 
-    $this->actingAs($this->user)->postJson("/api/imports/{$import->id}/apply")->assertOk();
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import))
+        ->assertOk();
     $clientsAfterFirst = Client::query()->count();
 
     $this->actingAs($this->user)
-        ->postJson("/api/imports/{$import->id}/apply")
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import))
         ->assertStatus(409)
         ->assertJsonPath('code', 'already_applied');
 
@@ -222,7 +230,9 @@ it('refuses a second application of a file whose hash was already applied', func
     app(StageLegacyImport::class)->stage($import, $import->absolutePath());
     plannedImport($import->refresh());
 
-    $this->actingAs($this->user)->postJson("/api/imports/{$import->id}/apply")->assertOk();
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import))
+        ->assertOk();
 
     expect($import->fresh()->status)->toBe(LegacyImportStatus::Applied);
 
@@ -254,15 +264,20 @@ it('refuses to apply while a blocker is unresolved and allows it once resolved',
     expect($import->issues()->where('blocking', true)->whereNull('resolved_at')->count())->toBeGreaterThan(0);
 
     $this->actingAs($this->user)
-        ->postJson("/api/imports/{$import->id}/apply")
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import))
         ->assertStatus(409)
         ->assertJsonPath('code', 'unresolved_blockers');
 
     $issue = $import->issues()->where('blocking', true)->firstOrFail();
 
+    // §8.4's answer for a date nobody can supply: the start is undated, with
+    // `precision = unknown`, rather than a guess. `accept_absence` — which this test used to
+    // send — was never a decision in the enum, and the endpoint accepted it anyway, because the
+    // decision was validated as `string|max:64` with no whitelist. It is the audit's finding in
+    // one line: any payload resolved any blocker and changed nothing.
     $this->actingAs($this->user)
         ->postJson("/api/imports/{$import->id}/issues/{$issue->id}/resolve", [
-            'resolution' => ['decision' => 'accept_absence', 'value' => null],
+            'resolution' => ['decision' => 'ignore_date', 'value' => null],
         ])
         ->assertOk();
 
@@ -293,9 +308,14 @@ it('records the retirement policy and never derives a date under the default', f
         'retirement_policy' => ImportRetirementPolicy::MonthEndBoundary->value,
     ])->assertStatus(202);
 
-    expect($import->fresh()->summary['retirement_policy'])->toBe('month_end_boundary');
+    // The column is the source of truth now; `summary` keeps a copy for the audit trail but
+    // nothing reads it, which is the point of moving it out of a JSON blob.
+    expect($import->fresh()->interpretation_policy)->toBe(ImportRetirementPolicy::MonthEndBoundary);
 
-    (new BuildLegacyImportPlan($import->id))->handle(app(ImportPlanBuilder::class));
+    (new BuildLegacyImportPlan($import->id))->handle(
+        app(ImportPlanBuilder::class),
+        app(AuditRecorder::class),
+    );
 
     $rebuilt = LegacyImportAction::query()
         ->where('legacy_import_id', $import->id)

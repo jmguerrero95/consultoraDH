@@ -6,9 +6,19 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Imports\Actions\ApplyImportPlan;
 use App\Domain\Imports\Actions\ImportNotApplicable;
+use App\Domain\Imports\Exceptions\ImportApplyFailed;
+use App\Domain\Imports\Exceptions\ImportNotFound;
+use App\Domain\Imports\Exceptions\InvalidIssueResolution;
+use App\Domain\Imports\ImportFileStore;
+use App\Domain\Imports\ImportLifecycle;
 use App\Domain\Imports\ImportPlan;
+use App\Domain\Imports\ImportPlanIdentity;
 use App\Domain\Imports\ImportRetirementPolicy;
+use App\Domain\Imports\IssueResolution;
+use App\Domain\Imports\IssueResolutionDecision;
+use App\Domain\Imports\LegacyImportIssue as LegacyImportIssueCode;
 use App\Domain\Imports\LegacyImportStatus;
+use App\Domain\Imports\WorkbookGuard;
 use App\Http\Controllers\Controller;
 use App\Jobs\BuildLegacyImportPlan;
 use App\Jobs\ParseLegacyImport;
@@ -16,10 +26,9 @@ use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
 use App\Models\LegacyImportIssue;
 use App\Models\LegacyImportRow;
-use Illuminate\Contracts\Filesystem\Filesystem;
+use App\Services\Imports\ResolveImportIssue;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
@@ -94,8 +103,19 @@ final class ImportController extends Controller
      *
      * The only endpoint that accepts a file. §5: nothing is written to the masters here.
      */
-    public function store(Request $request, Filesystem $storage): JsonResponse
+    public function store(Request $request, ImportFileStore $files): JsonResponse
     {
+        // §4.1's size limit, in the unit Laravel's `max` actually uses for a file: **kilobytes**.
+        //
+        // The previous rule was `'max:'.config('imports.max_bytes')` — 10 485 760 — which reads
+        // as 10 MiB of *bytes* and means 10 MiB × 1024 = **10 GiB** to the validator. The audit's
+        // finding: "Size rule is 1024× too permissive (bytes read as KB)." So the documented limit
+        // was off by three orders of magnitude and nothing tested it against a real file.
+        //
+        // `ceil` rather than `intdiv`, so a limit that is not a whole number of kilobytes does
+        // not round *down* into something smaller than the operator was promised.
+        $maxKilobytes = (int) ceil((int) config('imports.max_bytes', 10 * 1024 * 1024) / 1024);
+
         $validated = $request->validate([
             'file' => [
                 'required',
@@ -103,11 +123,23 @@ final class ImportController extends Controller
                 // Extension only. The guard checks the extension, the real OpenXML structure and
                 // the size; a MIME allow-list here would reject files Excel produces correctly.
                 'extensions:xlsx',
-                'max:'.((int) config('imports.max_bytes', 10 * 1024 * 1024)),
+                'max:'.$maxKilobytes,
             ],
         ], [], ['file' => 'archivo']);
 
         $upload = $validated['file'];
+        $path = (string) $upload->getRealPath();
+
+        // §4.1 and §4.2: the container is checked before anything writes it to disk, so a
+        // zip bomb or a macro-enabled workbook never occupies storage. `WorkbookGuard` also runs
+        // inside `StageLegacyImport`, before the parser — the file lives on disk between the two
+        // points, and a guard that only ran here would be guarding bytes that are no longer the
+        // ones it checked.
+        // No try/catch: `bootstrap/app.php` renders `WorkbookRejected` as a 422 with its own
+        // code, so a rejection raised here and one raised inside the parse job reach the client
+        // through the same path and cannot drift apart.
+        WorkbookGuard::fromConfig()->assertAcceptable($path, $upload->getClientOriginalName());
+
         $uuid = (string) Str::uuid();
 
         $import = LegacyImport::query()->create([
@@ -116,15 +148,16 @@ final class ImportController extends Controller
             'original_filename' => $upload->getClientOriginalName(),
             // The model builds this from the uuid; see `storedRelativePath()`.
             'stored_path' => 'imports/'.$uuid.'/source.xlsx',
-            'sha256' => hash_file('sha256', $upload->getRealPath()),
-            'file_size' => $upload->getSize(),
+            'sha256' => (string) hash_file('sha256', $path),
+            'file_size' => (int) $upload->getSize(),
             'status' => LegacyImportStatus::Uploaded->value,
             'created_by' => $request->user()?->id,
             'summary' => [],
         ]);
 
-        // The model owns the path, so the upload and the parse job cannot disagree about it.
-        $storage->put($import->storedRelativePath(), (string) file_get_contents($upload->getRealPath()));
+        // The model owns the path and `ImportFileStore` owns the disk, so the upload, the parse
+        // job and the cancellation cannot disagree about either.
+        $files->store($import, (string) file_get_contents($path));
 
         // §12.1: a file whose hash was already applied cannot be applied again. The import is
         // still created — §12.1 allows comparing it — but it is marked failed with a pointer to
@@ -132,12 +165,15 @@ final class ImportController extends Controller
         $previous = $this->previouslyApplied($import);
 
         if ($previous !== null) {
-            $import->forceFill([
-                'status' => LegacyImportStatus::Failed->value,
-                'failed_at' => now(),
-                'failure_code' => 'source_already_applied',
-                'failure_message' => 'Este archivo ya se aplicó en la importación '.$previous->uuid.'.',
-            ])->save();
+            $files->delete($import);
+
+            ImportLifecycle::mutate(
+                (int) $import->id,
+                fn (ImportLifecycle $lifecycle) => $lifecycle->markFailed(
+                    'source_already_applied',
+                    'Este archivo ya se aplicó en la importación '.$previous->uuid.'.',
+                ),
+            );
 
             return response()->json([
                 'message' => 'Este archivo ya fue aplicado.',
@@ -146,6 +182,12 @@ final class ImportController extends Controller
             ], 409);
         }
 
+        // §5.1's `queued` state, which nothing ever set before: the upload is `queued` and the
+        // parse job claims `queued → parsing`. The three frontend branches that handled `queued`
+        // were dead code until this.
+        ImportLifecycle::mutate((int) $import->id, fn (ImportLifecycle $lifecycle) => $lifecycle->claimQueued());
+
+        // §15: "debe responder rápido y encolar parsing." The file is never parsed in the request.
         ParseLegacyImport::dispatch($import->id);
 
         return response()->json([
@@ -225,17 +267,35 @@ final class ImportController extends Controller
                 'last_names' => $row->last_names,
                 'affiliation_date_raw' => $row->affiliation_date_raw,
                 'affiliation_date' => $row->affiliation_date,
+                // §8.3: the precision travels with the date, so the screen can render
+                // "marzo 2026 (mes aproximado)" instead of claiming the first was the day.
                 'affiliation_date_precision' => $row->affiliation_date_precision,
+                // §8.1's suggestion and the parse's own diagnosis, so §17.4's dialog has
+                // something to apply and the two passes cannot disagree about the cell.
+                'affiliation_date_suggestion' => $row->affiliation_date_suggestion,
+                'affiliation_date_problem' => $row->affiliation_date_problem,
                 'monthly_amount_cop' => $row->monthly_amount_cop,
+                'amount_problem' => $row->amount_problem,
                 'eps_token' => $row->eps_token,
                 'afp_token' => $row->afp_token,
                 'ccf_token' => $row->ccf_token,
                 'arl_token' => $row->arl_token,
+                // §9.4's two evidence sources, separately: the dialog needs to show both to
+                // ask which one to believe.
+                'arl_token_title' => $row->arl_token_title,
+                'arl_token_row' => $row->arl_token_row,
+                'arl_evidence' => $row->arl_evidence,
+                'arl_permitted_risks' => $row->arl_permitted_risks,
                 'arl_risk_class' => $row->arl_risk_class,
                 'job_title' => $row->job_title,
+                'entity_states' => $row->entity_states,
                 // Already redacted by the parser. §4.3 forbids the original anywhere else.
                 'novelty' => $row->novelty,
+                'retirement_month_token' => $row->retirement_month_token,
                 'retirement_day_count' => $row->retirement_day_count,
+                // §13's provenance identity, so the UI can link a row to its findings across a
+                // re-parse.
+                'source_key' => $row->source_key,
                 'parse_state' => $row->parse_state?->value,
             ])->all(),
             'meta' => [
@@ -293,16 +353,65 @@ final class ImportController extends Controller
                 'message' => $issue->message,
                 // Sanitised by construction: positions and codes only.
                 'context' => $issue->context,
+                // §5.3's stable identity, so the review screen can tell "the same question,
+                // still open" from "the same question, answered".
+                'fingerprint' => $issue->fingerprint,
+                'is_resolved' => $issue->isResolved(),
                 'resolved_by' => $issue->resolved_by,
                 'resolved_at' => $issue->resolved_at,
                 'resolution' => $issue->resolution,
+                // §5.3's record of what was decided, in the reviewer's own words.
+                'resolution_summary' => $issue->resolution === null
+                    ? null
+                    : $this->resolutionOf($issue)->summary(),
+                // §17.4 renders one dialog per code from this list. It is the *backend's*
+                // whitelist — the browser's copy exists for convenience and a crafted request
+                // that bypasses it is refused by `IssueResolution::make()`.
+                'allowed_decisions' => $this->decisionsFor($issue->code),
             ])->all(),
             'meta' => [
                 'current_page' => $issues->currentPage(),
                 'last_page' => $issues->lastPage(),
+                'per_page' => $issues->perPage(),
                 'total' => $issues->total(),
             ],
         ]);
+    }
+
+    /**
+     * §17.4's dialog options for one issue code, from the backend's whitelist.
+     *
+     * @return list<array{value: string, label: string, value_schema: array<string, string>, resolves: bool}>
+     */
+    private function decisionsFor(LegacyImportIssueCode $code): array
+    {
+        return array_values(array_map(
+            static fn (IssueResolutionDecision $decision): array => [
+                'value' => $decision->value,
+                'label' => $decision->label(),
+                // So the dialog builds the right control without a second table of shapes that
+                // could disagree with the validator.
+                'value_schema' => $decision->valueSchema(),
+                'requires_value' => $decision->requiresValue(),
+                'resolves' => $decision->resolves($code),
+            ],
+            IssueResolutionDecision::cases(),
+        ));
+    }
+
+    /**
+     * The stored answer, or null when there is none that still validates.
+     *
+     * A payload written by an older schema is reported as absent rather than crashing the list:
+     * one unreadable answer must not make the whole review screen fail to load.
+     */
+    private function resolutionOf(LegacyImportIssue $issue): IssueResolution
+    {
+        return IssueResolution::fromStored($issue->code, $issue->resolution) ?? IssueResolution::make(
+            $issue->code,
+            IssueResolutionDecision::AcceptSource->value,
+            null,
+        );
     }
 
     /**
@@ -326,19 +435,35 @@ final class ImportController extends Controller
         return response()->json([
             'data' => [
                 'counts' => $plan->counts(),
+                // §17.5's four buckets: Crear / Actualizar / Sin cambios / Bloqueados.
                 'counts_by_type' => $plan->countsByType(),
                 'applicable' => $plan->isApplicable(),
+                // §5.4: the reviewer approves *this* revision, and `apply` submits it back. The
+                // audit found `apply` took no body at all, so the approved plan and the applied
+                // plan could be different sets of rows with nothing recording it.
+                'plan_revision' => $import->plan_revision,
+                'plan_digest' => $import->plan_digest,
+                'plan_built_at' => $import->plan_built_at?->toIso8601String(),
+                // §13: the answers that were in force when this plan was built.
+                'plan_decisions' => $import->plan_decisions,
+                'interpretation_policy' => $import->interpretation_policy?->value,
                 'actions' => $actions->map(fn (LegacyImportAction $action): array => [
                     'id' => $action->id,
                     'ordinal' => $action->ordinal,
                     'action_type' => $action->action_type?->value,
                     'natural_key' => $action->natural_key,
                     'payload' => $action->payload,
+                    'batch_fingerprint' => $action->batch_fingerprint,
+                    // §13: real `legacy_import_rows.id` values, enforced by a trigger.
                     'source_row_ids' => $action->source_row_ids,
+                    // §17.5: what a reviewer sees when they expand an action to its evidence.
+                    'source_evidence' => $action->source_evidence,
+                    'preconditions' => $action->preconditions,
                     'state' => $action->state?->value,
                     'target_type' => $action->target_type,
                     'target_id' => $action->target_id,
                     'skip_reason' => $action->skip_reason,
+                    'failure_message' => $action->failure_message,
                 ])->all(),
             ],
         ]);
@@ -371,7 +496,14 @@ final class ImportController extends Controller
             ], 409);
         }
 
+        // Stored in its own column rather than inside `summary`, because the rule is part of
+        // what the reviewer approves: two plans built under different retirement rules are
+        // different plans, and §8.2's boundary derivation depends on it. Inside a JSON blob it
+        // was neither part of the plan identity nor readable by the reconstructor, which read
+        // `$import->summary['retirement_policy']` — so `interpretation_policy` in the column and
+        // the one the plan was built with could disagree.
         $import->forceFill([
+            'interpretation_policy' => $validated['retirement_policy'],
             'summary' => array_merge($import->summary ?? [], [
                 'retirement_policy' => $validated['retirement_policy'],
             ]),
@@ -387,40 +519,83 @@ final class ImportController extends Controller
         ], 202);
     }
 
-    /** POST /api/imports/{import}/issues/{issue}/resolve */
-    public function resolveIssue(Request $request, int $import, int $issue): JsonResponse
+    /**
+     * POST /api/imports/{import}/issues/{issue}/resolve
+     *
+     * §17.4: "Persistir cada decisión; refrescar plan sin perder el resto."
+     *
+     * ## Why this endpoint no longer writes the row itself
+     *
+     * It used to validate `resolution.decision` as `string|max:64` and `resolution.value` as
+     * `nullable`, write both into the JSON column and set `resolved_at`. The audit's finding:
+     * "**nothing anywhere reads a stored resolution** — resolving a blocker changes no data and
+     * re-opens `ready`." The whole mechanism was satisfiable with any payload at all.
+     *
+     * `ResolveImportIssue` validates against the decision's own schema, checks the answer is
+     * applicable to *this* finding, and performs §5.5's durable effect — so an approved entity
+     * mapping now resolves the next workbook too.
+     */
+    public function resolveIssue(Request $request, int $import, int $issue, ResolveImportIssue $resolver): JsonResponse
     {
         $import = $this->findImport($import);
-        $issue = LegacyImportIssue::query()->findOrFail($issue);
 
-        if ((int) $issue->legacy_import_id !== (int) $import->id) {
-            return response()->json(['message' => 'La incidencia no pertenece a esta importación.'], 404);
-        }
+        $issue = LegacyImportIssue::query()
+            ->where('legacy_import_id', $import->id)
+            ->findOrFail($issue);
 
         $validated = $request->validate([
-            // A free-form payload would let a resolution invent anything; the decision has to
-            // be one of the options the issue itself offers, or an import-specific value.
             'resolution' => ['required', 'array'],
+            // Shape is checked by `IssueResolution`, which knows the schema per decision. The
+            // rule here is only "some text", so a payload for a decision that does not exist is
+            // a 422 with a list of what does rather than Laravel's generic message.
             'resolution.decision' => ['required', 'string', 'max:64'],
-            'resolution.value' => ['nullable'],
+            'resolution.value' => ['nullable', 'array'],
             'resolution.note' => ['nullable', 'string', 'max:500'],
         ]);
 
-        $issue->forceFill([
-            'resolved_by' => $request->user()?->id,
-            'resolved_at' => now(),
-            'resolution' => $validated['resolution'],
-        ])->save();
+        try {
+            $result = $resolver->resolve(
+                $import,
+                $issue,
+                $validated['resolution'],
+                $request->user()?->id,
+            );
+        } catch (InvalidIssueResolution $rejection) {
+            return response()->json([
+                'message' => $rejection->getMessage(),
+                'code' => $rejection->reason,
+            ], 422);
+        }
 
         // §17.4: the plan is refreshed, and nothing else is lost — the resolution is a row, not
         // a replacement of the import.
         BuildLegacyImportPlan::dispatch($import->id);
 
-        return response()->json(['message' => 'Incidencia resuelta. El plan se está reconstruyendo.']);
+        return response()->json([
+            'message' => 'Incidencia resuelta. El plan se está reconstruyendo.',
+            'data' => [
+                'issue' => [
+                    'id' => $result['issue']->id,
+                    'code' => $result['issue']->code,
+                    'fingerprint' => $result['issue']->fingerprint,
+                    'blocking' => $result['issue']->blocking,
+                    'resolved_at' => $result['issue']->resolved_at?->toIso8601String(),
+                    'resolution' => $result['resolution']->toArray(),
+                    'summary' => $result['resolution']->summary(),
+                ],
+                // §5.5: an approved mapping is reusable, and the reviewer is told so rather
+                // than discovering it later.
+                'reusable_mapping' => $result['mapping'] === null ? null : [
+                    'type' => $result['mapping']->type,
+                    'source_key' => $result['mapping']->source_key,
+                    'social_security_entity_id' => $result['mapping']->social_security_entity_id,
+                ],
+            ],
+        ]);
     }
 
     /** POST /api/imports/{import}/issues/bulk-resolve */
-    public function bulkResolve(Request $request, int $import): JsonResponse
+    public function bulkResolve(Request $request, int $import, ResolveImportIssue $resolver): JsonResponse
     {
         $import = $this->findImport($import);
 
@@ -429,25 +604,52 @@ final class ImportController extends Controller
             'issue_ids.*' => ['integer'],
             'resolution' => ['required', 'array'],
             'resolution.decision' => ['required', 'string', 'max:64'],
-            'resolution.value' => ['nullable'],
-            'resolution.note' => ['nullable', 'string', 'max:500'],
+            'resolution.value' => ['nullable', 'array'],
         ]);
 
-        $affected = LegacyImportIssue::query()
+        // The previous version was a single `update()` over the ids: one payload, no validation,
+        // no per-issue applicability check, and no way to report which ones it refused. It also
+        // wrote the *same* resolution to issues of different codes, so one answer could settle a
+        // date question and an entity question at once.
+        //
+        // Now every issue goes through `ResolveImportIssue`, so a bulk action is N validated
+        // answers rather than one blind write. The ids that could not be answered come back with
+        // their reason, because §17.4's dialogs are shaped per code and a bulk action that spans
+        // codes is a partial success a reviewer has to see.
+        $issues = LegacyImportIssue::query()
             ->where('legacy_import_id', $import->id)
             ->whereIn('id', $validated['issue_ids'])
-            ->update([
-                'resolved_by' => $request->user()?->id,
-                'resolved_at' => now(),
-                'resolution' => $validated['resolution'],
-            ]);
+            ->get();
 
-        BuildLegacyImportPlan::dispatch($import->id);
+        $resolved = [];
+        $refused = [];
+
+        foreach ($issues as $issue) {
+            try {
+                $resolver->resolve($import, $issue, $validated['resolution'], $request->user()?->id);
+                $resolved[] = $issue->id;
+            } catch (InvalidIssueResolution $rejection) {
+                $refused[] = [
+                    'id' => $issue->id,
+                    'code' => $issue->code?->value,
+                    'message' => $rejection->getMessage(),
+                    'code_reason' => $rejection->reason,
+                ];
+            }
+        }
+
+        if ($resolved !== []) {
+            BuildLegacyImportPlan::dispatch($import->id);
+        }
 
         return response()->json([
-            'message' => $affected.' incidencia(s) resueltas. El plan se está reconstruyendo.',
-            'resolved' => $affected,
-        ]);
+            'message' => count($resolved).' incidencia(s) resueltas. El plan se está reconstruyendo.',
+            'resolved' => count($resolved),
+            'resolved_ids' => $resolved,
+            // Reported rather than swallowed: a bulk action that quietly ignored half its
+            // targets is how a review looks complete and is not.
+            'refused' => $refused,
+        ], $refused === [] ? 200 : 207);
     }
 
     /** POST /api/imports/{import}/rebuild-plan */
@@ -479,6 +681,36 @@ final class ImportController extends Controller
     {
         $import = $this->findImport($import);
 
+        // §5.4: "La UI de preview debe leer estas acciones; no reconstruir una explicación
+        // distinta a la que realmente aplicará el backend."
+        //
+        // The audit found this endpoint accepted **no request body at all**, so the reviewer
+        // approved one set of rows and the backend applied whatever was in the table by the time
+        // the click landed — after another tab's resolution, or after the plan job finished
+        // late. Nothing was checked and nothing was logged.
+        //
+        // So the confirmation carries the revision and the digest the screen was showing, and the
+        // apply refuses a mismatch with a 409 rather than writing a plan nobody reviewed.
+        // Required once a plan exists, and not before.
+        //
+        // A batch with no plan yet has nothing to confirm — and the useful answer to "apply a
+        // batch that has unresolved blockers" is `409 unresolved_blockers`, not "422 you did not
+        // send a digest". Validating the body unconditionally made the second mask the first, and
+        // the reviewer was told about a missing field instead of about the ten questions waiting
+        // for them.
+        $validated = $request->validate([
+            'plan_revision' => ['nullable', 'integer', 'min:0', Rule::requiredIf($import->plan_revision > 0)],
+            'plan_digest' => ['nullable', 'string', 'size:64', 'regex:/^[0-9a-f]{64}$/', Rule::requiredIf($import->plan_revision > 0)],
+        ]);
+
+        $expected = $import->plan_revision > 0
+            ? ImportPlanIdentity::of(
+                $import,
+                (int) $validated['plan_revision'],
+                (string) $validated['plan_digest'],
+            )
+            : null;
+
         $plan = new ImportPlan(
             $import,
             $import->actions()->orderBy('ordinal')->get()->all(),
@@ -486,12 +718,24 @@ final class ImportController extends Controller
         );
 
         try {
-            $applied = $applier->handle($import, $plan);
+            $applied = $applier->handle($import, $plan, $expected);
         } catch (ImportNotApplicable $refusal) {
             return response()->json([
                 'message' => $refusal->userMessage(),
                 'code' => $refusal->reason,
                 'previous_import_id' => $refusal->previousImportId,
+                // What the batch actually holds now, so the screen can offer "recargar" without
+                // the reviewer guessing.
+                'current_plan_revision' => $import->fresh()->plan_revision,
+                'current_plan_digest' => $import->fresh()->plan_digest,
+            ], 409);
+        } catch (ImportApplyFailed $failure) {
+            // §12.3: nothing was written and the batch is recoverable. The reason is sanitised:
+            // action types, natural keys and closed reason codes only.
+            return response()->json([
+                'message' => $failure->getMessage(),
+                'code' => 'apply_failed',
+                'stranded_actions' => $failure->stranded,
             ], 409);
         }
 
@@ -502,24 +746,30 @@ final class ImportController extends Controller
     }
 
     /** POST /api/imports/{import}/cancel */
-    public function cancel(Request $request, int $import): JsonResponse
+    public function cancel(Request $request, int $import, ImportFileStore $files): JsonResponse
     {
         $import = $this->findImport($import);
 
         try {
-            $import->moveTo(LegacyImportStatus::Cancelled);
-        } catch (\DomainException $refusal) {
+            // Through the lifecycle, under the row lock: the previous version called
+            // `moveTo()`, whose `\DomainException` carried a Spanish sentence with no code, and
+            // a queued parse job could still move the batch back afterwards.
+            ImportLifecycle::mutate($import->id, fn (ImportLifecycle $lifecycle) => $lifecycle->cancel());
+        } catch (ImportNotApplicable $refusal) {
             return response()->json([
-                'message' => $refusal->getMessage(),
-                'code' => 'wrong_state',
+                'message' => $refusal->userMessage(),
+                'code' => $refusal->reason,
             ], 409);
         }
 
         // The private copy goes with the cancellation: it is a file of national identifiers and
         // §4.3's whole premise is that it is not kept once there is no reason to.
-        if ($import->stored_path !== null) {
-            Storage::delete($import->stored_path);
-        }
+        //
+        // Through `ImportFileStore`, not `Storage::delete($import->stored_path)`. The audit's
+        // finding: "store()/cancel() use the default disk, `absolutePath()` uses `imports.disk`"
+        // — so with `IMPORT_DISK` set to anything other than `FILESYSTEM_DISK`, cancelling left
+        // the workbook on disk.
+        $files->delete($import);
 
         return response()->json(['message' => 'Importación cancelada.']);
     }
@@ -532,7 +782,11 @@ final class ImportController extends Controller
      */
     private function findImport(int $import): LegacyImport
     {
-        return LegacyImport::query()->findOrFail($import);
+        try {
+            return ImportLifecycle::observe($import)->import();
+        } catch (ImportNotFound $missing) {
+            abort($missing->toArray());
+        }
     }
 
     /** §12.1: an import whose file hash was already applied. */
@@ -582,6 +836,14 @@ final class ImportController extends Controller
                 'blocking' => $import->unresolvedBlockingIssues(),
             ],
             'actions' => $import->actions()->count(),
+            // §5.4: the revision and digest `apply` must be given back.
+            'plan' => [
+                'revision' => $import->plan_revision,
+                'digest' => $import->plan_digest,
+                'built_at' => $import->plan_built_at?->toIso8601String(),
+                'decisions' => $import->plan_decisions,
+                'interpretation_policy' => $import->interpretation_policy?->value,
+            ],
             // §17.5 reads this to disable Apply. The server enforces it again in the action.
             'applicable' => $import->status === LegacyImportStatus::Ready
                 && $import->unresolvedBlockingIssues() === 0,

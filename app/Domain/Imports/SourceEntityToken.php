@@ -90,6 +90,54 @@ final readonly class SourceEntityToken
     }
 
     /**
+     * Rebuild from what staging recorded, keeping §9.1's *outcome*.
+     *
+     * ## Why `read()` cannot be reused here
+     *
+     * The rebuild path used to call `read()` on the stored token string, which re-judges the
+     * cell from scratch. Two of §9.1's distinctions do not survive that:
+     *
+     * - an **absent** cell stored as an empty token comes back with `problem = null`, which
+     *   `isUsable()` reports as usable. So a column nobody wrote in could become an affiliation;
+     * - `OUTCOME_BARE_AFFIRMATIVE` and `OUTCOME_SUGGESTION` are re-derived from the text, which
+     *   is right for the first pass and is a second opinion for the second. The parse already
+     *   decided; `rebuild-plan` restores its decision.
+     *
+     * So the stored outcome wins, and only a token with *no* recorded outcome is judged — which
+     * happens for a row staged before this release and for a hand-written fixture.
+     */
+    public static function restore(
+        SocialSecurityEntityType $type,
+        string $token,
+        ?string $problem,
+        SensitiveSourceRedactor $redactor,
+        ?string $sheet = null,
+        ?int $row = null,
+    ): self {
+        $clean = trim((string) $redactor->redact(trim($token), $sheet, $row));
+        $folded = SheetMonth::fold($clean);
+
+        $known = in_array($problem, [
+            self::OUTCOME_NEGATIVE,
+            self::OUTCOME_BARE_AFFIRMATIVE,
+            self::OUTCOME_SUGGESTION,
+            self::OUTCOME_RESOLVED,
+        ], true);
+
+        if ($known) {
+            // A recorded refusal whose text folded to nothing would otherwise become an
+            // "absent" cell, which is the opposite of what it was.
+            return new self($type, $folded, $problem, $clean);
+        }
+
+        if ($folded === '') {
+            return new self($type, '', null, '');
+        }
+
+        return new self($type, $folded, self::judge($folded, $type), $clean);
+    }
+
+    /**
      * The verdict for a folded cell.
      *
      * Negation first, and this ordering is the whole point: `NO PORVENIR` must be a refusal
@@ -138,10 +186,46 @@ final readonly class SourceEntityToken
         ) === 1;
     }
 
-    /** Whether this cell can be turned into an affiliation without a person deciding. */
+    /**
+     * Whether this cell can be turned into an affiliation without a person deciding.
+     *
+     * "Usable" means *decided*. A token in `suggestion` is a perfectly good assertion of an
+     * affiliation — it is the one that needs §9.2's mapping — so it is not usable, but it does
+     * assert something.
+     */
     public function isUsable(): bool
     {
         return $this->problem === null;
+    }
+
+    /**
+     * Whether this cell says the person **was** affiliated to something.
+     *
+     * ## Why this is not `isUsable()`
+     *
+     * The two were conflated, and the consequence was that §9.2's `unresolved_social_entity` was
+     * unreachable from both ends at once:
+     *
+     * - `AffiliationSegment::isAffiliation()` returned `isUsable()`, which is false for every
+     *   token in `suggestion` — i.e. every token the catalogue does not already contain, which is
+     *   the *only* case that needs a mapping;
+     * - and `ImportPlanBuilder::collectUnresolvedEntities()` skipped anything that was not an
+     *   affiliation, so the question was never asked.
+     *
+     * So a positive name that no approved mapping resolved produced no action **and** no issue:
+     * the EPS/AFP/CCF/ARL history vanished with nothing for a reviewer to see, while the rate and
+     * the relationship were applied. That is the audit's finding, and its stated consequence —
+     * "a client's entire contribution history can vanish while their rate and relationship are
+     * all applied".
+     *
+     * `suggestion` is therefore an assertion that asks a question. `negative` (a refusal) and
+     * `bare_affirmative` (§9.1's `SI`) are not, and neither is an absent cell.
+     */
+    public function assertsEntity(): bool
+    {
+        return $this->problem === null
+            || $this->problem === self::OUTCOME_SUGGESTION
+            || $this->problem === self::OUTCOME_RESOLVED;
     }
 
     /** Whether a person has to look at this cell. */

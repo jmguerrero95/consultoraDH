@@ -36,6 +36,15 @@ function detail(overrides: Partial<LegacyImportDetail> = {}): LegacyImportDetail
         rows: 2560,
         issues: { total: 59, blocking: 59 },
         actions: 0,
+        // A04-R1: §5.4's identity travels with the detail payload so the review screen can
+        // show which revision it is about to approve and submit it back on Apply.
+        plan: {
+            revision: 3,
+            digest: 'd'.repeat(64),
+            built_at: '2026-10-04T12:05:00Z',
+            decisions: undefined,
+            interpretation_policy: 'manual_only',
+        },
         applicable: false,
         ...overrides,
     };
@@ -135,7 +144,9 @@ describe('imports.apply', () => {
         // The code is the API contract (§18) and it is what distinguishes "already applied"
         // from "blockers open" from "wrong state" — three different things for an operator,
         // and the difference is invisible in the message alone.
-        await expect(businessApi.imports.apply(1)).rejects.toMatchObject({
+        await expect(
+            businessApi.imports.apply(1, { plan_revision: 3, plan_digest: 'd'.repeat(64) }),
+        ).rejects.toMatchObject({
             status: 409,
             code: 'unresolved_blockers',
         });
@@ -147,9 +158,65 @@ describe('imports.apply', () => {
             vi.fn(async () => json({ message: 'Importación aplicada.', data: detail({ status: 'applied', applied_at: '2026-10-04T13:00:00Z' }) })),
         );
 
-        const payload = await businessApi.imports.apply(1);
+        const payload = await businessApi.imports.apply(1, { plan_revision: 3, plan_digest: 'd'.repeat(64) });
 
         expect(payload.data.status).toBe('applied');
+    });
+
+    it('sends the revision and digest it was given, because §5.4 binds the write to them', async () => {
+        // The CSRF handshake is a real request in this client, so it has to be answered
+        // separately. See the refusal test above for why.
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+            String(input).includes('/sanctum/csrf-cookie')
+                ? new Response(null, { status: 204 })
+                : json({ message: 'Importación aplicada.', data: detail({ status: 'applied' }) }),
+        );
+
+        vi.stubGlobal('fetch', fetchMock);
+
+        await businessApi.imports.apply(1, { plan_revision: 7, plan_digest: 'e'.repeat(64) });
+
+        const [, init] = callTo(fetchMock, '/api/imports/1/apply');
+
+        // A04-R1. The audit found this call sent **no body at all**, so nothing connected the
+        // operator's confirmation to the rows that were written: a plan rebuilt between the
+        // preview and the click was applied silently, and the screen reported success.
+        expect(JSON.parse(String(init.body))).toEqual({
+            plan_revision: 7,
+            plan_digest: 'e'.repeat(64),
+        });
+    });
+
+    it('surfaces the stale-plan refusal with the revision the batch now holds', async () => {
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL) =>
+                String(input).includes('/sanctum/csrf-cookie')
+                    ? new Response(null, { status: 204 })
+                    : json(
+                          {
+                              message: 'El plan cambió después de que lo revisara.',
+                              code: 'stale_plan',
+                              current_plan_revision: 4,
+                              current_plan_digest: 'f'.repeat(64),
+                          },
+                          409,
+                      ),
+            ),
+        );
+
+        await expect(
+            businessApi.imports.apply(1, { plan_revision: 3, plan_digest: 'd'.repeat(64) }),
+        ).rejects.toMatchObject({ status: 409, code: 'stale_plan' });
+
+        // The revision the batch now holds is what lets the screen offer "recargar" without the
+        // reviewer guessing, and it is in the payload rather than a top-level field because
+        // `ApiError` exposes the decoded body that way.
+        await expect(
+            businessApi.imports.apply(1, { plan_revision: 3, plan_digest: 'd'.repeat(64) }),
+        ).rejects.toMatchObject({
+            payload: { current_plan_revision: 4, current_plan_digest: 'f'.repeat(64) },
+        });
     });
 });
 
@@ -160,6 +227,11 @@ describe('imports.plan', () => {
                 counts: { create: 8, update: 0, unchanged: 1, applied: 0, blocked: 2, total: 9 },
                 counts_by_type: { create_client: 2, create_rate: 3 },
                 applicable: false,
+                plan_revision: 3,
+                plan_digest: 'd'.repeat(64),
+                plan_built_at: '2026-10-04T12:05:00Z',
+                plan_decisions: undefined,
+                interpretation_policy: 'manual_only',
                 actions: [
                     {
                         id: 1,
@@ -172,6 +244,10 @@ describe('imports.plan', () => {
                         target_type: null,
                         target_id: null,
                         skip_reason: null,
+                        batch_fingerprint: 'c'.repeat(64),
+                        source_evidence: { sheets: ['ENERO 2026'], rows: [3, 4], cells: ['ENERO 2026 · fila 3'] },
+                        preconditions: { target_exists: false },
+                        failure_message: null,
                     },
                 ],
             },
@@ -210,13 +286,25 @@ describe('imports.resolveIssue', () => {
 
         vi.stubGlobal('fetch', fetchMock);
 
-        await businessApi.imports.resolveIssue(1, 7, { decision: 'close_on_last_seen', note: null });
+        await businessApi.imports.resolveIssue(1, 7, {
+            decision: 'close_on_disappearance',
+            value: { date: '2026-03-01', precision: 'month' },
+            note: null,
+        });
 
         const [url, init] = callTo(fetchMock, '/issues/7/resolve');
 
         expect(url).toContain('/api/imports/1/issues/7/resolve');
         expect(JSON.parse(String(init.body))).toEqual({
-            resolution: { decision: 'close_on_last_seen', note: null },
+            // A04-R1: `close_on_last_seen` was never a decision the backend had — the audit
+            // found the old test sending an invented name, which the endpoint accepted because
+            // `decision` was validated as `string|max:64` and the only whitelist lived in the
+            // page's own `switch`. `decision` is now a closed union on both sides.
+            resolution: {
+                decision: 'close_on_disappearance',
+                value: { date: '2026-03-01', precision: 'month' },
+                note: null,
+            },
         });
     });
 });

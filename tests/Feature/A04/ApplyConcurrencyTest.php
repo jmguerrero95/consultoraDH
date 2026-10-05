@@ -10,7 +10,6 @@ use App\Domain\Imports\ImportPlan;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Models\Client;
 use App\Models\Company;
-use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -84,17 +83,6 @@ function billingLockKey(): int
     expect($key)->toBeInt();
 
     return $key;
-}
-
-/** A ready-to-apply import, with its plan built. */
-function applicableImport(): LegacyImport
-{
-    $import = stagedImport(userWithRole('Operations'));
-    plannedImport($import);
-
-    expect($import->fresh()->status)->toBe(LegacyImportStatus::Ready);
-
-    return $import->fresh();
 }
 
 it('lets only one of two concurrent applies through, with a real row lock', function () {

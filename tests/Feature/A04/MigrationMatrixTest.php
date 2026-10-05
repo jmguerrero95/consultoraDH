@@ -319,9 +319,13 @@ it('rolls A04 back without touching the tables A02 owns', function (): void {
         'sheet_name' => 'ENERO 2026',
         'sheet_month' => '2026-01-01',
         'source_row_number' => 1,
+        'block_index' => 0,
         'company_block_key' => 'x',
         'normalized_payload' => [],
         'fingerprint' => str_repeat('d', 64),
+        // NOT NULL since A04-R1: a staged line's identity by position is what §13's provenance
+        // and §18's issue identity are built on, so a row without one is not a row.
+        'source_key' => LegacyImportRow::sourceKeyFor('ENERO 2026', '2026-01', 1, 0),
         'parse_state' => 'staged',
     ]);
 

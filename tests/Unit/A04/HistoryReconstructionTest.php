@@ -7,6 +7,7 @@ use App\Domain\Imports\HistoricalInterval;
 use App\Domain\Imports\HistoryReconstructor;
 use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\LegacyImportIssue;
+use App\Domain\Imports\RelationshipEpisode;
 use App\Domain\Imports\SensitiveSourceRedactor;
 use Tests\Support\SyntheticWorkbook;
 
@@ -142,7 +143,15 @@ it('does not treat a transfer across consecutive months as an overlap', function
     expect($reconstruction->overlaps())->toBeEmpty();
 });
 
-it('blocks an overlap where the same person is at two employers in the same month', function () {
+it('does not call a shared month an overlap, because §8.5 says it is not one', function () {
+    // §8.5: "Mismo cliente observado en varias empresas el mismo mes **NO significa
+    // automáticamente paralelismo**: en el archivo real aparece masivamente durante
+    // retiros/traslados."
+    //
+    // This test previously asserted the opposite — that co-observation *is* an overlap — and the
+    // audit's finding was that the implementation did exactly that: 427 `overlapping_company_history`
+    // blockers against 320 identities in the delivered workbook, which is the shape §8.5's warning
+    // describes and not a finding a reviewer could act on.
     $rows = rowsOf((new SyntheticWorkbook)
         ->sheetWithBlocks('ENERO 2026', [
             ['title' => ANDINA, 'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '01/01/2026'])]],
@@ -151,9 +160,81 @@ it('blocks an overlap where the same person is at two employers in the same mont
 
     $reconstruction = (new HistoryReconstructor)->reconstruct($rows);
 
-    expect($reconstruction->overlaps())->toHaveCount(1);
-    expect($reconstruction->overlaps()[0]->isSimultaneous())->toBeTrue();
-    expect($reconstruction->overlaps()[0]->sharedMonths)->toBe(['2026-01']);
+    // Two episodes exist — §8.1 keys them by company as well as client and start, so two
+    // employers are two episodes…
+    expect($reconstruction->episodes())->toHaveCount(2)
+        // …and neither is an overlap, because both intervals are open and "both are open" is not
+        // evidence of anything. `HistoricalInterval::overlaps()` would say they intersect; §8.5's
+        // rule is that the intersection has to be affirmative.
+        ->and($reconstruction->overlaps())->toBeEmpty();
+
+    // And no disappearance either: both episodes were seen in the file's last month, and §8.4
+    // excludes that case — "si aparece en el último mes del libro y no hay retiro, puede
+    // proponerse abierto". A co-observed pair in one month raises nothing at all, which is the
+    // correct outcome for the shape §8.5 says is usually a transfer.
+});
+
+it('blocks a genuine overlap: two closed episodes whose dated intervals intersect', function () {
+    // §8.5's actual test — "después de reconstruir intervalos, solapamiento real" — and the case
+    // that needs bounded evidence to be affirmative.
+    //
+    // Two employers, each with a retirement note, and the first one's derived end boundary falls
+    // *inside* the second's interval. Both ends are known, so nothing here is an artefact of a
+    // missing date, and a person really was at two employers on one day.
+    $workbook = (new SyntheticWorkbook)
+        // NORTE from January, with no note: open.
+        ->sheetWithBlocks('ENERO 2026', [['title' => NORTE, 'people' => [
+            SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '01/01/2026']),
+        ]]])
+        ->sheetWithBlocks('FEBRERO 2026', [
+            ['title' => NORTE, 'people' => [
+                SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '01/01/2026']),
+            ]],
+            // ANDINA from February, retiring in February: the note's month, and
+            // `month_end_boundary` closes the episode on the first of March.
+            ['title' => ANDINA, 'people' => [
+                SyntheticWorkbook::personRow([
+                    'H' => '10101010',
+                    'F' => '01/02/2026',
+                    'D' => 'RETIRAR 5 DIAS FEBRERO',
+                ]),
+            ]],
+        ])
+        // NORTE again in March and April, so its episode is still open and still covers March.
+        ->sheetWithBlocks('MARZO 2026', [['title' => NORTE, 'people' => [
+            SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '01/01/2026']),
+        ]]])
+        ->sheetWithBlocks('ABRIL 2026', [['title' => NORTE, 'people' => [
+            SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '01/01/2026']),
+        ]]]);
+
+    $reconstruction = (new HistoryReconstructor(ImportRetirementPolicy::MonthEndBoundary))
+        ->reconstruct(rowsOf($workbook));
+
+    $overlaps = $reconstruction->overlaps();
+
+    expect($overlaps)->toHaveCount(1);
+
+    // The evidence a reviewer needs: which two episodes, and which side carries the dated
+    // boundary. The bounded one is found by shape rather than by position, because
+    // `CompanyOverlap` does not promise an order and a test that depended on one would be
+    // asserting an accident of iteration.
+    $closed = collect([$overlaps[0]->first, $overlaps[0]->second])
+        ->first(fn (RelationshipEpisode $episode): bool => ! $episode->interval->isOpen());
+
+    expect($closed)->not->toBeNull()
+        // §8.2's boundary: the note names February, and `month_end_boundary` closes the episode on
+        // the first of March — a month, and §8.3 says so.
+        ->and($closed->interval->end?->format('Y-m-d'))->toBe('2026-03-01')
+        ->and($closed->interval->endPrecision)->toBe(HistoricalInterval::MONTH)
+        ->and($closed->interval->describeEnd())->toBe('Marzo 2026 (mes aproximado)');
+
+    // `isSimultaneous()` reports whether the two were *seen* together, which is evidence for the
+    // reviewer — not what made this an overlap. Here they were: NORTE is on the February sheet as
+    // well. §8.5's rule is that co-observation is not the test, and this pair satisfies both
+    // conditions without relying on either.
+    expect($overlaps[0]->isSimultaneous())->toBeTrue()
+        ->and($overlaps[0]->sharedMonths)->toBe(['2026-02']);
 });
 
 it('does not report an overlap when one relationship simply was never closed', function () {

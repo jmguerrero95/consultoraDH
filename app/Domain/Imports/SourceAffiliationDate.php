@@ -75,19 +75,30 @@ final readonly class SourceAffiliationDate
      *                                                           it, before any string cast: a serial arrives as a number and a date-formatted
      *                                                           cell arrives as a date object. The date case is the *good* one — somebody's Excel
      *                                                           stored a real date, so there is no serial and no format to guess at.
+     * @param  string|null  $precision  what the caller already knows, used only for a
+     *                                  date object. See `readStaged()` for why that matters.
      */
     public static function read(
         float|int|string|\DateTimeInterface|null $value,
         SensitiveSourceRedactor $redactor,
         ?string $sheet = null,
         ?int $row = null,
+        ?string $precision = null,
     ): self {
         if ($value === null) {
             return new self(null, self::PRECISION_UNKNOWN, 'missing_date', null, '');
         }
 
         if ($value instanceof \DateTimeInterface) {
-            return new self($value->format('Y-m-d'), self::PRECISION_DAY, null, null, $value->format('Y-m-d'));
+            // A date object carries no precision of its own: `MARZO 2026` in a cell Excel
+            // formatted as a date arrives here indistinguishable from a real day. When the
+            // caller already knows the source asserted a month, that knowledge is kept —
+            // otherwise the value would be silently promoted to a day, which is exactly what
+            // §8.3's "no mostrar un mes como un día" forbids and what the audit found
+            // happening on every rebuild.
+            $resolved = $precision === self::PRECISION_MONTH ? self::PRECISION_MONTH : self::PRECISION_DAY;
+
+            return new self($value->format('Y-m-d'), $resolved, null, null, $value->format('Y-m-d'));
         }
 
         // A numeric cell is a serial. This has to be tested before the string path,
@@ -246,6 +257,55 @@ final readonly class SourceAffiliationDate
         }
 
         return abs($candidate - $thisYear) > 10 ? null : (string) $candidate;
+    }
+
+    /**
+     * Rebuild from what staging stored, without re-diagnosing.
+     *
+     * ## Why this exists instead of `read()` on the staged column
+     *
+     * `rebuild-plan` has to reconstruct the row from the database. The previous version called
+     * `read()` with the staged `affiliation_date`, which arrived as a `Carbon`, so `read()`
+     * took the date-object branch and hard-coded `PRECISION_DAY`. The audit's finding, verbatim:
+     * "`hydrate()` passes a Carbon ⇒ `read():89-91` forces `PRECISION_DAY`.
+     * `affiliation_date_precision` and `affiliation_date_raw` are never read."
+     *
+     * The chain that followed, for every one of the workbook's month-precision cells:
+     *
+     * - `HistoricalInterval::intervalFor()`'s `PRECISION_MONTH => MONTH` arm became unreachable,
+     *   so `default => DAY` caught it and `started_on_precision` was written as `day`;
+     * - `describeStart()` then rendered `01/03/2026` — a day the source never asserted;
+     * - `suggestion` was destroyed, so §17.4's "use the suggested date" button had nothing to
+     *   read even after the resolution contract was fixed;
+     * - a problem cell was staged with `affiliation_date = NULL` and re-diagnosed as
+     *   `missing_date`, while the issue it came from said `ambiguous_date` — so the plan and
+     *   the issue list disagreed about the same cell;
+     * - and `fingerprint()` differed between the two passes, because `normalizedPayload()`
+     *   includes the precision, so the stored fingerprint was wrong for every month row.
+     *
+     * ## The rule
+     *
+     * Staging is the record of what the parse concluded. A rebuild restores that conclusion;
+     * it never re-derives it. Re-deriving is what turned a reviewer-visible `ambiguous_date`
+     * into a plan-level `missing_date` behind the reviewer's back.
+     *
+     * The parse's own diagnosis is preserved verbatim, which is also why the staged
+     * `affiliation_date_problem` and `affiliation_date_suggestion` columns exist.
+     */
+    public static function readStaged(
+        ?string $isoDate,
+        ?string $precision,
+        ?string $problem,
+        ?string $suggestion,
+        ?string $raw,
+    ): self {
+        return new self(
+            $isoDate,
+            $precision ?? self::PRECISION_UNKNOWN,
+            $problem,
+            $suggestion,
+            $raw ?? '',
+        );
     }
 
     /** Whether this cell may open a relationship without a person deciding first. */

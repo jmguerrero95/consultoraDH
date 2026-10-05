@@ -58,7 +58,10 @@ final readonly class AffiliationSegment implements \JsonSerializable
     /** Whether the segment asserts an affiliation at all. */
     public function isAffiliation(): bool
     {
-        return $this->token !== null && $this->token->isUsable();
+        // `assertsEntity()`, not `isUsable()`: see the note there. `isUsable()` is false for
+        // every token still waiting on §9.2's mapping, which is exactly the token this predicate
+        // exists to keep.
+        return $this->token !== null && $this->token->assertsEntity();
     }
 
     /** Whether the segment asserts the *absence* of one, which closes the previous one. */

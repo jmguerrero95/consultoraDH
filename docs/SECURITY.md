@@ -757,6 +757,28 @@ mensaje de error es el camino más fácil por el que el sistema de archivos del 
 al navegador. `WorkbookParseFailed` se comporta igual, y por eso un fallo del analizador es
 un estado controlado y nunca un stack trace.
 
+#### Se llama en dos sitios, y el segundo es el que importa
+
+`WorkbookGuard` se invoca en `ImportController::store()` —antes de escribir nada en disco, para
+que un archivo rechazado no ocupe espacio— **y** en `StageLegacyImport::stage()`, justo antes
+de que el analizador abra el archivo.
+
+El segundo es el que no es opcional. Entre los dos puntos el archivo vive en disco, así que un
+guard ejecutado sólo en el primero estaría verificando bytes que ya no son los que se van a
+leer. Y el segundo punto es el que cruza **todo** lector: un endpoint nuevo que se olvidara de
+una línea en un controlador no podría saltárselo.
+
+Una auditoría externa encontró que el guard no se llamaba en **ninguno** de los dos. Era una
+defensa completa y documentada, con cero puntos de invocación.
+
+#### El límite de tamaño estaba 1024 veces mal
+
+`'max:'.config('imports.max_bytes')` son **kilobytes** para Laravel y **bytes** para la
+configuración. El techo documentado de 10 MiB era un techo real de 10 GiB.
+
+Corregido a `ceil($maxBytes / 1024)`, y con una prueba que pregunta al validador qué aceptaría
+en lugar de confiar en que `max:` hace lo que parece.
+
 ### El original no se archiva con el código
 
 `.local-fixtures/` está en `.gitignore`, y el verificador se niega a correr si el archivo no

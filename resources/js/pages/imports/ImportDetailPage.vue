@@ -11,10 +11,13 @@ import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
 
 import type {
+    ImportAction,
     ImportIssue,
+    ImportIssueDecision,
     ImportPlan as ImportPlanPayload,
     ImportRetirementPolicy,
     ImportRow,
+    IssueResolutionDecision,
     LegacyImportDetail,
 } from '@/types/api';
 
@@ -81,9 +84,27 @@ const rowSearch = ref('');
 const issueCode = ref('');
 const issueUnresolved = ref(true);
 
+/**
+ * §15's "Listados con paginación server-side".
+ *
+ * The audit's Area U finding: `loadRows()` and `loadIssues()` took the first page and threw the
+ * rest away. On the real workbook that is 2.560 rows and a few hundred findings, so the reviewer
+ * searching for one client was shown page one of a table they could not reach the end of — and
+ * the search ran server-side, so a document on page forty was *invisible* while the screen said
+ * it had been filtered.
+ *
+ * The page and the search term are now part of the request, and `total` is displayed, so a
+ * reviewer can see that a filter matched 3 of 2.560 rather than assuming it matched everything.
+ */
+const rowPage = ref(1);
+const issuePage = ref(1);
+const rowsMeta = ref({ current_page: 1, last_page: 1, per_page: 50, total: 0 });
+const issuesMeta = ref({ current_page: 1, last_page: 1, per_page: 50, total: 0 });
+
 const confirmApply = ref(false);
 const resolving = ref<ImportIssue | null>(null);
-const resolutionDecision = ref('');
+const resolutionDecision = ref<IssueResolutionDecision | ''>('');
+const resolutionValue = ref<Record<string, string>>({});
 const resolutionNote = ref('');
 
 let requestId = 0;
@@ -120,7 +141,13 @@ async function load(): Promise<void> {
 
 async function loadRows(): Promise<void> {
     try {
-        rows.value = (await businessApi.imports.rows(importId.value, { search: rowSearch.value })).data;
+        const payload = await businessApi.imports.rows(importId.value, {
+            search: rowSearch.value === '' ? undefined : rowSearch.value,
+            page: rowPage.value,
+        });
+
+        rows.value = payload.data;
+        rowsMeta.value = payload.meta;
     } catch {
         rows.value = [];
     }
@@ -128,12 +155,14 @@ async function loadRows(): Promise<void> {
 
 async function loadIssues(): Promise<void> {
     try {
-        issues.value = (
-            await businessApi.imports.issues(importId.value, {
-                code: issueCode.value,
-                unresolved: issueUnresolved.value,
-            })
-        ).data;
+        const payload = await businessApi.imports.issues(importId.value, {
+            code: issueCode.value === '' ? undefined : issueCode.value,
+            unresolved: issueUnresolved.value,
+            page: issuePage.value,
+        });
+
+        issues.value = payload.data;
+        issuesMeta.value = payload.meta;
     } catch {
         issues.value = [];
     }
@@ -164,24 +193,73 @@ function schedulePoll(): void {
     pollTimer = setTimeout(() => void load(), 3000);
 }
 
+/**
+ * §5.4's confirmation: the revision and digest this screen is showing.
+ *
+ * ## Why the identity travels with the click
+ *
+ * A04-R1. The audit found `apply` accepted no request body, so nothing connected the operator's
+ * confirmation to the rows that were written. A resolution in another tab, or the plan job
+ * finishing late, meant a different plan was applied — and the screen reported success while
+ * reporting a different revision than the one that ran.
+ *
+ * The digest is captured **when the plan is loaded**, not when Apply is pressed. Capturing it at
+ * press time would defeat the check: `loadPlan()` runs on a timer, and reading the current value
+ * on click would send the newest revision even if the reviewer had been looking at an older one
+ * for ten minutes.
+ */
 async function applyPlan(): Promise<void> {
+    const confirmation = plan.value;
+
+    if (confirmation === null || confirmation.plan_digest === null) {
+        error.value = 'No hay un plan que aplicar. Recargue la página.';
+
+        return;
+    }
+
     busy.value = true;
     notice.value = null;
     error.value = null;
 
     try {
-        const payload = await businessApi.imports.apply(importId.value);
+        const payload = await businessApi.imports.apply(importId.value, {
+            plan_revision: confirmation.plan_revision,
+            plan_digest: confirmation.plan_digest,
+        });
 
         notice.value = payload.message;
         confirmApply.value = false;
 
         await load();
     } catch (cause) {
+        if (cause instanceof ApiError && (STALE_PLAN_CODES as readonly string[]).includes(cause.code ?? '')) {
+            // The plan moved. Nothing was written, and the useful next step is to read the new
+            // one — so the dialog closes and the plan is reloaded, with the reason stated.
+            stalePlan.value = cause.message;
+            confirmApply.value = false;
+
+            await loadPlan();
+
+            return;
+        }
+
         error.value = cause instanceof ApiError ? cause.message : 'No fue posible aplicar el plan.';
     } finally {
         busy.value = false;
     }
 }
+
+/**
+ * §15's 409 codes that all mean the same first step: reload the plan and read it again.
+ *
+ * Distinct codes, one action. `stale_plan` is the case the audit describes — the content
+ * changed. `plan_rebuilt` means it was rebuilt to identical content, so re-confirming is enough.
+ * `plan_not_confirmed` means the request arrived without the identity, which this screen never
+ * does and which a scripted client would.
+ */
+const STALE_PLAN_CODES = ['stale_plan', 'plan_rebuilt', 'plan_not_confirmed'] as const;
+
+const stalePlan = ref<string | null>(null);
 
 async function setPolicy(policy: ImportRetirementPolicy): Promise<void> {
     busy.value = true;
@@ -218,7 +296,141 @@ async function rebuildPlan(): Promise<void> {
 function openResolution(issue: ImportIssue): void {
     resolving.value = issue;
     resolutionDecision.value = '';
+    resolutionValue.value = {};
     resolutionNote.value = '';
+}
+
+/**
+ * The decisions this issue accepts, from the server.
+ *
+ * ## Why this list is not written here
+ *
+ * A04-R1. The previous `resolutionOptions()` was a `switch` in this file listing decision names
+ * that **did not exist in the backend** — `accept_absence`, `correct_date`, `keep_first`,
+ * `acknowledge`, `recognise_transfer`, `authorise_parallel` — none of which the API would ever
+ * accept, while the API accepted any string at all. So the dialog offered answers that failed and
+ * hid the ones that worked, and the backend's actual whitelist (`IssueResolutionDecision`) was
+ * invisible to the only person who needed it.
+ *
+ * `allowed_decisions` comes from `IssueResolution::allowedFor()` on the server, so there is one
+ * whitelist and it is the one that validates.
+ */
+function resolutionOptions(issue: ImportIssue): ImportIssueDecision[] {
+    return issue.allowed_decisions;
+}
+
+const selectedDecision = computed<ImportIssueDecision | null>(() => {
+    if (resolving.value === null || resolutionDecision.value === '') {
+        return null;
+    }
+
+    return resolutionOptions(resolving.value).find((option) => option.value === resolutionDecision.value) ?? null;
+});
+
+/**
+ * The fields the chosen decision needs, as a list the template can render controls from.
+ *
+ * `value_schema` is the server's declaration — the same one `IssueResolution` validates against —
+ * so a dialog cannot offer a field the API will refuse, and a field the API requires cannot be
+ * missing from the form.
+ */
+const decisionFields = computed<{ key: string; rule: string }[]>(() =>
+    Object.entries(selectedDecision.value?.value_schema ?? {}).map(([key, rule]) => ({ key, rule })),
+);
+
+/**
+ * Whether the form has everything the chosen decision requires.
+ *
+ * A `requires_value` decision with a missing field is a guaranteed 422, so the button is
+ * disabled instead — with the reason being visible rather than the click failing.
+ */
+const resolutionValueComplete = computed(
+    () => decisionFields.value.every((field) => (resolutionValue.value[field.key] ?? '').trim() !== ''),
+);
+
+const canSubmitResolution = computed(
+    () =>
+        resolving.value !== null
+        && resolutionDecision.value !== ''
+        && (!selectedDecision.value?.requires_value || resolutionValueComplete.value)
+        && !busy.value,
+);
+
+/** §9.1's four columns. Mirrors `SocialSecurityEntityType`, which is what the value must be. */
+const entityTypes = ['EPS', 'AFP', 'ARL', 'CCF'] as const;
+
+/** §9.4's tie-break: which of the two contradicting sources to believe. */
+const arlSources = ['title', 'header'] as const;
+
+/** A label per declared rule, so the dialog names the field rather than showing a bare input. */
+function fieldLabel(field: { key: string; rule: string }): string {
+    const base: Record<string, string> = {
+        date: 'Fecha',
+        boundary: 'Frontera',
+        precision: 'Precisión',
+        positive_integer: 'Identificador',
+        risk_class: 'Nivel de riesgo (1 a 5)',
+        entity_name: 'Nombre de la entidad',
+        entity_type: 'Tipo de entidad',
+        source_key: 'Fila de referencia',
+        tax_id: 'NIT',
+        optional_single_char: 'Dígito de verificación',
+        optional_text: 'Nombre (opcional)',
+        arl_source: 'Fuente del ARL',
+    };
+
+    return base[field.rule] ?? field.key;
+}
+
+/**
+ * Help per rule, where the answer is not obvious from the type.
+ *
+ * §8.3's precision and §9.4's ARL source are the two that matter: both are cases where picking
+ * the wrong value silently changes somebody's history, and a bare dropdown gives no reason to
+ * think about it.
+ */
+function fieldHelp(field: { key: string; rule: string }): string | null {
+    const help: Record<string, string> = {
+        precision: 'Con «mes» la fecha debe ser el primer día del mes: el archivo afirma el mes, no el día.',
+        boundary: 'La fecha donde termina el episodio anterior y empieza el siguiente.',
+        arl_source: '§9.4 da prioridad al título de la empresa; elija la columna sólo si el título no la nombra.',
+        source_key: 'La fila de la que es duplicado. Búsquela en la pestaña Filas.',
+        entity_name: 'Se creará en el catálogo sólo cuando se aplique el plan.',
+    };
+
+    return help[field.rule] ?? null;
+}
+
+/** The value the API expects for each field's declared type. */
+function typedResolutionValue(): Record<string, unknown> | null {
+    const decision = selectedDecision.value;
+
+    if (decision === null || !decision.requires_value) {
+        return null;
+    }
+
+    const value: Record<string, unknown> = {};
+
+    for (const field of decisionFields.value) {
+        const raw = (resolutionValue.value[field.key] ?? '').trim();
+
+        switch (field.rule) {
+            case 'positive_integer':
+            case 'risk_class':
+                value[field.key] = Number.parseInt(raw, 10);
+                break;
+            case 'optional_text':
+            case 'optional_single_char':
+                // Null rather than `''`: the schemas distinguish "not supplied" from "supplied
+                // empty", and `IssueResolution::asOptionalText()` treats `''` as absent anyway.
+                value[field.key] = raw === '' ? null : raw;
+                break;
+            default:
+                value[field.key] = raw;
+        }
+    }
+
+    return value;
 }
 
 async function submitResolution(): Promise<void> {
@@ -233,10 +445,18 @@ async function submitResolution(): Promise<void> {
     try {
         const payload = await businessApi.imports.resolveIssue(importId.value, issue.id, {
             decision: resolutionDecision.value,
+            value: typedResolutionValue(),
             note: resolutionNote.value === '' ? null : resolutionNote.value,
         });
 
         notice.value = payload.message;
+
+        // §5.5: an approved entity mapping is reusable, and saying so is the difference between a
+        // reviewer trusting that the answer generalises and guessing whether it does.
+        if (payload.data.reusable_mapping !== null) {
+            notice.value = `${payload.message} «${payload.data.reusable_mapping.source_key}» queda asociado a esa entidad para las próximas importaciones.`;
+        }
+
         resolving.value = null;
 
         await load();
@@ -247,8 +467,18 @@ async function submitResolution(): Promise<void> {
     }
 }
 
-watch([rowSearch], () => void loadRows());
-watch([issueCode, issueUnresolved], () => void loadIssues());
+// A new search or filter starts at page one. Paging forward from the previous page's cursor is
+// how a reviewer ends up on an empty page and concludes the filter found nothing.
+watch(rowSearch, () => {
+    rowPage.value = 1;
+    void loadRows();
+});
+watch([issueCode, issueUnresolved], () => {
+    issuePage.value = 1;
+    void loadIssues();
+});
+watch(rowPage, () => void loadRows());
+watch(issuePage, () => void loadIssues());
 watch(tab, (value) => {
     if (value === 'filas' && rows.value.length === 0) {
         void loadRows();
@@ -338,6 +568,27 @@ function amount(value: number | null): string {
     return `$${value.toLocaleString('es-CO')}`;
 }
 
+/**
+ * §12.3's three outcomes plus `planned`.
+ *
+ * A04-R1 added `failed`, and it has to be visibly different from `planned` and `applied`: the
+ * audit's finding was that an action which could not be executed was left `planned` and counted
+ * as applied, so an operator reading the plan after the fact had no way to tell which writes
+ * actually happened. The three states now look like three different things.
+ */
+function actionStateClass(action: ImportAction): string {
+    switch (action.state) {
+        case 'applied':
+            return 'cdh-badge--success';
+        case 'skipped':
+            return 'cdh-badge--info';
+        case 'failed':
+            return 'cdh-badge--error';
+        default:
+            return 'cdh-badge--warning';
+    }
+}
+
 function severityClass(issue: ImportIssue): string {
     if (issue.blocking) {
         return 'cdh-badge--error';
@@ -346,33 +597,6 @@ function severityClass(issue: ImportIssue): string {
     return issue.severity === 'warning' ? 'cdh-badge--warning' : 'cdh-badge--info';
 }
 
-function resolutionOptions(issue: ImportIssue): string[] {
-    // Each code gets the answers §17.4 lists for it, and nothing else. A free-text decision
-    // would let a resolution mean anything, which is how a blocker becomes a silent override.
-    switch (issue.code) {
-        case 'invalid_affiliation_date':
-            return ['accept_absence', 'use_suggested_date', 'correct_date'];
-        case 'invalid_company_tax_id':
-        case 'company_identity_conflict':
-            return ['correct_tax_id', 'keep_separate_companies'];
-        case 'duplicate_conflicting_row':
-            return ['keep_first', 'keep_last', 'keep_both'];
-        case 'relationship_disappeared_without_retirement':
-            return ['close_on_last_seen', 'leave_open', 'correct_date'];
-        case 'overlapping_company_history':
-            return ['recognise_transfer', 'authorise_parallel', 'correct_date'];
-        case 'affiliation_entity_unknown':
-            return ['ignore_cell', 'map_entity'];
-        case 'existing_rate_conflict':
-        case 'existing_client_conflict':
-        case 'existing_company_conflict':
-        case 'existing_relationship_conflict':
-        case 'existing_affiliation_conflict':
-            return ['keep_existing', 'use_source'];
-        default:
-            return ['acknowledge'];
-    }
-}
 </script>
 
 <template>
@@ -620,6 +844,38 @@ function resolutionOptions(issue: ImportIssue): string[] {
                         </tbody>
                     </table>
                 </div>
+
+                    <!--
+                        §15: "Listados con paginación server-side".
+
+                        The count matters as much as the buttons. A reviewer who searched for one
+                        document needs to see that it matched 1 of 2.560, because a filtered
+                        first page that happens to be empty is indistinguishable from "not found" —
+                        and the previous version took page one and discarded the rest, so on the
+                        real workbook a document on page forty was invisible while the screen
+                        claimed it had been filtered.
+                    -->
+                    <nav v-if="rowsMeta.last_page > 1" class="cdh-pagination" aria-label="Paginación de filas">
+                        <button
+                            type="button"
+                            class="cdh-link"
+                            :disabled="rowsMeta.current_page <= 1"
+                            @click="rowPage = rowsMeta.current_page - 1"
+                        >
+                            Anterior
+                        </button>
+                        <span class="cdh-pagination__label">
+                            Página {{ rowsMeta.current_page }} de {{ rowsMeta.last_page }} · {{ rowsMeta.total }} filas
+                        </span>
+                        <button
+                            type="button"
+                            class="cdh-link"
+                            :disabled="rowsMeta.current_page >= rowsMeta.last_page"
+                            @click="rowPage = rowsMeta.current_page + 1"
+                        >
+                            Siguiente
+                        </button>
+                    </nav>
             </section>
 
             <!-- ---------------------------------------------------- Incidencias -->
@@ -665,7 +921,19 @@ function resolutionOptions(issue: ImportIssue): string[] {
                             <tr v-for="issue in issues" :key="issue.id">
                                 <th scope="row" class="cdh-table__primary">{{ issue.code }}</th>
                                 <td><span class="cdh-badge" :class="severityClass(issue)">{{ issue.severity }}</span></td>
-                                <td>{{ issue.message }}</td>
+                                <td>
+                                    {{ issue.message }}
+                                    <!--
+                                        §5.3's record of what was decided. The previous cell said
+                                        only "Sí", so a reviewer opening the batch later could
+                                        not tell what the earlier answer actually was — and the
+                                        audit found the answer was stored but never read by
+                                        anything at all.
+                                    -->
+                                    <span v-if="issue.resolution_summary" class="cdh-text-muted d-block">
+                                        {{ issue.resolution_summary }}
+                                    </span>
+                                </td>
                                 <td>{{ issue.resolved_at ? 'Sí' : 'No' }}</td>
                                 <td>
                                     <button
@@ -682,6 +950,29 @@ function resolutionOptions(issue: ImportIssue): string[] {
                         </tbody>
                     </table>
                 </div>
+
+                    <nav v-if="issuesMeta.last_page > 1" class="cdh-pagination" aria-label="Paginación de incidencias">
+                        <button
+                            type="button"
+                            class="cdh-link"
+                            :disabled="issuesMeta.current_page <= 1"
+                            @click="issuePage = issuesMeta.current_page - 1"
+                        >
+                            Anterior
+                        </button>
+                        <span class="cdh-pagination__label">
+                            Página {{ issuesMeta.current_page }} de {{ issuesMeta.last_page }} ·
+                            {{ issuesMeta.total }} incidencias
+                        </span>
+                        <button
+                            type="button"
+                            class="cdh-link"
+                            :disabled="issuesMeta.current_page >= issuesMeta.last_page"
+                            @click="issuePage = issuesMeta.current_page + 1"
+                        >
+                            Siguiente
+                        </button>
+                    </nav>
             </section>
 
             <!-- ---------------------------------------------------------- Plan -->
@@ -691,6 +982,30 @@ function resolutionOptions(issue: ImportIssue): string[] {
                 </div>
 
                 <template v-else>
+                    <!--
+                        §5.4's identity. Shown because the reviewer is about to approve *this*
+                        revision, and the number is what appears in the audit trail if something
+                        goes wrong afterwards. The digest is truncated for display and sent whole.
+                    -->
+                    <AppAlert
+                        v-if="stalePlan !== null"
+                        variant="warning"
+                        title="El plan cambió"
+                        class="mb-3"
+                    >
+                        {{ stalePlan }}
+                    </AppAlert>
+
+                    <p class="cdh-text-muted mb-3">
+                        Revisión del plan <strong>{{ plan.plan_revision }}</strong>
+                        <span v-if="plan.plan_built_at">
+                            · generado el {{ new Date(plan.plan_built_at).toLocaleString('es-CO') }}
+                        </span>
+                        <span v-if="plan.plan_digest !== null">
+                            · huella <code>{{ plan.plan_digest.slice(0, 12) }}</code>
+                        </span>
+                    </p>
+
                     <!-- §17.5's four buckets, with counts. -->
                     <div class="cdh-stat-grid mb-4">
                         <div class="cdh-stat">
@@ -729,18 +1044,38 @@ function resolutionOptions(issue: ImportIssue): string[] {
                                     <th scope="row" class="cdh-table__primary">{{ action.action_type }}</th>
                                     <td>{{ action.natural_key }}</td>
                                     <td>
-                                        <span
-                                            class="cdh-badge"
-                                            :class="action.state === 'applied' ? 'cdh-badge--success' : 'cdh-badge--info'"
-                                        >
+                                        <span class="cdh-badge" :class="actionStateClass(action)">
                                             {{ action.state }}
                                         </span>
                                         <span v-if="action.skip_reason" class="cdh-text-muted d-block">
                                             {{ action.skip_reason }}
                                         </span>
+                                        <!--
+                                            A04-R1. `failed` is new, and it is the state the
+                                            audit found unreachable: an action whose payload
+                                            could not be written was skipped silently, counted as
+                                            a success and left `planned`, while the batch still
+                                            reported `applied`. §12.3's reason has to be on
+                                            screen.
+                                        -->
+                                        <span v-if="action.failure_message" class="cdh-form-hint d-block">
+                                            {{ action.failure_message }}
+                                        </span>
                                     </td>
-                                    <!-- §13: which rows of the file produced this write. -->
-                                    <td>{{ action.source_row_ids.join(', ') || '—' }}</td>
+                                    <!--
+                                        §13 and §17.5: which lines of the file produced this
+                                        write, and the *ids* so the claim is verifiable rather
+                                        than a row number that collides across the ten sheets.
+                                    -->
+                                    <td>
+                                        <span v-if="action.source_evidence !== null && action.source_evidence.cells.length > 0">
+                                            {{ action.source_evidence.cells.join(' · ') }}
+                                        </span>
+                                        <span v-else class="cdh-text-muted">—</span>
+                                        <span v-if="action.source_row_ids.length > 0" class="cdh-text-muted d-block">
+                                            filas {{ action.source_row_ids.join(', ') }}
+                                        </span>
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>
@@ -780,7 +1115,7 @@ function resolutionOptions(issue: ImportIssue): string[] {
                 confirm-label="Guardar decisión"
                 cancel-label="Cancelar"
                 :busy="busy"
-                :disabled="resolutionDecision === ''"
+                :disabled="!canSubmitResolution"
                 @confirm="submitResolution"
                 @cancel="resolving = null"
             >
@@ -796,12 +1131,50 @@ function resolutionOptions(issue: ImportIssue): string[] {
                         <option value="">Elija una opción</option>
                         <option
                             v-for="option in resolving === null ? [] : resolutionOptions(resolving)"
-                            :key="option"
-                            :value="option"
+                            :key="option.value"
+                            :value="option.value"
                         >
-                            {{ option }}
+                            {{ option.label }}{{ option.resolves ? '' : ' (no quita el bloqueo)' }}
                         </option>
                     </select>
+                </div>
+
+                <!--
+                    The fields come from the chosen decision's `value_schema`, which is the
+                    server's own declaration. A04-R1: the previous dialog had no value inputs at
+                    all — it sent `{decision, note}` and nothing else — so every decision that
+                    needs a value (a date, an entity id, a NIT) could not be expressed. The
+                    server refused those payloads, which is the right answer, and the screen had
+                    no way to give it one.
+                -->
+                <div v-if="decisionFields.length > 0" class="cdh-form-field mb-3">
+                    <div v-for="field in decisionFields" :key="field.key" class="mb-2">
+                        <label class="cdh-form-label" :for="`resolution-${field.key}`">
+                            {{ fieldLabel(field) }}
+                        </label>
+                        <select
+                            v-if="field.rule === 'entity_type' || field.rule === 'arl_source'"
+                            :id="`resolution-${field.key}`"
+                            v-model="resolutionValue[field.key]"
+                            class="form-control form-control-sm"
+                        >
+                            <option value="">Elija…</option>
+                            <option v-for="option in field.rule === 'entity_type' ? entityTypes : arlSources" :key="option" :value="option">
+                                {{ option }}
+                            </option>
+                        </select>
+                        <input
+                            v-else
+                            :id="`resolution-${field.key}`"
+                            v-model="resolutionValue[field.key]"
+                            class="form-control form-control-sm"
+                            :type="field.rule === 'date' ? 'date' : 'text'"
+                            :inputmode="field.rule === 'positive_integer' || field.rule === 'risk_class' ? 'numeric' : undefined"
+                            :min="field.rule === 'risk_class' ? '1' : undefined"
+                            :max="field.rule === 'risk_class' ? '5' : undefined"
+                        />
+                        <p v-if="fieldHelp(field)" class="cdh-form-hint">{{ fieldHelp(field) }}</p>
+                    </div>
                 </div>
 
                 <div class="cdh-form-field">

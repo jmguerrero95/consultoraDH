@@ -220,11 +220,27 @@ Lo esencial de lo entregado:
   acción monetaria.
 - Aplicación de todo o nada, una sola vez, con proveniencia por acción.
 
+**Remediación posterior a una auditoría externa.** Once áreas con defectos,
+corregidas en [`docs/TASKS/A04-R1.md`](TASKS/A04-R1.md). Los tres que más pesan:
+el guard del contenedor no se llamaba; `apply` aceptaba un cuerpo vacío, así que
+el plan revisado y el plan aplicado podían ser distintos; y las resoluciones se
+validaban como texto libre y **nadie las leía**, de modo que responder todas las
+preguntas correctamente producía los datos sin transformar. Ahora hay un
+conjunto cerrado de decisiones con esquema propio, la revisión es la que se
+aplica, y `WorkbookGuard` se invoca en el upload y antes del parser.
+
+**A04 no tiene aprobación externa** y la auditoría debe repetirse sobre el commit
+de remediación.
+
 Detalle en [docs/TASKS/A04.md](TASKS/A04.md).
 
 ## Tareas pendientes
 
-### A05 — Planillas y validación operativa
+### A05 — Planillas y validación operativa — **bloqueada**
+
+> **No se empieza hasta que A04 tenga aprobación externa.** La remediación de
+> A04-R1 está verificada localmente; eso no es una aprobación. A05 ampliaría la
+> superficie sobre código que acaba de cambiar de forma sustancial.
 
 Alcance: generación de planillas, liquidación de aportes, validación de
 consistencias y descarga.

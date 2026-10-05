@@ -2,6 +2,11 @@
 
 declare(strict_types=1);
 
+use App\Domain\Imports\Actions\ImportNotApplicable;
+use App\Domain\Imports\Exceptions\ImportApplyFailed;
+use App\Domain\Imports\Exceptions\InvalidIssueResolution;
+use App\Domain\Imports\Exceptions\UnusableImportAction;
+use App\Domain\Imports\WorkbookRejected;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\RequireAnyAbility;
 use App\Http\Middleware\SecurityHeaders;
@@ -102,6 +107,86 @@ return Application::configure(basePath: dirname(__DIR__))
                 'message' => 'La aplicación no puede atender solicitudes en este momento.',
                 'code' => 'trusted_hosts_not_configured',
             ], 503);
+        });
+
+        /*
+        |----------------------------------------------------------------------
+        | A04's domain refusals
+        |----------------------------------------------------------------------
+        |
+        | §15 asks for "422 estándar" on an invalid request and "409 con código de dominio" on
+        | an invalid state. Both now come from typed exceptions rather than from each controller
+        | remembering to build a response, so they are rendered in one place here — and a refusal
+        | raised from a job, a service or the container cannot escape as a 500.
+        |
+        | The messages are written for a person and carry no payload content: an invalid
+        | resolution names the field and the shape it expected, never the value somebody tried
+        | to submit, because the value may be a document number.
+        |
+        */
+
+        $exceptions->render(function (ImportNotApplicable $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->userMessage(),
+                'code' => $e->reason,
+                'previous_import_id' => $e->previousImportId,
+            ], 409);
+        });
+
+        $exceptions->render(function (InvalidIssueResolution $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 422);
+        });
+
+        $exceptions->render(function (UnusableImportAction $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            // §12.3: nothing was written. 409 rather than 500 because this is a decision about
+            // the plan, not a fault in the server — and because the batch is intact and
+            // recoverable, which is the sentence the operator needs.
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+                'action' => $e->actionDescription,
+            ], 409);
+        });
+
+        $exceptions->render(function (ImportApplyFailed $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => 'apply_failed',
+                'stranded_actions' => $e->stranded,
+            ], 409);
+        });
+
+        // A workbook the guard or the parser refused. §4.1 and §4.2 make it a 422: the
+        // operator's file is the thing that is wrong, and the sentence is already written for
+        // them. `WorkbookRejected` never carries the server path.
+        $exceptions->render(function (WorkbookRejected $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->userMessage(),
+                'code' => $e->reason,
+            ], 422);
         });
 
         $exceptions->render(function (AuthenticationException $e, Request $request) {

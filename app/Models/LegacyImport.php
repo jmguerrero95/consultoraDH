@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Domain\Imports\ImportFileStore;
 use App\Domain\Imports\ImportProfile;
+use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\LegacyImportStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -12,7 +14,6 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Storage;
 
 /**
  * One uploaded workbook and everything that happened to it.
@@ -47,6 +48,11 @@ use Illuminate\Support\Facades\Storage;
  * @property string|null $failure_code
  * @property string|null $failure_message
  * @property array<string, mixed>|null $summary
+ * @property int $plan_revision
+ * @property string|null $plan_digest
+ * @property Carbon|null $plan_built_at
+ * @property ImportRetirementPolicy|null $interpretation_policy
+ * @property array<string, mixed>|null $plan_decisions
  */
 #[Fillable([
     'uuid',
@@ -66,6 +72,11 @@ use Illuminate\Support\Facades\Storage;
     'parse_attempts',
     'apply_attempts',
     'summary',
+    'plan_revision',
+    'plan_digest',
+    'plan_built_at',
+    'interpretation_policy',
+    'plan_decisions',
 ])]
 class LegacyImport extends Model
 {
@@ -85,6 +96,10 @@ class LegacyImport extends Model
             'apply_attempts' => 'integer',
             'file_size' => 'integer',
             'summary' => 'array',
+            'plan_revision' => 'integer',
+            'plan_built_at' => 'immutable_datetime',
+            'interpretation_policy' => ImportRetirementPolicy::class,
+            'plan_decisions' => 'array',
         ];
     }
 
@@ -163,14 +178,17 @@ class LegacyImport extends Model
     /**
      * The absolute path of the private copy, or null when it is gone.
      *
-     * Null rather than a fabricated path: a caller that gets null refuses the work, and a caller
-     * handed a path that does not exist fails somewhere deeper with a worse message.
+     * A convenience over `ImportFileStore::absolutePath()`, which is where disk selection now
+     * lives. It used to be implemented here, against `config('imports.disk')`, while the upload
+     * endpoint wrote through the *default* disk and `cancel()` deleted from the default disk
+     * again — three sites, two disks, and a configuration that only worked while the two
+     * happened to agree.
+     *
+     * Deprecated in favour of `ImportFileStore`, which the upload, parse and cancel paths all
+     * use; kept so a caller that only has a model is not forced to know about the store.
      */
     public function absolutePath(): ?string
     {
-        $disk = Storage::disk(config('imports.disk'));
-        $relative = $this->storedRelativePath();
-
-        return $disk->exists($relative) ? $disk->path($relative) : null;
+        return app(ImportFileStore::class)->absolutePath($this);
     }
 }

@@ -125,8 +125,23 @@ return [
     */
 
     'queue' => [
-        'connection' => env('IMPORT_QUEUE_CONNECTION', 'redis'),
+        /**
+         * `null` means "whatever the application uses".
+         *
+         * The previous default was a hardcoded `redis`, and the jobs read it into their
+         * constructor — so importing in a test suite that sets `QUEUE_CONNECTION=sync` silently
+         * pushed the work onto Redis instead of running it inline, and every test that expected
+         * staging to have happened by the time the endpoint returned saw an import still sitting
+         * in `queued`. §16 asks the import jobs to use the existing Redis infrastructure, and a
+         * deployment sets `IMPORT_QUEUE_CONNECTION=redis` to get it; a suite that wants inline
+         * execution gets it without having to know this file exists.
+         */
+        'connection' => env('IMPORT_QUEUE_CONNECTION'),
+
+        /** The queue *name*, so imports do not compete with A03's generation backlog. */
         'queue' => env('IMPORT_QUEUE', 'imports'),
+
+        /** §16: "deja suficiente información para reintentar". */
         'tries' => (int) env('IMPORT_TRIES', 3),
         'timeout' => (int) env('IMPORT_TIMEOUT', 600),
     ],

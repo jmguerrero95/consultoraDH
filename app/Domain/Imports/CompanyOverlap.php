@@ -7,12 +7,22 @@ namespace App\Domain\Imports;
 /**
  * §8.5: one person's episodes at two companies whose rebuilt intervals overlap.
  *
- * ## Co-occurrence is not a parallel
+ * ## Co-occurrence is not a parallel, and neither is an unbounded span
  *
- * §8.5 is blunt about this: in the real file the same client appears at several companies in
- * the same month *en masse* during retirements and transfers. A rule that blocked on
- * co-occurrence would bury the real findings under thousands of false ones, so the test is
- * overlap of the rebuilt intervals, and the months in which both were actually observed.
+ * §8.5 is blunt about co-occurrence: in the real file the same client appears at several
+ * companies in the same month *en masse* during retirements and transfers, so a shared month
+ * on its own is not a finding.
+ *
+ * The specification's actual test is the rebuilt intervals — "después de reconstruir intervalos" —
+ * and `HistoryReconstructor::genuineOverlap()` is where that is decided. What reaches this class
+ * has therefore already been shown to overlap *affirmatively*: both ends known and
+ * intersecting, or a dated start falling inside a closed interval, or (as the narrowest case)
+ * two unbounded episodes co-observed in an overlapping month.
+ *
+ * `sharedMonths` is carried as *evidence for the reviewer*, not as the reason the finding
+ * exists. §8.5 warns that this shape is usually a transfer recorded a month late, which is why
+ * `isSimultaneous()` reads as a hint about which of §8.5's three resolutions is plausible rather
+ * than as a classification.
  *
  * ## The three answers, and why none is chosen here
  *
@@ -35,11 +45,13 @@ final readonly class CompanyOverlap implements \JsonSerializable
     ) {}
 
     /**
-     * Whether the two were seen together, or whether one of them simply never closed.
+     * Whether the two were seen in the same month.
      *
-     * The difference matters to whoever resolves it: two employers in the same month is a
-     * different question from one open relationship that predates the next one, and the first
-     * is usually a transfer recorded a month late.
+     * §8.5's three resolutions are "corregir fecha", "reconocer transferencia", "autorizar
+     * paralelo con motivo explícito", and this is which of them the evidence leans towards. When
+     * both employers appear in one sheet, the likeliest answer is a transfer written a month
+     * late; when the overlap comes only from dated boundaries, it is likelier to be a wrong date
+     * or a genuine parallel. It is a hint for the dialog, never a decision.
      */
     public function isSimultaneous(): bool
     {
