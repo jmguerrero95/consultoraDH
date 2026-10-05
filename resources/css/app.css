@@ -1726,3 +1726,114 @@ button.cdh-link {
 .cdh-stat--link:focus-visible {
     border-color: var(--cdh-primary, #1f5f8b);
 }
+
+/* --- Import stepper (A04) -------------------------------------------------- */
+
+/*
+    Five steps, each one either reached or not. The current step is marked with
+    `aria-current="step"` as well as with colour, so the state is in the
+    accessibility tree and not only in the paint.
+*/
+
+.cdh-stepper {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0 0 1.5rem;
+    padding: 0;
+    list-style: none;
+    counter-reset: cdh-step;
+}
+
+.cdh-stepper__step {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.875rem;
+    font-size: 0.875rem;
+    color: var(--cdh-text-muted, #5b6472);
+    background: var(--cdh-surface-muted, #f6f7f9);
+    border: 1px solid var(--cdh-border, #e6e8ec);
+    border-radius: 999px;
+    counter-increment: cdh-step;
+}
+
+.cdh-stepper__step::before {
+    content: counter(cdh-step);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.375rem;
+    height: 1.375rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--cdh-text-muted, #5b6472);
+    background: var(--cdh-surface, #fff);
+    border: 1px solid var(--cdh-border, #e6e8ec);
+    border-radius: 50%;
+}
+
+.cdh-stepper__step--done {
+    color: var(--cdh-success, #1c7a4a);
+    border-color: var(--cdh-success, #1c7a4a);
+}
+
+.cdh-stepper__step--done::before {
+    content: '\2713';
+    color: #fff;
+    background: var(--cdh-success, #1c7a4a);
+    border-color: var(--cdh-success, #1c7a4a);
+}
+
+.cdh-stepper__step--current {
+    color: var(--cdh-primary, #1f5f8b);
+    font-weight: 600;
+    border-color: var(--cdh-primary, #1f5f8b);
+}
+
+.cdh-stepper__step--current::before {
+    color: #fff;
+    background: var(--cdh-primary, #1f5f8b);
+    border-color: var(--cdh-primary, #1f5f8b);
+}
+
+/* --- Import status badges (A04) -------------------------------------------- */
+
+/*
+    One badge per lifecycle state. Each has its own colour *and* its own label from
+    the server, because §17.1 asks for the state to be readable and a colour alone
+    is not readable.
+*/
+
+.cdh-badge--uploaded,
+.cdh-badge--queued,
+.cdh-badge--parsing,
+.cdh-badge--applying {
+    color: var(--cdh-primary, #1f5f8b);
+    background: #e8f0f7;
+}
+
+.cdh-badge--review {
+    color: #8a5a00;
+    background: #fdf3e0;
+}
+
+.cdh-badge--ready {
+    color: var(--cdh-primary, #1f5f8b);
+    background: #e8f0f7;
+}
+
+.cdh-badge--applied {
+    color: var(--cdh-success, #1c7a4a);
+    background: #e6f4ec;
+}
+
+.cdh-badge--failed {
+    color: #a32020;
+    background: #fbeaea;
+}
+
+.cdh-badge--cancelled {
+    color: var(--cdh-text-muted, #5b6472);
+    background: var(--cdh-surface-muted, #f6f7f9);
+}

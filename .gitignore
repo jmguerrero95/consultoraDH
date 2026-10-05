@@ -40,6 +40,14 @@
 /storage/app/private/*
 /storage/app/public/*
 
+# --- Private source data ------------------------------------------------------
+# Real Excel workbooks of client payroll live here for local verification only.
+# They are production-like data full of personal information and, in the delivered
+# file, credentials in plain text inside company titles. One `git add .` would
+# publish all of it, so the directory is ignored here as well as being kept out of
+# every test and out of the review archive.
+/.local-fixtures/
+
 # --- Local archives ----------------------------------------------------------
 # A full project snapshot (including node_modules and build output) must never
 # enter the repository.

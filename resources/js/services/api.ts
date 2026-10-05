@@ -13,6 +13,14 @@ function comoMesDeVigencia(mes: string): string {
 }
 
 import type {
+    ImportDetailPayload,
+    ImportIssuesPayload,
+    ImportListPayload,
+    ImportPlanPayload,
+    ImportRetirementPolicy,
+    ImportRowsPayload,
+    LegacyImport,
+    LegacyImportDetail,
     AdjustmentSummary,
     Affiliation,
     Assignment,
@@ -127,6 +135,105 @@ export const api = {
 
     settings(): Promise<SettingsPayload> {
         return request<SettingsPayload>('GET', '/api/settings');
+    },
+    /**
+     * The A04 surface.
+     *
+     * `imports.upload` is the only call that sends a file, and it is the only one that
+     * cannot be expressed as JSON. Everything else is an explicit action with its own
+     * endpoint, so the interface never has to guess which one a button means.
+     */
+    imports: {
+        list(params: ListParams & { status?: string | null } = {}): Promise<ImportListPayload> {
+            return request<ImportListPayload>('GET', '/api/imports', { query: params });
+        },
+
+        show(id: number): Promise<ImportDetailPayload> {
+            return request<ImportDetailPayload>('GET', `/api/imports/${id}`);
+        },
+
+        /**
+         * Upload a workbook.
+         *
+         * `FormData` because the file is the body. The endpoint answers quickly and queues
+         * the parse (§15), so a resolved promise means "received", not "analysed" — the
+         * caller polls `show()` for the status.
+         */
+        upload(file: File): Promise<{ message: string; data: LegacyImport; previous_import_id?: number }> {
+            const body = new FormData();
+            body.append('file', file);
+
+            return request('POST', '/api/imports', { body });
+        },
+
+        rows(
+            id: number,
+            params: ListParams & { parse_state?: string | null; company_tax_id?: string | null; sheet?: string | null } = {},
+        ): Promise<ImportRowsPayload> {
+            return request<ImportRowsPayload>('GET', `/api/imports/${id}/rows`, { query: params });
+        },
+
+        issues(
+            id: number,
+            params: ListParams & { code?: string | null; severity?: string | null; blocking?: boolean; unresolved?: boolean } = {},
+        ): Promise<ImportIssuesPayload> {
+            return request<ImportIssuesPayload>('GET', `/api/imports/${id}/issues`, { query: params });
+        },
+
+        /** The persisted actions. §17.5: the preview reads these, not a recomputation. */
+        plan(id: number): Promise<ImportPlanPayload> {
+            return request<ImportPlanPayload>('GET', `/api/imports/${id}/plan`);
+        },
+
+        /**
+         * §8.2's batch retirement rule.
+         *
+         * A decision about *this* import, stored with it, so it travels into the audit
+         * trail. The endpoint answers 202: the plan is rebuilt in the background.
+         */
+        setRetirementPolicy(id: number, policy: ImportRetirementPolicy): Promise<{ message: string }> {
+            return request('PUT', `/api/imports/${id}/interpretation-policy`, {
+                body: { retirement_policy: policy },
+            });
+        },
+
+        resolveIssue(
+            id: number,
+            issueId: number,
+            resolution: { decision: string; value?: unknown; note?: string | null },
+        ): Promise<{ message: string }> {
+            return request('POST', `/api/imports/${id}/issues/${issueId}/resolve`, { body: { resolution } });
+        },
+
+        bulkResolve(
+            id: number,
+            issueIds: number[],
+            resolution: { decision: string; value?: unknown; note?: string | null },
+        ): Promise<{ message: string; resolved: number }> {
+            return request('POST', `/api/imports/${id}/issues/bulk-resolve`, {
+                body: { issue_ids: issueIds, resolution },
+            });
+        },
+
+        rebuildPlan(id: number): Promise<{ message: string }> {
+            return request('POST', `/api/imports/${id}/rebuild-plan`);
+        },
+
+        /**
+         * Apply the persisted plan.
+         *
+         * Synchronous on purpose: the operator pressing Apply needs to know whether it
+         * happened before the dialog closes. A 409 carries `code` — `already_applied`,
+         * `unresolved_blockers`, `wrong_state` or `nothing_to_apply` — and each one means
+         * something different about what to do next.
+         */
+        apply(id: number): Promise<{ message: string; data: LegacyImportDetail }> {
+            return request('POST', `/api/imports/${id}/apply`);
+        },
+
+        cancel(id: number): Promise<{ message: string }> {
+            return request('POST', `/api/imports/${id}/cancel`);
+        },
     },
 } as const;
 
@@ -622,6 +729,105 @@ export const businessApi = {
 
         deactivate(id: number): Promise<{ message: string; entity: SocialSecurityEntity }> {
             return request('POST', `/api/social-security-entities/${id}/deactivate`);
+        },
+    },
+    /**
+     * The A04 surface.
+     *
+     * `imports.upload` is the only call that sends a file, and it is the only one that
+     * cannot be expressed as JSON. Everything else is an explicit action with its own
+     * endpoint, so the interface never has to guess which one a button means.
+     */
+    imports: {
+        list(params: ListParams & { status?: string | null } = {}): Promise<ImportListPayload> {
+            return request<ImportListPayload>('GET', '/api/imports', { query: params });
+        },
+
+        show(id: number): Promise<ImportDetailPayload> {
+            return request<ImportDetailPayload>('GET', `/api/imports/${id}`);
+        },
+
+        /**
+         * Upload a workbook.
+         *
+         * `FormData` because the file is the body. The endpoint answers quickly and queues
+         * the parse (§15), so a resolved promise means "received", not "analysed" — the
+         * caller polls `show()` for the status.
+         */
+        upload(file: File): Promise<{ message: string; data: LegacyImport; previous_import_id?: number }> {
+            const body = new FormData();
+            body.append('file', file);
+
+            return request('POST', '/api/imports', { body });
+        },
+
+        rows(
+            id: number,
+            params: ListParams & { parse_state?: string | null; company_tax_id?: string | null; sheet?: string | null } = {},
+        ): Promise<ImportRowsPayload> {
+            return request<ImportRowsPayload>('GET', `/api/imports/${id}/rows`, { query: params });
+        },
+
+        issues(
+            id: number,
+            params: ListParams & { code?: string | null; severity?: string | null; blocking?: boolean; unresolved?: boolean } = {},
+        ): Promise<ImportIssuesPayload> {
+            return request<ImportIssuesPayload>('GET', `/api/imports/${id}/issues`, { query: params });
+        },
+
+        /** The persisted actions. §17.5: the preview reads these, not a recomputation. */
+        plan(id: number): Promise<ImportPlanPayload> {
+            return request<ImportPlanPayload>('GET', `/api/imports/${id}/plan`);
+        },
+
+        /**
+         * §8.2's batch retirement rule.
+         *
+         * A decision about *this* import, stored with it, so it travels into the audit
+         * trail. The endpoint answers 202: the plan is rebuilt in the background.
+         */
+        setRetirementPolicy(id: number, policy: ImportRetirementPolicy): Promise<{ message: string }> {
+            return request('PUT', `/api/imports/${id}/interpretation-policy`, {
+                body: { retirement_policy: policy },
+            });
+        },
+
+        resolveIssue(
+            id: number,
+            issueId: number,
+            resolution: { decision: string; value?: unknown; note?: string | null },
+        ): Promise<{ message: string }> {
+            return request('POST', `/api/imports/${id}/issues/${issueId}/resolve`, { body: { resolution } });
+        },
+
+        bulkResolve(
+            id: number,
+            issueIds: number[],
+            resolution: { decision: string; value?: unknown; note?: string | null },
+        ): Promise<{ message: string; resolved: number }> {
+            return request('POST', `/api/imports/${id}/issues/bulk-resolve`, {
+                body: { issue_ids: issueIds, resolution },
+            });
+        },
+
+        rebuildPlan(id: number): Promise<{ message: string }> {
+            return request('POST', `/api/imports/${id}/rebuild-plan`);
+        },
+
+        /**
+         * Apply the persisted plan.
+         *
+         * Synchronous on purpose: the operator pressing Apply needs to know whether it
+         * happened before the dialog closes. A 409 carries `code` — `already_applied`,
+         * `unresolved_blockers`, `wrong_state` or `nothing_to_apply` — and each one means
+         * something different about what to do next.
+         */
+        apply(id: number): Promise<{ message: string; data: LegacyImportDetail }> {
+            return request('POST', `/api/imports/${id}/apply`);
+        },
+
+        cancel(id: number): Promise<{ message: string }> {
+            return request('POST', `/api/imports/${id}/cancel`);
         },
     },
 } as const;

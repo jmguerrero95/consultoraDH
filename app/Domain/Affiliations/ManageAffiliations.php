@@ -132,7 +132,12 @@ final class ManageAffiliations
                     );
                 }
 
-                $locked->forceFill(['ended_on' => $endedOn->format('Y-m-d')])->save();
+                $locked->forceFill([
+                    'ended_on' => $endedOn->format('Y-m-d'),
+                    // A date a person chose is an exact day. The precision column exists so an
+                    // import can mark a monthly inference; A02 never writes `month`.
+                    'ended_on_precision' => 'day',
+                ])->save();
 
                 $closed = $locked->refresh();
             }
@@ -143,7 +148,13 @@ final class ManageAffiliations
                 'client_company_assignment_id' => $underAssignment?->id,
                 'type' => $type->value,
                 'started_on' => $startedOn?->format('Y-m-d'),
+                // A start nobody can date is not a day-precision start with a missing value:
+                // saying `day` here would claim an exactness the row does not have, and the
+                // coherence CHECK rejects it. §9.5 calls this `started_on = null` with
+                // `precision = unknown`.
+                'started_on_precision' => $startedOn === null ? 'unknown' : 'day',
                 'ended_on' => null,
+                'ended_on_precision' => null,
                 'arl_risk_class' => $riskClass?->value,
                 'notes' => $notes,
             ]);
@@ -230,7 +241,10 @@ final class ManageAffiliations
                 throw new DomainException('La afiliación de origen ya no está abierta.');
             }
 
-            $closed->forceFill(['ended_on' => $effectiveOn->format('Y-m-d')])->save();
+            $closed->forceFill([
+                'ended_on' => $effectiveOn->format('Y-m-d'),
+                'ended_on_precision' => 'day',
+            ])->save();
 
             $opened = ClientAffiliation::query()->create([
                 'client_id' => $closed->client_id,
@@ -238,7 +252,9 @@ final class ManageAffiliations
                 'client_company_assignment_id' => $closed->client_company_assignment_id,
                 'type' => $closed->type->value,
                 'started_on' => $effectiveOn->format('Y-m-d'),
+                'started_on_precision' => 'day',
                 'ended_on' => null,
+                'ended_on_precision' => null,
                 'arl_risk_class' => $riskClass?->value,
                 'notes' => $notes ?? $closed->notes,
             ]);
@@ -290,7 +306,10 @@ final class ManageAffiliations
                 throw new DomainException('La fecha de cierre no puede ser anterior al inicio de la afiliación.');
             }
 
-            $locked->forceFill(['ended_on' => $endedOn->format('Y-m-d')])->save();
+            $locked->forceFill([
+                'ended_on' => $endedOn->format('Y-m-d'),
+                'ended_on_precision' => 'day',
+            ])->save();
 
             event(new AffiliationClosed($locked->refresh(), $actor, $reason));
 

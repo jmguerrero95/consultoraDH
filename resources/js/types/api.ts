@@ -973,3 +973,193 @@ export interface BillingVocabularyPayload {
     settlement_states: VocabularyOption[];
     period_statuses: VocabularyOption[];
 }
+
+/*
+|--------------------------------------------------------------------------
+| A04 — imports
+|--------------------------------------------------------------------------
+|
+| The shapes §5 and §15 define. Two of them carry a rule rather than a field, and
+| the types are where that rule becomes visible to the compiler:
+|
+|  - `ImportSummary` holds aggregates only. There is no name, no document and no
+|    free text anywhere in it, because §4.3 forbids all three in anything that can
+|    reach a log, and a type that could grow one is a type somebody will grow.
+|
+|  - `ImportAction.payload` is `Record<string, unknown>` because the payload's
+|    shape is per action type. The alternative — one union of every payload — would
+|    be a lie the moment a new action type is added, and §17.5 reads these rows
+|    verbatim rather than recomputing them.
+*/
+
+export type ImportStatus =
+    | 'uploaded'
+    | 'queued'
+    | 'parsing'
+    | 'review'
+    | 'ready'
+    | 'applying'
+    | 'applied'
+    | 'failed'
+    | 'cancelled';
+
+export type ImportActionType =
+    | 'create_client'
+    | 'update_client'
+    | 'create_company'
+    | 'update_company'
+    | 'create_social_entity'
+    | 'create_relationship'
+    | 'close_relationship'
+    | 'create_affiliation'
+    | 'close_affiliation'
+    | 'create_rate';
+
+export type ImportActionState = 'planned' | 'applied' | 'skipped';
+
+export type ImportRetirementPolicy = 'manual_only' | 'month_end_boundary';
+
+/** Date precision, as §8.3 defines it. `month` is never shown as an exact day. */
+export type DatePrecision = 'day' | 'month' | 'unknown';
+
+export interface ImportSummary {
+    monthly_sheets?: number;
+    blocks?: number;
+    rows?: number;
+    document_identities?: number;
+    company_names?: number;
+    blocking_issues?: number;
+    warning_issues?: number;
+    credential_like_cells?: number;
+    credential_findings?: number;
+    issues_by_code?: Record<string, number>;
+    reconstruction?: Record<string, number>;
+    plan?: ImportPlanCounts;
+    unresolved_blockers?: number;
+    retirement_policy?: ImportRetirementPolicy;
+    applied?: Record<string, number>;
+}
+
+export interface ImportPlanCounts {
+    create: number;
+    update: number;
+    unchanged: number;
+    applied: number;
+    blocked: number;
+    total: number;
+}
+
+export interface LegacyImport {
+    id: number;
+    uuid: string;
+    profile: string | null;
+    original_filename: string;
+    status: ImportStatus;
+    status_label: string;
+    file_size: number;
+    sha256: string;
+    created_at: string | null;
+    parsed_at: string | null;
+    applied_at: string | null;
+    failed_at: string | null;
+    failure_code: string | null;
+    failure_message: string | null;
+    created_by: string | null;
+    summary: ImportSummary;
+}
+
+export interface LegacyImportDetail extends LegacyImport {
+    rows: number;
+    issues: { total: number; blocking: number };
+    actions: number;
+    /** §17.5's disabled-Apply flag. The server enforces it again. */
+    applicable: boolean;
+}
+
+export interface ImportRow {
+    id: number;
+    sheet_name: string;
+    sheet_month: string;
+    source_row_number: number;
+    company_block_key: string;
+    company_tax_id: string | null;
+    company_display_name: string | null;
+    client_identity_key: string | null;
+    document_type: string | null;
+    document_number: string | null;
+    first_names: string | null;
+    last_names: string | null;
+    /** Already redacted by the parser. Never the original. */
+    affiliation_date_raw: string | null;
+    affiliation_date: string | null;
+    affiliation_date_precision: DatePrecision | null;
+    monthly_amount_cop: number | null;
+    eps_token: string | null;
+    afp_token: string | null;
+    ccf_token: string | null;
+    arl_token: string | null;
+    arl_risk_class: number | null;
+    job_title: string | null;
+    novelty: string | null;
+    retirement_day_count: number | null;
+    parse_state: 'staged' | 'blocked' | 'invalid' | 'duplicate' | null;
+}
+
+export interface ImportIssue {
+    id: number;
+    legacy_import_row_id: number | null;
+    code: string;
+    severity: 'info' | 'warning' | 'error';
+    blocking: boolean;
+    field: string | null;
+    message: string;
+    /** Sanitised: positions and codes, never a source value. */
+    context: Record<string, unknown> | null;
+    resolved_by: number | null;
+    resolved_at: string | null;
+    resolution: Record<string, unknown> | null;
+}
+
+export interface ImportAction {
+    id: number;
+    ordinal: number;
+    action_type: ImportActionType;
+    natural_key: string;
+    payload: Record<string, unknown>;
+    /** §13: the staged rows this action was derived from. */
+    source_row_ids: number[];
+    state: ImportActionState;
+    target_type: string | null;
+    target_id: number | null;
+    skip_reason: string | null;
+}
+
+export interface ImportPlan {
+    counts: ImportPlanCounts;
+    counts_by_type: Record<string, number>;
+    applicable: boolean;
+    actions: ImportAction[];
+}
+
+export interface ImportListPayload {
+    data: LegacyImport[];
+    meta: { current_page: number; last_page: number; per_page: number; total: number };
+}
+
+export interface ImportDetailPayload {
+    data: LegacyImportDetail;
+}
+
+export interface ImportRowsPayload {
+    data: ImportRow[];
+    meta: { current_page: number; last_page: number; per_page: number; total: number };
+}
+
+export interface ImportIssuesPayload {
+    data: ImportIssue[];
+    meta: { current_page: number; last_page: number; total: number };
+}
+
+export interface ImportPlanPayload {
+    data: ImportPlan;
+}

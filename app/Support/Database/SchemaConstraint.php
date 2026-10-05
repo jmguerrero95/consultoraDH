@@ -101,6 +101,34 @@ final class SchemaConstraint
     public const RATE_CLIENT_COMPANY_MONTH = 'client_company_rates_client_company_month_unique';
 
     /**
+     * One applied import per file hash.
+     *
+     * A partial unique index over `(sha256) WHERE status = 'applied'`. A04: the same
+     * workbook may be uploaded twice to be compared, but only one of them may have written
+     * anything, so "no second application" is a property of the schema rather than a check
+     * somebody has to remember in three places.
+     */
+    public const IMPORT_SHA256_APPLIED = 'legacy_imports_sha256_applied_unique';
+
+    /**
+     * One plan action per fingerprint inside an import.
+     *
+     * A04 §5.4. This is what makes rebuilding the plan safe: the rows are replaced wholesale
+     * after a resolution, and a fingerprint that could appear twice would be applied twice or
+     * in an order nobody approved.
+     */
+    public const IMPORT_ACTION_BATCH = 'legacy_import_actions_batch_unique';
+
+    /**
+     * One mapping per profile, type and normalised source spelling.
+     *
+     * A04 §9.2. A decision to read `SALUDTOTAL` as one entity is made once; a slightly
+     * different spelling of the same words is the same question and must not become a second
+     * row.
+     */
+    public const IMPORT_MAPPING_SOURCE = 'import_source_mappings_source_unique';
+
+    /**
      * Constraints that exist in the history but no longer in the schema.
      *
      * Separated from `all()` on purpose: `all()` is what the schema test asserts
@@ -141,6 +169,10 @@ final class SchemaConstraint
             self::CUTOFF_RULE_CLIENT_MONTH,
 
             self::RATE_CLIENT_COMPANY_MONTH,
+
+            self::IMPORT_SHA256_APPLIED,
+            self::IMPORT_ACTION_BATCH,
+            self::IMPORT_MAPPING_SOURCE,
         ];
     }
 }

@@ -203,7 +203,12 @@ final class ManageClientCompanies
                 throw new DomainException('La relación ya estaba cerrada.');
             }
 
-            $locked->forceFill(['ended_on' => $endedOn->format('Y-m-d')])->save();
+            $locked->forceFill([
+                'ended_on' => $endedOn->format('Y-m-d'),
+                // Chosen by a person, so an exact day. See `ManageAffiliations` for why the
+                // precision column travels with the date.
+                'ended_on_precision' => 'day',
+            ])->save();
 
             event(new RelationshipClosed($locked->refresh(), $actor, $reason));
         });
@@ -289,7 +294,10 @@ final class ManageClientCompanies
 
             $needsAuthorisation = $closed->isAuthorisedParallel() && $stillOpen->isNotEmpty();
 
-            $closed->forceFill(['ended_on' => $effectiveOn->format('Y-m-d')])->save();
+            $closed->forceFill([
+                'ended_on' => $effectiveOn->format('Y-m-d'),
+                'ended_on_precision' => 'day',
+            ])->save();
 
             $opened = $this->createRow(
                 $closed->client,
@@ -414,7 +422,10 @@ final class ManageClientCompanies
             throw new DomainException('La fecha de inicio no puede ser anterior al inicio de la relación abierta.');
         }
 
-        $current->forceFill(['ended_on' => $startedOn->format('Y-m-d')])->save();
+        $current->forceFill([
+            'ended_on' => $startedOn->format('Y-m-d'),
+            'ended_on_precision' => 'day',
+        ])->save();
 
         // The same event the dedicated transfer endpoint emits. This used to call
         // `open()`, which published `relationship.created` for a row that was the
@@ -517,7 +528,10 @@ final class ManageClientCompanies
             'client_id' => $client->id,
             'company_id' => $company->id,
             'started_on' => $startedOnOverride ?? $startedOn->format('Y-m-d'),
+            // A relationship always has a start and A02 always knows the day it was chosen.
+            'started_on_precision' => 'day',
             'ended_on' => null,
+            'ended_on_precision' => null,
             'job_title' => $jobTitle,
             'notes' => $notes,
             'parallel_authorized_at' => $parallel ? now() : null,

@@ -426,6 +426,75 @@ confiarse en lo que se leyó sin ellos. Entre que un operador lee una previsuali
 y la confirma, puede haberse añadido un valor o cerrado una relación, y la respuesta
 que vale es la calculada bajo el bloqueo.
 
+## 6.6 A04: el dominio Imports
+
+### El parser no escribe y no consulta
+
+`BlindenLegacyWorkbookParser` es una función pura: el mismo archivo produce las mismas
+filas, las mismas incidencias y las mismas huellas en cada ejecución. No toca la base, ni
+el catálogo, ni el reloj, ni la red. Eso es lo que permite comparar dos ejecuciones, lo que
+hace que las pruebas usen fixtures sintéticos en vez del archivo real, y lo que permite que
+el verificador de §19 corra el mismo código que correrá el job en producción.
+
+Todo lo que el parser no puede decidir sale como **problema**, nunca como valor. Una fecha
+ilegible es `invalid_affiliation_date`; una fila sin documento es un bloqueo; una palabra que
+aparece en dos empresas no se fusiona. La reconstrucción de historial recibe esas mismas
+filas y sigue sin decidir: un episodio que desaparece es una pregunta, un solapamiento es una
+pregunta, y ninguna de las dos tiene un campo de «resuelto» en este módulo —la respuesta vive
+en la tabla de incidencias, donde §13 puede auditar quién decidió qué.
+
+### La separación que cuesta caro no acortarla
+
+En el flujo de A04 hay tres cortes, y cada uno existe porque romperlo costó una tarde:
+
+| Corte | Qué pasa si se rompe |
+| --- | --- |
+| `parse()` → staging | Un archivo se analiza en la petición y 2 560 filas bloquean un worker |
+| staging → plan | Se corrige una fila y hay que volver a subir el archivo entero |
+| plan → apply | La previsualización describe algo distinto de lo que se aplica |
+
+El tercero es el que §5.4 y §17.5 hacen explícito: `legacy_import_actions` **es** el plan, y
+la pantalla lo lee. La previsualización no recalcula una explicación paralela, porque dos
+cálculos del mismo plan divergen en cuanto el primero se queda obsoleto.
+
+### La ruta privada la construye el modelo
+
+`imports/{uuid}/source.xlsx`. El controlador escribe usando
+`LegacyImport::storedRelativePath()` y el job lee con `absolutePath()`, que llama al mismo
+método. Cuando las dos cadenas vivían en archivos distintos y diferían en el prefijo del
+directorio, toda subida terminaba en `failed` con «el archivo ya no está en el servidor» para
+un archivo que acababa de llegar. Es la clase de bug que sólo aparece cuando los dos lados
+se ejercitan por primera vez en la misma ejecución, que es exactamente lo que hace un
+E2E de subida.
+
+### La precisión acompaña a la fecha, no se deduce de ella
+
+Una frontera mensual guardada como `2026-03-01` y otra guardada como `2026-03-01` porque
+alguien la eligió son indistinguibles sin una columna más. Por eso §8.3 añade
+`started_on_precision` y `ended_on_precision` a las tablas históricas de A02, y por eso la
+coherencia entre fecha y precisión la defiende un `CHECK` de PostgreSQL y no la aplicación.
+
+La invariante vive en el modelo, en un `saving`, y no en los puntos de llamada: escribirla en
+A02 y en las fábricas es dos mitades de la misma regla, y basta con que una vez no la
+recuerde para que 77 inserciones legítimas fallen. El `saving` **no** pisa una precisión
+declarada —un importador que escribe `month` conserva `month`—, sólo completa la que falta.
+
+### El cerrojo es el de A03, no uno nuevo
+
+Relaciones y rates son topología, y la generación de A03 lee esa topología. A04 toma el
+`BillingTopologyLock` que ya existe: un segundo cerrojo advisory cumpliría la frase «toma un
+cerrojo» y rompería su propósito. `ApplyImportPlan` corre dentro de
+`BillingTopologyLock::run()`, que es transaccional y toma
+`pg_advisory_xact_lock`, así que hay un cerrojo y una transacción y se liberan juntos.
+
+### Los 403 van antes que los 404
+
+Los enlaces de modelo de Laravel se sustituyen antes que el middleware de la ruta, así que un
+`can:` sobre un `{import}` enlazado responde 404 a un usuario sin permiso —y le dice si ese
+id existe. En un módulo cuyo tema es un archivo de documentos de identidad, eso es parte de
+lo que se protege. El controlador de importaciones resuelve el id a mano, el `can:` corre
+primero, y 404 significa que el id no existe **y** que quien pregunta podía preguntar.
+
 ## 7. Base de datos
 
 - **PostgreSQL 18** para todo. No hay SQLite en desarrollo ni en pruebas: se
@@ -480,8 +549,31 @@ notificaciones) y la infraestructura debe estar probada antes de que exista el
 primer trabajo real.
 
 En A01 se verificó el circuito completo: un trabajo colocado en Redis fue
-recogido y ejecutado por el worker. No se incluye ninguna clase de trabajo en
-el repositorio, porque todavía no hay una operación de negocio que lo justifique.
+recogido y ejecutado por el worker, sin ninguna clase de trabajo en el
+repositorio porque todavía no había una operación de negocio que lo justificara.
+
+**A04 es el primer trabajo real**, y por eso sus reglas son las de la cola y no las de
+una importación:
+
+| Trabajo | Qué hace | Reintentos |
+| --- | --- | ---: |
+| `ParseLegacyImport` | El libro → staging | 2 |
+| `BuildLegacyImportPlan` | Filas → plan persistido | 2 |
+| `ApplyLegacyImport` | El plan → maestros | 1 |
+
+**El trabajo lleva un id, no el archivo.** Un payload encolado se serializa en Redis, y
+un libro de 700 KB dentro de un payload se copia a la memoria de la cola y a sus logs; el
+job recibe el id y lee la ruta privada de la base.
+
+**Idempotente por estado, no por idempotencia de SQL.** `ParseLegacyImport` reemplaza sus
+filas e incidencias en vez de añadirlas, y `BuildLegacyImportPlan` borra el plan anterior
+antes de escribir el nuevo, con un índice único sobre la huella de cada acción. Un reintento
+converge en lugar de duplicar.
+
+**`ApplyLegacyImport` no reintenta.** Un apply que falla ya ha revertido todo, y reintentarlo
+significa aplicar un plan escrito contra un estado que nadie ha revisado. La seguridad real
+está en que un segundo intento se convierte en un 409 por el estado, no en una segunda
+escritura.
 
 ## 10. Decisiones de diseño y sus motivos
 

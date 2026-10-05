@@ -32,9 +32,10 @@ Un sistema de gestión interna con tres grupos de requisitos:
   por MCP / OpenCode.
 
 De esos tres grupos, A02 implementa el primero (clientes, empresas,
-afiliaciones y su historial) y A03 el núcleo financiero del primero (periodos,
-fechas de corte, obligaciones, ajustes, pagos y cartera). El servicio al
-cliente y la analítica con integración siguen sin empezar: son A08 a A14.
+afiliaciones y su historial), A03 el núcleo financiero del primero (periodos,
+fechas de corte, obligaciones, ajustes, pagos y cartera) y A04 la importación
+desde Excel con reconstrucción histórica. El servicio al cliente y la
+analítica con integración siguen sin empezar: son A08 a A14.
 
 ## 2. Arquitectura en una frase
 
@@ -397,6 +398,7 @@ Los detalles y la lista completa están en [docs/SECURITY.md](docs/SECURITY.md).
 | [docs/TASKS/A03-R1-REMEDIATION.md](docs/TASKS/A03-R1-REMEDIATION.md) | Corrección financiera, concurrencia y contrato de A03 |
 | [docs/TASKS/A03-R2-REMEDIATION.md](docs/TASKS/A03-R2-REMEDIATION.md) | Cierre de los hallazgos de auditoría de A03 |
 | [docs/TASKS/A03-R3-REMEDIATION.md](docs/TASKS/A03-R3-REMEDIATION.md) | Cierre final de los hallazgos de A03 |
+| [docs/TASKS/A04.md](docs/TASKS/A04.md) | Importación Excel, revisión y reconstrucción histórica |
 
 ## 13. Licencia
 

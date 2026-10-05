@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\BillingConfigurationController;
 use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\ImportController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\PeriodController;
 use App\Http\Controllers\Api\ProfileController;
@@ -404,5 +405,47 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.receivables.vocabulary');
         Route::get('/clients/{client}/account', [ReceivableController::class, 'clientAccount'])
             ->name('api.clients.account');
+    });
+
+    // --- imports (A04) --------------------------------------------------
+    //
+    // Four permissions, kept in separate groups on purpose: `imports.review` can resolve
+    // issues and rebuild the plan, `imports.apply` can write masters. §14 says the backend is
+    // what decides, and every one of these sits inside a `can:` gate.
+    //
+    // There is no read-only variant of this module. Even `index` exposes the people in a
+    // workbook, so `imports.view` is already the sensitive permission and §14 grants nothing
+    // at all to Collections, Support or Read Only.
+
+    Route::middleware('can:imports.view')->group(function (): void {
+        Route::get('/imports', [ImportController::class, 'index'])->name('api.imports.index');
+        Route::get('/imports/{import}', [ImportController::class, 'show'])->name('api.imports.show');
+        Route::get('/imports/{import}/rows', [ImportController::class, 'rows'])->name('api.imports.rows');
+        Route::get('/imports/{import}/issues', [ImportController::class, 'issues'])->name('api.imports.issues');
+        Route::get('/imports/{import}/plan', [ImportController::class, 'plan'])->name('api.imports.plan');
+    });
+
+    Route::middleware('can:imports.create')->group(function (): void {
+        Route::post('/imports', [ImportController::class, 'store'])->name('api.imports.store');
+    });
+
+    Route::middleware('can:imports.review')->group(function (): void {
+        Route::put('/imports/{import}/interpretation-policy', [ImportController::class, 'interpretationPolicy'])
+            ->name('api.imports.interpretation-policy');
+        Route::post('/imports/{import}/issues/{issue}/resolve', [ImportController::class, 'resolveIssue'])
+            ->name('api.imports.issues.resolve');
+        Route::post('/imports/{import}/issues/bulk-resolve', [ImportController::class, 'bulkResolve'])
+            ->name('api.imports.issues.bulk-resolve');
+        Route::post('/imports/{import}/rebuild-plan', [ImportController::class, 'rebuildPlan'])
+            ->name('api.imports.rebuild-plan');
+        Route::post('/imports/{import}/cancel', [ImportController::class, 'cancel'])
+            ->name('api.imports.cancel');
+    });
+
+    // §12.2: `ApplyImportPlan` locks the import row and accepts one `ready -> applying`
+    // transition, so a second request gets a 409 from the action even if it reaches this
+    // route a moment later.
+    Route::middleware('can:imports.apply')->group(function (): void {
+        Route::post('/imports/{import}/apply', [ImportController::class, 'apply'])->name('api.imports.apply');
     });
 });

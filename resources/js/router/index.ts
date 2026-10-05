@@ -116,8 +116,23 @@ const routes: RouteRecordRaw[] = [
                 },
             },
             {
+                path: 'imports',
+                name: 'imports',
+                component: () => import('@/pages/imports/ImportListPage.vue'),
+                meta: {
+                    title: 'Importaciones',
+                    nav: { label: 'Importaciones', icon: 'bi-file-earmark-spreadsheet', order: 45 },
+                    permission: 'imports.view',
+                },
+            },
+            {
+                path: 'imports/:id(\\d+)',
+                name: 'imports.show',
+                component: () => import('@/pages/imports/ImportDetailPage.vue'),
+                meta: { title: 'Detalle de la importación', permission: 'imports.view' },
+            },
+            {
                 path: 'clients',
-                name: 'clients',
                 component: () => import('@/pages/clients/ClientListPage.vue'),
                 meta: {
                     title: 'Clientes',

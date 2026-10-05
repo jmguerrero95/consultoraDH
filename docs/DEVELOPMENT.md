@@ -439,6 +439,40 @@ heredada de Laravel y falla al ejecutarse. Para una prueba puntual:
 docker compose exec app php artisan tinker --execute="Queue::push(new App\Jobs\MiTrabajo);"
 ```
 
+### 10.1 Los trabajos de A04
+
+| Trabajo | Qué hace | Reintentos |
+| --- | --- | ---: |
+| `ParseLegacyImport` | El libro → staging | 2 |
+| `BuildLegacyImportPlan` | Filas → plan persistido | 2 |
+| `ApplyLegacyImport` | El plan → maestros | 1 |
+
+**El trabajo lleva un id, no el archivo.** Un payload encolado se serializa en Redis: un
+libro de 700 KB en el payload se copia a la memoria de la cola y a sus logs. El trabajo
+recibe el id y lee la ruta privada de la base.
+
+En pruebas `QUEUE_CONNECTION=sync`, así que subir un archivo por la API **ejecuta el
+análisis dentro de la petición**. Es lo que permite comprobar el estado de una importación
+sin que la prueba espere al worker, y es la razón por la que un error del analizador sale
+como un 500 en lugar de como un estado `failed` durante una prueba.
+
+### 10.2 El libro real no se versiona
+
+```bash
+scripts/verify-a04-real-workbook.sh
+```
+
+Imprime **sólo agregados**: ningún nombre, documento, nombre de empresa ni texto de celda.
+Se niega a correr si el archivo no está en `.local-fixtures/`, que está en `.gitignore`.
+
+Los fixtures de las pruebas se generan con `Tests\Support\SyntheticWorkbook` en el
+directorio temporal del sistema y se borran al terminar. Nunca hay un `.xlsx` dentro del
+repositorio: uno que una prueba fallida deje junto a las fuentes es exactamente lo que un
+`git add .` posterior recogería.
+
+Los conteos que el verificador compara están escritos en el propio script, no derivados de
+la ejecución: un fingerprint que recalcula su propia expectativa no comprueba nada.
+
 ## 11. Registros (bitácora)
 
 ```bash

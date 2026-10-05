@@ -8,6 +8,7 @@ use Tests\TestCase;
 require_once __DIR__.'/Support/helpers.php';
 require_once __DIR__.'/Support/portfolio.php';
 require_once __DIR__.'/Support/a03.php';
+require_once __DIR__.'/Support/a04.php';
 
 /*
 |--------------------------------------------------------------------------

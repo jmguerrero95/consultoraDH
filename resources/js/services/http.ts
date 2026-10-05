@@ -187,13 +187,26 @@ function withQuery(url: string, query: RequestOptions['query']): string {
     return search === '' ? url : `${url}?${search}`;
 }
 
-function buildHeaders(withCsrf: boolean, hasBody: boolean): Headers {
+/**
+ * Whether a body is a `FormData` and therefore multipart.
+ *
+ * Checked rather than assumed: the upload endpoint needs the browser to choose the boundary,
+ * and the only way to know whether a body is multipart is to look at it.
+ */
+function isMultipart(body: unknown): boolean {
+    return typeof FormData !== 'undefined' && body instanceof FormData;
+}
+
+function buildHeaders(withCsrf: boolean, hasBody: boolean, body: unknown): Headers {
     const headers = new Headers({
         Accept: 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
     });
 
-    if (hasBody) {
+    // A `FormData` body sets its own `Content-Type`, boundary included. Declaring
+    // `application/json` on one produces a request the server cannot parse, and the boundary is
+    // the one thing a client must not write by hand.
+    if (hasBody && !isMultipart(body)) {
         headers.set('Content-Type', 'application/json');
     }
 
@@ -272,8 +285,10 @@ export async function request<T>(method: Method, url: string, options: RequestOp
         response = await fetch(withQuery(url, options.query), {
             method,
             credentials: 'same-origin',
-            headers: buildHeaders(mutating, hasBody),
-            body: hasBody ? JSON.stringify(options.body) : undefined,
+            headers: buildHeaders(mutating, hasBody, options.body),
+            // `FormData` goes through untouched: `JSON.stringify` on it produces
+            // `"{}"`, which is a file upload that silently contains no file.
+            body: hasBody ? (isMultipart(options.body) ? (options.body as FormData) : JSON.stringify(options.body)) : undefined,
             signal: options.signal,
         });
     } catch (error) {

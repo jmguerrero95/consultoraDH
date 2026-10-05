@@ -31,11 +31,21 @@ use Illuminate\Support\Carbon;
  * `arl_risk_class` is the integer 1..5, or null when genuinely unknown. It is
  * only allowed on an ARL row.
  *
+ * `started_on_precision` and `ended_on_precision` say how much of the date is
+ * known: `day` for a date a person chose, `month` for one derived from a monthly
+ * snapshot by an import policy, and `unknown` for a start nobody can date. The
+ * columns exist so a monthly inference is never displayed as an exact day, and
+ * a CHECK constraint keeps a date and its precision coherent. An import may
+ * therefore write `month` here; nothing in A02 does, because A02's dates always
+ * come from somebody choosing them.
+ *
  * @property int $id
  * @property SocialSecurityEntityType $type
  * @property int|null $arl_risk_class
  * @property Carbon|null $started_on
  * @property Carbon|null $ended_on
+ * @property string $started_on_precision
+ * @property string|null $ended_on_precision
  */
 #[Fillable([
     'client_id',
@@ -44,6 +54,8 @@ use Illuminate\Support\Carbon;
     'type',
     'started_on',
     'ended_on',
+    'started_on_precision',
+    'ended_on_precision',
     'arl_risk_class',
     'notes',
 ])]
@@ -51,6 +63,46 @@ class ClientAffiliation extends Model
 {
     /** @use HasFactory<ClientAffiliationFactory> */
     use HasFactory;
+
+    /**
+     * Keep a date and its precision coherent on every write.
+     *
+     * ## Why this is here and not at each call site
+     *
+     * §8.3's columns are held together by CHECK constraints, and a constraint only says no.
+     * Every caller would otherwise have to remember to state a precision for every date it
+     * writes, and one that does not — a factory, a test, a future importer — fails with a
+     * PostgreSQL check violation instead of a sentence anybody can act on. The first version
+     * of A04 wrote the precision at each A02 call site and still failed 77 real inserts,
+     * because the factories are the other half of the write paths.
+     *
+     * ## What it will not do
+     *
+     * It never *changes* a precision that was stated. An import that writes
+     * `started_on_precision = 'month'` keeps `month`, which is the whole point of §8.3: the
+     * imprecision has to survive to the screen that displays it. This only fills in what the
+     * caller left empty, and it is deliberately one-directional — a date with no precision is
+     * completed, a precision with no date is cleared, because the constraint says those two
+     * cannot both be absent.
+     */
+    protected static function booted(): void
+    {
+        static::saving(function (self $affiliation): void {
+            if ($affiliation->started_on === null) {
+                $affiliation->started_on_precision = 'unknown';
+            } elseif (blank($affiliation->started_on_precision)) {
+                $affiliation->started_on_precision = 'day';
+            }
+
+            if ($affiliation->ended_on === null) {
+                // An open affiliation has no end and therefore no end precision. Keeping a
+                // stale one would make the row claim a boundary it does not have.
+                $affiliation->ended_on_precision = null;
+            } elseif (blank($affiliation->ended_on_precision)) {
+                $affiliation->ended_on_precision = 'day';
+            }
+        });
+    }
 
     /**
      * @return array<string, string>

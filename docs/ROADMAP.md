@@ -197,16 +197,32 @@ pasarelas de pago, portal, asistente de IA y MCP.
 
 ---
 
+### A04 — Importación y reconstrucción histórica desde Excel — **completada**
+
+Importación de un libro mensual de Excel: Reception en almacenamiento privado,
+análisis determinista en cola, revisión humana de incidencias, plan exacto
+persistido y aplicación transaccional bajo el mismo cerrojo de topología que usa
+A03.
+
+Lo esencial de lo entregado:
+
+- El libro real del perfil `blinden_legacy_monthly_v1`: 10 hojas mensuales, 101
+  bloques de empresa, 2 560 filas, 320 identidades documentales y 14 nombres
+  lógicos de empresa, reproducidos por un verificador que imprime sólo
+  agregados.
+- **23 celdas con texto tipo contraseña** reescribidas como `[REDACTED]` antes de
+  llegar a cualquier base, pantalla o log. El original queda sólo en el archivo
+  privado.
+- Precisión de fecha (`day` / `month` / `unknown`) en las tablas históricas de
+  A02, para que una inferencia mensual nunca se presente como un día exacto.
+- Reconstrucción de episodios, afiliaciones y valores mensuales **sin** crear
+  obligaciones, pagos ni aplicaciones: el vocabulario del plan no tiene ninguna
+  acción monetaria.
+- Aplicación de todo o nada, una sola vez, con proveniencia por acción.
+
+Detalle en [docs/TASKS/A04.md](TASKS/A04.md).
+
 ## Tareas pendientes
-
-### A04 — Importación y normalización de Excel, reconstrucción de historial
-
-Alcance: importación de hojas de cálculo, normalización, validación de
-filas, detección de duplicados y reconstrucción del historial a partir de
-archivos existentes.
-
-Prepara: la base de colas (ya verificada en A01) para el procesamiento en
-segundo plano; permisos `imports.*`.
 
 ### A05 — Planillas y validación operativa
 

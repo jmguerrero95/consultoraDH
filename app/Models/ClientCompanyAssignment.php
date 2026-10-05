@@ -35,6 +35,8 @@ use Illuminate\Support\Carbon;
     'client_id',
     'company_id',
     'started_on',
+    'started_on_precision',
+    'ended_on_precision',
     'ended_on',
     'job_title',
     'notes',
@@ -45,6 +47,30 @@ class ClientCompanyAssignment extends Model
 {
     /** @use HasFactory<ClientCompanyAssignmentFactory> */
     use HasFactory;
+
+    /**
+     * Keep a date and its precision coherent on every write.
+     *
+     * The relationship half of the same rule as `ClientAffiliation`, and the reasoning is in
+     * that class: a CHECK constraint only refuses, so the correction has to happen before the
+     * insert or every caller has to remember. A relationship always has a start, so the start
+     * is `day` unless an import stated `month`; only the end can be absent, and a relation
+     * that is open has no end precision at all.
+     */
+    protected static function booted(): void
+    {
+        static::saving(function (self $assignment): void {
+            if (blank($assignment->started_on_precision)) {
+                $assignment->started_on_precision = 'day';
+            }
+
+            if ($assignment->ended_on === null) {
+                $assignment->ended_on_precision = null;
+            } elseif (blank($assignment->ended_on_precision)) {
+                $assignment->ended_on_precision = 'day';
+            }
+        });
+    }
 
     /**
      * @return array<string, string>

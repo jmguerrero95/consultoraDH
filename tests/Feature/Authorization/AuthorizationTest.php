@@ -98,7 +98,7 @@ it('creates no permission ahead of the module that enforces it', function (): vo
     expect(array_diff($guarded, $declared))->toBe([]);
 
     // And the catalogue holds nothing that belongs to no module at all: A01's
-    // settings, A02's directory, and A03's financial permissions.
+    // settings, A02's directory, A03's financial permissions and A04's import permissions.
     $expected = ['settings.view'];
     $expected = array_merge($expected, [
         'clients.view', 'clients.create', 'clients.update', 'clients.change_status',
@@ -115,6 +115,54 @@ it('creates no permission ahead of the module that enforces it', function (): vo
         'payments.view', 'payments.create', 'payments.allocate', 'payments.void',
         'receivables.view',
     ]);
+    $expected = array_merge($expected, [
+        'imports.view', 'imports.create', 'imports.review', 'imports.apply',
+    ]);
 
     expect($declared)->toEqualCanonicalizing($expected);
+});
+
+/**
+ * §14's matrix for A04, asserted end to end through the seeder.
+ *
+ * The point is the asymmetry, not the grants. Three roles get all four permissions and
+ * three get **none** — not even `imports.view` — because there is no read-only way to use this
+ * module: opening an import shows every person in the workbook, so a viewer would be a
+ * reader of a payroll file rather than a reader of a client record.
+ *
+ * Each case asserts both halves, for the same reason as the rest of this file: a permission
+ * that is granted and does nothing, and one that is refused without being granted, are
+ * equally invisible if only one side is checked.
+ */
+it('grants the import permissions to the three operational roles and nobody else', function (): void {
+    $all = ['imports.view', 'imports.create', 'imports.review', 'imports.apply'];
+
+    foreach (['Super Admin', 'Administrator', 'Operations'] as $role) {
+        foreach ($all as $permission) {
+            expect(Role::findByName($role, 'web')->hasPermissionTo($permission))
+                ->toBeTrue("{$role} should hold {$permission}");
+        }
+    }
+
+    foreach (['Collections', 'Support', 'Read Only'] as $role) {
+        foreach ($all as $permission) {
+            expect(Role::findByName($role, 'web')->hasPermissionTo($permission))
+                ->toBeFalse("{$role} must not hold {$permission}");
+        }
+    }
+});
+
+it('keeps review and apply as separate authorities', function (): void {
+    // Resolving a question and writing what the answer means are different decisions. A role
+    // that could do both by accident would be able to approve its own reconstruction without
+    // anyone noticing, which is the whole point of splitting them.
+    expect(Role::findByName('Operations', 'web')->hasPermissionTo('imports.review'))->toBeTrue();
+    expect(Role::findByName('Operations', 'web')->hasPermissionTo('imports.apply'))->toBeTrue();
+
+    // Neither of the three roles without access holds either one, so the split cannot be
+    // inherited by accident through a role that holds only one.
+    foreach (['Collections', 'Support', 'Read Only'] as $role) {
+        expect(Role::findByName($role, 'web')->hasPermissionTo('imports.review'))->toBeFalse();
+        expect(Role::findByName($role, 'web')->hasPermissionTo('imports.apply'))->toBeFalse();
+    }
 });

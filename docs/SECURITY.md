@@ -695,6 +695,75 @@ producción y el del desarrollo siguen siendo 120: ninguno de los dos fija la
 variable. La suite fija esa cifra en una prueba, para que no pueda convertirse en
 el valor normal por accidente.
 
+## 13-bis. La carga privada de A04
+
+### Qué es y por qué no es una pantalla más
+
+A04 sube un libro de Excel que es una nómina: nombres, documentos de identidad, empresas,
+afiliaciones y valores de personas que no son clientes de la plataforma todavía. El módulo
+no tiene una forma de sólo consultarlo —abrir una importación ya muestra a todas las
+personas del archivo—, así que `imports.view` es en sí mismo el permiso sensible, y §14 no
+concede nada a Collections, Support ni Read Only.
+
+### El archivo nunca se sirve
+
+Se guarda en `imports/{uuid}/source.xlsx`, en el disco `local`. Ese disco no es público y
+no hay ruta que lo exponga. El nombre del operador se guarda en una columna para mostrarlo y
+**nunca** se convierte en parte de una ruta, de modo que un archivo llamado `../../.env`
+no puede escapar del directorio. La ruta la construye un único método del modelo
+(`storedRelativePath()`), que el controlador escribe y el job lee.
+
+### Las contraseñas del archivo
+
+El libro real contiene **23 celdas con texto tipo contraseña**, dentro de títulos de
+empresa y notas libres: no están en una hoja de secretos, están en las mismas celdas que los
+datos de negocio, y no hay forma de leer el archivo sin pasar por ellas.
+
+`SensitiveSourceRedactor` las reescribe **antes** de que un solo valor llegue a la base:
+`CLAVE: hola123` se vuelve `CLAVE: [REDACTED]`. La celda no se borra, porque el texto
+alrededor es evidencia operativa y una celda vacía no diría nada.
+
+Lo que no existe en ninguna parte salvo el archivo privado:
+
+- logs y bitácora;
+- `audit_events.metadata`;
+- mensajes de excepción;
+- el JSON de la previsualización;
+- el texto completo de staging.
+
+Un hallazgo se reporta con **hoja, fila y tipo de patrón**, y el tipo de hallazgo no tiene
+ningún campo donde quepa el secreto. El reemplazo es asimétrico a propósito: `USUARIO
+Juan.Perez` no tiene separador, así que se toma todo lo que sigue a la etiqueta, porque
+sobre-redactar una línea cuesta una mirada a un revisor y under-redactar una publica una
+contraseña.
+
+### El contenedor se examina antes de abrirse
+
+Un `.xlsx` es un ZIP, y una aplicación que abre un ZIP subido sin límites es el objetivo
+clásico. `WorkbookGuard` decide **todo** sobre el directorio central, sin extraer nada —
+descomprimir para comprobar la descompresión es el error—:
+
+| Comprobación | Qué evita |
+| --- | --- |
+| Límite de entradas | Un archivo con decenas de miles de partes |
+| Límite de tamaño descomprimido, leído de lo declarado | Un zip bomb |
+| Rechazo de `../`, rutas absolutas, barra invertida, letra de unidad | Que una entrada salga de su carpeta |
+| Rechazo de `vbaProject.bin` | Un libro con macros renombrado a `.xlsx` |
+| Rechazo de `TargetMode="External"`, `file://`, UNC | Que el lector salga de la máquina |
+| Exigencia de `xl/workbook.xml` | Un `.docx` renombrado |
+
+Cada rechazo lleva un código y una frase para una persona, y **ninguno lleva una ruta**: un
+mensaje de error es el camino más fácil por el que el sistema de archivos del servidor llega
+al navegador. `WorkbookParseFailed` se comporta igual, y por eso un fallo del analizador es
+un estado controlado y nunca un stack trace.
+
+### El original no se archiva con el código
+
+`.local-fixtures/` está en `.gitignore`, y el verificador se niega a correr si el archivo no
+está. Los fixtures de las pruebas se generan en el directorio temporal del sistema, nunca en
+el repositorio: un `.xlsx` que una prueba fallida deja junto a las fuentes es exactamente lo
+que un `git add .` posterior recogería.
+
 ## 14. Registro (bitácora)
 
 - La bitácora vive en `storage/logs/laravel.log` y en la salida estándar de los

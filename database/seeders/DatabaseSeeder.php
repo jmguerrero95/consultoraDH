@@ -112,6 +112,37 @@ final class DatabaseSeeder extends Seeder
         'payments.void',
 
         'receivables.view',
+
+        'imports.view',
+        'imports.create',
+        'imports.review',
+        'imports.apply',
+    ];
+
+    /**
+     * The A04 permissions each role holds.
+     *
+     * ## Why this is a separate matrix and not four more entries above
+     *
+     * §14's reason for the split: the workbook is a file of mass PII and every role that may
+     * touch it may also *reconstruct history from it*, which is a different and much broader
+     * authority than reading a client's account. Collections, Support and Read Only get
+     * nothing — not a read-only view either — because there is no read-only way to use this
+     * module: even opening an import shows every person in the file.
+     *
+     * The three roles that do get it all get all four, deliberately. Splitting them would
+     * create a person who can upload a file of national identifiers but not see what the parser
+     * found in it, which is not a smaller authority, it is a blind one.
+     *
+     * @var array<string, list<string>>
+     */
+    private const MATRIX_A04 = [
+        'Super Admin' => ['imports.view', 'imports.create', 'imports.review', 'imports.apply'],
+        'Administrator' => ['imports.view', 'imports.create', 'imports.review', 'imports.apply'],
+        'Operations' => ['imports.view', 'imports.create', 'imports.review', 'imports.apply'],
+        'Collections' => [],
+        'Support' => [],
+        'Read Only' => [],
     ];
 
     /**
@@ -270,6 +301,7 @@ final class DatabaseSeeder extends Seeder
         $all = [
             ...self::PERMISSIONS,
             ...array_merge(...array_values(self::MATRIX_A03)),
+            ...array_merge(...array_values(self::MATRIX_A04)),
             'settings.view',
         ];
 
@@ -284,6 +316,16 @@ final class DatabaseSeeder extends Seeder
         // The A03 matrix is applied as its own pass so the two can be read, and
         // changed, independently of each other.
         foreach (self::MATRIX_A03 as $roleName => $permissions) {
+            Role::findByName($roleName, 'web')->givePermissionTo($permissions);
+        }
+
+        // The A04 matrix is a third pass, for the same reason the A03 one is: the import
+        // module's reach has to be readable on its own, without scanning the other two.
+        foreach (self::MATRIX_A04 as $roleName => $permissions) {
+            if ($permissions === []) {
+                continue;
+            }
+
             Role::findByName($roleName, 'web')->givePermissionTo($permissions);
         }
 
