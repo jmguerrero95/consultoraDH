@@ -21,6 +21,29 @@ final class AppServiceProvider extends ServiceProvider
         //
     }
 
+    /**
+     * Sign-in budgets, read from configuration in `boot()`.
+     *
+     * Declared with the production figures so the class is correct even if `boot()` has not run,
+     * and so a test that resolves the limiter without booting sees the real limit rather than
+     * `0` — which `Limit` would read as "no requests ever allowed".
+     *
+     * @see self::boot() for why the end to end suite raises them
+     */
+    private int $loginAttemptLimit = 20;
+
+    private int $loginAccountLimit = 30;
+
+    private function loginAttemptLimit(): int
+    {
+        return $this->loginAttemptLimit;
+    }
+
+    private function loginAccountLimit(): int
+    {
+        return $this->loginAccountLimit;
+    }
+
     public function boot(): void
     {
         // Resources are always returned under an explicit key (`user`), so the
@@ -67,13 +90,13 @@ final class AppServiceProvider extends ServiceProvider
         | the real work against online guessing.
         */
         RateLimiter::for('login-attempt', function (Request $request): Limit {
-            return Limit::perMinutes(5, 20)      // per client address
+            return Limit::perMinutes(5, $this->loginAttemptLimit())      // per client address
                 ->by('login-ip|'.$request->ip())
                 ->response(fn () => $this->tooManyAttempts());
         });
 
         RateLimiter::for('login-account', function (Request $request): Limit {
-            return Limit::perMinutes(15, 30)     // per account, across machines
+            return Limit::perMinutes(15, $this->loginAccountLimit())     // per account, across machines
                 ->by('login-account|'.$this->normalisedEmail($request))
                 ->response(fn () => $this->tooManyAttempts());
         });
@@ -131,6 +154,30 @@ final class AppServiceProvider extends ServiceProvider
                 ->by('reset-account|'.$this->normalisedEmail($request))
                 ->response(fn () => $this->tooManyAttempts());
         });
+
+        /*
+        |----------------------------------------------------------------------
+        | Sign in - the end to end suite raises these for itself
+        |----------------------------------------------------------------------
+        |
+        | Configurable for the same reason `api` is, and for the same reason the
+        | production figures above are the defaults: the suite is not a client, it
+        | is forty-four tests that each open their own session.
+        |
+        | Every one of them arrives from a single address — the `nginx-e2e`
+        | service — so the per-address limit is a budget for the whole run rather
+        | than for one user. At twenty attempts per five minutes the suite spent
+        | more of its time on the throttle than on the journeys: the login page
+        | answered 429, the interface showed "Se ha producido un error inesperado",
+        | and six A04 tests plus one A03 test failed on their `beforeEach` sign in
+        | while every assertion they made after it was fine.
+        |
+        | What was being measured was therefore not the module. Raising the budget
+        | for the suite measures the module, and the production numbers stay in
+        | force everywhere else — the guard itself is covered by its own tests.
+        */
+        $this->loginAttemptLimit = (int) env('LOGIN_RATE_LIMIT_PER_ATTEMPT', 20);
+        $this->loginAccountLimit = (int) env('LOGIN_RATE_LIMIT_PER_ACCOUNT', 30);
 
         // General API budget, applied to every authenticated endpoint, so a
         // script cannot hammer the application with a valid session.

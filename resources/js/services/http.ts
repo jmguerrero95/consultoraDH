@@ -179,7 +179,17 @@ function withQuery(url: string, query: RequestOptions['query']): string {
             continue;
         }
 
-        params.set(key, String(value));
+        // Booleans travel as `1` / `0`, not as `true` / `false`.
+        //
+        // `String(true)` produced `unresolved=true`, and Laravel's `boolean` rule accepts only
+        // `1`, `0`, `"1"` and `"0"` — so the request came back 422 and the import screen's
+        // Incidencias tab rendered "No hay incidencias que coincidan" for a batch that had four
+        // open findings, including the blocker that disables Apply. The tab's default filter is
+        // "Sólo sin resolver", so this was the *first* thing the tab ever asked for.
+        //
+        // A checkbox is the only source of a boolean here, and `1`/`0` is the spelling every
+        // one of these endpoints documents.
+        params.set(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
     }
 
     const search = params.toString();

@@ -158,8 +158,21 @@ development_fingerprint() {
 echo "--- ensuring the end to end database exists"
 ./scripts/ensure-e2e-db.sh
 
+# Recreated, not merely started.
+#
+# `up -d` on an already-running container leaves it running, and that is wrong for a suite that
+# has to measure *this* tree. `queue:work` is a long-lived PHP process: it boots once and holds
+# every class it has touched in memory for its whole life, so a worker started before an edit
+# keeps executing the old code with no warning. `app-e2e`'s PHP-FPM revalidates timestamps, so
+# the two halves of the same request would disagree — the route dispatched new code, the job that
+# route dispatched ran old code.
+#
+# The symptom is worse than a failure. During A04-R2 the suite reported an import as applicable
+# while a date blocker was open, and the only reason was that the worker had not been restarted
+# since the fix that stopped it. A suite that can quietly test yesterday's code cannot be used to
+# decide whether yesterday's bug is gone, so the services are recreated on every run.
 echo "--- starting the end to end services"
-"${E2E_COMPOSE[@]}" up -d app-e2e nginx-e2e node >/dev/null
+"${E2E_COMPOSE[@]}" up -d --force-recreate app-e2e nginx-e2e node queue-e2e >/dev/null
 
 # `node` runs the suite. Starting it here rather than assuming somebody already did
 # is the difference between "the suite runs" and "the suite runs on this machine".

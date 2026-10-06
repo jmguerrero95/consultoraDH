@@ -25,14 +25,15 @@ declare(strict_types=1);
  * broken.
  */
 
+use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\Imports\HistoricalInterval;
 use App\Domain\Imports\ImportActionState;
 use App\Domain\Imports\ImportActionType;
 use App\Domain\Imports\ImportLifecycle;
 use App\Domain\Imports\ImportPlanIdentity;
 use App\Domain\Imports\ImportRetirementPolicy;
-use App\Domain\Imports\IssueIdentity;
 use App\Domain\Imports\IssueResolutionDecision;
+use App\Domain\Imports\IssueSubject;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\StageLegacyImport;
@@ -682,9 +683,13 @@ it('keeps §9.4 two ARL sources apart and raises the conflict when they contradi
     // The audit: "the two values are **collapsed into one column**, so the rebuild cannot
     // distinguish them" and `company_arl_metadata_conflict` was unreachable — §18 lists it and
     // nothing ever raised it.
+    //
+    // §9.4's second ARL priority is a *header* that names an ARL, so the fixture names one. A
+    // 04-R1 read column R positionally and would have produced the same row by accident.
     $workbook = (new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
-        // The title names POSITIVA; the row's column R names LA EQUIDAD.
+        // The title names POSITIVA; the header's ARL column names LA EQUIDAD.
         'title' => 'ANDINA S.A.S. NIT 900123456-3 ARL POSITIVA',
+        'header' => ['R' => 'ARL'],
         'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'R' => 'LA EQUIDAD'])],
     ]]);
 
@@ -876,7 +881,11 @@ it('skips an identical rate rather than rewriting it, per §10', function () {
     // §10: "Si ya existe un rate en DB para la misma pareja/mes: mismo importe → no-op." The
     // audit's Area L finding was that the comparison did not exist at all for rates.
     $client = Client::factory()->create(['document_type' => 'CC', 'document_number' => '10101010']);
-    $company = Company::factory()->create(['tax_id' => '900123456']);
+    // `verification_digit` has to match the workbook's title (`900123456-3`). The factory
+    // defaults it to `1`, and §7.2 makes a contradicting digit a blocker — so without this the
+    // import would sit in `review` on a DV question and these tests, which are about rates and
+    // about relationship endings, would fail for a reason that has nothing to do with either.
+    $company = Company::factory()->create(['tax_id' => '900123456', 'verification_digit' => '3']);
 
     ClientCompanyRate::factory()->create([
         'client_id' => $client->id,
@@ -910,7 +919,11 @@ it('refuses to rewrite an existing relationship, per §11', function () {
     // same file with a changed plan silently closed or reopened somebody's relationship, which
     // A03 may already have billed against.
     $client = Client::factory()->create(['document_type' => 'CC', 'document_number' => '10101010']);
-    $company = Company::factory()->create(['tax_id' => '900123456']);
+    // `verification_digit` has to match the workbook's title (`900123456-3`). The factory
+    // defaults it to `1`, and §7.2 makes a contradicting digit a blocker — so without this the
+    // import would sit in `review` on a DV question and these tests, which are about rates and
+    // about relationship endings, would fail for a reason that has nothing to do with either.
+    $company = Company::factory()->create(['tax_id' => '900123456', 'verification_digit' => '3']);
 
     // §8.1's key is company + client + start date, so the pre-existing episode has to start on
     // the day the reconstruction derives — which for the default workbook's serial cell is
@@ -982,11 +995,14 @@ it('gives every finding a stable identity and keeps the answer across a rebuild'
 it('computes a finding identity from the subject, not from a row id', function () {
     // The same token is the same question wherever it appears (§5.3: one dialog, not
     // twenty-four), and the identity has to survive a re-stage, which reassigns every row id.
-    $a = IssueIdentity::token(LegacyImportIssue::UnresolvedSocialEntity, 'EPS', 'SALUD TOTAL');
-    $b = IssueIdentity::token(LegacyImportIssue::UnresolvedSocialEntity, 'EPS', 'SALUD TOTAL');
+    $eps = SocialSecurityEntityType::Eps;
+    $afp = SocialSecurityEntityType::Afp;
+
+    $a = IssueSubject::entityToken($eps, 'SALUD TOTAL')->identity(LegacyImportIssue::UnresolvedSocialEntity);
+    $b = IssueSubject::entityToken($eps, 'SALUD TOTAL')->identity(LegacyImportIssue::UnresolvedSocialEntity);
 
     // `EPS` and `AFP` both saying `NO PORVENIR` are two questions about two columns.
-    $c = IssueIdentity::token(LegacyImportIssue::UnresolvedSocialEntity, 'AFP', 'SALUD TOTAL');
+    $c = IssueSubject::entityToken($afp, 'SALUD TOTAL')->identity(LegacyImportIssue::UnresolvedSocialEntity);
 
     expect($a->equals($b))->toBeTrue()
         ->and($a->equals($c))->toBeFalse()

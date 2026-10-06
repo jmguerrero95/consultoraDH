@@ -72,7 +72,10 @@ final class SyntheticWorkbook
             'O' => 'AFP PENSION',
             'P' => 'POSITIVA',
             'Q' => 'CARGO',
-            'R' => 'EPS',
+            // §1.3: R is `correo`. The synthetic header says so, which is the whole point — a
+            // fixture that labelled R `EPS` would have kept the A04-R1 bug alive, since the bug
+            // was reading a person's email into a company's ARL.
+            'R' => 'CORREO',
         ], $overrides);
     }
 
@@ -106,7 +109,8 @@ final class SyntheticWorkbook
             'O' => 'PORVENIR',
             'P' => 'UNO',
             'Q' => 'AUXILIAR',
-            'R' => '',
+            // A person's email, never an ARL. §1.3's column contract.
+            'R' => 'persona@ejemplo.co',
         ], $cells);
     }
 

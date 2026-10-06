@@ -52,99 +52,44 @@ final class IssueIdentity
     private function __construct(private readonly string $hash) {}
 
     /**
-     * A finding about one cell of one source line.
+     * The one way to build a fingerprint.
      *
-     * @param  string|null  $field  which column, when one row can raise the code twice
-     */
-    public static function cell(LegacyImportIssue $code, string $sourceKey, ?string $field = null): self
-    {
-        return new self(self::hash([
-            'kind' => 'cell',
-            'code' => $code->value,
-            'source_key' => $sourceKey,
-            'field' => $field,
-        ]));
-    }
-
-    /**
-     * A finding about a company block's identity.
+     * ## Why the per-kind factories are gone
      *
-     * @param  string  $companyKey  the block key as staged, so a title with no readable NIT
-     *                              still has a subject to be identified by
-     */
-    public static function company(LegacyImportIssue $code, string $companyKey, ?string $field = null): self
-    {
-        return new self(self::hash([
-            'kind' => 'company',
-            'code' => $code->value,
-            'company_key' => $companyKey,
-            'field' => $field,
-        ]));
-    }
-
-    /**
-     * A finding about a reconstructed interval — a disappearance, an overlap.
+     * A04-R1 had one factory per finding class — `cell()`, `interval()`, `existing()`, `token()`
+     * — and each composed its own array of key names. That is the shape that let the producer
+     * and the consumer disagree: `HistoryReconstruction` emitted `episode`/`company_tax_id`/
+     * `first_month`/`last_seen_month`, `identityFor()` read `subject`/`months`, and the two never
+     * met. Every disappearance and every overlap hashed as `subject='' , months=[]`.
      *
-     * @param  string  $subject  `company|client|type`, the thing the interval belongs to
-     * @param  list<string>  $months  the sheet months the finding covers, in order
+     * Now the *subject* is built once by {@see IssueSubject}, which both halves call, and this
+     * method hashes a two-element identity: the code, the subject, and the field. There is no
+     * place left for a key name to disagree, because there is only one key name.
+     *
+     * @param  string  $subject  `IssueSubject::subject()`; never an id
+     * @param  string|null  $field  which column or record, when one subject can raise a code twice
      */
-    public static function interval(LegacyImportIssue $code, string $subject, array $months, ?string $field = null): self
+    public static function fromSubject(LegacyImportIssue $code, string $subject, ?string $field = null): self
     {
-        sort($months);
+        if ($subject === '') {
+            // A finding with no subject cannot be identified, and hashing `''` would collapse
+            // every such finding in the import into one row — which is precisely what happened
+            // in A04-R1 and what the unique index then refused.
+            //
+            // Throwing here is the point: the alternative is a plan whose findings silently
+            // overwrite each other, discovered by whoever notices a missing question.
+            throw new \InvalidArgumentException(sprintf(
+                'La incidencia «%s» no tiene sujeto y no puede tener identidad. Todo productor debe '
+                .'usar IssueSubject para construir el contexto.',
+                $code->value,
+            ));
+        }
 
         return new self(self::hash([
-            'kind' => 'interval',
+            'v' => 2,
             'code' => $code->value,
             'subject' => $subject,
-            'months' => array_values(array_unique($months)),
             'field' => $field,
-        ]));
-    }
-
-    /**
-     * A finding about a target that already exists in the database. §11.
-     *
-     * @param  string  $naturalKey  the action's natural key, so the finding names the record
-     */
-    public static function existing(LegacyImportIssue $code, string $naturalKey, ?string $field = null): self
-    {
-        return new self(self::hash([
-            'kind' => 'existing',
-            'code' => $code->value,
-            'natural_key' => $naturalKey,
-            'field' => $field,
-        ]));
-    }
-
-    /**
-     * A finding about a *token*, wherever it appears.
-     *
-     * §9.2's `unresolved_social_entity` is about a spelling the catalogue does not have, and the
-     * same spelling is the same question in every cell that carries it. Keying on the first
-     * staged row that showed it would make the finding move every time the reconstruction
-     * reordered — and §5.3's "one row per finding, not per finding per row" says twenty-four
-     * people writing `SALUD TOTAL` is one answer, not twenty-four.
-     *
-     * `type` is the entity column, and it is part of the key rather than of `field`: `EPS` and
-     * `AFP` both saying `NO PORVENIR` are two different questions about two different columns.
-     */
-    public static function token(LegacyImportIssue $code, string $type, string $foldedToken): self
-    {
-        return new self(self::hash([
-            'kind' => 'token',
-            'code' => $code->value,
-            'entity_type' => $type,
-            'token' => $foldedToken,
-        ]));
-    }
-
-    /** A finding about the workbook as a whole. §5.3's `row_id`-less codes. */
-    public static function workbook(LegacyImportIssue $code, string $subject): self
-    {
-        return new self(self::hash([
-            'kind' => 'workbook',
-            'code' => $code->value,
-            'subject' => $subject,
         ]));
     }
 

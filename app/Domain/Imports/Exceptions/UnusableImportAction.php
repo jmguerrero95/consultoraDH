@@ -124,6 +124,28 @@ final class UnusableImportAction extends \RuntimeException
         );
     }
 
+    /**
+     * §9.5 could not name one relationship to attach an affiliation to.
+     *
+     * Its own factory rather than a `preconditionFailed()` with a formatted string, because this
+     * is a distinct outcome with a distinct reason code — the caller can tell "the relationship
+     * ended" from "there are several and the file does not say which" — and a caller that has to
+     * string-match to tell two failures apart will eventually match the wrong one.
+     */
+    public static function ambiguousAssignment(string $description, int $candidates): self
+    {
+        return new self(
+            sprintf(
+                'La acción «%s» no puede decidirse: %d relaciones empresa cubren este intervalo y '
+                .'§9.5 no dice cuál es. Hay que cerrar o separar alguna antes de continuar.',
+                $description,
+                $candidates,
+            ),
+            'ambiguous_assignment',
+            $description,
+        );
+    }
+
     /** A02's invariants refused the write. */
     public static function invariantRefused(string $description, string $why): self
     {

@@ -9,6 +9,7 @@ use App\Domain\Imports\Exceptions\InvalidIssueResolution;
 use App\Domain\Imports\ImportProfile;
 use App\Domain\Imports\IssueResolution;
 use App\Domain\Imports\IssueResolutionDecision;
+use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\SheetMonth;
 use App\Models\ImportSourceMapping;
 use App\Models\LegacyImport;
@@ -79,22 +80,63 @@ final class ResolveImportIssue
             throw InvalidIssueResolution::sourceRowMissing('la incidencia no pertenece a esta importación');
         }
 
-        if ($import->status->isTerminal()) {
-            // A cancelled or applied batch has no plan left to rebuild, so an answer recorded
-            // against it would be a claim about something that will never be applied.
-            throw InvalidIssueResolution::inapplicable(
-                $issue->code,
-                'la importación está en estado «'.$import->status->label().'»',
-            );
-        }
-
         return DB::transaction(function () use ($import, $issue, $payload, $actorId): array {
-            // Locked, so two answers to the same question cannot both be written and one
+            // ## The import row is locked first, and this ordering is the whole fix
+            //
+            // A04-R1 read `$import->status->isTerminal()` **before** opening the transaction, on
+            // a model the controller had loaded at the start of the request. Apply takes the same
+            // row with `FOR UPDATE` in `ImportLifecycle::claimApply()`, so the sequence was:
+            //
+            // ```text
+            //   resolve:  read status = ready          (no lock)
+            //   apply:    lock row → status = applying
+            //   resolve:  BEGIN → lock the *issue* row → write resolved_at
+            // ```
+            //
+            // The answer was recorded against a batch that was mid-apply or already applied. Its
+            // `resolved_at` and `resolution` are in the audit trail, the review screen shows the
+            // question as answered, and nothing will ever act on it — because the plan that would
+            // have honoured it was built before the answer and is being applied right now. The
+            // rebuild the resolve endpoint dispatches then finds a terminal import and refuses.
+            //
+            // Locking the import first, then re-reading its status under that lock, is the
+            // check-then-act discipline `ImportLifecycle` already documents: the terminal test and
+            // the write are inside one critical section, so they cannot straddle an apply.
+            $lockedImport = DB::table('legacy_imports')->where('id', $import->id)->lockForUpdate()->first();
+
+            if ($lockedImport === null) {
+                throw InvalidIssueResolution::inapplicable($issue->code, 'la importación ya no existe');
+            }
+
+            // A cancelled or applied batch has no plan left to rebuild, so an answer recorded
+            // against it would be a claim about something that will never be applied. Read from
+            // the locked row, never from the caller's model.
+            $status = LegacyImportStatus::from((string) $lockedImport->status);
+
+            if ($status->isTerminal()) {
+                throw InvalidIssueResolution::inapplicable(
+                    $issue->code,
+                    'la importación está en estado «'.$status->label().'»',
+                );
+            }
+
+            // §5.3: a finding that no longer applies cannot be answered. Checked under the lock
+            // alongside everything else, so a resolution cannot land on a question a concurrent
+            // rebuild just withdrew.
+            //
+            // Locked second, so two answers to the same question cannot both be written and one
             // silently lost. §12.2's discipline applied to review rather than to apply.
             $locked = DB::table('legacy_import_issues')->where('id', $issue->id)->lockForUpdate()->first();
 
             if ($locked === null) {
                 throw InvalidIssueResolution::sourceRowMissing('la incidencia ya no existe');
+            }
+
+            if ($locked->superseded_at !== null) {
+                throw InvalidIssueResolution::inapplicable(
+                    $issue->code,
+                    'esta pregunta ya no aplica: la reconstrucción cambió',
+                );
             }
 
             $issue->refresh();

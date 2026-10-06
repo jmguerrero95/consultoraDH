@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 import type { ConsoleMessage, Page } from '@playwright/test';
 
+import { csrfHeaders } from './support/a03';
 import { emailField, passwordField } from './support/forms';
 
 /**
@@ -125,11 +126,9 @@ test.describe('the browser console', () => {
         // The CSRF token is read from the cookie and echoed back, as the interface
         // does before its first write. Without it the write is refused with 419
         // before anything is read, which is the correct behaviour and not what this
-        // test is about.
-        const token = (await page.context().cookies()).find((cookie) => cookie.name === 'XSRF-TOKEN')?.value;
-
+        // test is about. `apiWrite()` is the shared helper that does it.
         const response = await page.request.post('/api/clients', {
-            headers: token === undefined ? {} : { 'X-XSRF-TOKEN': decodeURIComponent(token) },
+            headers: await csrfHeaders(page),
             data: {
                 document_type: 'CC',
                 document_number: `9${stamp}`,

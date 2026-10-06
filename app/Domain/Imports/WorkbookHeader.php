@@ -107,6 +107,18 @@ final readonly class WorkbookHeader
     }
 
     /**
+     * The `ARL` column, if the header names one. §9.4's second ARL priority.
+     *
+     * A method rather than a resolved field so the caller can tell "the header has no ARL column"
+     * from "the header has one and this block's cell is empty" — §9.4 treats those differently,
+     * because the first means fall through to the title and the second means the two contradict.
+     */
+    public function arlColumn(): ?string
+    {
+        return $this->fields['arl'] ?? null;
+    }
+
+    /**
      * The `P` and `Q` columns, as headings, for `RiskColumns` to decide from.
      *
      * Returned rather than interpreted: §1.1 forbids deciding from the heading alone, and
@@ -153,6 +165,9 @@ final readonly class WorkbookHeader
             ['eps', ['EPS SALUD', 'EPS']],
             ['afp', ['AFP PENSION', 'AFP PENSIÓN', 'AFP']],
             ['job_title', ['CARGO', 'PUESTO']],
+            // §9.4's second ARL priority: a header that names the ARL. Matched only on headings
+            // that say `ARL`, so a column titled `EPS`, `AFP` or `CAJA` cannot be consumed here.
+            ['arl', ['ARL', 'SALUD OCUPACIONAL', 'SALUD OCUPACIONAL (ARL)']],
         ];
 
         foreach ($rules as [$field, $candidates]) {

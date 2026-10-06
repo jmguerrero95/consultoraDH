@@ -36,6 +36,7 @@ enum LegacyImportIssue: string
     // --- company identity ----------------------------------------------------
     case InvalidCompanyTaxId = 'invalid_company_tax_id';
     case CompanyIdentityConflict = 'company_identity_conflict';
+    case CompanyVerificationDigitConflict = 'company_verification_digit_conflict';
     case CompanyArlMetadataConflict = 'company_arl_metadata_conflict';
 
     // --- source hygiene ------------------------------------------------------

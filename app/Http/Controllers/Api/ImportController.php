@@ -312,6 +312,29 @@ final class ImportController extends Controller
     {
         $import = $this->findImport($import);
 
+        // `true` / `false` are accepted alongside `1` / `0` for the two boolean filters, and are
+        // normalised **before** validation.
+        //
+        // Laravel's `boolean` rule recognises only the numeric spellings, so a query string
+        // carrying `unresolved=true` was a 422 — even though `true` is how the value reads in
+        // every other language a caller might use, and how a checkbox serialises. Normalising
+        // after `validate()` would be too late: the request would already have been refused.
+        //
+        // The consequence was silent and bad. The import screen's Incidencias tab asks for
+        // `unresolved` on its default filter ("Sólo sin resolver"), caught the 422 in an empty
+        // `catch`, and rendered "No hay incidencias que coincidan" for a batch with four open
+        // findings — including the blocker that disables Apply. An empty list looked like an
+        // answer.
+        foreach (['blocking', 'unresolved'] as $flag) {
+            $raw = $request->query($flag);
+
+            if (! is_string($raw)) {
+                continue;
+            }
+
+            $request->query->set($flag, filter_var($raw, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? false);
+        }
+
         $filters = $request->validate([
             'code' => ['nullable', 'string', 'max:48'],
             'severity' => ['nullable', 'string', 'max:12'],
@@ -334,10 +357,16 @@ final class ImportController extends Controller
             $query->where('blocking', $filters['blocking']);
         }
 
+        // "Unresolved" means unanswered **and** still standing.
+        //
+        // A superseded finding is unanswered — nobody answered it — but it no longer describes
+        // anything, and A04-R2 added `superseded_at` to say exactly that. Filtering only on
+        // `resolved_at` would list withdrawn questions beside open ones, so a reviewer would be
+        // asked to answer a question about a situation that no longer exists.
         if (($filters['unresolved'] ?? null) !== null) {
             $filters['unresolved']
-                ? $query->whereNull('resolved_at')
-                : $query->whereNotNull('resolved_at');
+                ? $query->whereNull('resolved_at')->whereNull('superseded_at')
+                : $query->whereNotNull('resolved_at')->orWhereNotNull('superseded_at');
         }
 
         $issues = $query->paginate((int) ($filters['per_page'] ?? 50));
@@ -359,6 +388,11 @@ final class ImportController extends Controller
                 'is_resolved' => $issue->isResolved(),
                 'resolved_by' => $issue->resolved_by,
                 'resolved_at' => $issue->resolved_at,
+                // A04-R2. A finding the reconstruction stopped producing: kept for the record, no
+                // longer a question. Distinct from `is_resolved`, because nobody answered it, and
+                // the review screen must not present it as answered.
+                'is_superseded' => $issue->isSuperseded(),
+                'superseded_at' => $issue->superseded_at,
                 'resolution' => $issue->resolution,
                 // §5.3's record of what was decided, in the reviewer's own words.
                 'resolution_summary' => $issue->resolution === null

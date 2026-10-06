@@ -133,6 +133,18 @@ const routes: RouteRecordRaw[] = [
             },
             {
                 path: 'clients',
+                // The only route in this table that had no `name`.
+                //
+                // `DashboardPage`'s "Clientes activos" tile links to `{ name: 'clients' }`, and
+                // `vue-router` throws when it is asked to resolve a name that does not exist. The
+                // throw happened inside `RouterLink`'s own `setup()`, which aborted the whole
+                // `DashboardPage` subtree — so the dashboard rendered its header and navigation and
+                // then nothing else, with no error boundary and nothing in the server log.
+                //
+                // That is why the end-to-end suite failed on `authenticated`, `portfolio`,
+                // `billing` and both `console` specs at once: every one of them lands on the
+                // dashboard, and every one of them was failing for this one missing word.
+                name: 'clients',
                 component: () => import('@/pages/clients/ClientListPage.vue'),
                 meta: {
                     title: 'Clientes',

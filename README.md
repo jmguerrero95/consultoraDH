@@ -34,10 +34,11 @@ Un sistema de gestión interna con tres grupos de requisitos:
 De esos tres grupos, A02 implementa el primero (clientes, empresas,
 afiliaciones y su historial), A03 el núcleo financiero del primero (periodos,
 fechas de corte, obligaciones, ajustes, pagos y cartera) y A04 la importación
-desde Excel con reconstrucción histórica —con su remediación de auditoría en
-[`docs/TASKS/A04-R1.md`](docs/TASKS/A04-R1.md), que **no** es una aprobación
-externa. El servicio al cliente y la analítica con integración siguen sin empezar:
-son A08 a A14.
+desde Excel con reconstrucción histórica —con sus dos rondas de remediación de
+auditoría en [`docs/TASKS/A04-R1.md`](docs/TASKS/A04-R1.md) y
+[`docs/TASKS/A04-R2.md`](docs/TASKS/A04-R2.md), ninguna de las cuales **es** una
+aprobación externa. El servicio al cliente y la analítica con integración siguen
+sin empezar: son A08 a A14.
 
 ## 2. Arquitectura en una frase
 
@@ -402,6 +403,7 @@ Los detalles y la lista completa están en [docs/SECURITY.md](docs/SECURITY.md).
 | [docs/TASKS/A03-R3-REMEDIATION.md](docs/TASKS/A03-R3-REMEDIATION.md) | Cierre final de los hallazgos de A03 |
 | [docs/TASKS/A04.md](docs/TASKS/A04.md) | Importación Excel, revisión y reconstrucción histórica |
 | [docs/TASKS/A04-R1.md](docs/TASKS/A04-R1.md) | Remediación de la auditoría externa de A04 |
+| [docs/TASKS/A04-R2.md](docs/TASKS/A04-R2.md) | Segunda remediación, tras la segunda auditoría de A04 |
 
 ## 13. Licencia
 

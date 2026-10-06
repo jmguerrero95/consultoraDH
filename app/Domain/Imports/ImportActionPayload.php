@@ -245,6 +245,34 @@ final readonly class ImportActionPayload
     // --------------------------------------------------------------- intervals
 
     /**
+     * One boundary of an interval as a `Y-m-d` string, or null when it is undated.
+     *
+     * ## Why a precondition check cannot use `interval()`
+     *
+     * `interval()` validates the whole shape and throws when it is malformed, which is right for
+     * a writer about to use it. A precondition check has to survive a payload it cannot use:
+     * "the episode's start is `null`" is a *fact about the row*, and for a `create_relationship`
+     * whose first observation carried no exact date `started_on` is legitimately null, so the
+     * episode's existence has to be looked up by company and client instead of by start.
+     *
+     * So this reads defensively and returns null rather than refusing — refusing would turn "this
+     * plan cannot check its own assumption" into a hard error on a payload that is perfectly
+     * valid for the write that follows.
+     */
+    public function dateOrNull(string $intervalKey, string $boundary): ?string
+    {
+        $raw = $this->data[$intervalKey] ?? null;
+
+        if (! is_array($raw)) {
+            return null;
+        }
+
+        $value = $raw[$boundary] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    /**
      * The interval an action writes, as a `HistoricalInterval`.
      *
      * ## Why the payload's four fields are read as one unit

@@ -115,8 +115,8 @@ it('blocks a relationship that disappears before the last month of the file', fu
 
     $issue = $reconstruction->issues()[0];
     expect($issue->blocking)->toBeTrue();
-    expect($issue->context['last_seen_month'])->toBe('2026-02');
-    expect($issue->context['file_last_month'])->toBe('2026-03');
+    expect($issue->context()['last_seen_month'])->toBe('2026-02');
+    expect($issue->context()['file_last_month'])->toBe('2026-03');
 });
 
 it('does not call a relationship a disappearance when it is seen in the last month', function () {

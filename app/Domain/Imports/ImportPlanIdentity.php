@@ -83,16 +83,6 @@ final class ImportPlanIdentity
     }
 
     /**
-     * The identity the *next* build will produce, for comparison against the stored one.
-     *
-     * Used by the rebuild to decide whether anything changed: same digest, new revision.
-     */
-    public static function next(LegacyImport $import): self
-    {
-        return new self((int) $import->plan_revision + 1, (string) $import->plan_digest);
-    }
-
-    /**
      * SHA-256 over the plan's content, in ordinal order.
      *
      * @param  iterable<LegacyImportAction>  $actions

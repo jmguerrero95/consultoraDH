@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Imports\Actions;
 
+use App\Domain\Affiliations\Actions\ManageCatalogueEntities;
 use App\Domain\Affiliations\AffiliationAlreadyExists;
 use App\Domain\Affiliations\ArlRiskClass;
 use App\Domain\Affiliations\ManageAffiliations;
@@ -12,6 +13,10 @@ use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Billing\BillingTopologyLock;
+use App\Domain\Clients\Actions\CreateClient;
+use App\Domain\Clients\Actions\UpdateClient;
+use App\Domain\Companies\Actions\CreateCompany;
+use App\Domain\Companies\Actions\UpdateCompany;
 use App\Domain\Imports\Exceptions\ImportApplyFailed;
 use App\Domain\Imports\Exceptions\UnusableImportAction;
 use App\Domain\Imports\HistoricalInterval;
@@ -105,6 +110,14 @@ final class ApplyImportPlan
         private readonly BillingTopologyLock $topologyLock,
         private readonly ManageClientCompanies $relationships,
         private readonly ManageAffiliations $affiliations,
+        // §22's authoritative writers for the masters. A04-R1 wrote companies, clients and
+        // catalogue entities with `firstOrCreate`, which bypasses A02's document normalisation,
+        // its NIT validation and its domain events.
+        private readonly CreateCompany $companies,
+        private readonly CreateClient $clients,
+        private readonly UpdateClient $clientUpdates,
+        private readonly UpdateCompany $companyUpdates,
+        private readonly ManageCatalogueEntities $catalogue,
         private readonly AuditRecorder $audit,
     ) {}
 
@@ -145,8 +158,24 @@ final class ApplyImportPlan
     ): LegacyImport {
         $claimed = ImportLifecycle::mutate(
             (int) $import->id,
-            function (ImportLifecycle $lifecycle) use ($plan, $expected): LegacyImport {
+            function (ImportLifecycle $lifecycle) use ($expected): LegacyImport {
                 $this->assertPlanIdentity($lifecycle->import(), $expected);
+
+                // §5.4, enforced at the only point where it means anything: the actions are read
+                // **here**, under the lock and inside the transaction, not by the caller.
+                //
+                // A04-R1's controller did `$import->actions()->orderBy('ordinal')->get()` before
+                // calling this, so the plan being applied was whatever a relation had cached from
+                // an earlier read in the same request — while another tab's `rebuild-plan` or a
+                // late-firing `BuildLegacyImportPlan` job could have replaced those rows between
+                // the read and the write. The revision check compared the *import row* against
+                // the submitted pair and passed, because the import's `plan_revision` and the
+                // rows had not moved yet; the actions did, one statement later.
+                //
+                // The caller's plan is now only used for its `unresolvedBlockers` count, and even
+                // that is recomputed here. Reading the rows at the point of use is what makes
+                // "the plan that runs is the plan that was reviewed" true rather than asserted.
+                $plan = $this->reloadPlan($lifecycle->import());
 
                 $this->assertApplicable($lifecycle->import(), $plan);
 
@@ -193,6 +222,34 @@ final class ApplyImportPlan
         // `mutate()` returns whatever the callback returned, so the transition and the summary
         // are already committed by the time this line runs.
         return $claimed;
+    }
+
+    /**
+     * The plan as the database holds it right now, under the lock.
+     *
+     * Ordered by `ordinal` because the digest is computed in that order: reloading in a
+     * different order would produce a different digest for the same content and turn every apply
+     * into a 409.
+     *
+     * `superseded`/`skipped` actions are loaded too, because §12.3's counts have to include them
+     * — a batch that reports zero skipped while holding forty skips is not a summary, it is a
+     * different answer.
+     */
+    private function reloadPlan(LegacyImport $import): ImportPlan
+    {
+        return new ImportPlan(
+            $import,
+            LegacyImportAction::query()
+                ->where('legacy_import_id', $import->id)
+                ->orderBy('ordinal')
+                ->get()
+                ->all(),
+            $import->issues()
+                ->where('blocking', true)
+                ->whereNull('resolved_at')
+                ->whereNull('superseded_at')
+                ->count(),
+        );
     }
 
     // ------------------------------------------------------------------ refusals
@@ -314,6 +371,31 @@ final class ApplyImportPlan
                 ];
 
                 continue;
+            } catch (\RuntimeException $refusal) {
+                // A02's and A03's own invariants, reached through their actions.
+                //
+                // `DuplicateOpenRelationship` is a `RuntimeException`, and A04-R1 let it escape
+                // `applyActions()` entirely — so a plan that tried to open a second relationship
+                // to the same employer produced a **500**, not §12.3's refusal. The operator saw
+                // "server error" with no action name, no reason code and no way to learn which row
+                // was the problem; the batch's own summary said nothing, because the transaction
+                // rolled back before it could be written.
+                //
+                // §12.3's answer to an action that cannot run is a *refusal*, and it has a reason
+                // code for exactly this. The domain's own message is what says which rule was
+                // broken, and it is written for a person.
+                $action->forceFill([
+                    'state' => ImportActionState::Failed->value,
+                    'failure_message' => $refusal->getMessage(),
+                ])->save();
+
+                $stranded[] = [
+                    'type' => $action->action_type?->value ?? 'unknown',
+                    'key' => (string) $action->natural_key,
+                    'reason' => 'domain_refused',
+                ];
+
+                continue;
             }
 
             // Provenance is written as the action runs, not at the end: a row that exists
@@ -361,7 +443,244 @@ final class ApplyImportPlan
 
             $payload = ImportActionPayload::read($action->natural_key, $action->payload);
             $payload->onlyKeys($this->allowedKeys($action->action_type));
+
+            // §12.3's second half: what the plan *assumed* has to be true, not just what it
+            // carries.
+            $this->assertPreconditions($action, $payload);
         }
+    }
+
+    /**
+     * Re-check every action's `preconditions` against the database, before any write.
+     *
+     * ## Why these were stored and never read
+     *
+     * `ImportPlanBuilder` recorded `target_exists` and `observed` on every action — "nothing
+     * existed when the plan was built", "the name I read was this" — and A04-R1 never compared
+     * them to anything. Two of the writers re-checked their own preconditions by hand
+     * (`writeRate()`'s `accepted_conflict`, `writeCompanyUpdate()`'s `approved_fields`), and the
+     * rest read none, so for a company, a client or a relationship the assumption was decoration.
+     *
+     * The consequence is the specific thing §11 is about: the plan said "create this company
+     * because it did not exist", and if it came into existence between preview and click the
+     * write still ran — as a `firstOrCreate()` that silently adopted somebody else's row and
+     * then applied the source's name to it. The precondition would have caught it, had anything
+     * read it.
+     *
+     * ## All-or-nothing, and before the first write
+     *
+     * Every precondition in the batch is checked before any action runs, so a plan that is stale
+     * in its fourth action writes nothing at all rather than the first three. That is also why
+     * this is in `prevalidate()` rather than inside each writer: a check that runs after a write
+     * can only roll back, and §12.3 wants a refusal, not a rollback.
+     */
+    private function assertPreconditions(LegacyImportAction $action, ImportActionPayload $payload): void
+    {
+        $preconditions = $action->preconditions;
+        $key = $action->natural_key;
+
+        if (array_key_exists('target_exists', $preconditions)) {
+            $expected = (bool) $preconditions['target_exists'];
+            $actual = $this->targetExists($action->action_type, $payload);
+
+            // `null` is "this action type has no single record to look up", and a check that
+            // cannot run is not a check that passed. §11's `target_exists` is an assertion about a
+            // specific row, so it is only asserted where there is one to assert about.
+            if ($actual === null) {
+                return;
+            }
+
+            if ($actual !== $expected) {
+                throw UnusableImportAction::preconditionFailed(
+                    $key,
+                    $expected
+                        ? 'el plan asumía que el registro ya existía y ahora '.($actual ? 'sigue existiendo' : 'ya no está')
+                        : 'el plan asumía que el registro no existía y '.($actual ? 'ahora sí existe' : 'sigue sin existir'),
+                );
+            }
+        }
+
+        $observed = $preconditions['observed'] ?? null;
+
+        if (! is_array($observed)) {
+            return;
+        }
+
+        foreach ($observed as $field => $expected) {
+            $actual = $this->observedValue($action->action_type, $payload, (string) $field);
+
+            if ($actual === null) {
+                // The precondition named a field this action cannot observe. Refusing is the
+                // honest answer: a check that cannot run is not a check that passed.
+                throw UnusableImportAction::preconditionFailed(
+                    $key,
+                    sprintf('el plan registró una observación de «%s» que no se puede comprobar', (string) $field),
+                );
+            }
+
+            if ((string) $actual !== (string) $expected) {
+                throw UnusableImportAction::preconditionFailed(
+                    $key,
+                    sprintf(
+                        '«%s» era «%s» cuando se construyó el plan y ahora es «%s»',
+                        (string) $field,
+                        (string) $expected,
+                        (string) $actual,
+                    ),
+                );
+            }
+        }
+    }
+
+    /**
+     * Whether the record an action targets exists now, or `null` when there is no single row.
+     *
+     * Every §11 target is answerable, because each is named by a natural key the action already
+     * carries: a company by NIT, a client by document, a relationship by client + company +
+     * start, an affiliation by client + entity + type + start, a rate by client + company +
+     * month. Resolving each one here is what makes `target_exists` meaningful for the types
+     * whose whole point is reconciling with existing data.
+     *
+     * Tolerant lookups throughout: `first()` rather than the writers' `firstOrFail()`, because a
+     * precondition check must be able to answer "no, it is gone" without throwing the way a write
+     * refuses to.
+     */
+    private function targetExists(?ImportActionType $type, ImportActionPayload $payload): ?bool
+    {
+        $client = $this->peekClient($type, $payload);
+        $company = $this->peekCompany($type, $payload);
+
+        return match ($type) {
+            ImportActionType::CreateCompany, ImportActionType::UpdateCompany => Company::query()
+                ->where('tax_id', $payload->string('tax_id'))
+                ->exists(),
+
+            ImportActionType::CreateClient, ImportActionType::UpdateClient => Client::query()
+                ->where('document_type', $payload->string('document_type'))
+                ->where('document_number', $payload->string('document_number'))
+                ->exists(),
+
+            // §8.1's episode key is client + company + start, so this is the natural lookup for
+            // both the create and the close: "did this exact episode already exist when the plan
+            // was built" is the question `target_exists` was recording an answer to.
+            ImportActionType::CreateRelationship,
+            ImportActionType::CloseRelationship => $client !== null && $company !== null
+                && ClientCompanyAssignment::query()
+                    ->where('client_id', $client->id)
+                    ->where('company_id', $company->id)
+                    ->where('started_on', $payload->dateOrNull('interval', 'start'))
+                    ->exists(),
+
+            ImportActionType::CreateAffiliation,
+            ImportActionType::CloseAffiliation => $client !== null
+                && $this->affiliationExists($type, $payload, $client),
+
+            ImportActionType::CreateRate => $client !== null && $company !== null
+                && ClientCompanyRate::query()
+                    ->where('client_id', $client->id)
+                    ->where('company_id', $company->id)
+                    ->where('effective_month', $payload->monthKey('effective_month').'-01')
+                    ->exists(),
+
+            // §9.2's new catalogue entry: it names a `name`, not a record that could already
+            // exist under its natural key, so there is nothing for `target_exists` to assert
+            // about.
+            //
+            // Listed exhaustively rather than as a `default` on purpose. A04-R1's silent-skip
+            // defect was a `default => null` in this file that meant "unimplemented", and the
+            // guard against it — `RemediationRegressionTest`'s "not to contain `default => null`" —
+            // is worth more than the convenience. Naming every case means a new
+            // `ImportActionType` has to be classified here or the match throws, which is the
+            // behaviour we want for a precondition nobody thought about.
+            ImportActionType::CreateSocialEntity => null,
+        };
+    }
+
+    /** §9.5's affiliation, as a single row, for a precondition check. */
+    private function affiliationExists(
+        ?ImportActionType $type,
+        ImportActionPayload $payload,
+        Client $client,
+    ): bool {
+        $query = ClientAffiliation::query()
+            ->where('client_id', $client->id)
+            ->where('type', $payload->string('type'));
+
+        // A create names the entity it resolved to; a close names the one it is closing, and a
+        // close of an entity-less segment (a refusal) has nothing to look up.
+        $entityId = $payload->nullableInteger('social_security_entity_id');
+
+        if ($entityId !== null) {
+            $query->where('social_security_entity_id', $entityId);
+        } elseif ($type === ImportActionType::CreateAffiliation) {
+            // §9.2's unresolved token: no entity yet, so the only thing that can collide is
+            // another segment of the same type for the same person.
+            return $query->whereNull('ended_on')->exists();
+        } else {
+            return false;
+        }
+
+        return $query->where('started_on', $payload->dateOrNull('interval', 'start'))->exists();
+    }
+
+    private function peekClient(?ImportActionType $type, ImportActionPayload $payload): ?Client
+    {
+        if (! in_array($type, [
+            ImportActionType::CreateRelationship,
+            ImportActionType::CloseRelationship,
+            ImportActionType::CreateAffiliation,
+            ImportActionType::CloseAffiliation,
+            ImportActionType::CreateRate,
+        ], true)) {
+            return null;
+        }
+
+        return Client::query()
+            ->where('document_type', $payload->string('client_document_type'))
+            ->where('document_number', $payload->string('client_document_number'))
+            ->first();
+    }
+
+    private function peekCompany(?ImportActionType $type, ImportActionPayload $payload): ?Company
+    {
+        if (! in_array($type, [
+            ImportActionType::CreateRelationship,
+            ImportActionType::CloseRelationship,
+            ImportActionType::CreateRate,
+        ], true)) {
+            return null;
+        }
+
+        return Company::query()
+            ->where('tax_id', $payload->string('company_tax_id'))
+            ->first();
+    }
+
+    /**
+     * The current value of one observed field, for the types that can read it.
+     *
+     * Strings throughout, deliberately: a precondition recorded `'1 200 000'` and a column that
+     * holds `1200000` are the same amount, and a strict `===` on two different PHP types would
+     * report a conflict where there is none. `null` means "this type cannot observe this field".
+     */
+    private function observedValue(?ImportActionType $type, ImportActionPayload $payload, string $field): ?string
+    {
+        if (! in_array($type, [ImportActionType::CreateCompany, ImportActionType::UpdateCompany], true)) {
+            return null;
+        }
+
+        if (! in_array($field, ['legal_name', 'verification_digit'], true)) {
+            return null;
+        }
+
+        $value = Company::query()
+            ->where('tax_id', $payload->string('tax_id'))
+            ->value($field);
+
+        // A null column is a *value* — "the company has no digit" — not "cannot be observed".
+        // Conflating the two would make §7.2's missing-digit case indistinguishable from an
+        // unchecked field, and the whole enrichment question would pass silently.
+        return $value === null ? '' : (string) $value;
     }
 
     /** @return list<string> the keys each action type's writer reads */
@@ -374,6 +693,9 @@ final class ApplyImportPlan
 
             ImportActionType::CreateClient, ImportActionType::UpdateClient => [
                 'document_type', 'document_number', 'first_names', 'last_names',
+                // §1.3's K/L/R and §7.1's profile, on the same contract as the names: a proposal
+                // in the payload, a decision in `approved_fields`.
+                'address', 'phone', 'email',
                 'observed_names', 'current_id', 'fields',
             ],
 
@@ -423,11 +745,11 @@ final class ApplyImportPlan
         $payload = ImportActionPayload::read($action->natural_key, $action->payload);
 
         return match ($action->action_type) {
-            ImportActionType::CreateCompany => $this->writeCompany($payload),
+            ImportActionType::CreateCompany => $this->writeCompany($import, $action, $payload),
             ImportActionType::UpdateCompany => $this->writeCompanyUpdate($import, $action, $payload),
-            ImportActionType::CreateClient => $this->writeClient($payload),
+            ImportActionType::CreateClient => $this->writeClient($import, $action, $payload),
             ImportActionType::UpdateClient => $this->writeClientUpdate($import, $action, $payload),
-            ImportActionType::CreateSocialEntity => $this->writeSocialEntity($payload),
+            ImportActionType::CreateSocialEntity => $this->writeSocialEntity($import, $action, $payload),
             ImportActionType::CreateRelationship => $this->writeRelationship($import, $action, $payload),
             ImportActionType::CloseRelationship => $this->writeRelationshipClose($import, $action, $payload),
             ImportActionType::CreateAffiliation => $this->writeAffiliation($import, $action, $payload),
@@ -443,18 +765,47 @@ final class ApplyImportPlan
     // ------------------------------------------------------------------- masters
 
     /** @return array{type: string, id: int} */
-    private function writeCompany(ImportActionPayload $payload): array
+    private function writeCompany(LegacyImport $import, LegacyImportAction $action, ImportActionPayload $payload): array
     {
         $taxId = $payload->string('tax_id');
         $legalName = $payload->string('legal_name');
+        $digit = $payload->nullableString('verification_digit');
 
-        // §11: an exact match is a no-op. `firstOrCreate` puts the name in the *values*, so an
+        // §11: an exact match is a no-op. `firstOrCreate` puts the values in the *values*, so an
         // existing company is returned untouched rather than rewritten — a master value somebody
         // typed by hand is never overwritten by an import.
-        $company = Company::query()->firstOrCreate(
-            ['tax_id' => $taxId],
-            ['legal_name' => $legalName],
+        //
+        // §7.2's DV rides along as the third value for the same reason it is never overwritten:
+        // the title stated one, and it belongs to the company being created. A04-R1 parsed the
+        // digit, staged it, and dropped it here, so every company created from a title that
+        // carried `-3` was stored with `verification_digit = null`.
+        $attributes = array_filter([
+            'legal_name' => $legalName,
+            'verification_digit' => $digit,
+        ], static fn (?string $value): bool => $value !== null);
+
+        // §11's no-op, decided by a lookup rather than by `firstOrCreate`'s values: a company
+        // that appeared between the plan and this apply is caught by `assertPreconditions()`
+        // before this line, so anything found here is one the plan knew about.
+        $existing = Company::query()->where('tax_id', $taxId)->first();
+
+        if ($existing !== null) {
+            return ['type' => Company::class, 'id' => (int) $existing->id];
+        }
+
+        // Through A02's own action, which normalises the NIT through `TaxIdParts` and fires
+        // `CompanyCreated`. A04-R1 used `firstOrCreate`, which bypassed both — so a company
+        // created by an import had no audit event and whatever normalisation A02 guarantees.
+        $company = $this->companies->execute(
+            ['tax_id' => $taxId] + $attributes,
+            $import->creator,
         );
+
+        $this->audit->record(AuditAction::CompanyCreated, $import->creator, [
+            'import_uuid' => $import->uuid,
+            'action_fingerprint' => $action->batch_fingerprint,
+            'source_rows' => $action->source_row_ids,
+        ], subject: $company);
 
         return ['type' => Company::class, 'id' => (int) $company->id];
     }
@@ -479,7 +830,10 @@ final class ApplyImportPlan
             throw UnusableImportAction::targetUnresolvable($action->natural_key, 'la empresa', 'no existe con ese NIT');
         }
 
-        $fields = $this->approvedFields($action, $payload, ['legal_name']);
+        // §7.2's DV and §11's name are independent proposals. A reviewer may approve completing
+        // a missing digit and decline a name change in the same import, so the fields are matched
+        // individually rather than the action being treated as all-or-nothing.
+        $fields = $this->approvedFields($action, $payload, ['legal_name', 'verification_digit']);
 
         if ($fields === []) {
             throw UnusableImportAction::targetUnresolvable(
@@ -489,8 +843,31 @@ final class ApplyImportPlan
             );
         }
 
-        if ($fields === ['legal_name']) {
-            $company->forceFill(['legal_name' => $payload->string('legal_name')])->save();
+        $changes = [];
+
+        if (in_array('legal_name', $fields, true)) {
+            $changes['legal_name'] = $payload->string('legal_name');
+        }
+
+        // §7.2's one enrichment: the source stated a digit and the master has none. The proposal
+        // was shown as `null → 3` and approved, so it is applied — and only in that direction.
+        // A *contradicting* digit never reaches here: the builder raises
+        // `company_verification_digit_conflict` as a blocker instead, so this branch cannot
+        // overwrite a digit somebody is relying on.
+        $digit = $payload->nullableString('verification_digit');
+
+        if ($digit !== null
+            && in_array('verification_digit', $fields, true)
+            && ($company->verification_digit === null || $company->verification_digit === '')) {
+            $changes['verification_digit'] = $digit;
+        }
+
+        if ($changes !== []) {
+            // Through A02's `UpdateCompany`, which resolves the NIT and its digit together and
+            // records which of the two moved. `forceFill()` could not: §7.2's rule is that the
+            // digit travels with the NIT, and writing one without the other is exactly the
+            // inconsistency A02's `TaxIdUpdate` exists to prevent.
+            $company = $this->companyUpdates->execute($company, $changes, $import->creator);
         }
 
         $this->audit->record(AuditAction::CompanyUpdated, $import->creator, [
@@ -504,19 +881,54 @@ final class ApplyImportPlan
     }
 
     /** @return array{type: string, id: int} */
-    private function writeClient(ImportActionPayload $payload): array
+    private function writeClient(LegacyImport $import, LegacyImportAction $action, ImportActionPayload $payload): array
     {
         $attributes = [
             'document_type' => $payload->string('document_type'),
             'document_number' => $payload->string('document_number'),
         ];
 
-        // §11: an exact match is a no-op, and the names go in the *values* so an existing
-        // client is returned untouched.
-        $client = Client::query()->firstOrCreate($attributes, [
+        // §11: an exact match is a no-op, and everything proposed goes in the *values* so an
+        // existing client is returned untouched.
+        //
+        // §7.1's profile rides along: §1.3's K/L/R are the only contact data the source carries,
+        // and A04-R1 staged them into `legacy_import_rows` and then created every client with a
+        // null address, phone and email. §7.1 is explicit that a new client's profile is
+        // "el valor no vacío más reciente", so these are the client's own data on creation, not an
+        // overwrite of anybody's — no approval is needed for a row that did not exist.
+        $values = array_filter([
             'first_names' => $payload->nullableString('first_names'),
             'last_names' => $payload->nullableString('last_names'),
-        ]);
+            'address' => $payload->nullableString('address'),
+            'phone' => $payload->nullableString('phone'),
+            'email' => $payload->nullableString('email'),
+        ], static fn (?string $value): bool => $value !== null && trim($value) !== '');
+
+        $existing = Client::query()
+            ->where('document_type', $attributes['document_type'])
+            ->where('document_number', $attributes['document_number'])
+            ->first();
+
+        if ($existing !== null) {
+            // §11's no-op: returned untouched, which is what `firstOrCreate`'s values argument
+            // used to achieve and what a domain action cannot be asked to do — `CreateClient`
+            // always creates, by design, and the unique index is what stops a duplicate.
+            return ['type' => Client::class, 'id' => (int) $existing->id];
+        }
+
+        // Through A02's `CreateClient`, which normalises the document through
+        // `DocumentNumber::normalise()` for its type and fires `ClientCreated`.
+        //
+        // A04-R1's `firstOrCreate` did neither: an imported client's document was stored exactly
+        // as the spreadsheet wrote it, so `CC 10101010` and `10101010` were two different people
+        // even though §7.1 says identity is `DocumentType + DocumentNumber` *using A02's classes*.
+        $client = $this->clients->execute($attributes + $values, $import->creator);
+
+        $this->audit->record(AuditAction::ClientCreated, $import->creator, [
+            'import_uuid' => $import->uuid,
+            'action_fingerprint' => $action->batch_fingerprint,
+            'source_rows' => $action->source_row_ids,
+        ], subject: $client);
 
         return ['type' => Client::class, 'id' => (int) $client->id];
     }
@@ -538,7 +950,11 @@ final class ApplyImportPlan
             throw UnusableImportAction::targetUnresolvable($action->natural_key, 'el cliente', 'no existe con ese documento');
         }
 
-        $fields = $this->approvedFields($action, $payload, ['first_names', 'last_names']);
+        $fields = $this->approvedFields(
+            $action,
+            $payload,
+            ['first_names', 'last_names', 'address', 'phone', 'email'],
+        );
 
         if ($fields === []) {
             throw UnusableImportAction::targetUnresolvable(
@@ -548,10 +964,30 @@ final class ApplyImportPlan
             );
         }
 
-        $client->forceFill(array_filter([
-            'first_names' => in_array('first_names', $fields, true) ? $payload->nullableString('first_names') : null,
-            'last_names' => in_array('last_names', $fields, true) ? $payload->nullableString('last_names') : null,
-        ], static fn (?string $value): bool => $value !== null))->save();
+        // §7.1: "nunca sobrescribir un valor manual no vacío silenciosamente" and "campos vacíos
+        // de fuente nunca borran datos existentes". Both are enforced here by construction: a
+        // field is written only when it was in the approved list *and* the payload actually
+        // carries a non-empty value for it, so an approved field with an empty proposal is a
+        // no-op rather than a deletion.
+        $changes = [];
+
+        foreach ($fields as $field) {
+            $value = $payload->nullableString($field);
+
+            if ($value === null || trim($value) === '') {
+                continue;
+            }
+
+            $changes[$field] = trim($value);
+        }
+
+        if ($changes !== []) {
+            // Through A02's `UpdateClient`, which has the editable-field allow-list and fires
+            // `ClientUpdated` with exactly the fields that moved. `forceFill()->save()` wrote
+            // straight to the table and left the audit trail to this class's own record — so a
+            // client's profile changed with no event for anything else in the system to observe.
+            $client = $this->clientUpdates->execute($client, $changes, $import->creator);
+        }
 
         $this->audit->record(AuditAction::ClientUpdated, $import->creator, [
             'import_uuid' => $import->uuid,
@@ -573,15 +1009,36 @@ final class ApplyImportPlan
      *
      * @return array{type: string, id: int}
      */
-    private function writeSocialEntity(ImportActionPayload $payload): array
+    private function writeSocialEntity(LegacyImport $import, LegacyImportAction $action, ImportActionPayload $payload): array
     {
         $type = $payload->entityType('type');
         $name = $payload->string('name');
 
-        $entity = SocialSecurityEntity::query()->firstOrCreate(
-            ['type' => $type, 'name' => $name],
-            ['code' => null, 'tax_id' => null],
-        );
+        $existing = SocialSecurityEntity::query()
+            ->where('type', $type)
+            ->where('name', $name)
+            ->first();
+
+        if ($existing !== null) {
+            return ['type' => SocialSecurityEntity::class, 'id' => (int) $existing->id];
+        }
+
+        // Through `ManageCatalogueEntities::create()`, which normalises the name, enforces the
+        // catalogue's own uniqueness and fires the entity event. A04-R1's `firstOrCreate` wrote
+        // straight to the table, so §9.3's "crear entidades faltantes" bypassed every rule the
+        // catalogue has about a catalogue entry.
+        $entity = $this->catalogue->create([
+            'type' => $type,
+            'name' => $name,
+            'code' => null,
+            'tax_id' => null,
+        ], $import->creator);
+
+        $this->audit->record(AuditAction::SocialSecurityEntityCreated, $import->creator, [
+            'import_uuid' => $import->uuid,
+            'action_fingerprint' => $action->batch_fingerprint,
+            'source_rows' => $action->source_row_ids,
+        ], subject: $entity);
 
         return ['type' => SocialSecurityEntity::class, 'id' => (int) $entity->id];
     }
@@ -1013,20 +1470,43 @@ final class ApplyImportPlan
         $start = $interval->start->toDateString();
         $end = $interval->end?->toDateString();
 
-        return ClientCompanyAssignment::query()
+        // ## Why this predicate needed parentheses that actually group
+        //
+        // A04-R1 wrote the closure test inside a `where(function ($inner) ...)` with the two
+        // branches as `where(... OR ...)` alternatives *unbracketed from each other*, and the
+        // grouping landed wrong: `started_on <= X` ended up as one branch of the OR rather than a
+        // precondition on it. The result matched an assignment that started **after** the
+        // affiliation ended — `ended_on` in the past and `started_on` later — so §9.5's "the
+        // relationship that covers this interval" was answered with a relationship that does not
+        // cover it, and the affiliation was attached to the wrong episode.
+        //
+        // The rule is §8.3's half-open overlap, and it is a conjunction of two clauses:
+        //
+        //     started_on <= end AND (ended_on IS NULL OR ended_on >= start)
+        //
+        // Each clause gets its own group, so the OR can only ever apply to the two ways a
+        // relationship can still be open.
+        //
+        // Refused when more than one matches: §9.5 says "una relación empresa" and "the
+        // relationship", and two overlapping assignments mean the file cannot say which. Picking
+        // the latest would be the silent guess the audit already found once in this method.
+        $covers = ClientCompanyAssignment::query()
             ->where('client_id', $client->id)
             ->where('company_id', $company->id)
-            ->where(function ($inner) use ($start, $end): void {
-                $inner->where('started_on', '<=', $end ?? $start);
-
-                if ($end === null) {
-                    $inner->orWhereNull('ended_on');
-                } else {
-                    $inner->orWhere('ended_on', '>=', $start);
-                }
+            ->where('started_on', '<=', $end ?? $start)
+            ->where(function ($inner) use ($start): void {
+                $inner->whereNull('ended_on')
+                    ->orWhere('ended_on', '>=', $start);
             })
             ->orderByDesc('started_on')
-            ->first();
+            ->limit(2)
+            ->get();
+
+        if ($covers->count() > 1) {
+            throw UnusableImportAction::ambiguousAssignment($action->natural_key, $covers->count());
+        }
+
+        return $covers->first();
     }
 
     /**

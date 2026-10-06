@@ -137,8 +137,20 @@ final class ImportDecisionSet
                 $companies[self::key($context['company_block_key'], $code, $field)] = $resolution;
             }
 
-            if (isset($context['subject']) && is_string($context['subject'])) {
-                $intervals[self::key($context['subject'], $code, null)] = $resolution;
+            // §8.4 and §8.5's findings are about an *interval*, and their subject is built by
+            // `IssueSubject::disappearance()` / `::overlap()` — never guessed from context keys
+            // the way this was in A04-R1, which read a `subject` the reconstruction never wrote
+            // and therefore indexed nothing for any of its findings.
+            //
+            // `field` is deliberately not part of an interval key: one episode raises one question
+            // per code, and adding a field would let two different derivations of the same
+            // question both resolve under one subject.
+            $subject = IssueSubject::subjectFrom($context);
+
+            if ($subject !== ''
+                && ($code === LegacyImportIssue::RelationshipDisappearedWithoutRetirement
+                    || $code === LegacyImportIssue::OverlappingCompanyHistory)) {
+                $intervals[self::key($subject, $code)] = $resolution;
             }
 
             if (isset($context['natural_key']) && is_string($context['natural_key'])) {
@@ -271,7 +283,7 @@ final class ImportDecisionSet
     /** §8.4: what a person decided about a relationship that stopped appearing. */
     public function disappearanceFor(string $subject): ?IssueResolution
     {
-        $resolution = $this->intervals[self::key($subject, LegacyImportIssue::RelationshipDisappearedWithoutRetirement, null)] ?? null;
+        $resolution = $this->intervals[self::key($subject, LegacyImportIssue::RelationshipDisappearedWithoutRetirement)] ?? null;
 
         return $resolution?->decision === IssueResolutionDecision::CloseOnDisappearance
             || $resolution?->decision === IssueResolutionDecision::KeepOpen
@@ -282,7 +294,7 @@ final class ImportDecisionSet
     /** §8.5: the boundary a person chose between two overlapping episodes. */
     public function overlapBoundaryFor(string $subject): ?ResolvedBoundary
     {
-        $resolution = $this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory, null)] ?? null;
+        $resolution = $this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory)] ?? null;
 
         if ($resolution?->decision !== IssueResolutionDecision::SplitOverlapAt) {
             return null;
@@ -390,7 +402,7 @@ final class ImportDecisionSet
 
     // ------------------------------------------------------------------ plumbing
 
-    private static function key(string $subject, LegacyImportIssue $code, ?string $field): string
+    private static function key(string $subject, LegacyImportIssue $code, ?string $field = null): string
     {
         return $subject.'|'.$code->value.'|'.($field ?? '');
     }

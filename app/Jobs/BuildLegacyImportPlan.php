@@ -18,11 +18,9 @@ use App\Domain\Imports\ImportPlanBuilder;
 use App\Domain\Imports\ImportPlanIdentity;
 use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\ImportRowState;
-use App\Domain\Imports\IssueIdentity;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\LegacyIssueSeverity;
-use App\Domain\Imports\ParsedIssue;
 use App\Domain\Imports\RetirementNote;
 use App\Domain\Imports\RiskColumns;
 use App\Domain\Imports\SensitiveSourceRedactor;
@@ -212,24 +210,40 @@ final class BuildLegacyImportPlan implements ShouldQueue
     }
 
     /**
-     * Bump the revision and store the digest — but only advance the revision if the content
-     * changed.
+     * Advance the revision on **every** successful build, and store the digest.
      *
-     * §17.4: "Persistir cada decisión; refrescar plan sin perder el resto." A rebuild that
-     * produced identical actions must not invalidate every open approval, and it must still
-     * record that it happened. So the digest is the identity of the *content* and the revision
-     * is the identity of the *build*.
+     * ## Why the revision always moves, even when nothing changed
+     *
+     * A04-R1 advanced the revision only when the digest changed. §17.4's "refrescar plan sin
+     * perder el resto" was the justification: a rebuild that produced identical actions should
+     * not invalidate every open approval.
+     *
+     * But "the plan's contents are identical" and "the plan the reviewer approved is the plan
+     * being applied" are different claims, and the second is the one `matches()` enforces. A
+     * rebuild re-reads the database, the resolutions and the retirement policy — so it can reach
+     * a *different* answer for a reason the digest does not capture. The reviewer's policy, the
+     * target's state and the set of decisions consulted between the two builds are all inputs to
+     * the rebuild and none of them are in the action list. Holding the revision still in that
+     * window means an approval covers a plan whose *inputs* moved underneath it, and the 409
+     * cannot say so because the number did not change.
+     *
+     * Advancing every build makes the pair unambiguous and cheap to reason about:
+     *
+     *  - the revision names **the build** — a single value a client can store and echo back;
+     *  - the digest names **the content** — a single value that says whether a human needs to
+     *    read the plan again.
+     *
+     * §17.4's actual requirement is still met. A reviewer's decisions are persisted as
+     * `legacy_import_issues.resolution` and reapplied by the next build, so nothing is *lost* by
+     * a rebuild; what is no longer honoured is an approval of a plan that was never re-read.
      */
     private function recordPlanIdentity(ImportLifecycle $lifecycle, ImportPlan $plan): void
     {
         $import = $lifecycle->import();
-        $digest = ImportPlanIdentity::digestFor($plan->actions());
-
-        $changed = $digest !== (string) $import->plan_digest;
 
         $import->forceFill([
-            'plan_digest' => $digest,
-            'plan_revision' => $changed ? ((int) $import->plan_revision + 1) : ((int) $import->plan_revision),
+            'plan_digest' => ImportPlanIdentity::digestFor($plan->actions()),
+            'plan_revision' => ((int) $import->plan_revision) + 1,
             'plan_built_at' => now(),
             'plan_decisions' => $import->plan_decisions,
         ])->save();
@@ -543,7 +557,6 @@ final class BuildLegacyImportPlan implements ShouldQueue
      *
      * ```php
      * $already = LegacyImportIssue::query()
-     *     ->where('legacy_import_id', $import->id)
      *     ->where('code', $issue->code->value)
      *     ->where('field', $issue->field)
      *     ->exists();
@@ -552,103 +565,132 @@ final class BuildLegacyImportPlan implements ShouldQueue
      *
      * So an interval finding was raised **once ever**: a person who disappeared in March and
      * again in September got one dialog about March and none about September, and once it was
-     * resolved it could never be raised again even after the history changed underneath it. A
-     * first rebuild after the person answered also *kept* the old row with its resolution while
-     * the reconstruction had moved on.
+     * resolved it could never be raised again even after the history changed underneath it.
+     *
+     * The immediate successor keyed on a fingerprint, but computed it from context keys the
+     * reconstruction never emitted — `subject` and `months` against `episode`/`first_month`/
+     * `last_seen_month` — so every disappearance and every overlap hashed as `subject='',
+     * months=[]`. Thirteen findings became one, and the unique index on
+     * `(legacy_import_id, fingerprint)` rejected the second outright: a parse that found two
+     * disappearances aborted rather than reporting them.
      *
      * ## What this does
      *
-     * Each finding is identified by `IssueIdentity` over its subject and months. A stored
-     * finding with the same fingerprint is reconciled in place — the message and context are
-     * refreshed, and the **resolution is carried across** — and a finding whose fingerprint no
-     * longer appears is resolved as `superseded` rather than left open forever. §5.3's promise
-     * is that an import keeps the record of having had questions, which includes the record of
-     * a question that stopped applying.
+     * The finding names its own identity: `IssueSubject` builds the subject at the point where
+     * the finding is known, and both this method and `StageLegacyImport` hash the same string.
+     * There is no key for the two halves to disagree about.
+     *
+     * A stored finding with the same fingerprint is the *same* finding, so it is refreshed in
+     * place and its resolution is left alone. A finding whose fingerprint no longer appears is
+     * **superseded** — `blocking=false` and `superseded_at` set, with `resolved_at` deliberately
+     * left null, because nobody answered it and §4.1 reserves `resolved_at` for a human
+     * decision. §5.3's promise is that an import keeps the record of having had questions,
+     * including the record of one that stopped applying.
      */
     private function reconcileIssues(LegacyImport $import, HistoryReconstruction $reconstruction): array
     {
-        /** @var array<string, LegacyImportIssueModel> $existing */
-        $existing = [];
+        /**
+         * The interval findings currently on file, keyed by fingerprint.
+         *
+         * ## Only the codes this method re-derives
+         *
+         * Scoped to §8.4 and §8.5, and the scoping is the whole correctness of the pass.
+         *
+         * An earlier version loaded **every** issue for the import and superseded whatever the
+         * reconstruction did not produce. But the reconstruction only produces interval findings;
+         * the parser's row-level ones — `invalid_affiliation_date`, `invalid_client_document`,
+         * `duplicate_conflicting_row`, `credential_like_content` — are written by
+         * `StageLegacyImport` at parse time and are *not* derivable from a reconstruction at all.
+         *
+         * So the first rebuild after an upload superseded every real blocker in the file. The
+         * review screen's "Sólo sin resolver" list went empty, Apply's disabled reason vanished,
+         * and `31/02/2026` — a date that is not a date — quietly became applicable. The finding
+         * was not deleted, only withdrawn, and nothing in the code said so.
+         *
+         * §5.3's promise is that an import keeps the record of a question that stopped applying.
+         * It never promised that a question *nobody re-derived* stopped applying: those are
+         * different things, and conflating them makes a rebuild answer questions it was never
+         * asked.
+         *
+         * @var array<string, LegacyImportIssueModel> $onFile
+         */
+        $onFile = [];
 
         foreach (LegacyImportIssueModel::query()
             ->where('legacy_import_id', $import->id)
-            ->whereNull('resolved_at')
+            ->whereIn('code', [
+                LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value,
+                LegacyImportIssue::OverlappingCompanyHistory->value,
+            ])
             ->get() as $row
         ) {
-            $existing[(string) $row->fingerprint] = $row;
+            $onFile[(string) $row->fingerprint] = $row;
         }
 
-        $carried = [];
-
         foreach ($reconstruction->issues() as $issue) {
-            $identity = $this->identityFor($issue);
-            $fingerprint = $identity->value();
+            $fingerprint = $issue->identity()->value();
+            $current = $onFile[$fingerprint] ?? null;
 
-            if (isset($existing[$fingerprint])) {
-                $existing[$fingerprint]->forceFill([
+            // A finding that is derivable again is the *same* finding — same episode, same
+            // columns, same question — so it is refreshed in place. Its resolution is left alone,
+            // because a reviewer's answer to "close it here" still answers that question.
+            //
+            // A04-R1 inserted a fresh row carrying `$previous->resolved_at`, which both
+            // impersonated a human resolution on a row nobody approved and collided with the
+            // unique index it was trying to satisfy.
+            if ($current !== null) {
+                $current->forceFill([
                     'message' => $issue->message,
                     'severity' => $issue->severity->value,
-                    'blocking' => $issue->blocking,
+                    'blocking' => $current->resolved_at === null
+                        ? $issue->blocking
+                        : false,
+                    'superseded_at' => null,
                 ])->save();
 
-                unset($existing[$fingerprint]);
+                unset($onFile[$fingerprint]);
 
                 continue;
             }
 
-            // A resolution recorded against a *previous* derivation of this same finding is
-            // carried onto the new row, so the reviewer is not asked again for an answer that
-            // still applies. This is the whole point of the fingerprint.
-            $previous = LegacyImportIssueModel::query()
-                ->where('legacy_import_id', $import->id)
-                ->where('fingerprint', $fingerprint)
-                ->whereNotNull('resolved_at')
-                ->latest('resolved_at')
-                ->first();
-
-            $carried[] = LegacyImportIssueModel::query()->create([
+            LegacyImportIssueModel::query()->create([
                 'legacy_import_id' => $import->id,
                 'row_id' => null,
                 'code' => $issue->code->value,
                 'severity' => $issue->severity->value,
-                'blocking' => $previous === null ? $issue->blocking : false,
-                'field' => $issue->field,
+                'blocking' => $issue->blocking,
+                'field' => $issue->field(),
                 'message' => $issue->message,
-                'context' => $issue->context,
+                'context' => $issue->context(),
                 'fingerprint' => $fingerprint,
-                'resolved_by' => $previous?->resolved_by,
-                'resolved_at' => $previous?->resolved_at,
-                'resolution' => $previous?->resolution,
             ]);
         }
 
-        // Whatever is left no longer applies. Closed rather than deleted, so the history says
-        // the question was asked and is no longer.
-        foreach ($existing as $stale) {
+        // Whatever is left no longer applies: the reconstruction changed and the situation these
+        // described is gone.
+        //
+        // Superseded, not resolved. §4.1's `resolved_at` means "a person answered this", and
+        // nobody did — writing it here would put a reviewer who never saw the question into the
+        // audit trail as though they had, and would make the file look approved when it is not.
+        // `superseded_at` says only what is true.
+        foreach ($onFile as $stale) {
+            if ($stale->superseded_at !== null) {
+                continue;
+            }
+
             $stale->forceFill([
                 'blocking' => false,
                 'severity' => LegacyIssueSeverity::Info->value,
+                'superseded_at' => now(),
                 'message' => 'Esta pregunta ya no aplica: la reconstrucción cambió y la situación que describía desapareció.',
             ])->save();
         }
 
-        return $carried;
-    }
-
-    private function identityFor(ParsedIssue $issue): IssueIdentity
-    {
-        $context = $issue->context;
-        $months = array_values(array_filter(
-            (array) ($context['months'] ?? []),
-            static fn (mixed $month): bool => is_string($month),
-        ));
-
-        return IssueIdentity::interval(
-            $issue->code,
-            (string) ($context['subject'] ?? ''),
-            $months,
-            $issue->field,
-        );
+        return LegacyImportIssueModel::query()
+            ->where('legacy_import_id', $import->id)
+            ->whereNull('superseded_at')
+            ->get()
+            ->all();
     }
 
     public function failed(?\Throwable $exception): void

@@ -96,6 +96,18 @@ final class HistoryReconstruction
     /**
      * The issues to persist, in the shape `ParsedIssue` uses.
      *
+     * ## The subject is named here, because only here is it knowable
+     *
+     * A disappearance and an overlap are not about a *line*. They are about an interval implied
+     * by many lines, so there is no `source_key` and no `company_block_key` to key them on — and
+     * that is exactly why A04-R1 lost them. `StageLegacyImport::identityFor()` classified a
+     * finding by looking for those keys, found neither, fell through to its last branch, and
+     * hashed `subject=''` for all thirteen disappearances and all four overlaps. The unique index
+     * then admitted the first of each and rejected the rest.
+     *
+     * So the interval findings carry an explicit {@see IssueSubject} built from the episode
+     * identity §8.1 already gives us, and both readers use it verbatim.
+     *
      * @return list<ParsedIssue>
      */
     public function issues(): array
@@ -111,9 +123,9 @@ final class HistoryReconstruction
                 LegacyIssueSeverity::Error,
                 true,
                 $disappearance->message(),
-                'relationship_end',
+                IssueSubject::disappearance($disappearance),
                 [
-                    'episode' => $disappearance->episodeKey,
+                    'episode_key' => $disappearance->episodeKey,
                     'company_tax_id' => $disappearance->companyTaxId,
                     'first_month' => $disappearance->firstMonth,
                     'last_seen_month' => $disappearance->lastSeenMonth,
@@ -132,7 +144,7 @@ final class HistoryReconstruction
                 LegacyIssueSeverity::Error,
                 true,
                 $overlap->message(),
-                'relationship_end',
+                IssueSubject::overlap($overlap),
                 $overlap->toArray(),
             );
         }

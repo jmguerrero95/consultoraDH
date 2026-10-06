@@ -447,6 +447,21 @@ docker compose exec app php artisan tinker --execute="Queue::push(new App\Jobs\M
 | `BuildLegacyImportPlan` | Filas → plan persistido | 2 |
 | `ApplyLegacyImport` | El plan → maestros | 1 |
 
+Los tres van a la cola **`imports`**, no a `default`: `onQueue(config('imports.queue.queue'))`
+para que una importación no compita con la cola de generación de A03. Por eso el worker se
+arranca con `--queue=default,imports`; un worker sólo en `default` **nunca los ejecuta** y la
+importación se queda en `queued` para siempre sin ningún error.
+
+Es un fallo que ninguna prueba detectó, y conviene entender por qué: toda la suite corre con
+`QUEUE_CONNECTION=sync`, donde el nombre de la cola es irrelevante porque el trabajo se ejecuta
+dentro de la petición. El defecto sólo existe en el único entorno que usa una persona.
+
+> **Después de editar código, hay que reiniciar el worker.** `queue:work` es un proceso PHP de
+> larga vida: arranca una vez y mantiene en memoria todas las clases que ha tocado. El FPM de la
+> aplicación revalida timestamps, así que los dos lados de una misma petición pueden discrepar —
+> la ruta despacha código nuevo y el trabajo que esa ruta despacha ejecuta el viejo.
+> `docker compose restart queue` (o `queue-e2e`) antes de comprobar nada en el navegador.
+
 **El trabajo lleva un id, no el archivo.** Un payload encolado se serializa en Redis: un
 libro de 700 KB en el payload se copia a la memoria de la cola y a sus logs. El trabajo
 recibe el id y lee la ruta privada de la base.

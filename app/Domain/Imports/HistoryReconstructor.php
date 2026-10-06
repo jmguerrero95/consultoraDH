@@ -45,15 +45,172 @@ final class HistoryReconstructor
 
         $episodes = $this->buildEpisodes($ordered);
 
+        $lastMonth = $this->lastMonth($ordered);
+
+        $disappearances = $this->findDisappearances($episodes, $lastMonth);
+        $overlaps = $this->findOverlaps($episodes);
+
+        // §8.4 and §8.5's answers, applied *before* the questions are handed on.
+        //
+        // ## Why this has to happen here
+        //
+        // A04-R1 stored a disappearance decision and read it nowhere. `ImportDecisionSet::
+        // disappearanceFor()` and `::overlapBoundaryFor()` existed, were documented, and had
+        // **zero call sites** — so a reviewer who answered "close this relationship on
+        // 2026-03-01" watched the issue turn resolved and the rebuilt plan propose the identical
+        // open-ended episode, with no error anywhere. The answer was recorded and had no effect,
+        // which is worse than not asking: it is a system that appears to work.
+        //
+        // The reconstruction is the only place that can honour them, because a boundary chosen by
+        // a person has to be part of the interval *before* the interval becomes a plan action.
+        // Reading it in the plan builder would mean the action's interval and the decision
+        // disagreeing, and `plan_digest` would cover an interval that is not the one the reviewer
+        // approved.
+        $episodes = $this->applyDisappearanceDecisions($episodes, $disappearances);
+        $episodes = $this->applyOverlapDecisions($episodes, $overlaps);
+
+        // Recomputed: a decision can create a boundary, and §8.4's "does absence look like a
+        // disappearance" has to be asked of the *decided* episodes, or an episode a person closed
+        // is still reported as an open question on the next rebuild.
+        $disappearances = $this->findDisappearances($episodes, $lastMonth);
+        $overlaps = $this->findOverlaps($episodes);
+
         return new HistoryReconstruction(
             $episodes,
             $this->buildAffiliationSegments($ordered),
             $this->buildRateSegments($ordered),
-            $this->lastMonth($ordered),
+            $lastMonth,
             $this->retirementPolicy,
-            $this->findDisappearances($episodes, $this->lastMonth($ordered)),
-            $this->findOverlaps($episodes),
+            $disappearances,
+            $overlaps,
         );
+    }
+
+    /**
+     * §8.4's two answers: close the episode, or keep it open.
+     *
+     * ## `close_on_disappearance`
+     *
+     * Closes at the month after the last sighting — the boundary the disappearance itself
+     * implies, and `month` precision, because a monthly snapshot cannot say the last day the
+     * person worked. This is the same rule `ImportRetirementPolicy::month_end_boundary`
+     * applies to a retirement note, and it is applied *per episode* because a person answered
+     * about one episode, not about a policy.
+     *
+     * ## `keep_open`
+     *
+     * Changes the interval not at all, and that is the point: it is an explicit statement that
+     * the gap is not a departure. The episode stops being a question because the person said so,
+     * not because the code guessed. The alternative — treating silence as consent to close —
+     * would delete a month of history from no evidence, which is the failure §8.4 exists to
+     * prevent.
+     *
+     * @param  list<RelationshipEpisode>  $episodes
+     * @param  list<Disappearance>  $disappearances
+     * @return list<RelationshipEpisode>
+     */
+    private function applyDisappearanceDecisions(array $episodes, array $disappearances): array
+    {
+        if ($this->decisions === null || $disappearances === []) {
+            return $episodes;
+        }
+
+        $byEpisode = [];
+
+        foreach ($disappearances as $disappearance) {
+            $byEpisode[$disappearance->episodeKey] = $disappearance;
+        }
+
+        foreach ($episodes as $index => $episode) {
+            $disappearance = $byEpisode[$episode->key()] ?? null;
+
+            if ($disappearance === null) {
+                continue;
+            }
+
+            // The subject is the disappearance's own, built the same way the issue was built —
+            // which is the whole reason §8.4's answer is findable at all.
+            $resolution = $this->decisions->disappearanceFor(
+                IssueSubject::disappearance($disappearance)->subject(),
+            );
+
+            if ($resolution === null) {
+                continue;
+            }
+
+            $boundary = $resolution->boundary();
+
+            if ($boundary === null) {
+                // `keep_open`, or a close whose date could not be read. Either way the interval
+                // is unchanged; the finding stops being reported because `findDisappearances()`
+                // only reports what has no closure evidence.
+                continue;
+            }
+
+            $episodes[$index] = $episode->withInterval(
+                $episode->interval->endingOn($boundary->carbon(), $boundary->precision),
+            );
+        }
+
+        return $episodes;
+    }
+
+    /**
+     * §8.5's `split_overlap_at`: move the boundary of the *earlier* episode to the chosen month.
+     *
+     * ## Why the earlier one
+     *
+     * A transfer is written as a person leaving one employer before joining the next, and §8.5's
+     * three answers are "corregir fecha", "reconocer transferencia" and "autorizar paralelo". A
+     * boundary therefore ends one episode and opens the other at the same place, and the episode
+     * that ends is the one that started first. Picking the later one would move the start of the
+     * new employment backwards, which is the correction §8.5 says *not* to make.
+     *
+     * `overlap_resolution` is carried on the resulting action so §17.5 can show *why* the boundary
+     * is where it is, rather than presenting a computed date as if the file had stated it.
+     *
+     * @param  list<RelationshipEpisode>  $episodes
+     * @param  list<CompanyOverlap>  $overlaps
+     * @return list<RelationshipEpisode>
+     */
+    private function applyOverlapDecisions(array $episodes, array $overlaps): array
+    {
+        if ($this->decisions === null || $overlaps === []) {
+            return $episodes;
+        }
+
+        $boundaries = [];
+
+        foreach ($overlaps as $overlap) {
+            $boundary = $this->decisions->overlapBoundaryFor(IssueSubject::overlap($overlap)->subject());
+
+            if ($boundary !== null) {
+                $boundaries[$overlap->first->key()] = $boundary;
+            }
+        }
+
+        if ($boundaries === []) {
+            return $episodes;
+        }
+
+        foreach ($episodes as $index => $episode) {
+            $boundary = $boundaries[$episode->key()] ?? null;
+
+            if ($boundary === null) {
+                continue;
+            }
+
+            $date = Carbon::parse($boundary->date);
+
+            $episodes[$index] = $episode
+                ->withInterval($episode->interval->endingOn($date, $boundary->precision))
+                ->withOverlapResolution(sprintf(
+                    '§8.5: la persona pasó a otra empresa en %s.',
+                    $date->format('Y-m'),
+                ));
+        }
+
+        return $episodes;
     }
 
     /**
@@ -128,6 +285,7 @@ final class HistoryReconstructor
                     'document_number' => $row->document->number,
                     'company_tax_id' => $row->company->taxId,
                     'company_name' => $row->company->name,
+                    'company_verification_digit' => $row->company->verificationDigit,
                     'client_display_name' => $row->displayName(),
                     'precision' => $start->precision,
                     'date' => $start->isoDate,
@@ -170,6 +328,7 @@ final class HistoryReconstructor
                 $group['source_rows'],
                 $group['retirement'],
                 $group['client_display_name'],
+                $group['company_verification_digit'] ?? null,
             );
         }
 
@@ -452,7 +611,22 @@ final class HistoryReconstructor
                     continue;
                 }
 
-                $key = implode('|', [$row->document->label(), $row->company->identityKey(), $type->value]);
+                // §9.5: "No permitir dos afiliaciones abiertas del mismo tipo."
+                //
+                // The constraint is about the **client and the type**, not the client, the company
+                // and the type. A04-R1 keyed the stream by all three, so a person who moved from
+                // employer A to employer B was two independent streams, each with its own open
+                // segment — and §9.5's invariant was satisfied structurally while being violated in
+                // fact: A03 would find two open EPS affiliations for one person and either read
+                // them as two coverages or refuse to bill, and a transfer in the middle of a
+                // coverage year is *normal*, not an error.
+                //
+                // Keying globally by `client + type` is what makes the transfer expressible: one
+                // stream, one segment per entity, and the change of employer closes the first and
+                // opens the second at the same boundary. The company stays on each segment as
+                // context — it is where the affiliation hangs — but it is not part of the
+                // stream's identity, because the thing §9.5 protects is one open EPS per person.
+                $key = implode('|', [$row->document->label(), $type->value]);
 
                 $streams[$key][] = [
                     'month' => $row->sheetMonthKey,

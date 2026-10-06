@@ -122,7 +122,21 @@ services:
     container_name: consultora-dh-queue
     restart: unless-stopped
     working_dir: /var/www/html
-    command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--max-time=3600", "--verbose"]
+    # `--queue=default,imports` — the `imports` half is the fix.
+    #
+    # A04's three jobs call `onQueue(config('imports.queue.queue'))`, which is `imports`, so that
+    # an import never competes with A03's generation backlog. But `queue:work` with no `--queue`
+    # listens on `default` only. So this worker drained the default queue and never once touched
+    # an import job: uploading a workbook in development returned 202 and left the batch in
+    # `queued` for ever, with no error anywhere.
+    #
+    # Nothing caught it because the whole test suite runs with `QUEUE_CONNECTION=sync`, where the
+    # queue name is irrelevant — the job runs inside the request. The bug only exists in the one
+    # environment a human uses, which is the environment nobody tests.
+    #
+    # Both names are listed rather than only `imports` so this worker stays the single worker for
+    # the application instead of needing a second container when another module starts queueing.
+    command: ["php", "artisan", "queue:work", "--queue=default,imports", "--sleep=3", "--tries=3", "--max-time=3600", "--verbose"]
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor

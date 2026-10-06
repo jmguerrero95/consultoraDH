@@ -34,6 +34,7 @@ use Illuminate\Support\Carbon;
  * @property bool $blocking
  * @property int|null $row_id
  * @property Carbon|null $resolved_at
+ * @property Carbon|null $superseded_at
  * @property string $fingerprint
  */
 #[Fillable([
@@ -48,6 +49,7 @@ use Illuminate\Support\Carbon;
     'resolved_by',
     'resolved_at',
     'resolution',
+    'superseded_at',
     'fingerprint',
 ])]
 class LegacyImportIssue extends Model
@@ -63,6 +65,7 @@ class LegacyImportIssue extends Model
             'blocking' => 'boolean',
             'context' => 'array',
             'resolved_at' => 'immutable_datetime',
+            'superseded_at' => 'immutable_datetime',
             'resolution' => 'array',
         ];
     }
@@ -85,8 +88,42 @@ class LegacyImportIssue extends Model
         return $this->belongsTo(User::class, 'resolved_by');
     }
 
+    /**
+     * Whether a person answered this finding. §4.1's `resolved_at`, and only that.
+     *
+     * Deliberately not `! $this->blocking`: a reviewer may narrow a finding without answering it,
+     * and a superseded finding is closed without having been answered. `blocking` says whether
+     * this stands between the import and Apply; `resolved_at` says whether a human is on the
+     * record for it, and the audit trail needs those to be different questions.
+     */
     public function isResolved(): bool
     {
         return $this->resolved_at !== null;
+    }
+
+    /**
+     * Whether this finding stopped applying: the reconstruction no longer produces it.
+     *
+     * Not the same as resolved, and never to be reported as such — nobody answered it, the
+     * question went away. §4.3 keeps the row rather than deleting it so the import's history
+     * still shows the question was asked.
+     */
+    public function isSuperseded(): bool
+    {
+        return $this->superseded_at !== null;
+    }
+
+    /**
+     * Whether this finding still stands between the import and Apply.
+     *
+     * §17.5's disabled-Apply rule: a finding blocks when it is open *and* was not withdrawn.
+     * A narrowed finding and a superseded one are both non-blocking, but only one of them ever
+     * needed a person.
+     */
+    public function isBlocking(): bool
+    {
+        return $this->blocking
+            && ! $this->isResolved()
+            && ! $this->isSuperseded();
     }
 }

@@ -40,7 +40,60 @@ final readonly class RelationshipEpisode implements \JsonSerializable
         public array $sourceRowIds,
         public ?RetirementNote $retirement,
         public ?string $clientDisplayName = null,
+        /**
+         * §7.2's verification digit, from the title. Nullable and appended so every existing
+         * construction site keeps working; §7.2's DV rule needs it and the NIT string cannot
+         * carry it.
+         */
+        public ?string $companyVerificationDigit = null,
+        /**
+         * Why the interval ends where it does, when a person said so rather than the file.
+         *
+         * §17.5 shows this in the preview, so a boundary a reviewer chose is never presented as
+         * though the workbook had stated it.
+         */
+        public ?string $overlapResolution = null,
     ) {}
+
+    /** A copy carrying the reason a person gave for its boundary. */
+    public function withOverlapResolution(string $reason): self
+    {
+        return new self(
+            $this->clientKey,
+            $this->documentType,
+            $this->documentNumber,
+            $this->companyTaxId,
+            $this->companyName,
+            $this->interval,
+            $this->months,
+            $this->sourceRowIds,
+            $this->retirement,
+            $this->clientDisplayName,
+            $this->companyVerificationDigit,
+            $reason,
+        );
+    }
+
+    /**
+     * §7.2's DV as one digit, or null.
+     *
+     * ## Why it is normalised here
+     *
+     * The source writes `-3`, ` 3` and `3` for the same digit across blocks, and §7.2's rule is
+     * about *equality*: null may be completed, equal is a no-op, different is a blocker. Two
+     * spellings of the same digit must not read as a contradiction, or the real file produces a
+     * blocker per company for a formatting difference.
+     *
+     * Returns null for anything that is not exactly one digit, which the caller treats as "the
+     * source did not state one" — never as a contradiction, because not knowing a digit is
+     * `invalid_company_tax_id`'s business and not this rule's.
+     */
+    public function companyVerificationDigit(): ?string
+    {
+        $digit = trim((string) $this->companyVerificationDigit);
+
+        return preg_match('/^[0-9]$/', $digit) === 1 ? $digit : null;
+    }
 
     /** §8.1's key, as a string: the three things that make an episode an episode. */
     public function key(): string
@@ -89,6 +142,8 @@ final readonly class RelationshipEpisode implements \JsonSerializable
             $this->sourceRowIds,
             $this->retirement,
             $this->clientDisplayName,
+            $this->companyVerificationDigit,
+            $this->overlapResolution,
         );
     }
 
@@ -120,10 +175,12 @@ final readonly class RelationshipEpisode implements \JsonSerializable
             'client' => $this->clientKey,
             'company_tax_id' => $this->companyTaxId,
             'company_name' => $this->companyName,
+            'company_verification_digit' => $this->companyVerificationDigit(),
             'interval' => $this->interval->toArray(),
             'months' => $this->months,
             'source_row_ids' => $this->sourceRowIds,
             'has_retirement' => $this->retirement !== null,
+            'overlap_resolution' => $this->overlapResolution,
         ];
     }
 

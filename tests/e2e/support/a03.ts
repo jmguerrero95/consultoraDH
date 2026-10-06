@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test';
 
-import type { Page } from '@playwright/test';
+import type { APIRequestContext, APIResponse, Page } from '@playwright/test';
 
 import { emailField, passwordField } from './forms';
 
@@ -269,14 +269,81 @@ export async function apiSend(
     path: string,
     data: Record<string, unknown> = {},
 ) {
+    return page.request.fetch(path, {
+        method,
+        data,
+        headers: await csrfHeaders(page),
+    });
+}
+
+/**
+ * The `X-XSRF-TOKEN` header the browser would send.
+ *
+ * ## Why this is a helper and not a line copied at each call site
+ *
+ * Three specs had grown their own copy of this while the A04 spec had none, and the one that had
+ * none was the one that needed `multipart` — so its upload helper could not reach for
+ * `apiWrite()` and fell back to a bare `page.request.post()`. Every one of the six A04 journeys
+ * then failed with `419 session_expired`, on the first write, before a single rule of the module
+ * was exercised. The failure reads like the application rejecting the upload; it is the harness
+ * not sending a header.
+ *
+ * Centralised so that "how a write carries CSRF" is answered in one place and a fourth spec
+ * cannot reinvent it wrong.
+ */
+export async function csrfHeaders(page: Page): Promise<Record<string, string>> {
     const token = (await page.context().cookies()).find(
         (cookie) => cookie.name === 'XSRF-TOKEN',
     )?.value;
 
-    return page.request.fetch(path, {
-        method,
-        data,
+    return token === undefined ? {} : { 'X-XSRF-TOKEN': decodeURIComponent(token) };
+}
+
+/**
+ * Sign in on an `APIRequestContext` of your own, the way a browser would.
+ *
+ * The `signIn()` above drives the interface; this one is for the journeys that need a *second*
+ * session — §14's role guard needs a reader who is not the administrator with a hat on, and
+ * that means its own context with its own cookies.
+ *
+ * ## Why the CSRF round trip is not optional
+ *
+ * `context.post('/api/auth/login')` without it answers 419 `session_expired` before it looks at
+ * the credentials, so the assertion that failed was "the reader could not sign in" — which says
+ * nothing about the role guard the journey exists to prove. Two steps: take the CSRF cookie from
+ * `/sanctum/csrf-cookie`, then echo it back as `X-XSRF-TOKEN`.
+ */
+export async function apiSignIn(
+    context: APIRequestContext,
+    email: string,
+    password: string,
+): Promise<APIResponse> {
+    await context.get('/sanctum/csrf-cookie');
+
+    const jar = await context.storageState();
+    const token = jar.cookies.find((cookie) => cookie.name === 'XSRF-TOKEN')?.value;
+
+    return context.post('/api/auth/login', {
+        data: { email, password, remember: false },
         headers: token === undefined ? {} : { 'X-XSRF-TOKEN': decodeURIComponent(token) },
+    });
+}
+
+/**
+ * A multipart write, with the same CSRF header as every other write.
+ *
+ * §4.3's upload is the one A04 write whose body is not JSON, so it cannot go through
+ * `apiWrite()`. It still has to be authenticated and CSRF-checked exactly like the rest, and
+ * forgetting that is what the six 419s were.
+ */
+export async function apiUpload(
+    page: Page,
+    path: string,
+    multipart: Record<string, { name: string; mimeType: string; buffer: Buffer }>,
+) {
+    return page.request.post(path, {
+        multipart,
+        headers: await csrfHeaders(page),
     });
 }
 

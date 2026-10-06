@@ -138,10 +138,27 @@ final readonly class SourcePersonRow
                 SocialSecurityEntityType::Eps->value => SourceEntityToken::read($cell('eps'), SocialSecurityEntityType::Eps, $redactor, $sheetName, $rowNumber),
                 SocialSecurityEntityType::Afp->value => SourceEntityToken::read($cell('afp'), SocialSecurityEntityType::Afp, $redactor, $sheetName, $rowNumber),
                 SocialSecurityEntityType::Ccf->value => SourceEntityToken::read($cell('ccf'), SocialSecurityEntityType::Ccf, $redactor, $sheetName, $rowNumber),
-                // §9.4's second priority: the ARL provider usually comes from the company
-                // title, and only falls back to the row's own column. Which one was used is
-                // decided by the plan builder, which has both.
-                SocialSecurityEntityType::Arl->value => SourceEntityToken::read(self::text($cells['R'] ?? null), SocialSecurityEntityType::Arl, $redactor, $sheetName, $rowNumber),
+                // §9.4's second priority: the ARL provider comes from the company title, and
+                // falls back to a header that *names* an ARL column.
+                //
+                // ## Not column R
+                //
+                // A04-R1 read `cells['R']` here, positionally, on the theory that the ARL was the
+                // last column. §1.3 settles it: K/L/R are **dirección / teléfono / correo**. So R
+                // is a person's email address, and every ARL read from it was reading a secret
+                // belonging to a named individual into a company's social-security history — where
+                // it became an affiliation, a search result and, on a block-level finding, part
+                // of a reviewer's screen.
+                //
+                // Nothing positional can stand in for a header. A header that says `ARL` is
+                // evidence; a column's position is not, and §1.1 says the headings lie anyway.
+                SocialSecurityEntityType::Arl->value => SourceEntityToken::read(
+                    self::text($cells[$header->arlColumn() ?? ''] ?? null),
+                    SocialSecurityEntityType::Arl,
+                    $redactor,
+                    $sheetName,
+                    $rowNumber,
+                ),
             ],
             RiskColumns::decide($p, $q),
             $novelty === '' ? null : $novelty,

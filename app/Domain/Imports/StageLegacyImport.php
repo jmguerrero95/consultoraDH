@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Imports;
 
 use App\Domain\Affiliations\SocialSecurityEntityType;
+use App\Domain\Imports\LegacyImportIssue as LegacyImportIssueCode;
 use App\Models\LegacyImport;
 use App\Models\LegacyImportIssue;
 use App\Models\LegacyImportRow;
@@ -108,6 +109,9 @@ final class StageLegacyImport
             }
 
             $this->stageIssues($import, $parsed->issues(), $stagedIds);
+
+            // §4.3's finding, and the reason the redactor collects anything at all.
+            $this->stageCredentialIssues($import, $redactor->findings());
 
             $summary = $parsed->fingerprint() + [
                 // Positions and pattern types only: §4.3 forbids the value, and the shape here
@@ -334,8 +338,11 @@ final class StageLegacyImport
     private function stageIssues(LegacyImport $import, array $issues, array $stagedIds): void
     {
         foreach ($issues as $issue) {
+            // The issue names itself. §5.3: a finding about a company is asked once for the block,
+            // a finding about an interval once per episode, and §4.3 keeps raw cell text out of
+            // both the context and the fingerprint.
             $context = $this->issueContext($issue, $stagedIds);
-            $identity = $this->identityFor($issue, $context);
+            $identity = $issue->identity();
 
             // An identical finding may be derivable twice — §7.3's duplicate pair raises one
             // per line, and two blocks can carry the same unreadable title. The unique index on
@@ -355,12 +362,127 @@ final class StageLegacyImport
                 'code' => $issue->code->value,
                 'severity' => $issue->severity->value,
                 'blocking' => $issue->blocking,
-                'field' => $issue->field,
+                'field' => $issue->field(),
                 'message' => $issue->message,
                 'context' => $context,
                 'fingerprint' => $identity->value(),
             ]);
         }
+    }
+
+    /**
+     * §4.3's `credential_like_content`, once per sheet and pattern.
+     *
+     * ## Why this needed a producer at all
+     *
+     * The redactor has collected every detection since A04-R1 — `{sheet, row, pattern}`, with no
+     * field that could hold the text it found, which is exactly §4.3's rule — and the findings
+     * went into `summary.credential_like_cells` and nowhere else. The enum case had a severity, a
+     * label and a family mapping, and **no call site**.
+     *
+     * So a workbook containing twenty-three cells with plain-text passwords was parsed, redacted,
+     * counted, and produced **nothing a person could see**. The count lives in a summary field the
+     * review screen does not show and the API does not return as an issue. The secrets were
+     * correctly kept out of the database and incorrectly reported as fine.
+     *
+     * The finding exists so somebody removes the credentials from the source and re-uploads.
+     * §4.3's requirement is that the importer refuses to import credentials *and* says so; the
+     * redaction alone satisfies the first half and quietly fails the second.
+     *
+     * ## Grouped by sheet and pattern, per §5.3
+     *
+     * One dialog per subject, not one per cell: a company block with twenty-three occurrences of
+     * `USUARIA CLAVE: …` is one question — "this sheet has credentials in it, remove them" — and
+     * twenty-three dialogs about the same sheet is how a review gets abandoned halfway. The
+     * occurrences are counted and their *rows* listed, because a reviewer has to find them and
+     * the rows are positions, which §4.3 permits.
+     *
+     * Non-blocking, and that is a deliberate reading of §18. `LegacyImportIssue::blocksApply()`
+     * exempts this code, because a redacted secret cannot reach a master and refusing to import
+     * over a spreadsheet that happens to carry one would be §4.3 refusing for the wrong reason.
+     * The issue is a warning that the source is dirty.
+     *
+     * @param  list<array{sheet: string, row: int, pattern: string}>  $findings
+     */
+    private function stageCredentialIssues(LegacyImport $import, array $findings): void
+    {
+        /** @var array<string, array{sheet: string, pattern: string, rows: list<int>}> $grouped */
+        $grouped = [];
+
+        foreach ($findings as $finding) {
+            $key = $finding['sheet'].'|'.$finding['pattern'];
+
+            $grouped[$key] ??= [
+                'sheet' => $finding['sheet'],
+                'pattern' => $finding['pattern'],
+                'rows' => [],
+            ];
+
+            $grouped[$key]['rows'][] = (int) $finding['row'];
+        }
+
+        ksort($grouped);
+
+        foreach ($grouped as $group) {
+            $rows = array_values(array_unique($group['rows']));
+            sort($rows);
+
+            $subject = IssueSubject::credentialLike($group['sheet'], $group['pattern']);
+            $code = LegacyImportIssueCode::CredentialLikeContent;
+            $identity = $subject->identity($code);
+
+            // §4.3: the context is built by `IssueSubject`, which has no parameter that could
+            // carry a value. `pattern` is the redactor's own category name, not the matched text.
+            $context = [
+                ...$subject->context(),
+                'rows' => $rows,
+                'occurrences' => count($rows),
+            ];
+
+            $existing = LegacyImportIssue::query()
+                ->where('legacy_import_id', $import->id)
+                ->where('fingerprint', $identity->value())
+                ->first();
+
+            if ($existing !== null) {
+                $existing->forceFill([
+                    'message' => $this->credentialMessage($group['pattern'], count($rows)),
+                    'context' => $context,
+                ])->save();
+
+                continue;
+            }
+
+            LegacyImportIssue::query()->create([
+                'legacy_import_id' => $import->id,
+                'row_id' => null,
+                'code' => $code->value,
+                'severity' => LegacyIssueSeverity::Warning->value,
+                'blocking' => false,
+                'field' => null,
+                'message' => $this->credentialMessage($group['pattern'], count($rows)),
+                'context' => $context,
+                'fingerprint' => $identity->value(),
+            ]);
+        }
+    }
+
+    /**
+     * §4.3's wording: what was found, where, and what to do — never what it said.
+     *
+     * The pattern name is the redactor's category (`keyword_value`, `label_then_value`), which is
+     * a constant in `imports.redaction` and not derived from the cell.
+     */
+    private function credentialMessage(string $pattern, int $rows): string
+    {
+        return sprintf(
+            '§4.3: %d celda(s) de la hoja contienen texto que parece una credencial (patrón «%s»). '
+            .'El valor se reemplazó al leer y no se guardó en ninguna parte. '
+            .'Quítelas del archivo y vuelva a subirlo: una credencial en el libro está puesta en '
+            .'texto plano para cualquiera que lo abra.',
+            $rows,
+            $pattern,
+        );
     }
 
     /**
@@ -377,18 +499,11 @@ final class StageLegacyImport
      */
     private function issueContext(ParsedIssue $issue, array $stagedIds): array
     {
-        $context = $issue->context;
+        $context = $issue->context();
 
-        $context['sheet'] = $issue->sheet;
-        $context['row'] = $issue->row;
-        $context['location'] = $issue->location();
-
-        if ($issue->field !== null) {
-            $context['field'] = $issue->field;
-        }
-
-        $sourceKey = null;
-
+        // The subject already names the subject; this only attaches the staged row so the review
+        // screen can jump to it and §5.3's `row_id` column is populated. §3.C: it is a *pointer*,
+        // never part of the fingerprint, so a re-stage cannot orphan a resolution.
         if ($issue->sourceRow !== null) {
             $sourceKey = LegacyImportRow::sourceKeyFor(
                 $issue->sourceRow->sheetName,
@@ -396,48 +511,13 @@ final class StageLegacyImport
                 $issue->sourceRow->sourceRowNumber,
                 $issue->sourceRow->blockIndex,
             );
-        }
 
-        if ($sourceKey !== null) {
             $context['source_key'] = $sourceKey;
             $context['row_id'] = $stagedIds[$sourceKey] ?? null;
-        }
-
-        if (isset($context['company_block_key']) === false && $issue->sourceRow !== null) {
-            $context['company_block_key'] = $issue->sourceRow->blockKey;
+            $context['company_block_key'] ??= $issue->sourceRow->blockKey;
         }
 
         return $context;
-    }
-
-    /**
-     * @param  array<string, mixed>  $context
-     */
-    private function identityFor(ParsedIssue $issue, array $context): IssueIdentity
-    {
-        if (isset($context['source_key']) && is_string($context['source_key'])) {
-            return IssueIdentity::cell($issue->code, $context['source_key'], $issue->field);
-        }
-
-        if (isset($context['company_block_key']) && is_string($context['company_block_key'])) {
-            return IssueIdentity::company($issue->code, $context['company_block_key'], $issue->field);
-        }
-
-        if (isset($context['natural_key']) && is_string($context['natural_key'])) {
-            return IssueIdentity::existing($issue->code, $context['natural_key'], $issue->field);
-        }
-
-        if (isset($context['subject']) && is_string($context['subject'])) {
-            $months = array_values(array_filter(
-                (array) ($context['months'] ?? []),
-                static fn (mixed $month): bool => is_string($month),
-            ));
-
-            return IssueIdentity::interval($issue->code, $context['subject'], $months, $issue->field);
-        }
-
-        // A workbook-level finding names its sheet, or the whole file when it has none.
-        return IssueIdentity::workbook($issue->code, (string) ($context['sheet'] ?? '*'));
     }
 
     private function guard(): WorkbookGuard

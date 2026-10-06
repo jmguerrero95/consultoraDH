@@ -1216,6 +1216,16 @@ export interface ImportIssue {
     is_resolved: boolean;
     resolved_by: number | null;
     resolved_at: string | null;
+    /**
+     * A04-R2: the finding stopped applying — the reconstruction no longer produces it.
+     *
+     * Deliberately **not** the same thing as `is_resolved`. `is_resolved` means a person answered
+     * this question; a superseded finding means the question stopped applying and nobody was
+     * asked. Collapsing the two would put a reviewer who never saw the dialog into the record as
+     * though they had, which is exactly what `superseded_at` exists to prevent.
+     */
+    is_superseded: boolean;
+    superseded_at: string | null;
     resolution: Record<string, unknown> | null;
     /** A04-R1: the answer in the reviewer's own words, for the "ya respondida" state. */
     resolution_summary: string | null;

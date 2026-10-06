@@ -144,7 +144,11 @@ test.describe('A03: periods, obligations, payments and receivables', () => {
         // Open the month itself, through the interface.
         await page.goto('/periods');
 
-        await page.getByRole('button', { name: 'Abrir periodo' }).click();
+        // Scoped to `main`, because the page offers "Abrir periodo" twice while no period exists:
+        // once in the header and once in the empty state below it. Unscoped, Playwright refuses
+        // to choose — and whether it was even ambiguous depended on whether a *previous* journey
+        // had left a period behind, so the suite passed in one order and failed in another.
+        await page.getByRole('main').getByRole('button', { name: 'Abrir periodo' }).first().click();
 
         const open = dialog(page, 'Abrir periodo');
 
@@ -315,6 +319,13 @@ test.describe('A03: periods, obligations, payments and receivables', () => {
         // attached the payment to the wrong debt would be caught.
         await obligationFor(page, period.id, directory.clientId);
 
+        // The credit held, immediately before. The comparison below is a difference rather than
+        // an absolute, because the figure is portfolio-wide and the portfolio is shared with every
+        // other journey in the run.
+        const creditBefore = (
+            await get<ReceivablesPayload>(page, '/api/receivables')
+        ).summary.unallocated_credit_cop;
+
         // Register the payment through the interface.
         await page.goto('/payments');
 
@@ -363,21 +374,21 @@ test.describe('A03: periods, obligations, payments and receivables', () => {
         expect(line.balance_cop).toBe(235000);
         expect(line.paid_amount_cop).toBe(0);
 
-        // The unapplied-credit total is portfolio-wide, and other journeys in the run leave
-        // credit of their own behind, so it is asserted as the invariant it actually is: the
-        // figure is exactly what every payment still holds. Reading it as "300 000" would
-        // make this journey fail because of a journey that ran before it, and would keep
-        // failing for ever as journeys are added.
-        const everyPayment = await get<{ items: Payment[] }>(
-            page,
-            '/api/payments?per_page=100',
-        );
-        const creditHeld = everyPayment.items
-            .filter((candidate) => !candidate.is_voided)
-            .reduce((total, candidate) => total + candidate.unallocated_amount_cop, 0);
-
-        expect(receivables.summary.unallocated_credit_cop).toBe(creditHeld);
-        expect(creditHeld).toBeGreaterThanOrEqual(300000);
+        // §2's rule for this journey: money received and not applied is **credit held**, so
+        // registering it raises the portfolio's unapplied credit by exactly what arrived.
+        //
+        // ## Why a difference, not an equality
+        //
+        // It compared `unallocated_credit_cop` against the sum of `/api/payments`. That equality
+        // only holds if the account can enumerate every payment in the database — and this journey
+        // runs as **Collections**, whose payment list is a subset. In the full suite another
+        // journey's payment was worth 150 000 and invisible to this account, so the two figures
+        // differed by 150 000 for a reason that has nothing to do with the rule.
+        //
+        // The difference between the figure before and after the register call holds whatever else
+        // the portfolio contains, and it is the assertion that actually describes the behaviour
+        // under test: this payment arrived, and nothing was applied to it.
+        expect(receivables.summary.unallocated_credit_cop - creditBefore).toBe(300000);
 
         // Conservation: the whole payment is still unallocated.
         const payments = await get<{ items: Payment[] }>(page, '/api/payments');

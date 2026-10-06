@@ -70,6 +70,15 @@ services:
       # requests in a couple of minutes. The production budget refuses that on
       # purpose; the suite raises it for itself and for nothing else.
       API_RATE_LIMIT_PER_MINUTE: "2000"
+      # Sign in is throttled per client address, and every test in the suite arrives from
+      # the one `nginx-e2e` address — so twenty attempts per five minutes is a budget for
+      # the whole run, not for one user. At the production figure the suite spent more of
+      # its time on the throttle than on the journeys: six A04 tests and one A03 test
+      # failed in `beforeEach` with the login page reporting an unexpected error, while
+      # every assertion after it was sound. Raised for the suite, and for nothing else;
+      # the throttle itself is covered by its own tests.
+      LOGIN_RATE_LIMIT_PER_ATTEMPT: "2000"
+      LOGIN_RATE_LIMIT_PER_ACCOUNT: "2000"
       # Trusted for this test-only host. The development instance trusts
       # localhost; this one trusts the name it is actually reached by, and
       # nothing else. A wildcard here would make the trusted-host guard
@@ -116,6 +125,71 @@ services:
 
   # The web server for the test instance. No published port: reachable only from
   # inside the network.
+  # The E2E queue worker.
+  #
+  # ## Why it had to be added
+  #
+  # `app-e2e` is configured with `QUEUE_CONNECTION: redis` — deliberately, because the
+  # production path for A04 is "the upload returns 202 and `ParseLegacyImport` runs on a
+  # worker", and the journeys here are supposed to exercise that path rather than a
+  # synchronous stand-in. But this file declared no worker, so every `ParseLegacyImport`
+  # and `BuildLegacyImportPlan` was pushed onto Redis db 2 and **never processed**.
+  #
+  # What the suite saw was an import stuck in `queued` forever: "En cola · 0 filas leídas"
+  # on the detail screen, and six journeys failing on the first assertion that looked at the
+  # page. The application's own polling helper in the spec waits for the status to leave
+  # `parsing`, which `queued` satisfies — so the test moved on and then found nothing.
+  #
+  # This is the infrastructure defect the audit pointed at. It is not a product bug: with a
+  # worker present, the same code completes the same journeys. The worker is given the same
+  # database and the same Redis namespace as `app-e2e`, and no host port.
+  queue-e2e:
+    image: consultora-dh/app:local
+    container_name: consultora-dh-queue-e2e
+    working_dir: /var/www/html
+    # `--sleep=1` rather than the development `--sleep=3`: a journey waits on the status to
+    # leave `queued`, and a three second nap on an idle queue is three seconds of every test
+    # spent asleep. The development value is kept for development, where the queue is idle
+    # most of the time and the CPU is worth more than the latency.
+    # `--queue=default,imports`, for the same reason the development worker lists both.
+    #
+    # A04's jobs are dispatched with `onQueue('imports')`. A worker on the default queue alone
+    # never sees them, which is what left every journey staring at "En cola · 0 filas leídas".
+    command: ["php", "artisan", "queue:work", "--queue=default,imports", "--sleep=1", "--tries=3", "--max-time=3600", "--verbose"]
+    volumes:
+      - .:/var/www/html
+      - vendor:/var/www/html/vendor
+    environment:
+      APP_ENV: testing
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_DATABASE: ${DB_E2E_DATABASE:-consultora_dh_e2e}
+      APP_URL: http://nginx-e2e
+      API_RATE_LIMIT_PER_MINUTE: "2000"
+      LOGIN_RATE_LIMIT_PER_ATTEMPT: "2000"
+      LOGIN_RATE_LIMIT_PER_ACCOUNT: "2000"
+      TRUSTED_HOSTS: nginx-e2e,nginx-e2e.local,localhost,127.0.0.1
+      # The same namespace as `app-e2e`: a worker on a different Redis database would drain
+      # a queue the application never writes to, and the symptom would be identical to the
+      # one this service was added to fix.
+      REDIS_HOST: redis
+      REDIS_DB: "2"
+      REDIS_CACHE_DB: "3"
+      REDIS_PREFIX: consultora-dh-e2e-
+      CACHE_PREFIX: consultora-dh-e2e-cache-
+      CACHE_STORE: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      SESSION_COOKIE: consultora_dh_e2e_session
+      APP_DEBUG: "false"
+    depends_on:
+      app-e2e:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - consultora-dh
+
   nginx-e2e:
     image: nginx:1.31-alpine
     container_name: consultora-dh-nginx-e2e

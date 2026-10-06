@@ -179,6 +179,10 @@ function issue(overrides: Partial<ImportIssue> = {}): ImportIssue {
         is_resolved: false,
         resolved_by: null,
         resolved_at: null,
+        // A04-R2: a finding the reconstruction stopped producing. Kept false here because this
+        // fixture is an open question; `supersededIssue()` is the fixture for the other state.
+        is_superseded: false,
+        superseded_at: null,
         resolution: null,
         resolution_summary: null,
         allowed_decisions: [

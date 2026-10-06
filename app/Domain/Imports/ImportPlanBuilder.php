@@ -62,8 +62,27 @@ use Illuminate\Support\Facades\DB;
  */
 final class ImportPlanBuilder
 {
+    /**
+     * §7.2's "DV contradictorio": the sentinel that says "blocked", as opposed to a digit.
+     *
+     * A named constant rather than the string `'conflict'`, because a return value that happens
+     * to be one of the other possible strings would be silently misread as a block. PHP has no
+     * literal union types, so the alternative is a `null`/`string` pair plus an out-parameter,
+     * which is worse to read at the call site than one explicit sentinel is.
+     */
+    private const VERIFICATION_DIGIT_CONFLICT = '\0conflict';
+
     /** Set for the duration of one `build()` so the helpers below can reach the answers. */
     private ?ImportDecisionSet $activeDecisions = null;
+
+    /**
+     * The import being built, for the duration of one `build()`.
+     *
+     * Set explicitly rather than threaded through every helper, because §11's approval index has
+     * to be scoped to *this* import — and passing the id down to the one place that reads it is
+     * how a scope gets forgotten the next time a caller is added.
+     */
+    private ?LegacyImport $activeImport = null;
 
     public function __construct(
         private readonly ?ImportDecisionSet $decisions = null,
@@ -84,61 +103,76 @@ final class ImportPlanBuilder
     ): ImportPlan {
         $decisions ??= $this->decisions;
         $this->activeDecisions = $decisions;
+        $this->activeImport = $import;
         $this->approvals = null;
 
-        return DB::transaction(function () use ($import, $reconstruction, $decisions): ImportPlan {
-            // Rebuilding replaces the plan wholesale. §15 has a `rebuild-plan` endpoint used
-            // after a resolution, and leaving the previous actions behind would mean the
-            // preview showed a mixture of two decisions.
-            LegacyImportAction::query()->where('legacy_import_id', $import->id)->delete();
+        try {
+            return DB::transaction(function () use ($import, $reconstruction, $decisions): ImportPlan {
+                // Rebuilding replaces the plan wholesale. §15 has a `rebuild-plan` endpoint used
+                // after a resolution, and leaving the previous actions behind would mean the
+                // preview showed a mixture of two decisions.
+                LegacyImportAction::query()->where('legacy_import_id', $import->id)->delete();
 
-            // Chronological, because `latestNameValue()` takes the last usable value and §7.1
-            // says the latest one wins. Loaded once: the previous implementation queried per row
-            // id, which for 2.560 staged rows is 2.560 queries inside one transaction.
-            $this->rowsById = LegacyImportRow::query()
-                ->where('legacy_import_id', $import->id)
-                ->orderBy('sheet_month')
-                ->orderBy('source_row_number')
-                ->get()
-                ->all();
+                // Chronological, because `latestNameValue()` takes the last usable value and §7.1
+                // says the latest one wins. Loaded once: the previous implementation queried per row
+                // id, which for 2.560 staged rows is 2.560 queries inside one transaction.
+                $this->rowsById = LegacyImportRow::query()
+                    ->where('legacy_import_id', $import->id)
+                    ->orderBy('sheet_month')
+                    ->orderBy('source_row_number')
+                    ->get()
+                    ->all();
 
-            $actions = [];
-            $ordinal = 0;
+                $actions = [];
+                $ordinal = 0;
 
-            // §9.2's unresolvable tokens are collected first, so a reviewer's answer has an
-            // issue to attach to and the preview can report them.
-            $this->collectUnresolvedEntities($import, $reconstruction);
+                // §9.2's unresolvable tokens are collected first, so a reviewer's answer has an
+                // issue to attach to and the preview can report them.
+                $this->collectUnresolvedEntities($import, $reconstruction);
 
-            // `array_merge` throughout, for the same reason as `skip()`: `+` keeps the left
-            // operand's value, which silently ignores any key both arrays carry.
-            foreach ($this->companyActions($import, $reconstruction) as $action) {
-                $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
-            }
+                // `array_merge` throughout, for the same reason as `skip()`: `+` keeps the left
+                // operand's value, which silently ignores any key both arrays carry.
+                foreach ($this->companyActions($import, $reconstruction) as $action) {
+                    $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
+                }
 
-            foreach ($this->clientActions($import, $reconstruction, $decisions) as $action) {
-                $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
-            }
+                foreach ($this->clientActions($import, $reconstruction, $decisions) as $action) {
+                    $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
+                }
 
-            foreach ($this->relationshipActions($import, $reconstruction, $decisions) as $action) {
-                $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
-            }
+                foreach ($this->relationshipActions($import, $reconstruction, $decisions) as $action) {
+                    $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
+                }
 
-            foreach ($this->affiliationActions($import, $reconstruction, $decisions) as $action) {
-                $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
-            }
+                foreach ($this->affiliationActions($import, $reconstruction, $decisions) as $action) {
+                    $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
+                }
 
-            foreach ($this->rateActions($import, $reconstruction, $decisions) as $action) {
-                $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
-            }
+                foreach ($this->rateActions($import, $reconstruction, $decisions) as $action) {
+                    $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
+                }
 
-            $persisted = [];
+                // §11's questions, raised once from the actions themselves rather than at each of
+                // the five places a conflict can be found. See the method's docblock.
+                $this->raiseExistingConflicts($import, $actions);
 
-            foreach ($actions as $action) {
-                $persisted[] = LegacyImportAction::query()->create($action);
-            }
+                $persisted = [];
 
-            return new ImportPlan($import, $persisted);
-        }, 3);
+                foreach ($actions as $action) {
+                    $persisted[] = LegacyImportAction::query()->create($action);
+                }
+
+                return new ImportPlan($import, $persisted);
+            }, 3);
+        } finally {
+            // Cleared in a `finally`, not after the happy path: a build that throws must not
+            // leave a stale import and decision set on a builder the container will reuse for
+            // the next job. §11's approval index is scoped through `$activeImport`, so a stale
+            // one would scope approvals to the wrong import.
+            $this->activeImport = null;
+            $this->activeDecisions = null;
+            $this->approvals = null;
+        }
     }
 
     // ------------------------------------------------------------------ companies
@@ -172,6 +206,11 @@ final class ImportPlanBuilder
                     'episodes' => [],
                     'row_ids' => [],
                     'months' => [],
+                    // §7.2's DV, from the title. Kept separate from the NIT because §7.2's rule
+                    // is per-field: a null digit may be completed, a matching one is a no-op, and
+                    // only a *contradicting* one is a blocker. Collapsing the two into the NIT
+                    // string made all three indistinguishable.
+                    'verification_digits' => [],
                 ];
             } elseif ($byTaxId[$taxId]['name'] !== $episode->companyName) {
                 $names = array_unique([$byTaxId[$taxId]['name'], $episode->companyName]);
@@ -187,6 +226,12 @@ final class ImportPlanBuilder
                 $episode->sourceRowIds,
             )));
             $byTaxId[$taxId]['months'][] = $episode->firstMonth();
+
+            $digit = $episode->companyVerificationDigit();
+
+            if ($digit !== null) {
+                $byTaxId[$taxId]['verification_digits'][$digit] = true;
+            }
         }
 
         $actions = [];
@@ -219,6 +264,22 @@ final class ImportPlanBuilder
 
             $existing = $this->existingCompany((string) $company['tax_id']);
 
+            // §7.2's DV rule, in three cases and in this order.
+            //
+            // A04-R1 carried the digit all the way from `CompanyTitle` into
+            // `legacy_import_rows.company_verification_digit` and then never read it: no plan
+            // action carried it, no conflict was ever raised, and the verifier had nothing to
+            // assert. §7.2 says the three cases are different questions, so they are three arms.
+            $digit = $this->resolveVerificationDigit($import, $naturalKey, $company, $existing);
+
+            if ($digit === self::VERIFICATION_DIGIT_CONFLICT) {
+                continue;
+            }
+
+            if (is_string($digit)) {
+                $payload['verification_digit'] = $digit;
+            }
+
             if ($existing === null) {
                 $actions[] = $this->action(
                     $import,
@@ -235,6 +296,15 @@ final class ImportPlanBuilder
             }
 
             // §11: an empty source never clears data, and a non-empty value is only proposed.
+            // §7.2's digit is part of what the plan observed, so §11's `actual → propuesto` can
+            // show `null → 3` for an enrichment and can refuse when the master already holds a
+            // different one. Reading it here rather than at the conflict pass means the same
+            // precondition drives both the question and the refusal.
+            $observedCompany = [
+                'legal_name' => $existing->legal_name,
+                'verification_digit' => $existing->verification_digit,
+            ];
+
             if ($this->sameCompanyName($existing, (string) $company['name'])) {
                 $actions[] = $this->skip(
                     $import,
@@ -243,7 +313,7 @@ final class ImportPlanBuilder
                     $payload,
                     $company['row_ids'],
                     'La empresa ya existe con el mismo nombre.',
-                    ['target_exists' => true, 'observed' => ['legal_name' => $existing->legal_name]],
+                    ['target_exists' => true, 'observed' => $observedCompany],
                 );
 
                 continue;
@@ -269,7 +339,7 @@ final class ImportPlanBuilder
                     'La empresa existe con el nombre «'.$existing->legal_name.'» y el archivo dice «'
                     .$company['name'].'». §11 no permite sobreescribir un dato maestro sin una '
                     .'decisión explícita.',
-                    ['target_exists' => true, 'observed' => ['legal_name' => $existing->legal_name]],
+                    ['target_exists' => true, 'observed' => $observedCompany],
                 )
                 : $this->action(
                     $import,
@@ -277,12 +347,468 @@ final class ImportPlanBuilder
                     $naturalKey,
                     $payload + ['current_legal_name' => $existing->legal_name],
                     $company['row_ids'],
-                    ['target_exists' => true, 'observed' => ['legal_name' => $existing->legal_name]],
+                    ['target_exists' => true, 'observed' => $observedCompany],
                     ['approved_fields' => $approved],
                 );
         }
 
         return $actions;
+    }
+
+    /**
+     * §7.1's "Perfil actual del cliente" — address, phone and email from one episode's rows.
+     *
+     * ## Why this reads the staged rows rather than the reconstruction
+     *
+     * §1.3's K/L/R are *row* columns, not episode attributes: a person's address is written on
+     * the lines where it was known and left blank elsewhere, so it is not reconstructable from an
+     * episode the way a relationship interval is. `legacy_import_rows` already carries all three
+     * columns — `StageLegacyImport` wrote `address`, `phone` and `email` since A04-R1 and nothing
+     * ever read them, which is the audit's finding that K/L/R are staged and ignored.
+     *
+     * @return array{address?: string, phone?: string, email?: string}
+     */
+    private function profileObservationFor(RelationshipEpisode $episode): array
+    {
+        $rows = LegacyImportRow::query()
+            ->whereIn('id', $episode->sourceRowIds)
+            ->get();
+
+        $profile = [];
+
+        foreach (['address', 'phone', 'email'] as $field) {
+            $value = $rows
+                ->map(fn (LegacyImportRow $row): ?string => $row->{$field})
+                ->filter(fn (?string $value): bool => $value !== null && trim($value) !== '')
+                ->last();
+
+            if ($value === null) {
+                continue;
+            }
+
+            $value = trim((string) $value);
+
+            // §7.1: "Validar correo antes de escribir. Un correo inválido genera warning y se
+            // omite del maestro." The row already carries the validation verdict in
+            // `email_problem`, so an invalid address is not proposed at all rather than proposed
+            // and then rejected at write time.
+            if ($field === 'email' && $rows->contains(fn (LegacyImportRow $row): bool => $row->email_problem !== null)) {
+                continue;
+            }
+
+            $profile[$field] = $value;
+        }
+
+        return $profile;
+    }
+
+    /**
+     * The latest non-empty value per profile field, across the months that observed it.
+     *
+     * §7.1: "para un cliente nuevo, proponer el valor no vacío más reciente cronológicamente."
+     * Per field rather than per row, because the file is sparse — an address in January and a
+     * phone in September are two observations of one profile, and taking the last row's whole
+     * profile would drop January's address in favour of September's blanks.
+     *
+     * @param  array<string, array{address?: string, phone?: string, email?: string}>  $byMonth
+     * @return array<string, string>
+     */
+    private function latestProfile(array $byMonth): array
+    {
+        ksort($byMonth);
+
+        $latest = [];
+
+        foreach ($byMonth as $profile) {
+            foreach ($profile as $field => $value) {
+                $latest[$field] = $value;
+            }
+        }
+
+        return $latest;
+    }
+
+    /**
+     * §11's five conflicts, raised from the plan the five builders produced.
+     *
+     * ## Why this exists as one pass rather than five call sites
+     *
+     * `existing_client_conflict`, `existing_company_conflict`, `existing_relationship_conflict`,
+     * `existing_affiliation_conflict` and `existing_rate_conflict` are all in §18's mandatory
+     * list. A04-R1 had `ImportDecisionSet::keepsExisting()`, `::overwritesWithSource()` and
+     * `::acceptsSourceAmount()` reading them and **no producer anywhere** — the builders detected
+     * each conflict and emitted a *skipped action* whose `skip_reason` explained it in prose,
+     * which is not a question, has no resolution path and is invisible to a reviewer filtering
+     * by code.
+     *
+     * So the conflicts were permanent: the plan said "the company exists with a different name,
+     * not overwritten", the import sat in `review` or the action silently skipped, and no human
+     * was ever asked. §11's `actual → propuesto → aceptar` never happened for any of the five.
+     *
+     * ## Why one pass is the right shape
+     *
+     * Each builder already knows the comparison it made, and already records it: `differs` in the
+     * preconditions for a client, `observed` for a company, `accepted_conflict` for a rate. So the
+     * question is derivable from the action without asking any builder twice, and deriving it in
+     * one place means a sixth conflict type added later is covered by the same rule rather than by
+     * somebody remembering to add a sixth raise.
+     *
+     * ## Non-blocking, and deliberately so
+     *
+     * §11 says an existing conflict is a question, not a wall: the import may proceed with the
+     * existing value once answered. Blocking them would make every import onto a database that
+     * already has clients unappliable, which is the opposite of §11's "El importador debe poder
+     * ejecutarse sobre una base que ya tiene datos". The plan's `skipped` action already refuses
+     * to overwrite; the issue exists so a person is *offered* the choice.
+     *
+     * @param  list<array<string, mixed>>  $actions
+     */
+    private function raiseExistingConflicts(LegacyImport $import, array $actions): void
+    {
+        foreach ($actions as $action) {
+            $preconditions = $action['preconditions'];
+            $naturalKey = (string) $action['natural_key'];
+            $payload = $action['payload'];
+
+            if (($preconditions['target_exists'] ?? null) !== true) {
+                // Nothing existed when the plan was built. §11 has no question about a record
+                // that was not there.
+                continue;
+            }
+
+            foreach ($this->existingConflictFor($action, $naturalKey, $preconditions, $payload) as $conflict) {
+                $this->raiseIssue($import, $conflict['code'], $conflict);
+            }
+        }
+    }
+
+    /**
+     * The conflicts one action implies, as `{code, severity, blocking, subject, message, context}`.
+     *
+     * @param  array<string, mixed>  $action
+     * @param  array<string, mixed>  $preconditions
+     * @param  array<string, mixed>  $payload
+     * @return list<array<string, mixed>>
+     */
+    private function existingConflictFor(array $action, string $naturalKey, array $preconditions, array $payload): array
+    {
+        $type = $action['action_type'] ?? null;
+        $observed = is_array($preconditions['observed'] ?? null) ? $preconditions['observed'] : [];
+        $differs = is_array($preconditions['differs'] ?? null) ? $preconditions['differs'] : [];
+
+        // One field per issue, so a reviewer can accept the name and decline the phone rather than
+        // being offered the pair. §5.3's one dialog per subject, and §11's per-field proposal.
+        $fields = [];
+
+        if ($type === ImportActionType::CreateClient->value) {
+            $fields = $differs !== [] ? array_values($differs) : $this->changedFields($observed, $payload, ['first_names', 'last_names']);
+        }
+
+        if ($type === ImportActionType::CreateCompany->value) {
+            $fields = $this->changedFields($observed, $payload, ['legal_name']);
+
+            // §7.2's enrichment is §11's "posible enriquecimiento de campo vacío → propuesta
+            // visible", so it gets its own question on the same issue.
+            $digit = $payload['verification_digit'] ?? null;
+
+            if (is_string($digit)
+                && $digit !== ''
+                && trim((string) ($observed['verification_digit'] ?? '')) === '') {
+                $fields[] = 'verification_digit';
+            }
+        }
+
+        if ($type === ImportActionType::CreateRelationship->value
+            || $type === ImportActionType::CreateAffiliation->value) {
+            // No comparable scalar: the conflict is that the record already exists at all, and
+            // §11's answer is whether to keep it or let the import propose alongside it.
+            $fields = ['record'];
+        }
+
+        if ($type === ImportActionType::CreateRate->value) {
+            // §10 and §11 name the field `monthly_amount_cop`; the payload names it `amount` and
+            // the precondition names it `amount_cop`. All three are already on the wire — the
+            // frontend reads `amount` from the action, the applier reads `amount` from the
+            // payload and `amount_cop` from the precondition — so both sides are brought to the
+            // reviewer's name here rather than renaming any of them.
+            //
+            // Normalising **both** sides matters: an earlier version bridged only the proposed
+            // value, so `changedFields()` looked for `monthly_amount_cop` in an `observed` that
+            // only had `amount_cop`, found nothing, and raised no conflict at all — §10's
+            // "importe diferente → blocker" quietly never fired.
+            $observedForComparison = $observed;
+            $proposedForComparison = $payload;
+
+            if (array_key_exists('amount_cop', $observed)) {
+                $observedForComparison['monthly_amount_cop'] = $observed['amount_cop'];
+            }
+
+            if (array_key_exists('amount', $payload)) {
+                $proposedForComparison['monthly_amount_cop'] = $payload['amount'];
+            }
+
+            $fields = $this->changedFields($observedForComparison, $proposedForComparison, ['monthly_amount_cop']);
+        }
+
+        $code = match ($type) {
+            ImportActionType::CreateClient->value,
+            ImportActionType::UpdateClient->value => LegacyImportIssue::ExistingClientConflict,
+            ImportActionType::CreateCompany->value,
+            ImportActionType::UpdateCompany->value => LegacyImportIssue::ExistingCompanyConflict,
+            ImportActionType::CreateRelationship->value => LegacyImportIssue::ExistingRelationshipConflict,
+            ImportActionType::CreateAffiliation->value => LegacyImportIssue::ExistingAffiliationConflict,
+            ImportActionType::CreateRate->value => LegacyImportIssue::ExistingRateConflict,
+            default => null,
+        };
+
+        if ($code === null) {
+            return [];
+        }
+
+        // §11's "si ya existe y es idéntico → no-op": nothing to ask about a value that agrees.
+        if ($fields === [] || ($fields === ['record'] && $code !== LegacyImportIssue::ExistingRelationshipConflict && $code !== LegacyImportIssue::ExistingAffiliationConflict)) {
+            return [];
+        }
+
+        $conflicts = [];
+
+        foreach (array_unique($fields) as $field) {
+            $conflicts[] = [
+                'code' => $code,
+                'severity' => LegacyIssueSeverity::Warning,
+                'blocking' => false,
+                'subject' => IssueSubject::existing($naturalKey, $field),
+                'message' => $this->existingConflictMessage($code, $naturalKey, (string) $field, $observed),
+                // §4.3: `observed` is a business name, a company name or a money amount — never a
+                // person's document, and never a cell's text.
+                'context' => [
+                    'natural_key' => $naturalKey,
+                    'field' => $field,
+                    'action_type' => $type,
+                    'observed' => $observed[$field] ?? null,
+                    'proposed' => $payload[$field] ?? null,
+                ],
+            ];
+        }
+
+        return $conflicts;
+    }
+
+    /**
+     * Which of `$fields` the source would actually change, comparing against what was observed.
+     *
+     * Compares folded, so a spelling difference is still a difference but a case or accent
+     * difference is not — `SheetMonth::fold()` is what `clientDiffers()` already used, and two
+     * comparisons that disagreed would make a plan's precondition contradict its issue.
+     *
+     * @param  array<string, mixed>  $observed
+     * @param  array<string, mixed>  $payload
+     * @param  list<string>  $fields
+     * @return list<string>
+     */
+    private function changedFields(array $observed, array $payload, array $fields): array
+    {
+        $changed = [];
+
+        foreach ($fields as $field) {
+            if (! array_key_exists($field, $observed)) {
+                continue;
+            }
+
+            $proposed = $payload[$field] ?? null;
+
+            if ($proposed === null || trim((string) $proposed) === '') {
+                // §11: an empty source never clears an existing value, so it is not a conflict.
+                continue;
+            }
+
+            if (SheetMonth::fold((string) $observed[$field]) !== SheetMonth::fold((string) $proposed)) {
+                $changed[] = $field;
+            }
+        }
+
+        return $changed;
+    }
+
+    /** §11's `actual → propuesto`, in a sentence. No individual's data. */
+    private function existingConflictMessage(
+        LegacyImportIssue $code,
+        string $naturalKey,
+        string $field,
+        array $observed,
+    ): string {
+        $what = match ($code) {
+            LegacyImportIssue::ExistingClientConflict => 'El cliente',
+            LegacyImportIssue::ExistingCompanyConflict => 'La empresa',
+            LegacyImportIssue::ExistingRelationshipConflict => 'La relación',
+            LegacyImportIssue::ExistingAffiliationConflict => 'La afiliación',
+            LegacyImportIssue::ExistingRateConflict => 'El valor mensual',
+            default => 'El registro',
+        };
+
+        return sprintf(
+            '§11: %s de «%s» ya existe. El archivo propone un valor distinto para «%s». '
+            .'Se conserva el dato maestro hasta que alguien acepte el cambio.',
+            $what,
+            $naturalKey,
+            $field,
+        );
+    }
+
+    /**
+     * §7.2's verification digit: null may be completed, equal is a no-op, different is a blocker.
+     *
+     * ## Why this needed its own method
+     *
+     * A04-R1 parsed the digit, staged it in `legacy_import_rows.company_verification_digit`, and
+     * never read it again — so §7.2's three distinct rules were three identical no-ops, and the
+     * audit's "the NIT is identity; DV is separate" had no implementation behind it at all. A
+     * company created from the real file got `verification_digit = null` regardless of what its
+     * title said, and a title contradicting the database raised nothing.
+     *
+     * @param  array<string, mixed>  $company  one entry of `$byTaxId`
+     * @param  object|null  $existing  the row from `companies`, or null when absent
+     * @return string|null the digit to propose, {@see VERIFICATION_DIGIT_CONFLICT} when blocked, null when there is nothing to say
+     */
+    private function resolveVerificationDigit(
+        LegacyImport $import,
+        string $naturalKey,
+        array $company,
+        ?object $existing,
+    ): ?string {
+        /** @var array<string, true> $digits */
+        $digits = $company['verification_digits'] ?? [];
+
+        // Two different digits for one NIT inside a single file is the source contradicting
+        // itself, which is a different question from the source contradicting the database and
+        // has to be raised before either can be compared.
+        if (count($digits) > 1) {
+            $stated = array_keys($digits);
+            sort($stated, SORT_STRING);
+
+            $this->raiseIssue($import, LegacyImportIssue::CompanyVerificationDigitConflict, [
+                'severity' => LegacyIssueSeverity::Error,
+                'blocking' => true,
+                'subject' => IssueSubject::companyBlock(
+                    (string) ($company['name'] ?? $company['tax_id']),
+                    'company_verification_digit',
+                ),
+                'message' => 'El NIT '.$company['tax_id'].' aparece en el archivo con los dígitos de '
+                    .'verificación '.implode(' y ', $stated).'. No se puede elegir uno.',
+                'context' => [
+                    'natural_key' => $naturalKey,
+                    'company_tax_id' => $company['tax_id'],
+                    'source_digits' => $stated,
+                ],
+            ]);
+
+            return self::VERIFICATION_DIGIT_CONFLICT;
+        }
+
+        $source = $digits === [] ? null : (string) array_key_first($digits);
+
+        // The source did not state a digit: there is nothing to propose and nothing to compare.
+        // §7.2's "completar" needs a digit *from the source*, which this is not.
+        if ($source === null) {
+            return null;
+        }
+
+        if ($existing === null) {
+            // A new company takes the digit the title stated, and that is not an enrichment —
+            // it is simply the company's own data.
+            return $source;
+        }
+
+        if ($existing->verification_digit === null || $existing->verification_digit === '') {
+            // §7.2's one enrichment: "si una observación añade DV donde DB lo tiene null, puede
+            // proponerse completar".
+            //
+            // The digit is returned **unconditionally**, and whether it is written is decided by
+            // `ApplyImportPlan::writeCompanyUpdate()`'s `approved_fields`.
+            //
+            // Gating it here instead created a deadlock the audit would have called out: with no
+            // digit in the payload there was nothing for §17.5 to show as `null → 3`, nothing for
+            // a reviewer to accept, and therefore nothing to put in `approved_fields` — so the
+            // proposal could never exist. §7.2 says "proponerse" and §11 says "propuesta
+            // visible"; a proposal that is only visible once already approved is not a proposal.
+            return $source;
+        }
+
+        if ((string) $existing->verification_digit === $source) {
+            // Same digit: §7.2's no-op. Kept explicit so the three cases read as three cases.
+            return null;
+        }
+
+        // §7.2: "DV contradictorio = blocker."
+        $this->raiseIssue($import, LegacyImportIssue::CompanyVerificationDigitConflict, [
+            'severity' => LegacyIssueSeverity::Error,
+            'blocking' => true,
+            'subject' => IssueSubject::companyBlock(
+                (string) ($company['name'] ?? $company['tax_id']),
+                'company_verification_digit',
+            ),
+            'message' => 'El título dice que '.$company['tax_id'].' tiene dígito de verificación '
+                .$source.' y la base de datos tiene '.((string) $existing->verification_digit)
+                .'. §7.2 no deja elegir: hace falta corregir la fuente o el maestro.',
+            // §4.3: no individual's document or name. A NIT is a company's.
+            'context' => [
+                'natural_key' => $naturalKey,
+                'company_tax_id' => $company['tax_id'],
+                'source_digit' => $source,
+                'existing_digit' => (string) $existing->verification_digit,
+            ],
+        ]);
+
+        return 'conflict';
+    }
+
+    /**
+     * Raise a plan-time issue through the same path every other issue takes.
+     *
+     * `ParsedWorkbook::addIssue()` is the parser's; the builder needs its own because a conflict
+     * against the *database* can only be discovered here, and going through the model directly is
+     * how A04-R1 ended up with a hand-written context that did not match what the reader looked
+     * for.
+     *
+     * @param  array{severity: LegacyIssueSeverity, blocking: bool, message: string, subject: IssueSubject, context: array<string, mixed>}  $attributes
+     */
+    private function raiseIssue(LegacyImport $import, LegacyImportIssue $code, array $attributes): void
+    {
+        $identity = $attributes['subject']->identity($code);
+
+        $attributes['context'] = [
+            ...$attributes['subject']->context(),
+            ...$attributes['context'],
+        ];
+
+        $existing = \App\Models\LegacyImportIssue::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('fingerprint', $identity->value())
+            ->first();
+
+        if ($existing !== null) {
+            $existing->forceFill([
+                'severity' => $attributes['severity']->value,
+                'blocking' => $attributes['blocking'],
+                'field' => $attributes['subject']->field(),
+                'message' => $attributes['message'],
+                'context' => $attributes['context'],
+            ])->save();
+
+            return;
+        }
+
+        \App\Models\LegacyImportIssue::query()->create([
+            'legacy_import_id' => $import->id,
+            'row_id' => null,
+            'code' => $code->value,
+            'severity' => $attributes['severity']->value,
+            'blocking' => $attributes['blocking'],
+            'field' => $attributes['subject']->field(),
+            'message' => $attributes['message'],
+            'context' => $attributes['context'],
+            'fingerprint' => $identity->value(),
+        ]);
     }
 
     /**
@@ -339,6 +865,11 @@ final class ImportPlanBuilder
                     // comparison rather than an accident of reconstruction order.
                     'names_by_month' => [],
                     'row_ids' => [],
+                    // §7.1's "Perfil actual del cliente": A02 keeps no history for these, so the
+                    // most recent non-empty observation is the proposal. Kept per month for the
+                    // same reason as the name — "latest" has to be a comparison, not an accident
+                    // of reconstruction order.
+                    'profile_by_month' => [],
                 ];
             }
 
@@ -346,6 +877,12 @@ final class ImportPlanBuilder
                 $month = $episode->firstMonth() ?? '';
 
                 $byClient[$key]['names_by_month'][$month] = $episode->clientDisplayName;
+            }
+
+            $profile = $this->profileObservationFor($episode);
+
+            if ($profile !== []) {
+                $byClient[$key]['profile_by_month'][$episode->firstMonth() ?? ''] = $profile;
             }
 
             $byClient[$key]['row_ids'] = array_values(array_unique(array_merge(
@@ -370,6 +907,10 @@ final class ImportPlanBuilder
                 // *word* as the first names, so `JUAN CARLOS PEREZ` lost its middle name.
                 'first_names' => $this->firstNamesFor($client['row_ids']),
                 'last_names' => $this->lastNamesFor($client['row_ids']),
+                // §7.1's profile, from §1.3's K/L/R. Absent keys are absent keys: §7.1 says an
+                // empty source never clears a master value, so the payload carries only what the
+                // file actually stated.
+                ...$this->latestProfile($client['profile_by_month']),
             ];
 
             $naturalKey = 'client:'.$client['document_type'].':'.$client['document_number'];
@@ -494,7 +1035,9 @@ final class ImportPlanBuilder
     {
         $differs = [];
 
-        foreach (['first_names', 'last_names'] as $field) {
+        // §1.3's K/L/R are part of §7.1's profile and §11 covers them like any other master
+        // field: propose, never overwrite silently, never clear with an empty source.
+        foreach (['first_names', 'last_names', 'address', 'phone', 'email'] as $field) {
             $proposed = $payload[$field] ?? null;
 
             if ($proposed === null || trim((string) $proposed) === '') {
@@ -519,12 +1062,21 @@ final class ImportPlanBuilder
         return $differs;
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * §11's `observed` for a client: what the master holds, for every field the plan can propose.
+     *
+     * @return array<string, mixed>
+     */
     private function observedClient(object $existing): array
     {
         return [
             'first_names' => $existing->first_names ?? null,
             'last_names' => $existing->last_names ?? null,
+            // §1.3's K/L/R, so §11's `actual → propuesto` reaches the review screen for the
+            // whole profile and not only for the name.
+            'address' => $existing->address ?? null,
+            'phone' => $existing->phone ?? null,
+            'email' => $existing->email ?? null,
         ];
     }
 
@@ -643,7 +1195,14 @@ final class ImportPlanBuilder
                 'retirement' => $episode->retirement?->toArray(),
                 // §8.5's vocabulary, so `link()` gets A02's resolution deliberately rather than
                 // by a default that happens to be the safe one.
-                'overlap_resolution' => $this->overlapResolutionFor($naturalKey),
+                //
+                // §8.4's answer rides in the same field: when a reviewer closed a disappearance,
+                // `HistoryReconstructor` has already put the chosen date on the interval, so it is
+                // in `$episode->interval` above. This says *why* the interval ends, so §17.5 can
+                // show a boundary as a person's decision rather than as something the workbook
+                // stated.
+                'overlap_resolution' => $episode->overlapResolution
+                    ?? $this->overlapResolutionFor($naturalKey),
             ];
 
             $existing = $this->existingRelationship(
@@ -1029,22 +1588,25 @@ final class ImportPlanBuilder
      */
     private function raiseUnresolvedEntity(LegacyImport $import, array $entry): void
     {
-        $subject = $entry['subjects'][0] ?? $entry['token'];
-        // A token, not a staged row: the same spelling is the same question wherever it appears,
-        // and keying on the first row that showed it would make the issue move every time the
-        // reconstruction reordered. `field` carries the entity type, so four different columns
-        // spelling the same thing are four questions rather than one that fights over an index.
-        $identity = IssueIdentity::token(LegacyImportIssue::UnresolvedSocialEntity, $entry['type'], $entry['token']);
+        $type = SocialSecurityEntityType::from($entry['type']);
+        $code = LegacyImportIssue::UnresolvedSocialEntity;
 
-        $existing = \App\Models\LegacyImportIssue::query()
-            ->where('legacy_import_id', $import->id)
-            ->where('fingerprint', $identity->value())
-            ->first();
+        // The subject and the field come from the same object the reader will use.
+        //
+        // A04-R1 built this by hand and got all three keys wrong at once: it wrote `subject` as
+        // the *first staged row* that carried the spelling, `field` as `eps_token`, and hashed
+        // with a `token()` factory that read a third pair of names. `ImportDecisionSet::
+        // entityDecision()` looked the finding up as `EPS|SALUD TOTAL` with field `EPS`. Nothing
+        // connected the two, so a reviewer could map the token, the issue would show resolved, and
+        // `resolveEntity()` would still return null and the affiliation would still vanish from
+        // the plan — the exact failure §9.2's code exists to prevent.
+        $subject = IssueSubject::entityToken($type, $entry['token']);
+        $identity = $subject->identity($code);
 
         $attributes = [
             'severity' => LegacyIssueSeverity::Warning->value,
             'blocking' => false,
-            'field' => strtolower($entry['type']).'_token',
+            'field' => $subject->field(),
             'message' => sprintf(
                 'La columna %s dice «%s» en %d segmento(s) y no coincide con ninguna entidad del catálogo. '
                 .'§9.2 no permite fusionar por parecido: hay que asociarla a una entidad existente o crearla.',
@@ -1053,18 +1615,19 @@ final class ImportPlanBuilder
                 $entry['count'],
             ),
             // §4.3: an entity name is a business name, not a person, and it is already in the
-            // redacted cells. No document, no person's name.
+            // redacted cells. No document, no person's name. `subjects` are row *positions*,
+            // kept so a reviewer can jump to an occurrence, and they contribute to no identity.
             'context' => [
-                'sheet' => null,
-                'row' => null,
-                'field' => strtolower($entry['type']).'_token',
-                'entity_type' => $entry['type'],
-                'token' => $entry['token'],
-                'subject' => $subject,
+                ...$subject->context(),
                 'subjects' => $entry['subjects'],
                 'occurrences' => $entry['count'],
             ],
         ];
+
+        $existing = \App\Models\LegacyImportIssue::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('fingerprint', $identity->value())
+            ->first();
 
         if ($existing !== null) {
             // Refresh in place so a resolution stays attached to the question it answered.
@@ -1076,7 +1639,7 @@ final class ImportPlanBuilder
         \App\Models\LegacyImportIssue::query()->create([
             'legacy_import_id' => $import->id,
             'row_id' => null,
-            'code' => LegacyImportIssue::UnresolvedSocialEntity->value,
+            'code' => $code->value,
             'fingerprint' => $identity->value(),
             ...$attributes,
         ]);
@@ -1292,6 +1855,14 @@ final class ImportPlanBuilder
         $index = [];
 
         foreach (\App\Models\LegacyImportIssue::query()
+            // §11's "las únicas excepciones globales son los mappings explícitos". An approval is
+            // a reviewer's answer to *this* import's question, so it is scoped to this import.
+            //
+            // A04-R1 had no scope at all here: a reviewer who answered "overwrite with source" for
+            // company X in one import silently authorised overwriting X in every later import,
+            // with no question asked and nothing on the review screen showing it had happened.
+            // An approval that outlives the question that produced it is not an approval.
+            ->where('legacy_import_id', $this->activeImport?->id ?? 0)
             ->whereIn('code', [
                 LegacyImportIssue::ExistingClientConflict->value,
                 LegacyImportIssue::ExistingCompanyConflict->value,
@@ -1299,6 +1870,7 @@ final class ImportPlanBuilder
                 LegacyImportIssue::ExistingAffiliationConflict->value,
                 LegacyImportIssue::ExistingRateConflict->value,
             ])
+            ->whereNull('superseded_at')
             ->whereNotNull('resolved_at')
             ->get() as $issue
         ) {
@@ -1319,6 +1891,10 @@ final class ImportPlanBuilder
             $kind = match ($issue->code) {
                 LegacyImportIssue::ExistingClientConflict, LegacyImportIssue::ClientIdentityConflict => 'client',
                 LegacyImportIssue::ExistingCompanyConflict, LegacyImportIssue::CompanyIdentityConflict => 'company',
+                // §7.2's DV enrichment rides on `existing_company_conflict`'s `approved_fields`, so
+                // the approval has to be findable under its own kind too rather than needing a
+                // second, easily-forgotten mechanism.
+                LegacyImportIssue::CompanyVerificationDigitConflict => 'company_verification_digit',
                 default => 'other',
             };
 

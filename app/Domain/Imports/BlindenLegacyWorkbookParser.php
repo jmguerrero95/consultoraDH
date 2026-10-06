@@ -110,6 +110,11 @@ final class BlindenLegacyWorkbookParser
             $this->readSheet($entry, $parsed);
         }
 
+        // §7.2 needs every title the file contains before it can tell a consistent employer from
+        // an inconsistent one, so this cannot happen while reading a sheet. A04-R1 had the code
+        // in the enum with no producer at all; the comparison is what finally makes it reachable.
+        $parsed->raiseCompanyIdentityConflicts();
+
         return $parsed;
     }
 

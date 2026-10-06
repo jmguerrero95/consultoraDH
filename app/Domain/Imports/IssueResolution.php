@@ -50,6 +50,38 @@ final readonly class IssueResolution
     ) {}
 
     /**
+     * The boundary this decision asserts, or null when it asserts none.
+     *
+     * ## Why the reconstruction asks for it this way
+     *
+     * §8.4's `close_on_disappearance` carries `date` + `precision` and §8.5's `split_overlap_at`
+     * carries `boundary` + `precision`, so two decisions name the same idea under two keys.
+     * Reading them through one method means `HistoryReconstructor` does not branch on the
+     * decision's internals, and a third boundary-bearing decision added later is honoured by the
+     * reconstruction rather than silently ignored by it — which is precisely how A04-R1 lost both
+     * of the two it already had, with `disappearanceFor()` and `overlapBoundaryFor()` written,
+     * documented and never called.
+     *
+     * `keep_open` asserts the *absence* of a boundary and returns null, and null is also what an
+     * unanswered question returns. The two are indistinguishable here and correctly so: both mean
+     * "leave this interval alone". What differs is whether the question is still open, and that
+     * lives in the issue's `resolved_at`, not here.
+     */
+    public function boundary(): ?ResolvedBoundary
+    {
+        $date = $this->value['boundary'] ?? $this->value['date'] ?? null;
+
+        if (! is_string($date) || $date === '') {
+            return null;
+        }
+
+        return new ResolvedBoundary(
+            $date,
+            (string) ($this->value['precision'] ?? HistoricalInterval::MONTH),
+        );
+    }
+
+    /**
      * Build and validate from a request payload.
      *
      * @param  array<string, mixed>  $value

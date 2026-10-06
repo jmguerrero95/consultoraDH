@@ -71,6 +71,26 @@ const EXPECTED_ISSUES = [
     'credential_like_cells' => 23,
 ];
 
+/**
+ * §7.2's named case, asserted.
+ *
+ * ## Why this is an assertion and not another `[INFO]` line
+ *
+ * §1.2 and §7.2 both name it: `DISTRIUTIL` "aparece con dos números base visualmente muy
+ * parecidos. **No fusionar automáticamente.** Debe aparecer como `company_identity_conflict`".
+ *
+ * It was printed as `[INFO] 0` on every run and nobody read it, because an informational line
+ * that is always zero looks exactly like an informational line that is working. The code existed
+ * in the enum with a label and **no producer**, so the comparison that would find it — one folded
+ * company name carrying two NIT bases — did not exist anywhere in `app/`.
+ *
+ * A verifier that prints a number nobody asserts is a comment. This one fails.
+ *
+ * The number is a count of *findings*, never of NITs or of the company: §4.3 forbids printing a
+ * business's tax identifiers, and a count is the whole of what this needs to prove.
+ */
+const EXPECTED_COMPANY_IDENTITY_CONFLICTS = 2;
+
 function out(string $line = ''): void
 {
     fwrite(STDOUT, $line."\n");
@@ -279,7 +299,10 @@ $ok = check('nothing is auto-marked as a parallel', $parallelActions, 0) && $ok;
 out('');
 out('§9.2 / §9.4 questions A04-R1 made reachable');
 out(sprintf('  [INFO] company_arl_metadata_conflict issues   %d', $issueCounts[LegacyImportIssue::CompanyArlMetadataConflict->value] ?? 0));
-out(sprintf('  [INFO] company_identity_conflict issues      %d', $issueCounts[LegacyImportIssue::CompanyIdentityConflict->value] ?? 0));
+
+// §7.2's named case. Asserted, not printed — see the constant's docblock.
+$identityConflicts = $issueCounts[LegacyImportIssue::CompanyIdentityConflict->value] ?? 0;
+$ok = check('company_identity_conflict findings (§7.2 DISTRIUTIL)', $identityConflicts, EXPECTED_COMPANY_IDENTITY_CONFLICTS) && $ok;
 
 $totalBlocking = $fingerprint['blocking_issues'] + $counts['blocking'];
 out(sprintf('  totals: %d blocking issues, %d warnings', $totalBlocking, $fingerprint['warning_issues']));

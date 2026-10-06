@@ -229,6 +229,16 @@ preguntas correctamente producía los datos sin transformar. Ahora hay un
 conjunto cerrado de decisiones con esquema propio, la revisión es la que se
 aplica, y `WorkbookGuard` se invoca en el upload y antes del parser.
 
+**Segunda remediación, tras una segunda auditoría.** Diecisiete áreas, casi todas
+*desconectadas* — un código, una etiqueta, un lector y nada del otro lado — en
+[`docs/TASKS/A04-R2.md`](TASKS/A04-R2.md). Las tres que más pesan: el productor y
+el consumidor de una incidencia nombraban claves distintas, de modo que trece
+desparecimientos se colapsaban en una fila y el índice único rechazaba el segundo;
+la columna **R** se leía como ARL cuando R es **correo**, de modo que cada ARL del
+archivo real era el correo de una persona nombrada; y **ningún worker escuchaba la
+cola `imports`**, así que en desarrollo una importación se quedaba en `queued`
+para siempre. Nada de esto lo detectó la suite, que corre con cola síncrona.
+
 **A04 no tiene aprobación externa** y la auditoría debe repetirse sobre el commit
 de remediación.
 
@@ -238,9 +248,9 @@ Detalle en [docs/TASKS/A04.md](TASKS/A04.md).
 
 ### A05 — Planillas y validación operativa — **bloqueada**
 
-> **No se empieza hasta que A04 tenga aprobación externa.** La remediación de
-> A04-R1 está verificada localmente; eso no es una aprobación. A05 ampliaría la
-> superficie sobre código que acaba de cambiar de forma sustancial.
+> **No se empieza hasta que A04 tenga aprobación externa.** Las remediaciones de
+> A04-R1 y A04-R2 están verificadas localmente; eso no es una aprobación. A05
+> ampliaría la superficie sobre código que acaba de cambiar de forma sustancial.
 
 Alcance: generación de planillas, liquidación de aportes, validación de
 consistencias y descarga.

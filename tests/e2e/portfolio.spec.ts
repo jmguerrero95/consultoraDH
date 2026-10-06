@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 import type { Page } from '@playwright/test';
 
+import { csrfHeaders } from './support/a03';
 import { emailField, passwordField } from './support/forms';
 
 /**
@@ -84,12 +85,7 @@ function nav(page: Page, label: string) {
  * rule it means to exercise.
  */
 async function apiWrite(page: Page, path: string, data: Record<string, unknown>) {
-    const token = (await page.context().cookies()).find((cookie) => cookie.name === 'XSRF-TOKEN')?.value;
-
-    return page.request.post(path, {
-        data,
-        headers: token === undefined ? {} : { 'X-XSRF-TOKEN': decodeURIComponent(token) },
-    });
+    return page.request.post(path, { data, headers: await csrfHeaders(page) });
 }
 
 /**

@@ -532,6 +532,25 @@ const canApplyNow = computed(
 const summary = computed(() => detail.value?.summary ?? {});
 
 /**
+ * How a finding stands, in one word. A04-R2.
+ *
+ * Three states, because two of them used to look alike: answered by a person, withdrawn because
+ * the reconstruction stopped producing it, and still open. The middle one is the reason
+ * `superseded_at` is a separate column rather than a value written into `resolved_at`.
+ */
+function answerState(issue: ImportIssue): string {
+    if (issue.is_resolved) {
+        return 'Respondida';
+    }
+
+    if (issue.is_superseded) {
+        return 'Ya no aplica';
+    }
+
+    return 'Abierta';
+}
+
+/**
  * §8.3's three forms, verbatim.
  *
  * The date is never formatted by this screen on its own: a boundary the source stated as a
@@ -933,11 +952,24 @@ function severityClass(issue: ImportIssue): string {
                                     <span v-if="issue.resolution_summary" class="cdh-text-muted d-block">
                                         {{ issue.resolution_summary }}
                                     </span>
+                                    <!--
+                                        A04-R2. A withdrawn finding is neither answered nor open,
+                                        and the screen has to say which: "Sí" would put a
+                                        reviewer who never saw this dialog into the record.
+                                    -->
+                                    <span v-if="issue.is_superseded" class="cdh-text-muted d-block">
+                                        Ya no aplica: la reconstrucción cambió.
+                                    </span>
                                 </td>
-                                <td>{{ issue.resolved_at ? 'Sí' : 'No' }}</td>
+                                <td>{{ answerState(issue) }}</td>
                                 <td>
+                                    <!--
+                                        A04-R2: no "Resolver" on a finding that stopped applying.
+                                        The endpoint refuses it now as well; disabling the control
+                                        is what keeps the screen and the server agreeing.
+                                    -->
                                     <button
-                                        v-if="canReview && issue.resolved_at === null"
+                                        v-if="canReview && issue.resolved_at === null && !issue.is_superseded"
                                         type="button"
                                         class="cdh-link"
                                         @click="openResolution(issue)"
