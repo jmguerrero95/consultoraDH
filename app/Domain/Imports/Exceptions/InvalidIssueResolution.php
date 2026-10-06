@@ -141,6 +141,19 @@ final class InvalidIssueResolution extends \InvalidArgumentException
         );
     }
 
+    /**
+     * §7.3's `treat_as_duplicate_of` named something that cannot be the row it counts.
+     *
+     * @param  string  $why  why this particular target is refused
+     */
+    public static function invalidDuplicateTarget(string $why): self
+    {
+        return new self(
+            'La fila duplicada no es válida: '.$why,
+            'invalid_duplicate_target',
+        );
+    }
+
     /** The decision is well-formed but this finding cannot be answered with it. */
     public static function inapplicable(LegacyImportIssue $issue, string $why): self
     {

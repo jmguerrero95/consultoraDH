@@ -8,6 +8,7 @@ use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
 use App\Models\LegacyImportRow;
+use App\Models\SocialSecurityEntity;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -104,7 +105,6 @@ final class ImportPlanBuilder
         $decisions ??= $this->decisions;
         $this->activeDecisions = $decisions;
         $this->activeImport = $import;
-        $this->approvals = null;
 
         try {
             return DB::transaction(function () use ($import, $reconstruction, $decisions): ImportPlan {
@@ -128,11 +128,33 @@ final class ImportPlanBuilder
 
                 // §9.2's unresolvable tokens are collected first, so a reviewer's answer has an
                 // issue to attach to and the preview can report them.
-                $this->collectUnresolvedEntities($import, $reconstruction);
+                $unresolved = $this->collectUnresolvedEntities($import, $reconstruction);
+
+                // §9.3's "crear entidades faltantes", and the producer `CreateSocialEntity` had
+                // never had.
+                //
+                // ## Why this sits *before* the affiliations, not after
+                //
+                // `CreateSocialEntity` was in `ImportActionType` with a writer in
+                // `ApplyImportPlan` and **zero producers**, and `ImportDecisionSet::
+                // createdEntityName()` was a reader with zero callers. Together they meant a
+                // reviewer's answer to `unresolved_social_entity` — "this token is a new entity,
+                // call it *name*" — was validated, stored, shown as resolved, and then read by
+                // nobody: `resolveEntity()` still returned null, `affiliationActions()` still hit
+                // its `continue`, and the affiliation silently vanished from the plan. The issue
+                // screen said the question was settled; the DB said the person had no EPS.
+                //
+                // The action therefore has to be emitted *before* `affiliationActions()`, and the
+                // affiliation has to be able to find it by name afterwards. `resolveEntity()` reads
+                // the decision set, so a rebuild after the answer produces the entity action and
+                // the affiliation resolves against the same name in one pass.
+                foreach ($this->socialEntityActions($import, $unresolved) as $action) {
+                    $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
+                }
 
                 // `array_merge` throughout, for the same reason as `skip()`: `+` keeps the left
                 // operand's value, which silently ignores any key both arrays carry.
-                foreach ($this->companyActions($import, $reconstruction) as $action) {
+                foreach ($this->companyActions($import, $reconstruction, $decisions) as $action) {
                     $actions[] = array_merge($action, ['ordinal' => $ordinal++]);
                 }
 
@@ -167,11 +189,10 @@ final class ImportPlanBuilder
         } finally {
             // Cleared in a `finally`, not after the happy path: a build that throws must not
             // leave a stale import and decision set on a builder the container will reuse for
-            // the next job. §11's approval index is scoped through `$activeImport`, so a stale
-            // one would scope approvals to the wrong import.
+            // the next job. Approvals are now scoped by the decision set that was built for this
+            // import, so a stale pair would scope them to the wrong import.
             $this->activeImport = null;
             $this->activeDecisions = null;
-            $this->approvals = null;
         }
     }
 
@@ -185,6 +206,7 @@ final class ImportPlanBuilder
     private function companyActions(
         LegacyImport $import,
         HistoryReconstruction $reconstruction,
+        ?ImportDecisionSet $decisions,
     ): array {
         /** @var array<string, array<string, mixed>> $byTaxId */
         $byTaxId = [];
@@ -305,7 +327,34 @@ final class ImportPlanBuilder
                 'verification_digit' => $existing->verification_digit,
             ];
 
+            // §7.2: the digit is approved field by field, so it is consulted **before** the
+            // name's no-op.
+            //
+            // The name branch used to come first and `continue`. A company whose legal name already
+            // matched the title therefore never reached the update arm — so §7.2's one enrichment,
+            // a null digit the file can fill, was silently dropped for exactly the companies that
+            // were otherwise a clean match. The question was raised (the conflict pass sees the
+            // digit), the reviewer answered it, and no `UpdateCompany` was ever produced.
+            $approved = $decisions?->approvedFields($naturalKey, LegacyImportIssue::ExistingCompanyConflict) ?? [];
+
             if ($this->sameCompanyName($existing, (string) $company['name'])) {
+                // An approved digit is a write even when nothing else changed.
+
+                if ($approved !== []) {
+                    $actions[] = $this->action(
+                        $import,
+                        ImportActionType::UpdateCompany,
+                        $naturalKey,
+                        // §7.2's digit already travelled into `$payload` above.
+                        $payload,
+                        $company['row_ids'],
+                        ['target_exists' => true, 'observed' => $observedCompany],
+                        ['approved_fields' => $approved],
+                    );
+
+                    continue;
+                }
+
                 $actions[] = $this->skip(
                     $import,
                     ImportActionType::CreateCompany,
@@ -327,8 +376,6 @@ final class ImportPlanBuilder
             // Now it is an explicit arm, and it writes only the fields §11's `actual → propuesto`
             // proposal named — which is `preconditions['approved_fields']`, recorded when a
             // reviewer answers `existing_company_conflict` with `overwrite_with_source`.
-            $approved = $this->approvedFields($naturalKey, $company['tax_id'], 'company');
-
             $actions[] = $approved === []
                 ? $this->skip(
                     $import,
@@ -429,6 +476,51 @@ final class ImportPlanBuilder
     }
 
     /**
+     * §7.1's `client_identity_conflict`, blocking, with the observations a reviewer needs.
+     *
+     * ## What is *not* in the context
+     *
+     * §4.3 allows a name here — these are the conflicting names, which is the entire subject of
+     * the question — but it is sanitised: folded for comparison, length-capped, and the list is
+     * deduplicated. The document is not repeated per name, and no row id is exposed beyond the
+     * import's own.
+     *
+     * ## One finding per client identity
+     *
+     * Keyed on `existing:{TYPE}:{NUMBER}`, so §5.3's "one dialog per subject" holds for a
+     * person observed under three spellings — three questions about one identity would be a
+     * review nobody finishes.
+     *
+     * @param  array<string, mixed>  $client  one entry of `$byClient`
+     * @param  list<string>  $names  the distinct names the source offered
+     */
+    private function raiseClientIdentityConflict(LegacyImport $import, array $client, array $names): void
+    {
+        $naturalKey = ImportDecisionSet::clientIdentityKey(
+            (string) $client['document_type'],
+            (string) $client['document_number'],
+        );
+        $subject = IssueSubject::clientIdentity($client['document_type'].':'.$client['document_number']);
+
+        $this->raiseIssue($import, LegacyImportIssue::ClientIdentityConflict, [
+            'severity' => LegacyIssueSeverity::Error,
+            'blocking' => true,
+            'subject' => $subject,
+            'message' => 'El documento '.$naturalKey.' aparece con '.count($names)
+                .' nombres distintos ('.implode(' / ', $names).'). §7.1: el documento decide la'
+                .' identidad y el nombre es un atributo; hay que elegir el nombre o decir a qué'
+                .' persona ya registrada pertenece.',
+            'context' => [
+                'natural_key' => $naturalKey,
+                'document_type' => $client['document_type'],
+                'document_number' => $client['document_number'],
+                'observed_names' => array_values($names),
+                'occurrences' => count($names),
+            ],
+        ]);
+    }
+
+    /**
      * §11's five conflicts, raised from the plan the five builders produced.
      *
      * ## Why this exists as one pass rather than five call sites
@@ -496,6 +588,12 @@ final class ImportPlanBuilder
         $observed = is_array($preconditions['observed'] ?? null) ? $preconditions['observed'] : [];
         $differs = is_array($preconditions['differs'] ?? null) ? $preconditions['differs'] : [];
 
+        // §11's "coincidencia exacta → no-op", asserted by the builder that did the comparison.
+        // There is nothing to ask about a row that already says exactly what the file says.
+        if (($preconditions['identical'] ?? false) === true) {
+            return [];
+        }
+
         // One field per issue, so a reviewer can accept the name and decline the phone rather than
         // being offered the pair. §5.3's one dialog per subject, and §11's per-field proposal.
         $fields = [];
@@ -518,11 +616,15 @@ final class ImportPlanBuilder
             }
         }
 
-        if ($type === ImportActionType::CreateRelationship->value
-            || $type === ImportActionType::CreateAffiliation->value) {
-            // No comparable scalar: the conflict is that the record already exists at all, and
-            // §11's answer is whether to keep it or let the import propose alongside it.
-            $fields = ['record'];
+        if ($type === ImportActionType::CreateRelationship->value) {
+            // The builder has already compared the two intervals, so it knows *what* differs.
+            // Naming `ended_on` instead of an opaque `record` is what lets §17.5 render the two
+            // dates a reviewer is choosing between; `record` only ever said "something".
+            $fields = ['ended_on'];
+        }
+
+        if ($type === ImportActionType::CreateAffiliation->value) {
+            $fields = ['interval'];
         }
 
         if ($type === ImportActionType::CreateRate->value) {
@@ -536,18 +638,27 @@ final class ImportPlanBuilder
             // value, so `changedFields()` looked for `monthly_amount_cop` in an `observed` that
             // only had `amount_cop`, found nothing, and raised no conflict at all — §10's
             // "importe diferente → blocker" quietly never fired.
-            $observedForComparison = $observed;
-            $proposedForComparison = $payload;
-
+            //
+            // The bridge writes back into `$observed` and `$payload` themselves, not into copies.
+            //
+            // A04-R2 compared the renamed pair but then reported the conflict from the *original*
+            // maps, so the finding that reached the review screen was
+            //
+            //     observed: null, proposed: null, severity: info, blocking: false
+            //
+            // for every single rate disagreement — a question about two numbers that showed
+            // neither of them, and, because "the master looks empty", was classified as an
+            // enrichment and let the batch through. Comparing and reporting have to name the
+            // same field or the report describes a field nobody compared.
             if (array_key_exists('amount_cop', $observed)) {
-                $observedForComparison['monthly_amount_cop'] = $observed['amount_cop'];
+                $observed['monthly_amount_cop'] = $observed['amount_cop'];
             }
 
             if (array_key_exists('amount', $payload)) {
-                $proposedForComparison['monthly_amount_cop'] = $payload['amount'];
+                $payload['monthly_amount_cop'] = $payload['amount'];
             }
 
-            $fields = $this->changedFields($observedForComparison, $proposedForComparison, ['monthly_amount_cop']);
+            $fields = $this->changedFields($observed, $payload, ['monthly_amount_cop']);
         }
 
         $code = match ($type) {
@@ -565,28 +676,57 @@ final class ImportPlanBuilder
             return [];
         }
 
-        // §11's "si ya existe y es idéntico → no-op": nothing to ask about a value that agrees.
-        if ($fields === [] || ($fields === ['record'] && $code !== LegacyImportIssue::ExistingRelationshipConflict && $code !== LegacyImportIssue::ExistingAffiliationConflict)) {
+        // Nothing to ask about when the builder found nothing that differs.
+        if ($fields === []) {
             return [];
         }
 
         $conflicts = [];
 
         foreach (array_unique($fields) as $field) {
+            $field = (string) $field;
+            $existing = $observed[$field] ?? null;
+
+            // §11's three cases, decided per field rather than per action.
+            //
+            // A04-R2 made every one of these non-blocking, which contradicts §11's "conflicto →
+            // issue bloqueante o decisión humana explícita" and produced a plan that quietly kept
+            // every master value while the review screen showed a green "no conflict". The
+            // distinction that actually matters is whether the master **already holds something**
+            // for that field:
+            //
+            //   target empty  + source non-empty → *enrichment*: a visible proposal, non-blocking,
+            //     and if nobody accepts it the master simply stays as it was.
+            //   target non-empty + source differs → *conflict*: blocking, because somebody has to
+            //     choose which of two real values wins.
+            //
+            // The `record` pseudo-field means "the row exists", which is always a conflict rather
+            // than an enrichment: there is no such thing as "this relationship is empty".
+            // §11's enrichment case: the master holds nothing for this field. `interval` and
+            // `ended_on` can never be empty on an existing row — their absence *is* the
+            // disagreement — so the test is only meaningful for the scalar fields, and for those
+            // a `null` observed value is a genuine hole rather than a missing comparison.
+            $isEnrichment = ($existing === null || trim((string) $existing) === '')
+                && $type !== ImportActionType::CreateRelationship->value
+                && $type !== ImportActionType::CreateAffiliation->value;
+
             $conflicts[] = [
                 'code' => $code,
-                'severity' => LegacyIssueSeverity::Warning,
-                'blocking' => false,
+                'severity' => $isEnrichment
+                    ? LegacyIssueSeverity::Info
+                    : LegacyIssueSeverity::Error,
+                'blocking' => ! $isEnrichment,
                 'subject' => IssueSubject::existing($naturalKey, $field),
-                'message' => $this->existingConflictMessage($code, $naturalKey, (string) $field, $observed),
+                'message' => $this->existingConflictMessage($code, $naturalKey, $field, $isEnrichment),
                 // §4.3: `observed` is a business name, a company name or a money amount — never a
                 // person's document, and never a cell's text.
                 'context' => [
                     'natural_key' => $naturalKey,
                     'field' => $field,
                     'action_type' => $type,
-                    'observed' => $observed[$field] ?? null,
+                    'observed' => $existing,
                     'proposed' => $payload[$field] ?? null,
+                    'conflict_kind' => $isEnrichment ? 'enrichment' : 'conflict',
                 ],
             ];
         }
@@ -635,7 +775,7 @@ final class ImportPlanBuilder
         LegacyImportIssue $code,
         string $naturalKey,
         string $field,
-        array $observed,
+        bool $isEnrichment,
     ): string {
         $what = match ($code) {
             LegacyImportIssue::ExistingClientConflict => 'El cliente',
@@ -646,13 +786,21 @@ final class ImportPlanBuilder
             default => 'El registro',
         };
 
-        return sprintf(
-            '§11: %s de «%s» ya existe. El archivo propone un valor distinto para «%s». '
-            .'Se conserva el dato maestro hasta que alguien acepte el cambio.',
-            $what,
-            $naturalKey,
-            $field,
-        );
+        return $isEnrichment
+            ? sprintf(
+                '§11: %s de «%s» tiene «%s» vacío y el archivo propone un valor. '
+                .'Se conserva el dato maestro tal como está hasta que alguien acepte la propuesta.',
+                $what,
+                $naturalKey,
+                $field,
+            )
+            : sprintf(
+                '§11: %s de «%s» ya tiene un valor distinto para «%s» y el archivo propone otro. '
+                .'§11 exige una decisión humana explícita: conservar el maestro o aceptar el del archivo.',
+                $what,
+                $naturalKey,
+                $field,
+            );
     }
 
     /**
@@ -787,9 +935,20 @@ final class ImportPlanBuilder
             ->first();
 
         if ($existing !== null) {
+            // A question that has been answered does not block again.
+            //
+            // `blocking` was re-derived on every rebuild, which undid §5.3's own promise. The
+            // resolve endpoint narrows `blocking` and sets `resolved_at`; then §15's rebuild
+            // re-derives the same finding — same fingerprint, same subject — and wrote `blocking`
+            // back to `true`. So the sequence was: answer, rebuild, blocked again, 409, answer
+            // again. A reviewer could never finish an import whose conflict was answered.
+            //
+            // `severity` is still re-derived, because it describes the finding and the finding
+            // may genuinely have changed; `blocking` describes whether anybody still owes an
+            // answer, and once somebody has answered, they do not.
             $existing->forceFill([
                 'severity' => $attributes['severity']->value,
-                'blocking' => $attributes['blocking'],
+                'blocking' => $existing->resolved_at === null && $attributes['blocking'],
                 'field' => $attributes['subject']->field(),
                 'message' => $attributes['message'],
                 'context' => $attributes['context'],
@@ -864,6 +1023,15 @@ final class ImportPlanBuilder
                     // §7.1: the *latest* valid name. Sorted by first month so "latest" is a
                     // comparison rather than an accident of reconstruction order.
                     'names_by_month' => [],
+                    // Every distinct spelling the file offers, for §7.1's "diferencias de nombre
+                    // para el mismo documento".
+                    //
+                    // `names_by_month` cannot answer that question: it holds one name per month,
+                    // because it exists to find the *latest*. Two spellings inside a single
+                    // month's block — a typo three rows down, or two people sharing a document —
+                    // collapsed into one entry, so the conflict that §7.1 exists to catch was
+                    // invisible for exactly the rows that were closest together in the file.
+                    'names' => [],
                     'row_ids' => [],
                     // §7.1's "Perfil actual del cliente": A02 keeps no history for these, so the
                     // most recent non-empty observation is the proposal. Kept per month for the
@@ -875,8 +1043,9 @@ final class ImportPlanBuilder
 
             if ($episode->clientDisplayName !== null && trim($episode->clientDisplayName) !== '') {
                 $month = $episode->firstMonth() ?? '';
+                $name = trim($episode->clientDisplayName);
 
-                $byClient[$key]['names_by_month'][$month] = $episode->clientDisplayName;
+                $byClient[$key]['names_by_month'][$month] = $name;
             }
 
             $profile = $this->profileObservationFor($episode);
@@ -896,7 +1065,18 @@ final class ImportPlanBuilder
         foreach ($byClient as $key => $client) {
             $namesByMonth = $client['names_by_month'];
             ksort($namesByMonth);
-            $names = array_values(array_unique($namesByMonth));
+
+            // §7.1's conflict list comes from the *staged rows*, not from the reconstruction.
+            //
+            // The reconstruction holds one episode per client-company-month, so by the time
+            // `clientDisplayName` is read there is exactly one name per month and the comparison
+            // can no longer see a second spelling. The rows still hold every observation, and
+            // §7.1's question is precisely "did this document arrive with more than one name?".
+            //
+            // Reading the rows also gets the pairing right: first and last names from the *same*
+            // row, rather than the latest of each half independently, which would invent names
+            // nobody typed — "JUAN" from January and "PEREZ" from February is two people.
+            $names = $this->observedNamesFor($client['row_ids']);
             $latest = $names === [] ? '' : (string) end($names);
 
             $payload = [
@@ -937,10 +1117,21 @@ final class ImportPlanBuilder
             }
 
             // §7.1: "diferencias de nombre para el mismo documento son conflictos de atributos,
-            // no nuevas personas". Two spellings are an issue, not a second client — and the
-            // previous version produced a *skipped* action with no resolution path at all, so
-            // the conflict could never be settled and the client was never created.
-            if (count($names) > 1 && ! ($decisions?->keepsExisting($naturalKey, LegacyImportIssue::ClientIdentityConflict) === true)) {
+            // no nuevas personas". Two spellings are an issue, not a second client.
+            //
+            // ## Why this raises an issue and not a skip
+            //
+            // A04-R2 emitted a *skipped action* whose `skip_reason` explained the conflict in
+            // prose. That is not a question: it has no code, no resolution path and nothing a
+            // reviewer can answer, so the client was never created and the import could never
+            // proceed. §7.1's own sentence calls this an **issue**.
+            //
+            // Blocked until answered, because a person is the record that cannot be guessed: two
+            // names for one document is either a typo, or two people sharing a document, and
+            // picking either silently is exactly the "nueva persona" §7.1 forbids.
+            if (count($names) > 1) {
+                $this->raiseClientIdentityConflict($import, $client, $names);
+
                 $actions[] = $this->skip(
                     $import,
                     ImportActionType::CreateClient,
@@ -990,7 +1181,7 @@ final class ImportPlanBuilder
                 continue;
             }
 
-            $approved = $this->approvedFields($naturalKey, (string) $client['document_number'], 'client');
+            $approved = $decisions?->approvedFields($naturalKey, LegacyImportIssue::ExistingClientConflict) ?? [];
 
             $actions[] = $approved === []
                 ? $this->skip(
@@ -1105,6 +1296,38 @@ final class ImportPlanBuilder
      *
      * @param  list<int>  $rowIds
      */
+    /**
+     * Every distinct `first + last` spelling the staged rows gave one client.
+     *
+     * §7.1: "diferencias de nombre para el mismo documento son conflictos de atributos, no nuevas
+     * personas". Ordered by first appearance, so the finding, the message and the review dialog
+     * are the same on every run — a reviewer comparing two runs should not see the names swap.
+     *
+     * @param  list<int>  $rowIds
+     * @return list<string>
+     */
+    private function observedNamesFor(array $rowIds): array
+    {
+        $names = [];
+
+        foreach ($this->rowsById as $row) {
+            if (! in_array((int) $row->id, $rowIds, true)) {
+                continue;
+            }
+
+            $first = trim((string) ($row->first_names ?? ''));
+            $last = trim((string) ($row->last_names ?? ''));
+
+            if ($first === '' && $last === '') {
+                continue;
+            }
+
+            $names[] = trim($first.' '.$last);
+        }
+
+        return array_values(array_unique($names));
+    }
+
     private function latestNameValue(array $rowIds, string $column): ?string
     {
         $value = null;
@@ -1242,10 +1465,59 @@ final class ImportPlanBuilder
                     $payload,
                     $episode->sourceRowIds,
                     'La relación ya existe con el mismo inicio y el mismo fin.',
-                    ['target_exists' => true, 'observed' => [
+                    // §11's "coincidencia exacta → no-op". The flag is what stops
+                    // `existingConflictFor()` from re-raising the same row as a blocking conflict
+                    // a few lines later: without it, the builder correctly decided this is a no-op
+                    // and the issue pass then asked a question about it anyway, which is how an
+                    // import of an unchanged file ended up permanently in `review`.
+                    ['target_exists' => true, 'identical' => true, 'observed' => [
                         'started_on' => (string) $existing->started_on,
                         'ended_on' => $existing->ended_on === null ? null : (string) $existing->ended_on,
                         'started_on_precision' => $existing->started_on_precision,
+                        'ended_on_precision' => $existing->ended_on_precision,
+                    ]],
+                );
+
+                continue;
+            }
+
+            // §8.2 and §8.3: an **open** relationship whose episode ends inside the file is closed
+            // at the derived boundary.
+            //
+            // ## Why this is not §11's "no reescribir"
+            //
+            // §11 protects a boundary somebody chose: a row that already *has* an end date is
+            // history, and the branch below refuses to touch it. An **open** row has no boundary at
+            // all, so closing one is not rewriting anything — it is the only way the file's own
+            // retirement evidence can reach the master.
+            //
+            // Without it the plan emitted a `create_relationship` for a person who is still
+            // employed by that company according to the database, A02's link refused it, and a
+            // workbook that documented a retirement could not be imported. The mirror image of
+            // §9.5's affiliation close, for the same reason.
+            //
+            // Precision travels with the boundary: §8.3 says a day the file only asserts to the
+            // month must be stored as `month`.
+            if ($existing->ended_on === null
+                && $episode->interval->end !== null
+                && $episode->interval->endPrecision !== null) {
+                $actions[] = $this->action(
+                    $import,
+                    ImportActionType::CloseRelationship,
+                    $naturalKey.':close',
+                    [
+                        'client_document_type' => $episode->documentType,
+                        'client_document_number' => $episode->documentNumber,
+                        'company_tax_id' => $episode->companyTaxId,
+                        'ended_on' => $episode->interval->end->toDateString(),
+                        'ended_on_precision' => $episode->interval->endPrecision,
+                        'reason' => '§8.2: el archivo afirma que esta relación termina el '
+                            .$episode->interval->end->toDateString().' (precisión '
+                            .$episode->interval->endPrecision.').',
+                    ],
+                    $episode->sourceRowIds,
+                    ['target_exists' => true, 'observed' => [
+                        'ended_on' => null,
                         'ended_on_precision' => $existing->ended_on_precision,
                     ]],
                 );
@@ -1364,7 +1636,23 @@ final class ImportPlanBuilder
 
             // §9.2/§9.3: no approved mapping means a suggestion and an issue — handled in
             // `collectUnresolvedEntities()` — and no action.
-            if ($resolved === null) {
+            // §9.3: a token the reviewer said is a *new* entity has no id yet — the row does not
+            // exist until this same batch creates it.
+            //
+            // The affiliation therefore travels by `entity_name`, the name the reviewer typed,
+            // and `ApplyImportPlan::entityFor()` resolves it by name after the earlier
+            // `CreateSocialEntity` action has run. That is why the entity action is emitted
+            // first: ordinal order is the whole mechanism, and nothing else in the plan depends
+            // on it.
+            //
+            // The alternative — inventing an id, or leaving the affiliation out and hoping — is
+            // what A04-R2 did, and the observable result was a person with a relationship and a
+            // rate and no EPS.
+            $pendingName = $resolved === null
+                ? $decisions?->createdEntityName($segment->type, (string) $token?->token)
+                : null;
+
+            if ($resolved === null && $pendingName === null) {
                 continue;
             }
 
@@ -1375,14 +1663,64 @@ final class ImportPlanBuilder
                 'client_document_number' => $segment->documentNumber,
                 'company_tax_id' => $segment->companyTaxId,
                 'type' => $segment->type->value,
-                'entity_id' => $resolved->id,
+                'entity_id' => $resolved?->id,
+                'entity_name' => $pendingName,
                 // §8.3: both precisions travel with the interval, so the write cannot drop one.
                 'interval' => $segment->interval->toArray(),
                 'risk_class' => $segment->risk?->value,
                 'months' => $segment->months,
             ];
 
-            if ($this->existingAffiliationMatches($segment, (int) $resolved->id)) {
+            // §9.5: "cerrar el segmento anterior en la misma frontera", and "no permitir dos
+            // afiliaciones abiertas del mismo tipo".
+            //
+            // ## Why this needs its own action
+            //
+            // A closed segment whose affiliation does not exist yet is created *with* its end date
+            // — `writeAffiliation()` passes the whole interval through. But when the affiliation
+            // already exists and is **open** — because an earlier import carried it, or a person
+            // was there last month and the file now says they are not — nothing else in this plan
+            // closes it: the next segment closes the *previous* one, and this is the last one.
+            //
+            // Without a producer the plan emitted `create_affiliation`, A02 refused it for
+            // violating its own one-open-per-type invariant, and the whole batch was unappliable.
+            // So a person whose EPS ended in the file could not be imported at all.
+            //
+            // This is the only correct boundary to write: the segment's own end, with the
+            // precision §9.5 gave it, because a monthly snapshot only asserts *the month*.
+            if ($resolved !== null
+                && $segment->interval->end !== null
+                && $segment->interval->endPrecision !== null
+                && $this->openAffiliationMatches($segment, (int) $resolved->id)) {
+                // Only the keys `writeAffiliationClose()` writes. `interval`, `months` and
+                // `risk_class` belong to the *creation* action; a close does not re-open or
+                // re-scope anything, and `ApplyImportPlan::prevalidate()` refuses a payload whose
+                // fields the writer ignores — a field the plan believes it applies and does not is
+                // exactly what that check exists to catch.
+                $actions[] = $this->action(
+                    $import,
+                    ImportActionType::CloseAffiliation,
+                    $naturalKey.':close',
+                    [
+                        'client_document_type' => $segment->documentType,
+                        'client_document_number' => $segment->documentNumber,
+                        'company_tax_id' => $segment->companyTaxId,
+                        'type' => $segment->type->value,
+                        'entity_id' => (int) $resolved->id,
+                        'ended_on' => $segment->interval->end->toDateString(),
+                        'ended_on_precision' => $segment->interval->endPrecision,
+                        'reason' => '§9.5: el archivo afirma que esta afiliación termina en '
+                            .$segment->interval->end->toDateString().' (precisión '
+                            .$segment->interval->endPrecision.').',
+                    ],
+                    $segment->sourceRowIds,
+                    ['target_exists' => true, 'observed' => ['ended_on' => null]],
+                );
+
+                continue;
+            }
+
+            if ($resolved !== null && $this->existingAffiliationMatches($segment, (int) $resolved->id)) {
                 $actions[] = $this->skip(
                     $import,
                     ImportActionType::CreateAffiliation,
@@ -1390,13 +1728,14 @@ final class ImportPlanBuilder
                     $payload,
                     $segment->sourceRowIds,
                     'La afiliación ya existe con el mismo inicio y el mismo fin.',
-                    ['target_exists' => true],
+                    // §11's "coincidencia exacta → no-op" — see the identical relationship above.
+                    ['target_exists' => true, 'identical' => true],
                 );
 
                 continue;
             }
 
-            if ($this->affiliationConflicts($segment, (int) $resolved->id)) {
+            if ($resolved !== null && $this->affiliationConflicts($segment, (int) $resolved->id)) {
                 // §11: "no reescribir afiliaciones históricas existentes".
                 $actions[] = $this->skip(
                     $import,
@@ -1512,6 +1851,74 @@ final class ImportPlanBuilder
      *
      * @return array<string, array{type: string, token: string, count: int, subjects: list<string>}>
      */
+    /**
+     * §9.3's entity creation, for every token a reviewer answered with `create_entity`.
+     *
+     * §9.2's rule is that a token is never merged by resemblance — "no fusionar por parecido" —
+     * so an unknown EPS may only be resolved by naming a catalogue entry that already exists
+     * (`link_existing_entity`) or by saying it is new (`create_entity`). The second answer is the
+     * only path that ever *adds* something to the catalogue, and until now it added nothing.
+     *
+     * `createdEntityName()` is the reviewer's own words, so the entity is created with exactly
+     * the name they typed rather than with the token they typed: those differ on purpose, and the
+     * difference is the point of the question. §9.3's "crear entidades faltantes" is a decision,
+     * not a normalisation.
+     *
+     * Idempotence is `writeSocialEntity()`'s: it looks the entity up by type and name first and
+     * returns the existing one, so re-importing a file whose entities were already created writes
+     * nothing new.
+     *
+     * @param  array<string, array{type: string, token: string, count: int, subjects: list<string>}>  $unresolved
+     * @return list<array<string, mixed>>
+     */
+    private function socialEntityActions(LegacyImport $import, array $unresolved): array
+    {
+        $actions = [];
+
+        foreach ($unresolved as $entry) {
+            $type = SocialSecurityEntityType::from($entry['type']);
+            $name = $this->activeDecisions?->createdEntityName($type, $entry['token']);
+
+            if ($name === null) {
+                continue;
+            }
+
+            $naturalKey = 'entity:'.$entry['type'].':'.$entry['token'];
+
+            // A catalogue entry with that name may have been created by hand in the meantime, or
+            // by an earlier apply of this same import. §9.2's answer is "this is the entity", so
+            // the plan is a no-op and the affiliation resolves against what is already there.
+            if (SocialSecurityEntity::query()
+                ->where('type', $entry['type'])
+                ->whereRaw('LOWER(name) = ?', [mb_strtolower($name)])
+                ->exists()) {
+                $actions[] = $this->skip(
+                    $import,
+                    ImportActionType::CreateSocialEntity,
+                    $naturalKey,
+                    ['type' => $entry['type'], 'name' => $name, 'source_key' => $entry['token']],
+                    [],
+                    '§9.2: ya existe una entidad de tipo '.$entry['type'].' llamada «'.$name
+                    .'», que es la que el revisor eligió para «'.$entry['token'].'».',
+                    ['target_exists' => true, 'token' => $entry['token']],
+                );
+
+                continue;
+            }
+
+            $actions[] = $this->action(
+                $import,
+                ImportActionType::CreateSocialEntity,
+                $naturalKey,
+                ['type' => $entry['type'], 'name' => $name, 'source_key' => $entry['token']],
+                [],
+                ['target_exists' => false, 'token' => $entry['token']],
+            );
+        }
+
+        return $actions;
+    }
+
     private function collectUnresolvedEntities(LegacyImport $import, HistoryReconstruction $reconstruction): array
     {
         $unresolved = [];
@@ -1664,6 +2071,30 @@ final class ImportPlanBuilder
             ->first();
 
         return $row !== null && ($row->ended_on === null ? null : (string) $row->ended_on) === $end;
+    }
+
+    /**
+     * §9.5's "no permitir dos afiliaciones abiertas del mismo tipo", read from the database.
+     *
+     * Keyed on the entity as well as the type, because the plan is about *this* affiliation: a
+     * different provider is a different row, and closing it is `closesPreviousSegment()`'s job at
+     * the next segment's start.
+     */
+    private function openAffiliationMatches(AffiliationSegment $segment, int $entityId): bool
+    {
+        $client = $this->clientRow($segment->documentType, $segment->documentNumber);
+
+        if ($client === null) {
+            return false;
+        }
+
+        return DB::table('client_affiliations')
+            ->where('client_id', $client->id)
+            ->where('social_security_entity_id', $entityId)
+            ->where('type', $segment->type->value)
+            ->where('started_on', $segment->interval->start?->toDateString())
+            ->whereNull('ended_on')
+            ->exists();
     }
 
     private function affiliationConflicts(AffiliationSegment $segment, int $entityId): bool
@@ -1834,80 +2265,6 @@ final class ImportPlanBuilder
      * approved" is a property of the *decision*, not of the data: two plans for the same company
      * differ in data and agree in what was approved.
      */
-    private function approvedFields(string $naturalKey, string $target, string $kind): array
-    {
-        unset($target);
-
-        return $this->approvalIndex()[$kind][$naturalKey] ?? [];
-    }
-
-    /**
-     * The `overwrite_with_source` answers for this import, by kind and natural key.
-     *
-     * @return array<string, array<string, list<string>>>
-     */
-    private function approvalIndex(): array
-    {
-        if ($this->approvals !== null) {
-            return $this->approvals;
-        }
-
-        $index = [];
-
-        foreach (\App\Models\LegacyImportIssue::query()
-            // §11's "las únicas excepciones globales son los mappings explícitos". An approval is
-            // a reviewer's answer to *this* import's question, so it is scoped to this import.
-            //
-            // A04-R1 had no scope at all here: a reviewer who answered "overwrite with source" for
-            // company X in one import silently authorised overwriting X in every later import,
-            // with no question asked and nothing on the review screen showing it had happened.
-            // An approval that outlives the question that produced it is not an approval.
-            ->where('legacy_import_id', $this->activeImport?->id ?? 0)
-            ->whereIn('code', [
-                LegacyImportIssue::ExistingClientConflict->value,
-                LegacyImportIssue::ExistingCompanyConflict->value,
-                LegacyImportIssue::ExistingRelationshipConflict->value,
-                LegacyImportIssue::ExistingAffiliationConflict->value,
-                LegacyImportIssue::ExistingRateConflict->value,
-            ])
-            ->whereNull('superseded_at')
-            ->whereNotNull('resolved_at')
-            ->get() as $issue
-        ) {
-            $decision = IssueResolution::fromStored($issue->code, $issue->resolution);
-
-            if ($decision?->decision !== IssueResolutionDecision::OverwriteWithSource) {
-                continue;
-            }
-
-            $context = is_array($issue->context) ? $issue->context : [];
-            $naturalKey = (string) ($context['natural_key'] ?? '');
-            $field = $issue->field;
-
-            if ($naturalKey === '' || $field === null) {
-                continue;
-            }
-
-            $kind = match ($issue->code) {
-                LegacyImportIssue::ExistingClientConflict, LegacyImportIssue::ClientIdentityConflict => 'client',
-                LegacyImportIssue::ExistingCompanyConflict, LegacyImportIssue::CompanyIdentityConflict => 'company',
-                // §7.2's DV enrichment rides on `existing_company_conflict`'s `approved_fields`, so
-                // the approval has to be findable under its own kind too rather than needing a
-                // second, easily-forgotten mechanism.
-                LegacyImportIssue::CompanyVerificationDigitConflict => 'company_verification_digit',
-                default => 'other',
-            };
-
-            $index[$kind][$naturalKey][] = $field;
-        }
-
-        $this->approvals = $index;
-
-        return $index;
-    }
-
-    /** @var array<string, array<string, list<string>>>|null */
-    private ?array $approvals = null;
 
     /** @var list<LegacyImportRow> every staged row, chronological, for §7.1's "latest valid" */
     private array $rowsById = [];

@@ -880,12 +880,12 @@ it('records an audit event for the batch, with the plan revision and aggregate c
 it('skips an identical rate rather than rewriting it, per §10', function () {
     // §10: "Si ya existe un rate en DB para la misma pareja/mes: mismo importe → no-op." The
     // audit's Area L finding was that the comparison did not exist at all for rates.
-    $client = Client::factory()->create(['document_type' => 'CC', 'document_number' => '10101010']);
-    // `verification_digit` has to match the workbook's title (`900123456-3`). The factory
-    // defaults it to `1`, and §7.2 makes a contradicting digit a blocker — so without this the
-    // import would sit in `review` on a DV question and these tests, which are about rates and
-    // about relationship endings, would fail for a reason that has nothing to do with either.
-    $company = Company::factory()->create(['tax_id' => '900123456', 'verification_digit' => '3']);
+    // Both records already exist and already *say the same thing* the workbook says, which is what
+    // these tests need: §10's "same amount → no-op" and §11's "do not rewrite history" are only
+    // meaningful against a master that agrees on identity. The names and the DV matter for the
+    // same reason — see `existingWorkbookClient()` for why A04-R3 had to make them explicit.
+    $client = existingWorkbookClient();
+    $company = existingWorkbookCompany();
 
     ClientCompanyRate::factory()->create([
         'client_id' => $client->id,
@@ -918,12 +918,12 @@ it('refuses to rewrite an existing relationship, per §11', function () {
     // `writeRelationship()` `forceFill`ed `ended_on` on a live row — so a second apply of the
     // same file with a changed plan silently closed or reopened somebody's relationship, which
     // A03 may already have billed against.
-    $client = Client::factory()->create(['document_type' => 'CC', 'document_number' => '10101010']);
-    // `verification_digit` has to match the workbook's title (`900123456-3`). The factory
-    // defaults it to `1`, and §7.2 makes a contradicting digit a blocker — so without this the
-    // import would sit in `review` on a DV question and these tests, which are about rates and
-    // about relationship endings, would fail for a reason that has nothing to do with either.
-    $company = Company::factory()->create(['tax_id' => '900123456', 'verification_digit' => '3']);
+    // Both records already exist and already *say the same thing* the workbook says, which is what
+    // these tests need: §10's "same amount → no-op" and §11's "do not rewrite history" are only
+    // meaningful against a master that agrees on identity. The names and the DV matter for the
+    // same reason — see `existingWorkbookClient()` for why A04-R3 had to make them explicit.
+    $client = existingWorkbookClient();
+    $company = existingWorkbookCompany();
 
     // §8.1's key is company + client + start date, so the pre-existing episode has to start on
     // the day the reconstruction derives — which for the default workbook's serial cell is
@@ -936,14 +936,56 @@ it('refuses to rewrite an existing relationship, per §11', function () {
         'ended_on_precision' => 'day',
     ]);
 
-    $import = applicableImport();
+    // The import goes to `review`, because §11 makes a differing end date a blocking conflict
+    // rather than a decision the importer may take on its own. A04-R2 marked this conflict
+    // non-blocking, which let a plan overwrite a closed interval the moment somebody pressed
+    // apply; blocking it is what makes the reviewer's answer the only way through.
+    $import = reviewedImportFor(defaultWorkbook());
 
+    $issue = $import->issues()
+        ->where('code', LegacyImportIssue::ExistingRelationshipConflict->value)
+        ->firstOrFail();
+
+    // §4.3: the reviewer is shown the two dates, not told that "something" differs.
+    //
+    // The *field* is not asserted, and that is deliberate rather than lazy. Which end the
+    // reconstruction derives depends on where "now" falls relative to the workbook's months, so
+    // naming `ended_on` made this test fail or pass with the calendar — twice in the same day,
+    // with identical code. §11's promise is about not rewriting a historical interval, and that
+    // is asserted below against the row itself.
+    expect($issue->isBlocking())->toBeTrue()
+        ->and($issue->context)->toHaveKeys(['observed', 'proposed'])
+        ->and($issue->context['observed'])->not->toBe($issue->context['proposed']);
+
+    // §11's answer for a historical interval is `accept_existing`, and it is the *only* one
+    // offered: `overwrite_with_source` is not in this code's vocabulary, because a closing date
+    // somebody chose is not a master field an import may replace.
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/issues/{$issue->id}/resolve", [
+            'resolution' => ['decision' => 'accept_existing'],
+        ])
+        ->assertOk();
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", [
+            'plan_revision' => $import->fresh()->plan_revision,
+            'plan_digest' => $import->fresh()->plan_digest,
+        ])
+        ->assertOk();
+
+    // Whatever the plan concluded, a pre-existing relationship is not overwritten.
+    //
+    // Ordered **and** filtered to the client under test. The default workbook carries two people,
+    // so the plan has two `create_relationship` actions, and an unordered `firstOrFail()` picked
+    // whichever row PostgreSQL happened to return — which is how this assertion passed and failed
+    // on identical code: sometimes the other person's relationship, which is created, not skipped.
     $relationship = LegacyImportAction::query()
         ->where('legacy_import_id', $import->id)
         ->where('action_type', 'create_relationship')
+        ->where('payload->client_document_number', '10101010')
+        ->orderBy('ordinal')
         ->firstOrFail();
 
-    // Whatever the plan concluded, a pre-existing relationship is not overwritten.
     expect($relationship->state)->toBe(ImportActionState::Skipped)
         ->and($relationship->skip_reason)->toContain('§11')
         ->and($existing->fresh()->ended_on?->toDateString())->toBe('2026-01-01');

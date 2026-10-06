@@ -267,11 +267,17 @@ enum IssueResolutionDecision: string
                 LegacyImportIssue::ExistingRateConflict,
             ],
 
+            // §11's "no reescribir relaciones/afiliaciones históricas existentes" is enforced in
+            // the *vocabulary*, not only in the writer.
+            //
+            // A04-R2 offered `overwrite_with_source` here and relied on `writeRelationship()` to
+            // refuse it, which is a decision the reviewer could see, could pick, and then watch
+            // fail — the exact shape of the defect this round is closing. A historical interval
+            // somebody already closed is not a master field to replace, so the question is not
+            // offered; `accept_existing` is its only answer, and it is the safe one.
             self::OverwriteWithSource => [
                 LegacyImportIssue::ExistingClientConflict,
                 LegacyImportIssue::ExistingCompanyConflict,
-                LegacyImportIssue::ExistingRelationshipConflict,
-                LegacyImportIssue::ExistingAffiliationConflict,
                 LegacyImportIssue::ExistingRateConflict,
             ],
 

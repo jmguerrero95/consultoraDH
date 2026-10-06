@@ -154,7 +154,25 @@ final readonly class IssueResolution
             throw InvalidIssueResolution::valueMustBeObject($decision);
         }
 
-        $missing = array_values(array_diff(array_keys($schema), array_keys($value)));
+        // A key named `optional_*` may be omitted.
+        //
+        // The prefix was decoration. `optional_single_char` and `optional_text` were handled in
+        // `normalise()` and never in the required-key check above, so §7.2's `use_company_nit`
+        // demanded a `verification_digit` and a `display_name` from every reviewer — and §9.3's
+        // alternative answers with the same rule. A schema that says "optional" and then rejects
+        // the answer for omitting it is worse than no schema: the reviewer is told the question is
+        // unanswerable.
+        $required = array_keys(array_filter(
+            $schema,
+            // `ARRAY_FILTER_USE_BOTH`, not `ARRAY_FILTER_USE_KEY`: the key alone says nothing
+            // about whether the key is optional — `verification_digit` is an ordinary-looking key
+            // with an `optional_` rule, and filtering on the key would have kept it required,
+            // which is the bug this block exists to fix.
+            static fn (mixed $rule): bool => is_string($rule) && ! str_starts_with($rule, 'optional_'),
+            ARRAY_FILTER_USE_BOTH,
+        ));
+
+        $missing = array_values(array_diff($required, array_keys($value)));
         $unknown = array_values(array_diff(array_keys($value), array_keys($schema)));
 
         if ($missing !== []) {
@@ -168,7 +186,11 @@ final readonly class IssueResolution
         $normalised = [];
 
         foreach ($schema as $key => $rule) {
-            $normalised[$key] = self::normalise($decision, $key, $rule, $value[$key]);
+            // An omitted optional key is stored as `null` rather than dropped, so the stored
+            // answer's shape still matches the schema it was validated against.
+            $normalised[$key] = array_key_exists($key, $value)
+                ? self::normalise($decision, $key, $rule, $value[$key])
+                : null;
         }
 
         self::enforceMonthBoundary($decision, $normalised);

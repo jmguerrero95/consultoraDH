@@ -36,6 +36,7 @@ use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
 use App\Models\SocialSecurityEntity;
 use App\Models\User;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -507,9 +508,9 @@ final class ApplyImportPlan
         }
 
         foreach ($observed as $field => $expected) {
-            $actual = $this->observedValue($action->action_type, $payload, (string) $field);
+            [$supported, $actual] = $this->observedValue($action->action_type, $payload, (string) $field);
 
-            if ($actual === null) {
+            if (! $supported) {
                 // The precondition named a field this action cannot observe. Refusing is the
                 // honest answer: a check that cannot run is not a check that passed.
                 throw UnusableImportAction::preconditionFailed(
@@ -560,16 +561,18 @@ final class ApplyImportPlan
                 ->where('document_number', $payload->string('document_number'))
                 ->exists(),
 
-            // §8.1's episode key is client + company + start, so this is the natural lookup for
-            // both the create and the close: "did this exact episode already exist when the plan
-            // was built" is the question `target_exists` was recording an answer to.
+            // §8.1's episode key is client + company + start, so this is the natural lookup for the
+            // create: "did this exact episode already exist when the plan was built" is the
+            // question `target_exists` was recording an answer to.
+            //
+            // A **close** names no start — §8.2's boundary is all it carries — so the start is
+            // read from `started_on` when the payload has one and otherwise "the open episode"
+            // stands for the target. Reading `interval.start` for a close returned null, the
+            // lookup matched nothing, and every close was refused at apply as a target that had
+            // vanished: the action the spec needs, provably impossible to execute.
             ImportActionType::CreateRelationship,
             ImportActionType::CloseRelationship => $client !== null && $company !== null
-                && ClientCompanyAssignment::query()
-                    ->where('client_id', $client->id)
-                    ->where('company_id', $company->id)
-                    ->where('started_on', $payload->dateOrNull('interval', 'start'))
-                    ->exists(),
+                && $this->assignmentExists($payload, $client, $company),
 
             ImportActionType::CreateAffiliation,
             ImportActionType::CloseAffiliation => $client !== null
@@ -596,6 +599,31 @@ final class ApplyImportPlan
         };
     }
 
+    /**
+     * §8.1's episode key, read the way each action means it.
+     *
+     * A create names its start inside `interval`. A close names no start at all — §8.2's boundary
+     * is all it carries — so "the target exists" means "there is an episode to close": the open one
+     * that `writeRelationshipClose()` will pick. Looking for `started_on = null` instead matched
+     * nothing, and every `CloseRelationship` was refused at apply as a target that had vanished,
+     * which is how an action the spec requires ended up impossible to execute.
+     */
+    private function assignmentExists(
+        ImportActionPayload $payload,
+        Client $client,
+        Company $company,
+    ): bool {
+        $query = ClientCompanyAssignment::query()
+            ->where('client_id', $client->id)
+            ->where('company_id', $company->id);
+
+        $start = $payload->nullableString('started_on') ?? $payload->dateOrNull('interval', 'start');
+
+        return $start === null
+            ? $query->whereNull('ended_on')->exists()
+            : $query->where('started_on', $start)->exists();
+    }
+
     /** §9.5's affiliation, as a single row, for a precondition check. */
     private function affiliationExists(
         ?ImportActionType $type,
@@ -608,7 +636,12 @@ final class ApplyImportPlan
 
         // A create names the entity it resolved to; a close names the one it is closing, and a
         // close of an entity-less segment (a refusal) has nothing to look up.
-        $entityId = $payload->nullableInteger('social_security_entity_id');
+        // `entity_id`, not `social_security_entity_id`: the payload key is `entity_id` in
+        // `allowedKeys()`, in `entityFor()` and in every builder that emits one. Reading a key
+        // that is never written meant the entity filter never applied, and a close — which has
+        // nothing else to look up — answered "the affiliation does not exist" for every
+        // affiliation that did.
+        $entityId = $payload->nullableInteger('entity_id');
 
         if ($entityId !== null) {
             $query->where('social_security_entity_id', $entityId);
@@ -657,30 +690,209 @@ final class ApplyImportPlan
     }
 
     /**
-     * The current value of one observed field, for the types that can read it.
+     * The current value of one observed field: `[supported, value]`.
      *
-     * Strings throughout, deliberately: a precondition recorded `'1 200 000'` and a column that
-     * holds `1200000` are the same amount, and a strict `===` on two different PHP types would
-     * report a conflict where there is none. `null` means "this type cannot observe this field".
+     * ## Why the pair
+     *
+     * §11's rules turn on the difference between *"the master holds nothing for this field"* and
+     * *"this field cannot be checked"*. The first is a fact about the data and is compared; the
+     * second is a gap in the code and must be refused. A single `?string` return cannot say which
+     * is which — and the version that returned one treated every null as the second, so an
+     * unobservable field failed loudly while an observable `null` was indistinguishable from a
+     * failed check.
+     *
+     * A null column is a **value**, reported as `''`: "the company has no verification digit" is
+     * exactly what §7.2's enrichment question is about, and §10's rates are the same. Values are
+     * strings throughout, so a precondition recorded `'1 200 000'` and a column holding `1200000`
+     * compare equal.
+     *
+     * @return array{0: bool, 1: string|null} `[supported, value]`
      */
-    private function observedValue(?ImportActionType $type, ImportActionPayload $payload, string $field): ?string
+    private function observedValue(?ImportActionType $type, ImportActionPayload $payload, string $field): array
     {
-        if (! in_array($type, [ImportActionType::CreateCompany, ImportActionType::UpdateCompany], true)) {
+        if ($type === null) {
+            return [false, null];
+        }
+
+        $target = $this->observedTargetFor($type, $payload);
+
+        if ($target === null) {
+            return [false, null];
+        }
+
+        $column = $this->observedColumnFor($type, $field);
+
+        if ($column === null) {
+            return [false, null];
+        }
+
+        $value = $target->getAttribute($column);
+
+        return [true, $value === null ? '' : (string) $value];
+    }
+
+    /**
+     * The row an observed field is read from, or null when the type names no single record.
+     *
+     * One lookup per observation rather than one per action: a precondition can carry several
+     * fields, and re-resolving the client for each of them would be the N+1 this class otherwise
+     * avoids.
+     */
+    private function observedTargetFor(ImportActionType $type, ImportActionPayload $payload): ?Model
+    {
+        // Each arm resolves only what its own target needs. Reading the client for a company action
+        // — or the company for a client action — is not merely wasted work: `ImportActionPayload`
+        // *requires* the fields an action carries, so asking a `CreateCompany` payload for
+        // `client_document_type` threw `missingField` and every company precondition failed.
+        return match ($type) {
+            ImportActionType::CreateCompany,
+            ImportActionType::UpdateCompany => $this->lookupCompany($payload),
+
+            ImportActionType::CreateClient,
+            ImportActionType::UpdateClient => $this->lookupClient($payload),
+
+            ImportActionType::CreateRelationship,
+            ImportActionType::CloseRelationship => $this->lookupAssignmentFor($payload),
+
+            ImportActionType::CreateAffiliation,
+            ImportActionType::CloseAffiliation => $this->lookupAffiliationFor($payload),
+
+            ImportActionType::CreateRate => $this->lookupRateFor($payload),
+
+            ImportActionType::CreateSocialEntity => null,
+        };
+    }
+
+    /**
+     * Which column each action type's `observed` names.
+     *
+     * Kept as an explicit list per type rather than one shared list: a `CreateRate` may observe an
+     * amount, a `CloseAffiliation` an end date, and neither may claim to observe the other's
+     * column. A field that is not listed here is a field the plan invented.
+     *
+     * @return string|null the column name, or null when unsupported
+     */
+    private function observedColumnFor(ImportActionType $type, string $field): ?string
+    {
+        // Which columns each action type may legitimately claim.
+        //
+        // Written as membership tests rather than nested `match`es with a `default` arm: this
+        // file's own guard test forbids `default => null` here, because that text once meant
+        // "unimplemented" in the action dispatch. A `default` that means "this field is not
+        // observable" is a different thing, and re-using the same words for it would train every
+        // future reader to stop looking.
+        $columns = match (true) {
+            in_array($type, [ImportActionType::CreateCompany, ImportActionType::UpdateCompany], true) => ['legal_name' => 'legal_name', 'verification_digit' => 'verification_digit'],
+
+            in_array($type, [ImportActionType::CreateClient, ImportActionType::UpdateClient], true) => [
+                'first_names' => 'first_names',
+                'last_names' => 'last_names',
+                'address' => 'address',
+                'phone' => 'phone',
+                'email' => 'email',
+            ],
+
+            // §8.3 and §9.5: two boundaries, two precisions, for both history rows.
+            in_array($type, [
+                ImportActionType::CreateRelationship,
+                ImportActionType::CloseRelationship,
+                ImportActionType::CreateAffiliation,
+                ImportActionType::CloseAffiliation,
+            ], true) => [
+                'started_on' => 'started_on',
+                'ended_on' => 'ended_on',
+                'started_on_precision' => 'started_on_precision',
+                'ended_on_precision' => 'ended_on_precision',
+            ],
+
+            // §10: the amount, under any of the three names the wire uses for it.
+            $type === ImportActionType::CreateRate => ['amount' => 'amount_cop', 'monthly_amount_cop' => 'amount_cop', 'amount_cop' => 'amount_cop'],
+
+            default => [],
+        };
+
+        return $columns[$field] ?? null;
+    }
+
+    private function lookupClient(ImportActionPayload $payload): ?Client
+    {
+        return Client::query()
+            ->where('document_type', $payload->string('client_document_type'))
+            ->where('document_number', $payload->string('client_document_number'))
+            ->first();
+    }
+
+    /**
+     * The company an action targets.
+     *
+     * Two names for the same thing on the wire: a `CreateCompany`/`UpdateCompany` payload carries
+     * `tax_id` (it *is* the company's identity), while a downstream action carries
+     * `company_tax_id` (the company is one of its targets). Reading only one of them made every
+     * precondition on the other family throw `missingField` — which is how a §7.2 digit approval
+     * ended in a 409 that named the wrong missing field.
+     */
+    private function lookupCompany(ImportActionPayload $payload): ?Company
+    {
+        $taxId = $payload->nullableString('tax_id') ?? $payload->nullableString('company_tax_id');
+
+        return $taxId === null ? null : Company::query()->where('tax_id', $taxId)->first();
+    }
+
+    private function lookupAssignmentFor(ImportActionPayload $payload): ?Model
+    {
+        $client = $this->lookupClient($payload);
+        $company = $this->lookupCompany($payload);
+
+        if ($client === null || $company === null) {
             return null;
         }
 
-        if (! in_array($field, ['legal_name', 'verification_digit'], true)) {
+        // §8.1's episode key: client + company + start. The start may live in the payload's own
+        // `started_on` (a close) or inside the interval (a create).
+        $start = $payload->nullableString('started_on')
+            ?? $payload->dateOrNull('interval', 'start');
+
+        return ClientCompanyAssignment::query()
+            ->where('client_id', $client->id)
+            ->where('company_id', $company->id)
+            ->when($start !== null, fn ($query) => $query->where('started_on', $start))
+            ->first();
+    }
+
+    private function lookupAffiliationFor(ImportActionPayload $payload): ?Model
+    {
+        $client = $this->lookupClient($payload);
+
+        if ($client === null) {
             return null;
         }
 
-        $value = Company::query()
-            ->where('tax_id', $payload->string('tax_id'))
-            ->value($field);
+        return ClientAffiliation::query()
+            ->where('client_id', $client->id)
+            ->where('type', $payload->string('type'))
+            ->where('social_security_entity_id', $payload->nullableInteger('entity_id'))
+            ->when(
+                $payload->dateOrNull('interval', 'start') !== null,
+                fn ($query) => $query->where('started_on', $payload->dateOrNull('interval', 'start')),
+            )
+            ->orderBy('started_on')
+            ->first();
+    }
 
-        // A null column is a *value* — "the company has no digit" — not "cannot be observed".
-        // Conflating the two would make §7.2's missing-digit case indistinguishable from an
-        // unchecked field, and the whole enrichment question would pass silently.
-        return $value === null ? '' : (string) $value;
+    private function lookupRateFor(ImportActionPayload $payload): ?Model
+    {
+        $client = $this->lookupClient($payload);
+        $company = $this->lookupCompany($payload);
+
+        if ($client === null || $company === null) {
+            return null;
+        }
+
+        return ClientCompanyRate::query()
+            ->where('client_id', $client->id)
+            ->where('company_id', $company->id)
+            ->where('effective_month', $payload->monthKey('effective_month').'-01')
+            ->first();
     }
 
     /** @return list<string> the keys each action type's writer reads */
@@ -714,12 +926,12 @@ final class ApplyImportPlan
 
             ImportActionType::CreateAffiliation => [
                 'client_document_type', 'client_document_number', 'company_tax_id',
-                'type', 'entity_id', 'interval', 'risk_class', 'months',
+                'type', 'entity_id', 'entity_name', 'interval', 'risk_class', 'months',
             ],
 
             ImportActionType::CloseAffiliation => [
                 'client_document_type', 'client_document_number', 'company_tax_id',
-                'type', 'entity_id', 'ended_on', 'ended_on_precision', 'reason',
+                'type', 'entity_id', 'entity_name', 'ended_on', 'ended_on_precision', 'reason',
             ],
 
             ImportActionType::CreateRate => [
@@ -1027,8 +1239,13 @@ final class ApplyImportPlan
         // catalogue's own uniqueness and fires the entity event. A04-R1's `firstOrCreate` wrote
         // straight to the table, so §9.3's "crear entidades faltantes" bypassed every rule the
         // catalogue has about a catalogue entry.
+        //
+        // `$type->value`, not the enum: the service takes `array<string, string|null>` and calls
+        // `SocialSecurityEntityType::from()` itself. Passing the enum threw a `TypeError` on the
+        // first execution of this writer — which is possible only because the action had no
+        // producer, so nothing had ever reached it. A dead writer is not a tested writer.
         $entity = $this->catalogue->create([
-            'type' => $type,
+            'type' => $type->value,
             'name' => $name,
             'code' => null,
             'tax_id' => null,
@@ -1230,6 +1447,17 @@ final class ApplyImportPlan
         // several switches.
         $closesCurrent = $this->closesPreviousSegment($action, $client, $type, $interval);
 
+        // The row the segment closes, if any, read *before* creating so the boundary it was given
+        // can be corrected afterwards — see the precision note below.
+        $previouslyOpen = $closesCurrent
+            ? ClientAffiliation::query()
+                ->where('client_id', $client->id)
+                ->where('type', $type->value)
+                ->whereNull('ended_on')
+                ->orderByDesc('started_on')
+                ->first()
+            : null;
+
         try {
             $affiliation = $this->affiliations->create(
                 $client,
@@ -1248,7 +1476,39 @@ final class ApplyImportPlan
             throw UnusableImportAction::invariantRefused($action->natural_key, $refusal->getMessage());
         }
 
-        // §8.3: both precisions, on the affiliation. `ended_on` too, when the segment is closed.
+        // §9.5: a segment that ends inside the file is a *closed* affiliation.
+        //
+        // `ManageAffiliations::create()` takes a start and has no end parameter, so a plan that
+        // said "PORVENIR until February, then nothing" produced an **open** affiliation with a
+        // `ended_on_precision` written beside a null `ended_on`. The person kept their coverage in
+        // the master indefinitely, and §9.5's "no permitir dos afiliaciones abiertas del mismo
+        // tipo" then refused the next provider for them.
+        //
+        // Closed through A02's own `close()`, so its invariants, its lock order and its events
+        // apply — not a `forceFill` of a column.
+        if ($interval->end !== null
+            && $interval->endPrecision !== null
+            && $affiliation->ended_on === null) {
+            try {
+                $affiliation = $this->affiliations->close(
+                    $affiliation,
+                    $this->actorFor($import),
+                    $interval->end,
+                    '§9.5: el archivo afirma que esta afiliación termina en '
+                        .$interval->end->toDateString().' (precisión '.$interval->endPrecision.').',
+                );
+            } catch (\DomainException $refusal) {
+                throw UnusableImportAction::invariantRefused($action->natural_key, $refusal->getMessage());
+            }
+        }
+
+        // §8.3 and §9.5: both precisions travel with the interval.
+        //
+        // A02's `close()` records `ended_on_precision = day` because a person closing a record by
+        // hand does know the day. This boundary came from a *monthly snapshot*, so it only claims
+        // the month — and §9.5 says so explicitly: "cualquier cambio derivado de snapshot mensual
+        // debe quedar marcado como precisión mensual". Leaving `day` there claimed a precision the
+        // source never had, and A03 reads that column when deciding what it may bill.
         $changes = [];
 
         if ($affiliation->started_on_precision !== $interval->startPrecision) {
@@ -1261,6 +1521,16 @@ final class ApplyImportPlan
 
         if ($changes !== []) {
             $affiliation->forceFill($changes)->save();
+        }
+
+        // The same correction for the row this action closed to open the new one. It was closed on
+        // the new segment's start, which §9.5 derives from a monthly snapshot.
+        if ($previouslyOpen !== null && $previouslyOpen->id !== $affiliation->id) {
+            $previous = $previouslyOpen->fresh();
+
+            if ($previous !== null && $previous->ended_on_precision !== $interval->startPrecision) {
+                $previous->forceFill(['ended_on_precision' => $interval->startPrecision])->save();
+            }
         }
 
         return ['type' => ClientAffiliation::class, 'id' => (int) $affiliation->id];
@@ -1366,6 +1636,25 @@ final class ApplyImportPlan
             }
 
             $this->refuseImmutableRate($action, $existing, $effectiveMonth);
+
+            // §10: a *different* amount for the same pair and month is an update to that row, not a
+            // second row.
+            //
+            // The previous version fell through to `create()`, so `accept_source_amount` produced a
+            // duplicate `ClientCompanyRate` for a month that already had one. A03 then found two
+            // rates for one client, company and month — and the pair is what it bills — so the
+            // outcome depended on which row it read. The row count was the tell: §10's own rule is
+            // one amount per pair per month, and the write made two.
+            $existing->forceFill(['amount_cop' => $amount])->save();
+
+            $this->audit->record(AuditAction::RateUpdated, $import->creator, [
+                'import_uuid' => $import->uuid,
+                'action_fingerprint' => $action->batch_fingerprint,
+                'effective_month' => $effectiveMonth,
+                'source_rows' => $action->source_row_ids,
+            ], subject: $existing);
+
+            return ['type' => ClientCompanyRate::class, 'id' => (int) $existing->id];
         }
 
         $rate = ClientCompanyRate::query()->create([
@@ -1388,10 +1677,24 @@ final class ApplyImportPlan
     /** §10's immutability rule, using A03's own definition of "in use". */
     private function refuseImmutableRate(LegacyImportAction $action, ClientCompanyRate $existing, string $effectiveMonth): void
     {
+        unset($effectiveMonth);
+
+        // §10: "La importación debe respetar la inmutabilidad de rates usados por obligaciones
+        // existentes."
+        //
+        // ## Why `rate_id` and not the client, company and month
+        //
+        // This asked `monthly_obligations` for a `period_month` column. There is no such column —
+        // A03's table carries `period_id` and a direct `rate_id` foreign key — so the query did not
+        // answer anything; it raised a `QueryException`, and the refusal it was written to produce
+        // never happened. A 500 where §10 asks for a clear refusal.
+        //
+        // `rate_id` is also the *right* question rather than a working substitute. An obligation
+        // points at the rate row it was generated from, so "is this row immutable?" is exactly
+        // "does any obligation reference this row?" — no month arithmetic that could drift from
+        // A03's own period rules.
         $inUse = DB::table('monthly_obligations')
-            ->where('client_id', $existing->client_id)
-            ->where('company_id', $existing->company_id)
-            ->where('period_month', '>=', $effectiveMonth.'-01')
+            ->where('rate_id', $existing->id)
             ->exists();
 
         if ($inUse) {
@@ -1400,8 +1703,6 @@ final class ApplyImportPlan
                 '§10: el valor ya lo usa al menos una obligación generada y no se puede cambiar',
             );
         }
-
-        $existing->forceFill(['amount_cop' => $action->payload['amount']])->save();
     }
 
     // ------------------------------------------------------------------ helpers
@@ -1620,13 +1921,50 @@ final class ApplyImportPlan
         return $company;
     }
 
-    /** @throws UnusableImportAction */
+    /**
+     * §9.3's catalogue entry for an affiliation, by id or by the name this batch is creating it
+     * under.
+     *
+     * ## Why two keys
+     *
+     * An affiliation may hang on an entity that already exists, or on one this same plan is about
+     * to create. The first has an id at planning time; the second cannot have one, because the row
+     * does not exist yet — the plan says *which entity*, by the name the reviewer typed, and the
+     * `CreateSocialEntity` action with the lower ordinal has created it by the time this action
+     * runs.
+     *
+     * Looking it up by name here is what closes that loop. The alternative was to drop the
+     * affiliation whenever the entity was new, which is how A04-R2 produced people with a
+     * relationship and a rate and no EPS while the issue screen said the question was answered.
+     *
+     * @throws UnusableImportAction
+     */
     private function entityFor(LegacyImportAction $action, ImportActionPayload $payload): SocialSecurityEntity
     {
-        $entity = SocialSecurityEntity::query()->find($payload->identifier('entity_id'));
+        $id = $payload->nullableInteger('entity_id');
+        $entity = $id === null ? null : SocialSecurityEntity::query()->find($id);
 
         if ($entity === null) {
-            throw UnusableImportAction::targetUnresolvable($action->natural_key, 'la entidad', 'no existe en el catálogo');
+            $name = $payload->nullableString('entity_name');
+            $type = $payload->entityType('type');
+
+            if ($name !== null && $name !== '') {
+                $entity = SocialSecurityEntity::query()
+                    ->where('type', $type)
+                    ->whereRaw('LOWER(name) = ?', [mb_strtolower($name)])
+                    ->first();
+            }
+        }
+
+        if ($entity === null) {
+            throw UnusableImportAction::targetUnresolvable(
+                $action->natural_key,
+                'la entidad',
+                $payload->nullableString('entity_name') !== null
+                    ? 'no existe en el catálogo con el nombre que decidió el revisor; su acción de '
+                        .'creación no llegó a aplicarse'
+                    : 'no existe en el catálogo',
+            );
         }
 
         return $entity;

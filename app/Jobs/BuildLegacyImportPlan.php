@@ -8,6 +8,8 @@ use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Imports\CompanyTitle;
+use App\Domain\Imports\EffectiveClientIdentity;
+use App\Domain\Imports\EffectiveCompanyIdentity;
 use App\Domain\Imports\HistoricalInterval;
 use App\Domain\Imports\HistoryReconstruction;
 use App\Domain\Imports\HistoryReconstructor;
@@ -269,11 +271,127 @@ final class BuildLegacyImportPlan implements ShouldQueue
      */
     private function rowsFrom(Collection $staged, ImportDecisionSet $decisions): array
     {
+        // §7.2's effective company identity, resolved **once per block** and before any row is
+        // hydrated.
+        //
+        // It used to be resolved per row, inside `titleFor()`, which is why it could not work:
+        // each row independently re-derived an identity from its own staged NIT, so a block whose
+        // NIT a reviewer replaced rebuilt with the *source* NIT for every row but the one that
+        // happened to carry the replacement. Worse, `taxIdProblemFor()` only cleared the
+        // "invalid" flag, so the title became *usable* without its identity ever changing — and
+        // episodes, relationships, affiliations and rates were keyed on the original NIT.
+        //
+        // Resolving per block, once, and passing it down is what makes §7.2's two answers
+        // actually change the reconstruction rather than only the flag on the title.
+        $identities = $this->companyIdentities($staged, $decisions);
+
+        // §7.1's effective client identity, same shape and same reason as the company's: the
+        // downstream builders all name their client by `document_type`/`document_number`, so
+        // resolving it *here* makes every relationship, affiliation and rate action carry the
+        // identity the reviewer chose without any of them learning that the question exists.
+        $clients = $this->clientIdentities($staged, $decisions);
+
         return $staged
-            ->map(fn (LegacyImportRow $row): ?SourcePersonRow => $this->hydrate($row, $decisions))
+            ->map(fn (LegacyImportRow $row): ?SourcePersonRow => $this->hydrate($row, $decisions, $identities, $clients))
             ->filter()
             ->values()
             ->all();
+    }
+
+    /**
+     * §7.1's effective identity for every document in the import, keyed by `TYPE:NUMBER`.
+     *
+     * Resolved per *source* document, so all the observations of one document agree, and returned
+     * keyed by that source key so a row can find its own.
+     *
+     * @param  Collection<int, LegacyImportRow>  $staged
+     * @return array<string, EffectiveClientIdentity>
+     */
+    private function clientIdentities(Collection $staged, ImportDecisionSet $decisions): array
+    {
+        /** @var array<string, list<array{type: string, number: string, name: string|null}>> $observations */
+        $observations = [];
+
+        foreach ($staged as $row) {
+            if ($row->document_type === null || $row->document_number === null) {
+                continue;
+            }
+
+            $observations[$row->document_type.':'.$row->document_number][] = [
+                'type' => $row->document_type,
+                'number' => $row->document_number,
+                'name' => $this->stagedName($row),
+            ];
+        }
+
+        $identities = [];
+
+        foreach ($observations as $key => $seen) {
+            $first = $seen[0];
+
+            $identities[$key] = EffectiveClientIdentity::resolve(
+                $first['type'],
+                $first['number'],
+                $seen,
+                $decisions,
+            );
+        }
+
+        return $identities;
+    }
+
+    /**
+     * Whether a person has supplied the understanding a row was marked `invalid` for.
+     *
+     * §7.1's date questions are the only ones that can repair a parse, because the parse's own
+     * complaint about a date column is that it could not read a date. An answer that supplies a
+     * date — `set_date` with a typed value, or `use_suggested_date` with the parser's suggestion —
+     * is exactly that understanding.
+     *
+     * `ignore_date` is deliberately **not** counted: it says "there is no date here", which leaves
+     * the row without the understanding the parser was missing, and the row stays out. That is the
+     * difference between a reviewer fixing the file's ambiguity and a reviewer accepting it.
+     */
+    private function dateWasRepaired(LegacyImportRow $staged, ImportDecisionSet $decisions): bool
+    {
+        $sourceKey = (string) $staged->source_key;
+
+        return $decisions->usesSuggestedDate($sourceKey)
+            || $decisions->dateFor($sourceKey) !== null;
+    }
+
+    /** §7.1's name for one staged row, assembled from the two halves staging keeps separate. */
+    private function stagedName(LegacyImportRow $row): ?string
+    {
+        $first = trim((string) $row->first_names);
+        $last = trim((string) $row->last_names);
+
+        $name = trim($first.' '.$last);
+
+        return $name === '' ? null : $name;
+    }
+
+    /**
+     * §7.2's effective identity for every block in the import, keyed by `company_block_key`.
+     *
+     * @param  Collection<int, LegacyImportRow>  $staged
+     * @return array<string, EffectiveCompanyIdentity>
+     */
+    private function companyIdentities(Collection $staged, ImportDecisionSet $decisions): array
+    {
+        $byBlock = [];
+
+        foreach ($staged as $row) {
+            $byBlock[(string) $row->company_block_key][] = $row;
+        }
+
+        $identities = [];
+
+        foreach ($byBlock as $blockKey => $rows) {
+            $identities[$blockKey] = EffectiveCompanyIdentity::resolve($rows, $decisions);
+        }
+
+        return $identities;
     }
 
     /**
@@ -288,13 +406,13 @@ final class BuildLegacyImportPlan implements ShouldQueue
      *   re-deriving them from a date column produced a *different* diagnosis, which is how a
      *   cell the parse called `ambiguous_date` arrived at the plan as `missing_date`.
      */
-    private function hydrate(LegacyImportRow $staged, ImportDecisionSet $decisions): ?SourcePersonRow
-    {
+    private function hydrate(
+        LegacyImportRow $staged,
+        ImportDecisionSet $decisions,
+        array $identities = [],
+        array $clientIdentities = [],
+    ): ?SourcePersonRow {
         if ($staged->document_type === null || $staged->document_number === null) {
-            return null;
-        }
-
-        if ($staged->parse_state === ImportRowState::Invalid) {
             return null;
         }
 
@@ -302,10 +420,52 @@ final class BuildLegacyImportPlan implements ShouldQueue
             return null;
         }
 
+        // §7.3: "mismo natural key pero payload distinto → blocker", and the reviewer's answer
+        // says what the two rows are.
+        //
+        // `treat_as_duplicate_of` names the row that counts, so this one stops contributing an
+        // observation. It stays *staged* — §17.4's review screen shows both rows so the decision
+        // can be understood and revisited — but a second person, a second relationship or a second
+        // rate for the same month is no longer derived from it.
+        //
+        // Before this, both answers were inert: the blocker was marked resolved, the plan carried
+        // two readings of one person, and whichever name came last silently won.
+        if ($decisions->duplicateOf((string) $staged->source_key) !== null
+            && ! $decisions->keepsBothRows((string) $staged->source_key)) {
+            return null;
+        }
+
+        // `parse_state = invalid` is checked **after** the decisions, not before.
+        //
+        // A row the parser marked invalid because its date was unreadable keeps that state after a
+        // reviewer answers `set_date` or `use_suggested_date` — nothing rewrites it. So the row was
+        // dropped from every rebuild for ever, and the answer to §7.1's date question could not
+        // reach the plan it was asked about: the person's whole history went missing because of one
+        // bad cell that a person had already fixed on the review screen.
+        //
+        // The state is a *diagnosis*, not a verdict: it says "this row was not understood". A
+        // decision that supplies the missing understanding supersedes it. What is still refused is
+        // a row with no document at all, checked above.
+        if ($staged->parse_state === ImportRowState::Invalid
+            && ! $this->dateWasRepaired($staged, $decisions)) {
+            return null;
+        }
+
         // §7.2: a person may declare that an unreadable title's NIT is the company's identity,
         // or that the title is an existing company. Applied before the title is rebuilt, because
         // §7.2's whole point is that the identity comes from the NIT and the name is a hint.
-        $title = $this->titleFor($staged, $decisions);
+        //
+        // The identity comes from the per-block resolution, so every row of a block agrees on
+        // which company it is. Without that, §7.2's answers changed the *flag* on a title and
+        // left the *identity* alone.
+        $identity = $identities[(string) $staged->company_block_key]
+            ?? EffectiveCompanyIdentity::fromSource(
+                $staged->company_tax_id,
+                $staged->company_display_name,
+                $staged->company_verification_digit,
+            );
+
+        $title = $this->titleFor($staged, $decisions, $identity);
 
         return SourcePersonRow::fromValues(
             sheetName: (string) $staged->sheet_name,
@@ -313,7 +473,10 @@ final class BuildLegacyImportPlan implements ShouldQueue
             sourceRowNumber: (int) $staged->source_row_number,
             company: $title,
             blockIndex: (int) $staged->block_index,
-            document: SourceDocument::fromValue((string) $staged->document_type.' '.$staged->document_number),
+            // §7.1's *effective* document. Every downstream builder names its client by this,
+            // so a `link_existing_client` reaches relationships, affiliations and rates without
+            // any of them knowing the question was ever asked.
+            document: SourceDocument::fromValue($this->effectiveClientKeyFor($staged, $clientIdentities)),
             firstNames: $this->firstNamesFor($staged),
             lastNames: $this->lastNamesFor($staged),
             // §8.3 restored, not re-derived. See `SourceAffiliationDate::readStaged()`.
@@ -344,14 +507,37 @@ final class BuildLegacyImportPlan implements ShouldQueue
     }
 
     /**
+     * The document identity one staged row effectively carries, as `TYPE NUMBER`.
+     *
+     * Falls back to the row's own when the document could not be resolved — an unusable document
+     * never reaches hydration anyway, and guessing here would invent an identity.
+     *
+     * @param  array<string, EffectiveClientIdentity>  $identities
+     */
+    private function effectiveClientKeyFor(LegacyImportRow $staged, array $identities): string
+    {
+        $sourceKey = $staged->document_type.':'.$staged->document_number;
+        $identity = $identities[$sourceKey] ?? null;
+
+        if ($identity === null) {
+            return $sourceKey;
+        }
+
+        return $identity->documentType.' '.$identity->documentNumber;
+    }
+
+    /**
      * §9.4's title, with both evidence sources restored separately.
      *
      * The previous version passed the merged `arl_token` to *both* the title and the row's
      * token, so after a re-parse the title and the row agreed by construction whether or not
      * they ever had — and the plan could not fall back to the header when the title had none.
      */
-    private function titleFor(LegacyImportRow $staged, ImportDecisionSet $decisions): CompanyTitle
-    {
+    private function titleFor(
+        LegacyImportRow $staged,
+        ImportDecisionSet $decisions,
+        EffectiveCompanyIdentity $identity,
+    ): CompanyTitle {
         $titleProvider = $staged->arl_token_title;
         $headerProvider = $staged->arl_token_row;
 
@@ -375,15 +561,16 @@ final class BuildLegacyImportPlan implements ShouldQueue
         }
 
         return CompanyTitle::fromStored(
-            taxId: $staged->company_tax_id,
-            name: $staged->company_display_name,
+            // §7.2's *effective* identity, not the source's.
+            taxId: $identity->taxId,
+            name: $identity->name,
             arlProvider: $titleProvider,
             // §9.4's allow-list, which `fromStored()` used to return empty for.
             permittedRisks: is_array($staged->arl_permitted_risks)
                 ? array_values(array_map('intval', $staged->arl_permitted_risks))
                 : [],
-            verificationDigit: $staged->company_verification_digit,
-            taxIdProblem: $this->taxIdProblemFor($staged, $decisions),
+            verificationDigit: $identity->verificationDigit,
+            taxIdProblem: $this->taxIdProblemFor($staged, $decisions, $identity),
             raw: $staged->company_title_raw,
         );
     }
@@ -395,15 +582,21 @@ final class BuildLegacyImportPlan implements ShouldQueue
      * a title whose NIT was *invalid* rebuilt as *missing* — and §7.2's "same base, different
      * check digit" conflict was undetectable after a rebuild.
      */
-    private function taxIdProblemFor(LegacyImportRow $staged, ImportDecisionSet $decisions): ?string
-    {
-        if ($decisions->companyNitFor((string) $staged->company_block_key) !== null) {
+    private function taxIdProblemFor(
+        LegacyImportRow $staged,
+        ImportDecisionSet $decisions,
+        EffectiveCompanyIdentity $identity,
+    ): ?string {
+        // A decided identity is usable by definition: the reviewer supplied the NIT, or pointed at
+        // a company that already has one. Asking the *source* row whether its NIT was readable,
+        // as this did, kept reporting a problem for an identity nobody is going to use.
+        if ($identity->wasDecided()) {
             return null;
         }
 
-        return $staged->company_tax_id === null || $staged->company_tax_id === ''
+        return $identity->taxId === null || $identity->taxId === ''
             ? 'missing'
-            : ($staged->company_verification_digit === null ? 'invalid' : null);
+            : ($identity->verificationDigit === null ? 'invalid' : null);
     }
 
     /**

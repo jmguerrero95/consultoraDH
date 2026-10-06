@@ -9,6 +9,7 @@ use App\Domain\Imports\Exceptions\InvalidIssueResolution;
 use App\Domain\Imports\ImportProfile;
 use App\Domain\Imports\IssueResolution;
 use App\Domain\Imports\IssueResolutionDecision;
+use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\SheetMonth;
 use App\Models\ImportSourceMapping;
@@ -168,6 +169,147 @@ final class ResolveImportIssue
      *
      * @throws InvalidIssueResolution
      */
+    /**
+     * §7.3's `treat_as_duplicate_of` may only point at a row that can actually stand in for this
+     * one.
+     *
+     * Three things are refused, and each of them produced a silently wrong plan rather than an
+     * error:
+     *
+     * - **a row pointing at itself**, which collapses the observation into nothing;
+     * - **a row outside its duplicate group**, which would let a reviewer discard one person's month
+     *   by naming an unrelated row, including a row belonging to a different person entirely;
+     * - **a chain that loops**, e.g. A says it duplicates B while B already says it duplicates A,
+     *   which makes both rows disappear and leaves no observation for that month at all.
+     *
+     * The group is the row this finding already names as the other side of the conflict, plus that
+     * row's own answers, so a chain inside one group stays legal and a jump out of it does not.
+     */
+    private function assertUsableDuplicateTarget(
+        LegacyImport $import,
+        LegacyImportIssueModel $issue,
+        string $targetKey,
+    ): void {
+        $own = $issue->row?->source_key;
+
+        if ($own !== null && (string) $own === $targetKey) {
+            throw InvalidIssueResolution::invalidDuplicateTarget(
+                'una fila no puede señalarse a sí misma como su propio duplicado.',
+            );
+        }
+
+        $context = is_array($issue->context) ? $issue->context : [];
+        $counterpart = isset($context['conflicts_with_row']) ? (string) $context['conflicts_with_row'] : null;
+
+        if ($counterpart !== null && ! $this->withinDuplicateGroup($import, $counterpart, $targetKey)) {
+            throw InvalidIssueResolution::invalidDuplicateTarget(
+                'sólo puede señalarse la fila con la que ésta entra en conflicto, o una fila a la '
+                .'que aquélla ya apunta.',
+            );
+        }
+
+        // Walk the answers already recorded for this import. If the chain comes back to this row,
+        // the whole group would collapse into nothing: both rows stop contributing and that month
+        // loses its only observation. A cycle has to be refused at answer time, because by the
+        // time the reconstruction runs there is no way to tell a cycle from a very short chain.
+        $seen = [];
+        $cursor = $targetKey;
+
+        while ($cursor !== null && ! isset($seen[$cursor])) {
+            $seen[$cursor] = true;
+
+            if ($own !== null && $cursor === (string) $own) {
+                throw InvalidIssueResolution::invalidDuplicateTarget(
+                    'la fila '.$targetKey.' ya declara que duplica a ésta, y las dos quedarían sin '
+                    .'observación para ese mes.',
+                );
+            }
+
+            $cursor = $this->recordedDuplicateTargetOf($import, $cursor);
+        }
+    }
+
+    /**
+     * Whether `$targetKey` is inside the §7.3 group identified by a row number.
+     *
+     * The group's members are the two rows of this conflict plus anything either already points at,
+     * so a chain inside one group stays legal while a jump to an unrelated row does not. Comparing
+     * row *numbers* is what ties the walk to this finding: `conflicts_with_row` is the counterpart's
+     * source row number, which is the only identifier the parser could name at parse time.
+     */
+    private function withinDuplicateGroup(LegacyImport $import, string $counterpartRowNumber, string $targetKey): bool
+    {
+        $target = LegacyImportRow::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('source_key', $targetKey)
+            ->first();
+
+        if ($target === null) {
+            return false;
+        }
+
+        $rowNumber = (string) $target->source_row_number;
+
+        if ($rowNumber === $counterpartRowNumber) {
+            return true;
+        }
+
+        // Otherwise: is the target one this conflict's counterpart already points at?
+        $cursor = $this->sourceKeyForRowNumber($import, $counterpartRowNumber);
+        $seen = [];
+
+        while ($cursor !== null && ! isset($seen[$cursor])) {
+            $seen[$cursor] = true;
+
+            if ($cursor === $targetKey) {
+                return true;
+            }
+
+            $cursor = $this->recordedDuplicateTargetOf($import, $cursor);
+        }
+
+        return false;
+    }
+
+    private function sourceKeyForRowNumber(LegacyImport $import, string $rowNumber): ?string
+    {
+        $row = LegacyImportRow::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('source_row_number', $rowNumber)
+            ->first();
+
+        return $row === null ? null : (string) $row->source_key;
+    }
+
+    /**
+     * The row that a given row's already-recorded `duplicate_conflicting_row` answer names.
+     *
+     * Read from stored answers rather than from the decision set, so the walk sees the answers that
+     * existed before this request — which is the only way a loop can be caught at all.
+     */
+    private function recordedDuplicateTargetOf(LegacyImport $import, string $sourceKey): ?string
+    {
+        $issue = LegacyImportIssueModel::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('code', LegacyImportIssue::DuplicateConflictingRow->value)
+            ->whereNull('superseded_at')
+            ->whereNotNull('resolved_at')
+            ->whereHas('row', fn ($query) => $query->where('source_key', $sourceKey))
+            ->first();
+
+        if ($issue === null || ! is_array($issue->resolution)) {
+            return null;
+        }
+
+        if (($issue->resolution['decision'] ?? null) !== IssueResolutionDecision::TreatAsDuplicateOf->value) {
+            return null;
+        }
+
+        $target = $issue->resolution['value']['source_key'] ?? null;
+
+        return is_string($target) ? $target : null;
+    }
+
     private function assertApplicable(
         LegacyImport $import,
         LegacyImportIssueModel $issue,
@@ -196,14 +338,16 @@ final class ResolveImportIssue
         if ($decision === IssueResolutionDecision::TreatAsDuplicateOf) {
             $sourceKey = (string) $resolution->value['source_key'];
 
-            $exists = LegacyImportRow::query()
+            $target = LegacyImportRow::query()
                 ->where('legacy_import_id', $import->id)
                 ->where('source_key', $sourceKey)
-                ->exists();
+                ->first();
 
-            if (! $exists) {
+            if ($target === null) {
                 throw InvalidIssueResolution::sourceRowMissing($sourceKey);
             }
+
+            $this->assertUsableDuplicateTarget($import, $issue, $sourceKey);
 
             return;
         }

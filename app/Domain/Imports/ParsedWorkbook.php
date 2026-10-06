@@ -158,9 +158,22 @@ final class ParsedWorkbook
             $nits = array_keys($byNit);
             sort($nits, SORT_STRING);
 
-            $others = array_values(array_diff($nits, [$nits[0]]));
-
             foreach ($byNit as $taxId => $title) {
+                // §7.2's "the **other** NIT bases", computed per title.
+                //
+                // It used to be computed once, as `array_diff($nits, [$nits[0]])`, and then
+                // reused for every title in the group. So the first title was told about the
+                // others correctly, and **every other title was told about itself** — the
+                // sentence read "aparece con 900123456 y también con 900123456", and the context
+                // carried a self-reference a reviewer would have to notice and discount by hand.
+                $others = array_values(array_diff($nits, [$taxId]));
+
+                if ($others === []) {
+                    // Two titles with the same NIT under one folded name is not an identity
+                    // conflict; §7.2's signal is one name carrying *different* bases.
+                    continue;
+                }
+
                 $this->addIssue(
                     LegacyImportIssue::CompanyIdentityConflict,
                     null,

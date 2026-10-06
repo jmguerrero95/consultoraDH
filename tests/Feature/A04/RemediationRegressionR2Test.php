@@ -29,9 +29,11 @@ use App\Domain\Clients\DocumentType;
 use App\Domain\Clients\Events\ClientCreated;
 use App\Domain\Imports\CompanyOverlap;
 use App\Domain\Imports\HistoricalInterval;
+use App\Domain\Imports\ImportActionState;
 use App\Domain\Imports\IssueIdentity;
 use App\Domain\Imports\IssueSubject;
 use App\Domain\Imports\LegacyImportIssue as IssueCode;
+use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\RelationshipEpisode;
 use App\Domain\Imports\WorkbookHeader;
 use App\Models\Client;
@@ -47,7 +49,6 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
-use Tests\Support\SyntheticWorkbook;
 
 uses(RefreshDatabase::class);
 
@@ -57,42 +58,6 @@ beforeEach(function () {
 
     $this->user = userWithRole('Operations');
 });
-
-/**
- * A workbook from a list of sheets, each a list of `[title, people…]`.
- *
- * @param  array<string, list<array{0: string, 1: list<array<string, mixed>>}>>  $sheets
- */
-function a04Workbook(array $sheets): SyntheticWorkbook
-{
-    $workbook = new SyntheticWorkbook;
-
-    foreach ($sheets as $name => $blocks) {
-        $rows = [];
-
-        foreach ($blocks as [$title, $people]) {
-            $rows = array_merge($rows, SyntheticWorkbook::block($title));
-
-            foreach ($people as $person) {
-                $rows[] = SyntheticWorkbook::personRow($person);
-            }
-
-            // The delivered file has a blank line between blocks, and the reader has to skip it
-            // rather than mistake it for the next company title.
-            $rows[] = [];
-        }
-
-        $workbook->sheet((string) $name, $rows);
-    }
-
-    return $workbook;
-}
-
-/** One person, with only the cells a test cares about. */
-function a04Person(string $document, array $overrides = []): array
-{
-    return array_merge(['H' => $document], $overrides);
-}
 
 // =============================================================================
 // Area 1 — issue identity: the producer and the consumer named different keys
@@ -596,8 +561,11 @@ it('treats a change of employer as one continuous affiliation stream, not two', 
  * relationship that covers this interval" was answered with one that does not cover it.
  */
 it('refuses to attach an affiliation when two relationships cover the interval', function () {
-    $client = Client::factory()->create(['document_type' => 'CC', 'document_number' => '10101010']);
-    $company = Company::factory()->create(['tax_id' => '900123456', 'verification_digit' => '3']);
+    // Agrees with the workbook on identity and name: these three tests are about affiliation
+    // ambiguity, conflicting existing records and approval scoping — none of which is about a
+    // name disagreement. See `existingWorkbookClient()`.
+    $client = existingWorkbookClient();
+    $company = existingWorkbookCompany();
 
     // Two relationships that *overlap* the affiliation. Not two open ones: A02's
     // `assignments_one_open_client_company_unique` index forbids that, which is itself the answer
@@ -654,7 +622,7 @@ it('raises §11\'s existing-record conflicts with a resolution path', function (
         'effective_month' => '2026-01-01', 'amount_cop' => 999_000,
     ]);
 
-    $import = applicableImportFor(a04Workbook([
+    $import = reviewedImportFor(a04Workbook([
         'ENERO 2026' => [
             ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010', ['G' => 1_200_000])]],
         ],
@@ -668,23 +636,78 @@ it('raises §11\'s existing-record conflicts with a resolution path', function (
         $issue = $import->issues()->where('code', $code)->where('field', $field)->first();
 
         expect($issue, "{$code} must have a producer")->not->toBeNull()
-            ->and($issue->isBlocking())->toBeFalse()
+            // §11: "si ya existe y el valor del archivo difiere → conflicto → issue bloqueante o
+            // decisión humana explícita".
+            //
+            // A04-R2 asserted `false` here, and that assertion is why three of A04's five
+            // conflicts were unreadable in production: the plan was marked applicable while the
+            // master kept its old value, so the file was silently not applied and the review
+            // screen showed nothing. A real conflict blocks.
+            ->and($issue->isBlocking())->toBeTrue()
             // §11: the question is about *this* record, so its natural key is the subject.
             ->and($issue->context['natural_key'])->toStartWith($prefix)
-            ->and($issue->context)->toHaveKey('observed')
-            ->and($issue->context)->toHaveKey('proposed');
+            // Not `toHaveKey()`. `toHaveKey()` passes on a key whose value is `null`, and that is
+            // exactly what every rate conflict carried through A04-R2: the key was present, the
+            // number was not, and a reviewer was asked to reconcile two amounts they could not
+            // see. §4.3 requires these values to be usable, so the assertion checks the values.
+            ->and($issue->context['observed'])->not->toBeNull()
+            ->and($issue->context['proposed'])->not->toBeNull()
+            ->and($issue->context['conflict_kind'])->toBe('conflict');
     }
 
-    // §10's no-op is not a conflict: the same amount is the same rate.
-    $identical = applicableImportFor(a04Workbook([
-        'ENERO 2026' => [
-            ['ANDINA S.A.S. NIT 900555555-3', [a04Person('30303030', ['G' => 1_200_000])]],
+    // And because the conflicts are blocking, the plan is not applicable until they are answered.
+    expect($import->status)->toBe(LegacyImportStatus::Review);
+
+});
+
+/**
+ * §10: "Si ya existe un rate en DB para la misma pareja/mes: mismo importe → no-op."
+ *
+ * Separate from the §11 test because it needs the *opposite* starting state: records that agree
+ * with the file. Reusing §11's deliberately-conflicting records would leave a client and a company
+ * conflict blocking the batch, and "no rate conflict" would then hold for a reason that has
+ * nothing to do with §10.
+ *
+ * It also guards the direction of the rule. A04-R2's version of this assertion named a client and
+ * a company that did not exist at all, so it passed with zero existing rates — the assertion was
+ * true, and it was not about §10.
+ */
+it('treats §10\'s identical rate as a no-op rather than a conflict', function () {
+    $client = existingWorkbookClient();
+    $company = existingWorkbookCompany();
+
+    ClientCompanyRate::factory()->create([
+        'client_id' => $client->id, 'company_id' => $company->id,
+        'effective_month' => '2026-02-01', 'amount_cop' => 1_200_000,
+    ]);
+
+    $import = applicableImportFor(a04Workbook([
+        'FEBRERO 2026' => [
+            ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010', ['G' => 1_200_000])]],
         ],
     ]));
 
-    expect($identical->issues()
+    expect($import->issues()
         ->where('code', IssueCode::ExistingRateConflict->value)
         ->count())->toBe(0);
+
+    // And the rate that already agreed is left exactly as it was. §10's no-op means no write at
+    // all — not a new row, and not an update that happens to end up with the same number.
+    expect(ClientCompanyRate::query()
+        ->where('client_id', $client->id)
+        ->where('company_id', $company->id)
+        ->count())->toBe(1)
+        ->and((int) ClientCompanyRate::query()
+            ->where('client_id', $client->id)
+            ->where('company_id', $company->id)
+            ->value('amount_cop'))->toBe(1_200_000);
+
+    $rate = LegacyImportAction::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('action_type', 'create_rate')
+        ->firstOrFail();
+
+    expect($rate->state)->toBe(ImportActionState::Skipped);
 });
 
 /**
@@ -701,7 +724,9 @@ it('does not carry an approval from one import into another', function () {
         'legal_name' => 'ANDINA ANTIGUA S.A.S.',
     ]);
 
-    $first = applicableImportFor(a04Workbook([
+    // `reviewed`, because the existing company deliberately disagrees about its legal name and
+    // §11's conflict is blocking. This is the state the test is about.
+    $first = reviewedImportFor(a04Workbook([
         'ENERO 2026' => [
             ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010')]],
         ],
@@ -727,7 +752,7 @@ it('does not carry an approval from one import into another', function () {
         ->count())->toBe(1);
 
     // A second import of the same file asks again.
-    $second = applicableImportFor(a04Workbook([
+    $second = reviewedImportFor(a04Workbook([
         'ENERO 2026' => [
             ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010')]],
         ],
@@ -737,6 +762,10 @@ it('does not carry an approval from one import into another', function () {
         ->where('legacy_import_id', $second->id)
         ->where('action_type', 'update_company')
         ->count())->toBe(0);
+
+    // The approval did not carry: the second import is still blocked, which is what "the answer
+    // was scoped to one import" means in observable terms.
+    expect($second->status)->toBe(LegacyImportStatus::Review);
 
     expect($second->issues()
         ->where('code', IssueCode::ExistingCompanyConflict->value)
@@ -1025,11 +1054,12 @@ it('reports a superseded finding as neither resolved nor unresolved', function (
     $issue = $import->issues()->firstOrFail();
     $issue->forceFill(['superseded_at' => now()])->save();
 
+    // Identified by id rather than by position: the list is `latest()` ordered, so `data.0` was
+    // whichever finding happened to be newest. A test about *one* finding must name it.
     $this->actingAs($this->user)
         ->getJson("/api/imports/{$import->id}/issues")
         ->assertOk()
-        ->assertJsonPath('data.0.is_superseded', true)
-        ->assertJsonPath('data.0.is_resolved', false);
+        ->assertJsonFragment(['id' => $issue->id, 'is_superseded' => true, 'is_resolved' => false]);
 
     // And it is gone from the list a reviewer works from: one fewer than before, and this
     // particular id absent rather than merely flagged.

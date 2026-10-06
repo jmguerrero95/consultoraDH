@@ -110,26 +110,39 @@ final class ImportDecisionSet
                     $skipped[$sourceKey] = true;
                 }
 
-                if ($code === LegacyImportIssue::UnresolvedSocialEntity
-                    || $code === LegacyImportIssue::AffiliationEntityUnknown) {
-                    $type = self::entityType($context, $field);
-                    $token = self::token($context);
-
-                    if ($type !== null && $token !== null) {
-                        $entities[self::key($type.'|'.$token, $code, $type)] = $resolution;
-
-                        // §9.3's approved name, so the plan can propose one catalogue entry
-                        // for the whole token rather than one per cell.
-                        if ($resolution->decision === IssueResolutionDecision::CreateEntity
-                            && isset($resolution->value['name'])) {
-                            $canonical[$type.'|'.$token] = (string) $resolution->value['name'];
-                        }
-                    }
-                }
-
                 if ($code === LegacyImportIssue::UnknownRiskToken
                     && $resolution->decision === IssueResolutionDecision::SetRiskClass) {
                     $cells[self::key($sourceKey, $code, 'arl_risk_class')] = $resolution;
+                }
+            }
+
+            // §9.2's entity findings are about a *token*, not about a row.
+            //
+            // ## Why this is outside the `$sourceKey !== null` branch
+            //
+            // It was inside. `unresolved_social_entity` is raised once per token for the whole
+            // import, with `row_id = null` — §5.3's "one question per subject" — so the branch
+            // never ran for it, `canonicalOf` stayed empty, and `createdEntityName()` returned
+            // null for every answer a reviewer ever gave. The `create_entity` decision was
+            // validated, stored, shown as resolved, and unreachable: the only structural reason
+            // the writer with no producer survived A04-R2's audit.
+            //
+            // An answer's reachability now depends on the finding's *subject*, and a token's
+            // subject is not a row.
+            if ($code === LegacyImportIssue::UnresolvedSocialEntity
+                || $code === LegacyImportIssue::AffiliationEntityUnknown) {
+                $type = self::entityType($context, $field);
+                $token = self::token($context);
+
+                if ($type !== null && $token !== null) {
+                    $entities[self::key($type.'|'.$token, $code, $type)] = $resolution;
+
+                    // §9.3's approved name, so the plan can propose one catalogue entry for the
+                    // whole token rather than one per cell.
+                    if ($resolution->decision === IssueResolutionDecision::CreateEntity
+                        && isset($resolution->value['name'])) {
+                        $canonical[$type.'|'.$token] = (string) $resolution->value['name'];
+                    }
                 }
             }
 
@@ -222,7 +235,14 @@ final class ImportDecisionSet
      * top, for tokens whose mapping was recorded during this review but where the caller wants
      * the decision object rather than the entity id.
      */
-    public function entityDecision(SocialSecurityEntityType $type, string $foldedToken): ?IssueResolution
+    /**
+     * One recorded answer for a social-security entity token.
+     *
+     * Private because it is a lookup, not a contract: `mappedEntityId()` is the reader a consumer
+     * is meant to use, and a public `entityDecision()` next to it is the same callable-on-nothing
+     * surface that let five readers go unused through A04-R1 and A04-R2.
+     */
+    private function entityDecision(SocialSecurityEntityType $type, string $foldedToken): ?IssueResolution
     {
         return $this->entities[self::key($type->value.'|'.$foldedToken, LegacyImportIssue::UnresolvedSocialEntity, $type->value)] ?? null;
     }
@@ -254,7 +274,14 @@ final class ImportDecisionSet
     /** §9.4: which of the two contradicting ARL sources a person believed. */
     public function arlSourceFor(string $companyBlockKey): ?string
     {
-        $resolution = $this->companies[self::key($companyBlockKey, LegacyImportIssue::CompanyArlMetadataConflict, null)] ?? null;
+        // The subject and the field come from the same factory the producer used. It read
+        // `field = null` while the finding was filed under `arl_token`, so no resolution was ever
+        // found and §9.4's arbitration did nothing.
+        $resolution = $this->companies[self::key(
+            IssueSubject::companyArl($companyBlockKey)->subject(),
+            LegacyImportIssue::CompanyArlMetadataConflict,
+            IssueSubject::companyArl($companyBlockKey)->field(),
+        )] ?? null;
 
         return $resolution?->decision === IssueResolutionDecision::ChooseArlSource
             ? (string) $resolution->value['source']
@@ -307,23 +334,61 @@ final class ImportDecisionSet
     }
 
     /** §11: what a person decided about a record that already exists. */
-    public function existingDecision(string $naturalKey, LegacyImportIssue $code, ?string $field = null): ?IssueResolution
+
+    /** Whether a person said to keep the stored value rather than the source's. */
+    /**
+     * The fields of one existing record a reviewer said to replace with the file's value.
+     *
+     * §11's "actual → propuesto" proposal is per field — a reviewer may accept the legal name and
+     * decline the phone — so this returns the *approved subset*, which the builder writes to
+     * `preconditions['approved_fields']` and `ApplyImportPlan` refuses to exceed.
+     *
+     * ## Why this lives here and not in the builder
+     *
+     * `ImportPlanBuilder` used to answer the same question with its own `approvalIndex()` query
+     * against `legacy_import_issues`. Two readers of one table, one of them a private duplicate:
+     * `overwritesWithSource()` and `keepsExisting()` sat unused while the builder asked its own
+     * question, and `ImportDecisionSet`'s docblock — "every consumer of 'what did the person
+     * decide' goes through it" — was false. This is the class's own promise, so the query moved
+     * here and the duplicate was deleted.
+     *
+     * @return list<string>
+     */
+    public function approvedFields(string $naturalKey, LegacyImportIssue $code): array
+    {
+        $approved = [];
+
+        foreach ($this->existing as $key => $resolution) {
+            if ($resolution->decision !== IssueResolutionDecision::OverwriteWithSource) {
+                continue;
+            }
+
+            [$keyNatural, $keyCode, $field] = array_pad(explode('|', $key, 3), 3, null);
+
+            if ($keyNatural !== $naturalKey || $keyCode !== $code->value || $field === null || $field === '') {
+                continue;
+            }
+
+            $approved[] = $field;
+        }
+
+        return array_values(array_unique($approved));
+    }
+
+    /** Whether a person said the source's value should replace the stored one. */
+
+    /**
+     * One recorded answer for an existing record, by subject.
+     *
+     * Private because it is not a contract: it is the lookup two readers share, and leaving it
+     * public is how `existingDecision()` became a dead entry in the public surface in the first
+     * place — callable, documented, and used by nothing outside the class.
+     */
+    private function existingDecision(string $naturalKey, LegacyImportIssue $code, ?string $field = null): ?IssueResolution
     {
         return $this->existing[self::key($naturalKey, $code, $field)]
             ?? $this->existing[self::key($naturalKey, $code, null)]
             ?? null;
-    }
-
-    /** Whether a person said to keep the stored value rather than the source's. */
-    public function keepsExisting(string $naturalKey, LegacyImportIssue $code, ?string $field = null): bool
-    {
-        return $this->existingDecision($naturalKey, $code, $field)?->decision === IssueResolutionDecision::AcceptExisting;
-    }
-
-    /** Whether a person said the source's value should replace the stored one. */
-    public function overwritesWithSource(string $naturalKey, LegacyImportIssue $code, ?string $field = null): bool
-    {
-        return $this->existingDecision($naturalKey, $code, $field)?->decision === IssueResolutionDecision::OverwriteWithSource;
     }
 
     /** §10: a person said the source amount is right and the stored rate is stale. */
@@ -331,6 +396,26 @@ final class ImportDecisionSet
     {
         return $this->existingDecision($naturalKey, LegacyImportIssue::ExistingRateConflict, 'monthly_amount_cop')
             ?->decision === IssueResolutionDecision::AcceptSourceAmount;
+    }
+
+    /**
+     * §7.1's subject for one client identity: `client:{TYPE}:{NUMBER}`.
+     *
+     * ## Why this exists
+     *
+     * The producer (`ImportPlanBuilder::raiseClientIdentityConflict()`) writes the natural key,
+     * the fingerprint's subject and the context's `natural_key` from the same string; the reader
+     * (`EffectiveClientIdentity::resolve()`) looked the answer up by a bare `TYPE:NUMBER`. The
+     * two never met, so `linkedClientId()` returned null for every answer ever given — the review
+     * screen showed the identity resolved, the client was still created from the source document,
+     * and every relationship and rate pointed at a person who did not exist.
+     *
+     * One place that spells the key, used by both, because a key that is written twice is a key
+     * that will be written twice differently.
+     */
+    public static function clientIdentityKey(string $documentType, string $documentNumber): string
+    {
+        return 'client:'.$documentType.':'.$documentNumber;
     }
 
     /** §7.1: a document a person declared to be an existing client. */

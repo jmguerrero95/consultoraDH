@@ -114,6 +114,28 @@ final readonly class IssueSubject implements \JsonSerializable
         return new self('company:'.$blockKey, $field, ['company_block_key' => $blockKey]);
     }
 
+    /**
+     * §9.4's contradiction between the company title's ARL and the header's.
+     *
+     * Its own factory rather than `companyBlock($blockKey, 'arl_token')` written out twice.
+     *
+     * ## The bug this prevents
+     *
+     * The producer filed the finding under `field = 'arl_token'`, so the index in
+     * `ImportDecisionSet::fromStored()` keyed it
+     * `BLOCK|company_arl_metadata_conflict|arl_token`. `arlSourceFor()` asked for the same code
+     * with `field = null`, producing `BLOCK|company_arl_metadata_conflict|`. The two never met,
+     * so a reviewer who chose "el título" or "el encabezado" saw the issue turn resolved and the
+     * arbitration never happened — `titleFor()` then fell back to its own tie-break and the
+     * header kept winning.
+     *
+     * One factory, used by the producer and by the reader, is what makes that impossible.
+     */
+    public static function companyArl(string $blockKey): self
+    {
+        return self::companyBlock($blockKey, 'arl_token');
+    }
+
     // ------------------------------------------------------- workbook-level findings
 
     /** A finding about the file itself: a sheet that is not a month, a profile mismatch. */

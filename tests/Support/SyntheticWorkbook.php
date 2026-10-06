@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Support;
 
+use OpenSpout\Common\Entity\Cell;
 use OpenSpout\Common\Entity\Row;
+use OpenSpout\Common\Entity\Style\Style;
 use OpenSpout\Writer\XLSX\Writer;
 
 /**
@@ -211,13 +213,15 @@ final class SyntheticWorkbook
         return $path;
     }
 
-    /** @param array<string, mixed> $cells */
+    /**
+     * @param  array<string, mixed>  $cells
+     */
     private static function toRow(array $cells): Row
     {
         // Positional, so the keys have to become indexes — and a missing column has to stay
         // missing rather than sliding the rest left. A title written only in `B` must land in
         // column B, and `array_values()` on a sparse map would have put it in A.
-        $values = array_fill(0, count(self::COLUMNS) - 1, null);
+        $cellsArray = array_fill(0, count(self::COLUMNS) - 1, null);
 
         foreach ($cells as $letter => $value) {
             $index = array_search($letter, self::COLUMNS, true);
@@ -226,9 +230,23 @@ final class SyntheticWorkbook
                 continue;
             }
 
-            $values[$index] = $value;
+            // §8.3: column E (FECHA AFILIACION) must be written as text so that truncated
+            // years like "15/01/26" are not auto-converted to Excel serials.
+            // We create a StringCell with text format '@' to prevent auto-detection as date.
+            if ($letter === 'E' && is_string($value)) {
+                $cellsArray[$index] = Cell::fromValue($value)
+                    ->withStyle(new Style(format: '@'));
+            } else {
+                $cellsArray[$index] = Cell::fromValue($value);
+            }
         }
 
-        return Row::fromValues(array_values($values));
+        // Build Row directly with Cell objects (Row::fromValues expects raw values).
+        $cells = array_map(
+            static fn ($v): Cell => $v instanceof Cell ? $v : Cell::fromValue($v),
+            $cellsArray
+        );
+
+        return new Row($cells);
     }
 }
