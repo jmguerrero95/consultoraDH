@@ -178,7 +178,18 @@ test.describe('A02: clients, companies and affiliation history', () => {
         // The catalogue is reference data and ships empty on purpose, so the flow
         // registers the entity it needs.
         await nav(page, 'Entidades de seguridad social').click();
-        await page.getByRole('button', { name: 'Nueva entidad' }).click();
+
+        // Scoped to the page header, and it has to be.
+        //
+        // "Nueva entidad" names three different things on this screen: the header's action, the
+        // empty-state call to action, and the dialog's title. Which of the first two exist depends
+        // on whether the catalogue has rows — and the catalogue's contents depend on which specs
+        // ran before this one, because the A03 and A04 journeys import entities. So an unscoped
+        // locator resolved to one button when this spec ran alone and to two when it ran after
+        // them, and the failure was a strict-mode violation on a screen that was perfectly correct.
+        // `cdh-page-header` rather than the `banner` role: a `<header>` nested inside a `<section>`
+        // is not a banner landmark, and asking for one would silently match nothing.
+        await page.locator('header.cdh-page-header').getByRole('button', { name: 'Nueva entidad' }).click();
 
         const epsName = `EPS E2E ${stamp}`;
 

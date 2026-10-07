@@ -292,7 +292,7 @@ final class ImportPlanBuilder
             // `legacy_import_rows.company_verification_digit` and then never read it: no plan
             // action carried it, no conflict was ever raised, and the verifier had nothing to
             // assert. §7.2 says the three cases are different questions, so they are three arms.
-            $digit = $this->resolveVerificationDigit($import, $naturalKey, $company, $existing);
+            $digit = $this->resolveVerificationDigit($import, $naturalKey, $company, $existing, $decisions);
 
             if ($digit === self::VERIFICATION_DIGIT_CONFLICT) {
                 continue;
@@ -335,7 +335,17 @@ final class ImportPlanBuilder
             // a null digit the file can fill, was silently dropped for exactly the companies that
             // were otherwise a clean match. The question was raised (the conflict pass sees the
             // digit), the reviewer answered it, and no `UpdateCompany` was ever produced.
-            $approved = $decisions?->approvedFields($naturalKey, LegacyImportIssue::ExistingCompanyConflict) ?? [];
+            $approved = array_merge(
+                $decisions?->approvedFields($naturalKey, LegacyImportIssue::ExistingCompanyConflict) ?? [],
+                // §7.2's digit is answered under `company_verification_digit_conflict`, not under
+                // `existing_company_conflict`, so the approval has to be read under the code the
+                // reviewer actually answered. It was not: the update arm asked only for the
+                // latter, so the approved list was always empty for a digit decision and the plan
+                // carried no `UpdateCompany` at all — the answer resolved the blocker and the
+                // contradiction it was about stayed in the master, with the batch reported as
+                // applicable.
+                $decisions?->approvedFields($naturalKey, LegacyImportIssue::CompanyVerificationDigitConflict) ?? [],
+            );
 
             if ($this->sameCompanyName($existing, (string) $company['name'])) {
                 // An approved digit is a write even when nothing else changed.
@@ -823,6 +833,7 @@ final class ImportPlanBuilder
         string $naturalKey,
         array $company,
         ?object $existing,
+        ?ImportDecisionSet $decisions,
     ): ?string {
         /** @var array<string, true> $digits */
         $digits = $company['verification_digits'] ?? [];
@@ -887,13 +898,15 @@ final class ImportPlanBuilder
             return null;
         }
 
-        // §7.2: "DV contradictorio = blocker."
+        // §7.2: "DV contradictorio = blocker." The reviewer gets exactly one way out of
+        // this, so the finding is filed before their answer is read — a resolution that was
+        // already given is carried forward by `raiseIssue()` rather than re-raised as blocking.
         $this->raiseIssue($import, LegacyImportIssue::CompanyVerificationDigitConflict, [
             'severity' => LegacyIssueSeverity::Error,
             'blocking' => true,
             'subject' => IssueSubject::companyBlock(
                 (string) ($company['name'] ?? $company['tax_id']),
-                'company_verification_digit',
+                ImportDecisionSet::VERIFICATION_DIGIT_FIELD,
             ),
             'message' => 'El título dice que '.$company['tax_id'].' tiene dígito de verificación '
                 .$source.' y la base de datos tiene '.((string) $existing->verification_digit)
@@ -906,6 +919,15 @@ final class ImportPlanBuilder
                 'existing_digit' => (string) $existing->verification_digit,
             ],
         ]);
+
+        // §7.2's tie-break, read from the answer rather than guessed from the data.
+        //
+        // Without this the branch below is unreachable and the finding can never be answered: the
+        // batch stays blocked on a contradiction whose only resolution the API accepts is a
+        // decision nothing consulted.
+        if ($decisions?->verificationDigitFor($naturalKey) !== null) {
+            return $source;
+        }
 
         return 'conflict';
     }
@@ -1417,15 +1439,16 @@ final class ImportPlanBuilder
                 'months' => $episode->months,
                 'retirement' => $episode->retirement?->toArray(),
                 // §8.5's vocabulary, so `link()` gets A02's resolution deliberately rather than
-                // by a default that happens to be the safe one.
+                // by a default that happens to be the safe one. `'none'` is the answer for an
+                // episode no reviewer's decision touched; see the note in this class on where the
+                // other two values are decided, because it is not here.
                 //
                 // §8.4's answer rides in the same field: when a reviewer closed a disappearance,
                 // `HistoryReconstructor` has already put the chosen date on the interval, so it is
                 // in `$episode->interval` above. This says *why* the interval ends, so §17.5 can
                 // show a boundary as a person's decision rather than as something the workbook
                 // stated.
-                'overlap_resolution' => $episode->overlapResolution
-                    ?? $this->overlapResolutionFor($naturalKey),
+                'overlap_resolution' => $episode->overlapResolution ?? 'none',
             ];
 
             $existing = $this->existingRelationship(
@@ -1594,20 +1617,22 @@ final class ImportPlanBuilder
         return $this->existingClient($documentType, $documentNumber);
     }
 
-    /**
-     * §8.5's resolution vocabulary, from the reviewer's answer.
-     *
-     * `split_overlap_at` on the interval issue means the reviewer chose a boundary between the two
-     * episodes, which §8.5 lists as "corregir fecha" — and after that correction the second
-     * episode is a *transfer* rather than a parallel, so A02's `RESOLUTION_TRANSFER` is the right
-     * instruction. An `authorize parallel` answer would be a different decision recorded as a
-     * `parallel_reason`; §8.5 requires an explicit motive, so the payload carries it and the plan
-     * never invents one.
-     */
-    private function overlapResolutionFor(string $naturalKey): string
-    {
-        return 'none';
-    }
+    /*
+    |--------------------------------------------------------------------------
+    | §8.5's resolution vocabulary
+    |--------------------------------------------------------------------------
+    |
+    | Decided in one place, and not here. There used to be an `overlapResolutionFor()` in this
+    | class that returned `'none'` unconditionally, under a docblock describing how it would read
+    | the reviewer's answer and pass a `parallel_reason` along. So `recognize_transfer` and
+    | `authorize_parallel` were validated, stored, marked resolved and unblocked the batch, and
+    | that method discarded all of it: every relationship went out with the ordinary resolution.
+    |
+    | The vocabulary now lives in `HistoryReconstructor::applyOverlapDecisions()`, the only place
+    | that knows which episode a decision is *about* — the boundary moves the earlier episode,
+    | while the code that selects A02's resolution belongs on the later one — and it reaches the
+    | payload through `RelationshipEpisode::$overlapResolution`.
+    */
 
     // -------------------------------------------------------------- affiliations
 

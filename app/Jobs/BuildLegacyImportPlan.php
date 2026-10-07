@@ -357,7 +357,7 @@ final class BuildLegacyImportPlan implements ShouldQueue
         $sourceKey = (string) $staged->source_key;
 
         return $decisions->usesSuggestedDate($sourceKey)
-            || $decisions->dateFor($sourceKey) !== null;
+            || $decisions->dateFor($sourceKey)->isKnown();
     }
 
     /** §7.1's name for one staged row, assembled from the two halves staging keeps separate. */

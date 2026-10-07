@@ -93,6 +93,15 @@ enum IssueResolutionDecision: string
     /** This document is an existing client. Requires `client_id`. */
     case LinkExistingClient = 'link_existing_client';
 
+    /** §7.2: the source's verification digit is the correct one. Optional: it may be restated. */
+    case UseSourceVerificationDigit = 'use_source_verification_digit';
+
+    /** §8.5: consecutive months at two employers are one person moving. */
+    case RecognizeTransfer = 'recognize_transfer';
+
+    /** §8.5: the overlap is real. Carries the reason when the reviewer gives one. */
+    case AuthorizeParallel = 'authorize_parallel';
+
     /** §9.4's risk level for an unreadable P/Q. Requires `risk_class` 1..5. */
     case SetRiskClass = 'set_risk_class';
 
@@ -162,6 +171,27 @@ enum IssueResolutionDecision: string
             self::SetRiskClass => [
                 'risk_class' => 'risk_class',
             ],
+
+            // §7.2's tie-break for a contradictory verification digit: the reviewer says the
+            // file is right. The digit itself is optional because the decision means "use the
+            // one the source stated" — a reviewer who also wants to *correct* it has a different
+            // decision. What is not optional is the decision existing.
+            self::UseSourceVerificationDigit => [
+                'verification_digit' => 'optional_single_char',
+            ],
+
+            // §8.5's transfer recognition: consecutive months at two employers are one person
+            // moving, not one person overlapping. Nothing to fill in — the shape of the evidence
+            // is the answer.
+            self::RecognizeTransfer => [],
+
+            // §8.5's parallel authorization: a reason travels with the decision when the
+            // reviewer gives one, so the record can say why two employers were believed to overlap.
+            // `optional_text` is the only text rule the validator knows, and it treats an absent
+            // value as absent rather than as empty — a decision with no reason is still a decision.
+            self::AuthorizeParallel => [
+                'reason' => 'optional_text',
+            ],
         };
     }
 
@@ -196,6 +226,9 @@ enum IssueResolutionDecision: string
             self::AcceptSourceAmount => 'El valor del archivo es el correcto',
             self::LinkExistingClient => 'Es un cliente ya registrado',
             self::SetRiskClass => 'Escribir el nivel de riesgo',
+            self::UseSourceVerificationDigit => 'Usar el dígito de verificación del archivo',
+            self::RecognizeTransfer => 'Reconocer transferencia entre empresas',
+            self::AuthorizeParallel => 'Autorizar que el traslape es real',
         };
     }
 
@@ -210,15 +243,37 @@ enum IssueResolutionDecision: string
     public function allowedFor(): array
     {
         return match ($this) {
-            self::AcceptSource, self::SkipRow => [
-                LegacyImportIssue::InvalidAffiliationDate,
+            // §17.4, split because the two decisions stop meaning the same thing on some findings.
+            //
+            // `accept_source` is only an answer where *there is a source value to accept*. On the
+            // five below there is not, and offering it there is the defect R4 closes:
+            //
+            //  - `invalid_client_document` — there is no readable document, so "the file's value" is
+            //    the absence of one. Accepting it accepts a client that cannot exist, and the
+            //    reviewer is shown the blocker turn resolved with nothing written.
+            //  - `invalid_email` — §7.1 already decides the outcome (a warning, omitted from the
+            //    master). There is nothing for the choice to change.
+            //  - `missing_monthly_value` / `invalid_monthly_value` — §10's outcome is fixed by the
+            //    amount being unreadable: no rate is generated. Agreeing with that is silence, not a
+            //    decision, and a dialog that offers it is offering an answer it will discard.
+            //  - `client_identity_conflict` — the document is readable; what is contested is the
+            //    *name*, and `accept_source` says nothing about names.
+            //
+            // `skip_row` is the real answer to all five: it is honoured (`skipsRow()`, and the row
+            // is dropped from the reconstruction), and §17.4's screen can show its consequence.
+            self::SkipRow => [
                 LegacyImportIssue::InvalidClientDocument,
                 LegacyImportIssue::InvalidEmail,
-                LegacyImportIssue::DuplicateExactRow,
-                LegacyImportIssue::DuplicateConflictingRow,
                 LegacyImportIssue::MissingMonthlyValue,
                 LegacyImportIssue::InvalidMonthlyValue,
                 LegacyImportIssue::ClientIdentityConflict,
+            ],
+
+            // Where there is a parsed value to stand behind.
+            self::AcceptSource => [
+                LegacyImportIssue::InvalidAffiliationDate,
+                LegacyImportIssue::DuplicateExactRow,
+                LegacyImportIssue::DuplicateConflictingRow,
             ],
 
             self::UseSuggestedDate, self::SetDate, self::IgnoreDate => [
@@ -275,10 +330,18 @@ enum IssueResolutionDecision: string
             // fail — the exact shape of the defect this round is closing. A historical interval
             // somebody already closed is not a master field to replace, so the question is not
             // offered; `accept_existing` is its only answer, and it is the safe one.
+            // §11's per-field overwrite, for the findings whose subject **is** a replaceable
+            // master field: a company's legal name and a client's name or contact details.
+            //
+            // `existing_rate_conflict` is deliberately absent. §10 gives that finding its own
+            // vocabulary — `accept_existing` and `accept_source_amount` — and offering the generic
+            // overwrite beside them produced three buttons where the specification describes two,
+            // with no stated difference between two of them. §10 also says a rate in force is
+            // corrected through A03's adjustment flow rather than rewritten, so an overwrite here
+            // would be a third, undocumented way to change money.
             self::OverwriteWithSource => [
                 LegacyImportIssue::ExistingClientConflict,
                 LegacyImportIssue::ExistingCompanyConflict,
-                LegacyImportIssue::ExistingRateConflict,
             ],
 
             self::AcceptSourceAmount => [
@@ -288,6 +351,24 @@ enum IssueResolutionDecision: string
             self::LinkExistingClient => [
                 LegacyImportIssue::ClientIdentityConflict,
                 LegacyImportIssue::ExistingClientConflict,
+            ],
+
+            // §7.2's only tie-break for a contradictory verification digit. The finding is a
+            // blocker by construction, so it has to offer exactly one way out — §7.2 says the
+            // alternative is correcting the source, which is a job outside this screen.
+            self::UseSourceVerificationDigit => [
+                LegacyImportIssue::CompanyVerificationDigitConflict,
+            ],
+
+            // §8.5's two readings of the same evidence, offered together: a reviewer looking at an
+            // overlap is choosing between "they moved" and "they really did both", and the plan
+            // needs to be told which.
+            self::RecognizeTransfer => [
+                LegacyImportIssue::OverlappingCompanyHistory,
+            ],
+
+            self::AuthorizeParallel => [
+                LegacyImportIssue::OverlappingCompanyHistory,
             ],
 
             self::SetRiskClass => [
@@ -338,7 +419,17 @@ enum IssueResolutionDecision: string
             self::AcceptExisting,
             self::AcceptSourceAmount,
             self::LinkExistingClient,
-            self::SetRiskClass => true,
+            self::SetRiskClass,
+            // §7.1: "this document is somebody who already exists". Distinct from
+            // `link_existing_client`, which names *which* existing client — this one accepts the
+            // §7.2: answering "whose digit is right" is the whole question, so the answer
+            // resolves it.
+            self::UseSourceVerificationDigit,
+            // §8.5: both readings of an overlap are answers to §8.5's question, so either one
+            // resolves it. They differ in what the plan then writes, not in whether the reviewer
+            // has replied.
+            self::RecognizeTransfer,
+            self::AuthorizeParallel => true,
 
             // §11's "posible enriquecimiento de campo vacío → propuesta visible": the reviewer
             // saw the proposal and chose the source over the stored value. A decision either

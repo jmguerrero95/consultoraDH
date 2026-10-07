@@ -62,6 +62,12 @@ final readonly class ResolvedDate
         return $this->precision !== null;
     }
 
+    /** Whether a person explicitly decided on a date (not undecided, not unknown). */
+    public function isKnown(): bool
+    {
+        return $this->precision !== null && $this->precision !== HistoricalInterval::UNKNOWN;
+    }
+
     public function isUnknownStart(): bool
     {
         return $this->date === null && $this->precision === HistoricalInterval::UNKNOWN;

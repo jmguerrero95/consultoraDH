@@ -179,35 +179,86 @@ final class HistoryReconstructor
             return $episodes;
         }
 
+        // Two separate things are collected, because §8.5's three answers do two separate jobs.
+        //
+        // A **boundary** only exists for `split_overlap_at`, which carries the date the reviewer
+        // chose. `recognize_transfer` and `authorize_parallel` carry no date: the reviewer is
+        // answering a question about the evidence, not correcting it.
+        //
+        // A **code** exists for all three, and it is what `ApplyImportPlan` needs in order to
+        // choose A02's resolution. Without it the plan said `none`, the writer opened every
+        // relationship with the ordinary resolution, and a reviewer who had explicitly authorised
+        // a parallel got a row that did not claim to be one.
         $boundaries = [];
+        $codes = [];
 
         foreach ($overlaps as $overlap) {
-            $boundary = $this->decisions->overlapBoundaryFor(IssueSubject::overlap($overlap)->subject());
+            $subject = IssueSubject::overlap($overlap)->subject();
+            $decision = $this->decisions->overlapDecisionFor($subject);
+
+            if ($decision === null) {
+                continue;
+            }
+
+            $boundary = $this->decisions->overlapBoundaryFor($subject);
 
             if ($boundary !== null) {
                 $boundaries[$overlap->first->key()] = $boundary;
             }
+
+            $code = match ($decision) {
+                // §8.5's "corregir fecha". Once the earlier episode ends where the reviewer said,
+                // the two no longer overlap and the later one is a transfer — which is what A02
+                // has to be told to do. There is deliberately no `split` code: `ApplyImportPlan`
+                // has no such resolution, and emitting one made every split import fail at Apply
+                // with "overlap_resolution: transfer, parallel, none o null" — a contradiction
+                // the reviewer had just resolved.
+                IssueResolutionDecision::SplitOverlapAt,
+                IssueResolutionDecision::RecognizeTransfer => 'transfer',
+
+                IssueResolutionDecision::AuthorizeParallel => 'parallel',
+
+                default => null,
+            };
+
+            if ($code !== null) {
+                // On the **later** episode, in every case.
+                //
+                // The code selects how A02 opens *this* row, and both of the resolutions that use
+                // it are about the row being opened: a transfer closes whatever is open before it,
+                // and `ManageClientCompanies::link()` **refuses** `RESOLUTION_PARALLEL` outright
+                // when nothing is open. Marking the earlier episode would therefore either degrade
+                // silently or throw, and in the parallel case would fail the whole apply for a
+                // decision the reviewer got exactly right.
+                $codes[$overlap->second->key()] = $code;
+            }
         }
 
-        if ($boundaries === []) {
+        if ($boundaries === [] && $codes === []) {
             return $episodes;
         }
 
         foreach ($episodes as $index => $episode) {
             $boundary = $boundaries[$episode->key()] ?? null;
+            $code = $codes[$episode->key()] ?? null;
 
-            if ($boundary === null) {
+            if ($boundary === null && $code === null) {
                 continue;
             }
 
-            $date = Carbon::parse($boundary->date);
+            $replacement = $episode;
 
-            $episodes[$index] = $episode
-                ->withInterval($episode->interval->endingOn($date, $boundary->precision))
-                ->withOverlapResolution(sprintf(
-                    '§8.5: la persona pasó a otra empresa en %s.',
-                    $date->format('Y-m'),
-                ));
+            if ($boundary !== null) {
+                $replacement = $replacement->withInterval(
+                    $episode->interval->endingOn(Carbon::parse($boundary->date), $boundary->precision),
+                );
+            }
+
+            if ($code !== null) {
+                $replacement = $replacement->withOverlapResolution($code);
+            }
+
+            $episodes[$index] = $replacement;
         }
 
         return $episodes;

@@ -46,6 +46,18 @@ async function workbook(rows: string[][][], sheetName = 'ENERO 2026'): Promise<B
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
 
+    // The rows are the fixture, and nothing else is added to the sheet.
+    //
+    // A cell carrying `Date.now()` used to be appended here to "prevent hash collisions on
+    // re-runs", on the theory that §12.1 compares contents and two runs of the same journey
+    // would collide. They cannot. `run-e2e.sh` rebuilds `consultora_dh_e2e` from migrations on
+    // every run, so there is no previous applied hash to collide with — while journey C, whose
+    // entire subject is the duplicate refusal, depends on two uploads of the *same* bytes, and
+    // the timestamp made the second one different. The journey was asserting that a fresh file
+    // is accepted, under the name of the one that proves a repeated file is refused.
+    //
+    // Cross-journey uniqueness is already guaranteed a better way, by the fixture itself: each
+    // journey names its own document, and §12.1 hashes the sheet that carries it.
     const cells = rows
         .map((row, rowIndex) => {
             const parts = row
@@ -466,6 +478,11 @@ test.describe('A04 — import journeys', () => {
         // The decision is persisted and the plan is rebuilt without losing anything else.
         await expect(page.getByText('Incidencia resuelta')).toBeVisible();
 
+        // The rebuild that retires the blocker runs on a worker, so the flag moves when the
+        // worker gets to it rather than when the dialog closes. Polled for the server's own
+        // answer instead of inferred from the screen, and given room to arrive: the work is
+        // a few hundred milliseconds, but it waits behind a queue that may be serving another
+        // journey's parse.
         await expect
             .poll(
                 async () => {
@@ -473,7 +490,7 @@ test.describe('A04 — import journeys', () => {
 
                     return payload.data.applicable;
                 },
-                { timeout: 20_000 },
+                { timeout: 30_000, intervals: [250, 500, 1000, 2000] },
             )
             .toBe(true);
 

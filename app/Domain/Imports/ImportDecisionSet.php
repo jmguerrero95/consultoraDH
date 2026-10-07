@@ -41,6 +41,18 @@ use App\Models\LegacyImportIssue as LegacyImportIssueModel;
 final class ImportDecisionSet
 {
     /**
+     * The column a verification-digit finding is filed under.
+     *
+     * Named once and used by both the producer (`ImportPlanBuilder`) and the reader
+     * (`verificationDigitFor()`), because the two agreeing on this string *is* the wiring: the
+     * same class of drift as `IssueSubject::companyArl()` is the documented reason this codebase
+     * keeps a factory for a single field. It is also the payload column
+     * `ApplyImportPlan::writeCompanyUpdate()` checks `approved_fields` for, so naming it after the
+     * column rather than after the finding keeps the approval and the write the same value.
+     */
+    public const VERIFICATION_DIGIT_FIELD = 'verification_digit';
+
+    /**
      * @param  array<string, IssueResolution>  $cells  `source_key|code|field`
      * @param  array<string, IssueResolution>  $companies  `company_key|code|field`
      * @param  array<string, IssueResolution>  $intervals  `company|client|type|code`
@@ -220,11 +232,22 @@ final class ImportDecisionSet
     /** §9.4's risk level a reviewer typed for an unreadable P/Q. */
     public function riskClassFor(string $sourceKey): ?int
     {
-        $resolution = $this->cells[self::key($sourceKey, LegacyImportIssue::UnknownRiskToken, 'arl_risk_class')] ?? null;
+        // Both codes, because both offer `set_risk_class`.
+        //
+        // `unknown_risk_token` is the column the profile could not read; `ambiguous_risk_job_columns`
+        // is the case where two columns compete and a person has to say which one the row meant.
+        // The reader asked only for the first, so an answer given to the second was validated,
+        // stored, shown as resolved — and then never read. The batch unblocked and the risk class
+        // stayed at whatever the parser guessed, which is the one thing §9.4 says not to do.
+        foreach ([LegacyImportIssue::UnknownRiskToken, LegacyImportIssue::AmbiguousRiskJobColumns] as $code) {
+            $resolution = $this->cells[self::key($sourceKey, $code, 'arl_risk_class')] ?? null;
 
-        return $resolution?->decision === IssueResolutionDecision::SetRiskClass
-            ? (int) $resolution->value['risk_class']
-            : null;
+            if ($resolution?->decision === IssueResolutionDecision::SetRiskClass) {
+                return (int) $resolution->value['risk_class'];
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -294,7 +317,43 @@ final class ImportDecisionSet
         $resolution = $this->companies[self::key($companyBlockKey, LegacyImportIssue::InvalidCompanyTaxId, 'company_tax_id')]
             ?? $this->companies[self::key($companyBlockKey, LegacyImportIssue::CompanyIdentityConflict, 'company_tax_id')] ?? null;
 
+        // Only `use_company_nit`. §7.2's verification-digit question is a *different* finding with
+        // a different answer, and this method's one job is to hand back a resolution whose
+        // `value['company_tax_id']` exists — `EffectiveCompanyIdentity::fromDeclaredNit()` reads
+        // that key directly. Returning the digit decision here answered a question nobody asked and
+        // read a key the digit decision's schema never declares.
         return $resolution?->decision === IssueResolutionDecision::UseCompanyNit ? $resolution : null;
+    }
+
+    /**
+     * §7.2: whether a person answered "the file's verification digit is the right one".
+     *
+     * ## Why this is not `companyNitFor()`
+     *
+     * The obvious way to reach this decision is to widen `companyNitFor()` to also return it, and
+     * that is what this used to do. It does not work, for two independent reasons, both of which
+     * made the decision unreachable while every screen said it had been answered:
+     *
+     *  - **The finding is filed under a different code.** The subject is
+     *    `company_verification_digit_conflict`, and the reader above only asks for
+     *    `invalid_company_tax_id` and `company_identity_conflict`. No amount of widening the
+     *    *decision* check helps; the key it would have to read is never looked up.
+     *  - **The subject is keyed differently.** Company findings land in `$this->companies` under
+     *    `company_block_key`, which `ImportPlanBuilder` derives from the company's *name* when the
+     *    title has one. The plan asks about the company by natural key (`company:{tax_id}`), and
+     *    for a named company those two strings are different, so even the right code would not
+     *    match.
+     *
+     * So the reader below goes through `$this->existing`, which is keyed by the `natural_key` the
+     *    producer also wrote into the finding's context — the one identifier both sides already
+     *    agree on, and the same bucket `approvedFields()` reads. That is why `ApplyImportPlan`
+     *    receives `verification_digit` in `approved_fields` and can actually write it.
+     */
+    public function verificationDigitFor(string $naturalKey): ?IssueResolution
+    {
+        $resolution = $this->existing[self::key($naturalKey, LegacyImportIssue::CompanyVerificationDigitConflict, self::VERIFICATION_DIGIT_FIELD)] ?? null;
+
+        return $resolution?->decision === IssueResolutionDecision::UseSourceVerificationDigit ? $resolution : null;
     }
 
     /** §7.2: a title a person declared to be an existing company. */
@@ -319,6 +378,24 @@ final class ImportDecisionSet
     }
 
     /** §8.5: the boundary a person chose between two overlapping episodes. */
+    /**
+     * §8.5: which of the three answers the reviewer gave to this overlap, if any.
+     *
+     * `overlapBoundaryFor()` answers a narrower question — only `split_overlap_at` carries a date —
+     * and reading the decision itself from here means `HistoryReconstructor` never has to know how
+     * an interval resolution is keyed.
+     *
+     * That is not a stylistic preference. `HistoryReconstructor::applyOverlapDecisions()` used to
+     * call `self::key(...)`, a method that class does not have: `key()` is `ImportDecisionSet`'s,
+     * and it is private. So the branch only ever ran for a boundary-carrying answer, and when it
+     * did, the import **fataled** with "Call to undefined method
+     * HistoryReconstructor::key()" — a `split_overlap_at` could not be applied at all.
+     */
+    public function overlapDecisionFor(string $subject): ?IssueResolutionDecision
+    {
+        return ($this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory)] ?? null)?->decision;
+    }
+
     public function overlapBoundaryFor(string $subject): ?ResolvedBoundary
     {
         $resolution = $this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory)] ?? null;
@@ -359,7 +436,8 @@ final class ImportDecisionSet
         $approved = [];
 
         foreach ($this->existing as $key => $resolution) {
-            if ($resolution->decision !== IssueResolutionDecision::OverwriteWithSource) {
+            if ($resolution->decision !== IssueResolutionDecision::OverwriteWithSource
+                && $resolution->decision !== IssueResolutionDecision::UseSourceVerificationDigit) {
                 continue;
             }
 

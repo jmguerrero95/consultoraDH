@@ -156,8 +156,54 @@ final class ResolveImportIssue
                 'blocking' => $resolution->unblocks() ? false : $issue->blocking,
             ])->save();
 
+            $this->invalidatePlanIdentity($import->id);
+
             return ['issue' => $issue->refresh(), 'resolution' => $resolution, 'mapping' => $mapping];
         }, 3);
+    }
+
+    /**
+     * §5.4: an approval belongs to the plan the reviewer was *shown*.
+     *
+     * ## Why this is written here rather than left to the rebuild
+     *
+     * The answer is stored, and then `BuildLegacyImportPlan` is dispatched. Between those two
+     * facts the import still carries the **old** revision and the **old** digest, and that pair is
+     * exactly what `apply` accepts. So a reviewer who had the plan open could press Apply in that
+     * window and the request would be accepted against a plan built from decisions that no longer
+     * hold — including the answer they had just given. The screen would report a successful
+     * application of a plan that silently omitted their own instruction.
+     *
+     * The row lock taken at the top of this transaction is what makes the withdrawal safe: a
+     * concurrent `apply` either held it first and is already applying the plan the reviewer saw,
+     * or waits and then finds the identity withdrawn and is refused. There is no interleaving in
+     * which an approval outlives the plan it approved.
+     *
+     * ## Why the revision goes back to zero rather than advancing
+     *
+     * The obvious encoding is "clear the digest, advance the revision". The schema refuses it:
+     * `legacy_imports_plan_identity_check` requires `plan_revision = 0` **iff** the digest and
+     * `plan_built_at` are null, with the reason spelled out in the migration — "a revision without
+     * a plan is a revision of nothing; a plan without a revision cannot be ordered. Both halves are
+     * one fact." That is a better rule than the one I would have written, because it leaves no way
+     * to describe a plan that does not exist while implying that some plan once did.
+     *
+     * So withdrawal is the zero state, and the rebuild that follows produces revision 1 again.
+     * Two plans can therefore share a revision number, and that is sound because the *pair* is
+     * what identifies a plan: a stale approval is refused either because the digest differs, or —
+     * when a rebuild reproduced identical content — because the content it approves really is the
+     * content that would be written.
+     */
+    private function invalidatePlanIdentity(int $importId): void
+    {
+        DB::table('legacy_imports')
+            ->where('id', $importId)
+            ->update([
+                'plan_digest' => null,
+                'plan_revision' => 0,
+                'plan_built_at' => null,
+                'updated_at' => now(),
+            ]);
     }
 
     /**

@@ -429,7 +429,23 @@ final class ImportController extends Controller
                 'requires_value' => $decision->requiresValue(),
                 'resolves' => $decision->resolves($code),
             ],
-            IssueResolutionDecision::cases(),
+            // Filtered by the decision's own whitelist, which is the whole point of this method.
+            //
+            // It used to map over `cases()` unfiltered, so every dialog offered every decision —
+            // including `accept_absence` and `correct_date`, which do not exist, and
+            // `use_source_verification_digit`, which is only right for one specific finding. The
+            // comment above the call said "the backend's whitelist", and the one assertion that
+            // makes that true is `IssueResolution::make()` refusing the request: the *server* was
+            // right and the *screen* was wrong, which is the worse of the two, because a reviewer
+            // picks an answer, watches the endpoint refuse it, and concludes the module is broken.
+            //
+            // This is A04-R1's original finding ("`allowed_decisions` is the browser's whitelist,
+            // and a crafted request bypasses it") with the roles swapped: now the server refuses
+            // and the browser still shows the question.
+            array_values(array_filter(
+                IssueResolutionDecision::cases(),
+                static fn (IssueResolutionDecision $decision): bool => $decision->accepts($code),
+            )),
         ));
     }
 
@@ -536,12 +552,35 @@ final class ImportController extends Controller
         // was neither part of the plan identity nor readable by the reconstructor, which read
         // `$import->summary['retirement_policy']` — so `interpretation_policy` in the column and
         // the one the plan was built with could disagree.
-        $import->forceFill([
-            'interpretation_policy' => $validated['retirement_policy'],
-            'summary' => array_merge($import->summary ?? [], [
-                'retirement_policy' => $validated['retirement_policy'],
-            ]),
-        ])->save();
+        // Written under the same lock `ResolveImportIssue` takes, and for the same reason.
+        //
+        // This endpoint's own comment says two plans built under different retirement rules are
+        // different plans — which is an argument that the *identity* has to say so, not only the
+        // reconstruction. It did not: the rule was stored, the rebuild was queued, and until that
+        // rebuild landed the import still presented the revision and digest of a plan built under
+        // the **previous** rule. An approval held across that window was an approval of a plan the
+        // reviewer was no longer looking at.
+        //
+        // So the identity is withdrawn in the same transaction that stores the rule. §5.4's
+        // promise — the approval covers the plan that was shown — holds for this endpoint exactly
+        // as it does for a resolution.
+        ImportLifecycle::mutate($import->id, function (ImportLifecycle $lifecycle) use ($validated): void {
+            $current = $lifecycle->import();
+
+            $current->forceFill([
+                'interpretation_policy' => $validated['retirement_policy'],
+                'summary' => array_merge($current->summary ?? [], [
+                    'retirement_policy' => $validated['retirement_policy'],
+                ]),
+                // The zero state, not "clear the digest and advance the revision":
+                // `legacy_imports_plan_identity_check` holds that a revision without a plan is a
+                // revision of nothing. See `ResolveImportIssue::invalidatePlanIdentity()` for why
+                // that is also the better rule rather than merely the permitted one.
+                'plan_digest' => null,
+                'plan_revision' => 0,
+                'plan_built_at' => null,
+            ])->save();
+        });
 
         // §17.4: "Persistir cada decisión; refrescar plan sin perder el resto." The plan is
         // rebuilt in the background because §10's rates and §8.2's closures both depend on it.

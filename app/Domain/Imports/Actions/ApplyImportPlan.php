@@ -1061,16 +1061,28 @@ final class ApplyImportPlan
             $changes['legal_name'] = $payload->string('legal_name');
         }
 
-        // §7.2's one enrichment: the source stated a digit and the master has none. The proposal
-        // was shown as `null → 3` and approved, so it is applied — and only in that direction.
-        // A *contradicting* digit never reaches here: the builder raises
-        // `company_verification_digit_conflict` as a blocker instead, so this branch cannot
-        // overwrite a digit somebody is relying on.
+        // §7.2's digit, in both directions.
+        //
+        // Two shapes reach here, and both are gated the same way: `approved_fields` contains
+        // `verification_digit` only when the reviewer explicitly approved *this* field for *this*
+        // action, so an approval for a name change cannot quietly move a digit.
+        //
+        //  - **Enrichment.** The source stated a digit and the master has none. The proposal was
+        //    shown as `null → 3`.
+        //  - **Contradiction.** The source and the master disagree, and the reviewer chose
+        //    `use_source_verification_digit`. This arm used to be impossible: the builder raised
+        //    `company_verification_digit_conflict` as a blocker with no way to answer it, so the
+        //    branch could not overwrite a digit somebody was relying on. Now that §7.2's tie-break
+        //    exists, refusing the write would be the worse failure — the reviewer would say the
+        //    file is right, the batch would become applicable, and the master would keep the digit
+        //    they just rejected. A contradiction answered and then left in place is a contradiction
+        //    recorded as settled and still true.
+        //
+        // The change goes through A02's `UpdateCompany`, which resolves the NIT and its digit
+        // together, so this cannot end up writing a digit that does not match the base number.
         $digit = $payload->nullableString('verification_digit');
 
-        if ($digit !== null
-            && in_array('verification_digit', $fields, true)
-            && ($company->verification_digit === null || $company->verification_digit === '')) {
+        if ($digit !== null && in_array('verification_digit', $fields, true)) {
             $changes['verification_digit'] = $digit;
         }
 

@@ -1059,7 +1059,14 @@ export type IssueResolutionDecision =
     | 'overwrite_with_source'
     | 'accept_source_amount'
     | 'link_existing_client'
-    | 'set_risk_class';
+    | 'set_risk_class'
+    // A04-R4. §7.2's tie-break for a contradictory verification digit, and §8.5's two readings of
+    // an overlap. Added together because they arrived together: one answers a question about a
+    // contradiction the reviewer must settle, the other answers a question about evidence the
+    // reviewer is the only one who can weigh.
+    | 'use_source_verification_digit'
+    | 'recognize_transfer'
+    | 'authorize_parallel';
 
 /**
  * One decision's value shape, as §17.4's dialog needs it.

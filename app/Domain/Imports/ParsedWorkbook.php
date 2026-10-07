@@ -436,7 +436,7 @@ final class ParsedWorkbook
             LegacyImportIssue::InvalidEmail => 'email',
             LegacyImportIssue::InvalidCompanyTaxId => 'company_tax_id',
             LegacyImportIssue::CompanyIdentityConflict => 'company_tax_id',
-            LegacyImportIssue::CompanyVerificationDigitConflict => 'company_verification_digit',
+            LegacyImportIssue::CompanyVerificationDigitConflict => ImportDecisionSet::VERIFICATION_DIGIT_FIELD,
             LegacyImportIssue::UnknownRiskToken => 'arl_risk_class',
             LegacyImportIssue::AffiliationEntityUnknown => 'entity_token',
             LegacyImportIssue::DuplicateConflictingRow => null,

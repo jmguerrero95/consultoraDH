@@ -176,8 +176,47 @@ async function loadPlan(): Promise<void> {
     }
 }
 
+/**
+ * Whether the batch still has work in flight, and therefore whether to ask again.
+ *
+ * ## Why `review` counts as pending
+ *
+ * A04-R3. `BuildLegacyImportPlan` only runs the job when the batch is already in `review`, and
+ * `settleAfterPlanBuild()` is what moves it on to `ready`. So `review` is the state a batch sits
+ * in **while its plan is being built** — and this screen used to stop polling there, on the
+ * assumption that `review` meant "a person still has work to do".
+ *
+ * The consequence was the screen's worst failure mode: a reviewer who opened the batch a second
+ * after uploading it — the normal case, because that is when the link exists — saw "En revisión",
+ * a greyed-out Apply, and no further updates. The plan was built seconds later and the batch
+ * really was `ready` and applicable, but this page had stopped asking, so it kept asserting a
+ * state the server had already left. §17.5 hands the enablement to the server; a screen that
+ * stops listening is a screen that overrides it with a stale answer.
+ *
+ * `plan.digest` is the honest test rather than the status, because the plan is written inside the
+ * same locked mutation that settles the status, and a rebuild invalidates the digest while leaving
+ * the status alone. So: `ready` always has a digest, and a `review` with a digest is a batch with a
+ * real blocker — settled, and must stop polling. Conversely a `review` or a `ready` with **no**
+ * digest is a batch whose plan job has not landed yet, and the screen that stops asking there is
+ * the screen that will misreport it.
+ */
 function isPending(): boolean {
-    return detail.value !== null && ['uploaded', 'queued', 'parsing', 'applying'].includes(detail.value.status);
+    if (detail.value === null) {
+        return false;
+    }
+
+    const status = detail.value.status;
+
+    // Terminal states are never going to change on their own.
+    if (['applied', 'failed', 'cancelled'].includes(status)) {
+        return false;
+    }
+
+    if (['uploaded', 'queued', 'parsing', 'applying'].includes(status)) {
+        return true;
+    }
+
+    return detail.value.plan.digest === null;
 }
 
 function schedulePoll(): void {
