@@ -95,6 +95,11 @@ use Illuminate\Support\Collection;
  */
 final class BuildLegacyImportPlan implements ShouldQueue
 {
+    /** Why the overlap is still open, in the words a reviewer reads on the screen. */
+    private const UNUSABLE_TRANSFER_MESSAGE = 'Este solapamiento sigue sin resolver. Se pidió reconocer una '
+        .'transferencia, pero ambos episodios empiezan el mismo día y no hay una fuente y un destino '
+        .'que los distingan. Indique la fecha de corte o autorice un paralelo.';
+
     use Dispatchable;
     use InteractsWithQueue;
     use Queueable;
@@ -856,39 +861,58 @@ final class BuildLegacyImportPlan implements ShouldQueue
                     // `legacy_import_issues_resolution_check` requires it to: `resolved_at` and
                     // `resolution` are only valid together, so "open again" cannot mean "clear the
                     // resolution".
+                    if ($current->superseded_at === null) {
+                        $current->forceFill([
+                            'blocking' => false,
+                            'severity' => LegacyIssueSeverity::Info->value,
+                            'superseded_at' => now(),
+                            'message' => 'La respuesta «reconocer transferencia» no pudo aplicarse: '
+                                .'ambos episodios empiezan el mismo día, así que no hay una fuente y un '
+                                .'destino que los distingan.',
+                        ])->save();
+                    }
+
+                    // The re-raised question, on a stable fingerprint derived from the finding it
+                    // replaces — `legacy_import_issues` has a permanent UNIQUE index over
+                    // `(legacy_import_id, fingerprint)` that includes superseded rows, so a plain
+                    // insert would violate it on the second rebuild. And a second rebuild is exactly
+                    // what answering this question causes.
                     //
-                    // The question is then re-raised under its own fingerprint, because the unique
-                    // index is over `(legacy_import_id, fingerprint)` and the finding is the same
-                    // overlap. Two rows for one overlap is honest here: the first says a person
-                    // answered, the second says the answer did not settle it.
-                    $current->forceFill([
-                        'blocking' => false,
-                        'severity' => LegacyIssueSeverity::Info->value,
-                        'superseded_at' => now(),
-                        'message' => 'La respuesta «reconocer transferencia» no pudo aplicarse: '
-                            .'ambos episodios empiezan el mismo día, así que no hay una fuente y un '
-                            .'destino que los distingan.',
-                    ])->save();
+                    // So the row is looked up first and updated, never created twice.
+                    $retryFingerprint = hash('sha256', $fingerprint.'|transfer-not-executable');
 
-                    unset($onFile[$fingerprint]);
+                    $retry = LegacyImportIssueModel::query()
+                        ->where('legacy_import_id', $import->id)
+                        ->where('fingerprint', $retryFingerprint)
+                        ->first();
 
-                    LegacyImportIssueModel::query()->create([
-                        'legacy_import_id' => $import->id,
-                        'row_id' => null,
-                        'code' => $issue->code->value,
-                        'severity' => $issue->severity->value,
-                        'blocking' => true,
-                        'field' => $issue->field(),
-                        'message' => 'Este solapamiento sigue sin resolver. Se pidió reconocer una '
-                            .'transferencia, pero ambos episodios empiezan el mismo día y no hay una '
-                            .'fuente y un destino que los distingan. Indique la fecha de corte o '
-                            .'autorice un paralelo.',
-                        'context' => $issue->context(),
-                        // `char(64)`, so the distinction has to live inside the hash rather than in
-                        // front of it. The suffix is stable: the same overlap always re-raises onto
-                        // the same row instead of accumulating one per rebuild.
-                        'fingerprint' => hash('sha256', $fingerprint.'|transfer-not-executable'),
-                    ]);
+                    if ($retry === null) {
+                        LegacyImportIssueModel::query()->create([
+                            'legacy_import_id' => $import->id,
+                            'row_id' => null,
+                            'code' => $issue->code->value,
+                            'severity' => $issue->severity->value,
+                            'blocking' => true,
+                            'field' => $issue->field(),
+                            'message' => self::UNUSABLE_TRANSFER_MESSAGE,
+                            'context' => $issue->context(),
+                            'fingerprint' => $retryFingerprint,
+                        ]);
+                    } elseif ($retry->resolved_at === null) {
+                        // Still unanswered: keep it active and blocking. Once answered, it is a
+                        // decision and this pass has no business reopening it — the alternative the
+                        // reviewer chose is applied by the reconstruction, not here.
+                        $retry->forceFill([
+                            'message' => self::UNUSABLE_TRANSFER_MESSAGE,
+                            'severity' => $issue->severity->value,
+                            'blocking' => true,
+                            'superseded_at' => null,
+                        ])->save();
+                    }
+
+                    // Both rows are handled. Leaving either in `$onFile` would let the stale pass at
+                    // the end of this method supersede the active retry on the very same rebuild.
+                    unset($onFile[$fingerprint], $onFile[$retryFingerprint]);
 
                     continue;
                 }

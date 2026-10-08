@@ -86,6 +86,15 @@ final class ImportDecisionSet
             ->with('row:id,legacy_import_id,source_key')
             ->where('legacy_import_id', $importId)
             ->whereNotNull('resolved_at')
+            // A superseded row is history, not a decision.
+            //
+            // §4.1's `resolved_at` means "a person answered this", and `superseded_at` says the
+            // question it answered no longer applies. Reading both together let a withdrawn answer
+            // keep deciding things, which matters now that an overlap can carry two rows for the same
+            // question: the answer that was found unusable, and the one that replaced it. Both carry
+            // the same canonical subject, so whichever the query happened to return last won, and a
+            // reviewer's `split_overlap_at` could be silently overridden by the `recognize_transfer`
+            // it replaced.
             ->get();
 
         $cells = [];

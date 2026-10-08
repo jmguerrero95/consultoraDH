@@ -1405,3 +1405,94 @@ it('refuses to invent a transfer boundary when both episodes start on the same d
 
     expect(ClientCompanyAssignment::query()->exists())->toBeFalse();
 });
+
+it('re-raises the unusable transfer blocker once, and lets the replacement answer supersede it', function () {
+    // The retry that keeps an unusable `recognize_transfer` from settling a batch has to be
+    // idempotent, and answering it *causes another rebuild* — so the second rebuild is not an edge
+    // case, it is the very next thing anybody does.
+    //
+    // `legacy_import_issues` has a permanent UNIQUE index over `(legacy_import_id, fingerprint)`
+    // that counts superseded rows, so re-inserting the retry on every pass would fail the second
+    // time — inside the rebuild that the reviewer's answer triggered.
+    $import = stagedImport(userWithRole('Operations'), transferredWorkbook('25/11/2025'));
+
+    $planned = plannedImport($import);
+
+    $disappearance = $planned->issues()
+        ->where('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value)
+        ->firstOrFail();
+
+    $planned = answerAndReadBack($planned, $disappearance, IssueResolutionDecision::CloseOnDisappearance->value, [
+        'date' => '2026-02-01',
+        'precision' => 'month',
+    ]);
+
+    $unusable = $planned->issues()
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('resolved_at')
+        ->firstOrFail();
+
+    $planned = answerAndReadBack($planned, $unusable, IssueResolutionDecision::RecognizeTransfer->value);
+
+    $activeRetries = fn (): LegacyImportAction|LegacyImportIssueModel|int => LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('superseded_at')
+        ->whereNull('resolved_at')
+        ->count();
+
+    // Step 3 — one active retry blocker after the first rebuild.
+    expect($activeRetries())->toBe(1);
+
+    // Step 4 — and exactly one after another, with no unique violation and nothing accumulating.
+    $planned = plannedImport($planned->fresh());
+
+    expect($activeRetries())->toBe(1)
+        ->and($planned->status)->toBe(LegacyImportStatus::Review);
+
+    // Step 5 — the operator answers the question that is actually open.
+    $retry = LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('superseded_at')
+        ->whereNull('resolved_at')
+        ->firstOrFail();
+
+    $planned = answerAndReadBack($planned, $retry, IssueResolutionDecision::SplitOverlapAt->value, [
+        'boundary' => '2026-02-01',
+        'precision' => 'month',
+    ]);
+
+    // Steps 6–9 — the replacement answer is consumed and the batch advances.
+    expect(LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('superseded_at')
+        ->whereNull('resolved_at')
+        ->count())->toBe(0);
+
+    // Step 8 — the unusable answer is still on file, as superseded history.
+    $history = LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNotNull('superseded_at')
+        ->where('resolution->decision', IssueResolutionDecision::RecognizeTransfer->value)
+        ->firstOrFail();
+
+    expect($history->resolved_at)->not->toBeNull();
+
+    $planned->refresh();
+
+    // The boundary §8.5's answer derived is on the interval, which is what "consumed" means here.
+    $boundaries = LegacyImportAction::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('action_type', ImportActionType::CreateRelationship->value)
+        ->get()
+        ->map(fn (LegacyImportAction $a) => $a->payload['interval']['end'] ?? null)
+        ->filter()
+        ->values()
+        ->all();
+
+    expect($boundaries)->not->toBeEmpty('§8.5\'s boundary reached the plan')
+        ->and($planned->status)->not->toBe(LegacyImportStatus::Review);
+});
