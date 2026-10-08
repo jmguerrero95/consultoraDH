@@ -1449,6 +1449,9 @@ final class ImportPlanBuilder
                 // show a boundary as a person's decision rather than as something the workbook
                 // stated.
                 'overlap_resolution' => $episode->overlapResolution ?? 'none',
+                // §8.5's "motivo explícito", on its own key so §17.5 can show it as the reviewer's
+                // words rather than folding a sentence into the machine vocabulary above.
+                'parallel_reason' => $episode->parallelReason,
             ];
 
             $existing = $this->existingRelationship(

@@ -250,6 +250,7 @@ final readonly class IssueResolution
             'tax_id' => self::asTaxId($raw, $where),
             'optional_single_char' => self::asOptionalSingleChar($raw, $where),
             'optional_text' => self::asOptionalText($raw, $where, 180),
+            'text' => self::asText($raw, $where, 180),
             'arl_source' => self::asArlSource($raw, $where),
             default => throw InvalidIssueResolution::unsupportedRule($rule),
         };
@@ -401,6 +402,42 @@ final readonly class IssueResolution
         }
 
         return $text === '' ? null : $text;
+    }
+
+    /**
+     * Text that has to be there — §8.5's "autorizar paralelo con **motivo explícito**".
+     *
+     * ## Why `optional_text` was not enough
+     *
+     * A parallel is the one relationship §8.5 refuses to infer: "Nunca marcar un paralelo
+     * automáticamente", and the authorisation has to carry a motive so the record says who accepted
+     * an overlap the evidence alone did not prove. `optional_text` accepted `null`, `''` and a
+     * run of spaces, all three of which produce a parallel whose stated reason is nothing —
+     * `ManageClientCompanies::link()` then refuses the row, so the import failed at Apply with
+     * "No hay ninguna relación abierta con la que ser paralelo" *or* a reason-less parallel that
+     * A02 had to reject. Either way the reviewer's answer was accepted and the batch was unwriteable.
+     *
+     * So the reason is refused at the endpoint instead, where the reviewer is still on the screen and
+     * can supply one. Same normalisation as `optional_text` — trimmed, whitespace collapsed, bounded —
+     * so the two rules cannot disagree about what a well-formed reason is.
+     */
+    private static function asText(mixed $raw, string $where, int $max): string
+    {
+        if (! is_string($raw)) {
+            throw InvalidIssueResolution::badValue($where, 'the text itself');
+        }
+
+        $text = trim((string) preg_replace('/\s+/u', ' ', $raw));
+
+        if ($text === '') {
+            throw InvalidIssueResolution::badValue($where, 'a non-empty reason');
+        }
+
+        if (mb_strlen($text) > $max) {
+            throw InvalidIssueResolution::badValue($where, "at most {$max} characters");
+        }
+
+        return $text;
     }
 
     private static function asArlSource(mixed $raw, string $where): string

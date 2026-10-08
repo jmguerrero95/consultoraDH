@@ -230,7 +230,13 @@ final class HistoryReconstructor
                 // when nothing is open. Marking the earlier episode would therefore either degrade
                 // silently or throw, and in the parallel case would fail the whole apply for a
                 // decision the reviewer got exactly right.
-                $codes[$overlap->second->key()] = $code;
+                // §8.5's motive travels beside the machine code, never inside it:
+                // `ApplyImportPlan::linkResolution()` switches on the code and refuses anything
+                // else, and A02 stores the reason on its own column.
+                $codes[$overlap->second->key()] = [
+                    'code' => $code,
+                    'reason' => $this->decisions->overlapParallelReason($subject),
+                ];
             }
         }
 
@@ -255,7 +261,7 @@ final class HistoryReconstructor
             }
 
             if ($code !== null) {
-                $replacement = $replacement->withOverlapResolution($code);
+                $replacement = $replacement->withOverlapResolution($code['code'], $code['reason']);
             }
 
             $episodes[$index] = $replacement;

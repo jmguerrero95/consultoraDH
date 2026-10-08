@@ -465,7 +465,23 @@ test.describe('A04 — import journeys', () => {
         await page.getByRole('tab', { name: 'Incidencias' }).click();
         await expect(page.getByText('invalid_affiliation_date').first()).toBeVisible();
 
-        await page.getByRole('button', { name: 'Resolver' }).first().click();
+        // Scoped to the date finding's own row, not "the first Resolver on the screen".
+        //
+        // This workbook also raises `unresolved_social_entity` for the EPS/AFP/ARL names, and that
+        // finding is *not* blocking — so it sits above the blocker in the list, and `.first()`
+        // opened its dialog. The journey still passed until A04-R5 made the dialog show only the
+        // decisions the API actually accepts for the finding in front of it: previously the select
+        // listed every decision in the enum, so `ignore_date` was there by accident, and the
+        // reviewer had been offered answers that were always going to be refused with
+        // `decision_not_allowed`. The right answer to a date question was invisible and the wrong
+        // one looked available.
+        //
+        // So the fix is to click the blocker, which is what this journey is about.
+        await page
+            .getByRole('row')
+            .filter({ hasText: 'invalid_affiliation_date' })
+            .getByRole('button', { name: 'Resolver' })
+            .click();
 
         const modal = dialog(page, 'Resolver');
 

@@ -267,7 +267,22 @@ final class ImportDecisionSet
      */
     private function entityDecision(SocialSecurityEntityType $type, string $foldedToken): ?IssueResolution
     {
-        return $this->entities[self::key($type->value.'|'.$foldedToken, LegacyImportIssue::UnresolvedSocialEntity, $type->value)] ?? null;
+        // Both codes, because both offer the same three answers.
+        //
+        // `unresolved_social_entity` is §9.2's "a name a person has to confirm". `affiliation_entity_unknown`
+        // is §9.1's "a cell that says there is an affiliation without naming one" — the bare `SI`.
+        // The reader asked only for the first, so every answer given to a bare `SI` was indexed and
+        // then never consulted: §17.4 showed the dialog, the reviewer chose, and the reconstruction
+        // carried on exactly as before.
+        foreach ([LegacyImportIssue::UnresolvedSocialEntity, LegacyImportIssue::AffiliationEntityUnknown] as $code) {
+            $resolution = $this->entities[self::key($type->value.'|'.$foldedToken, $code, $type->value)] ?? null;
+
+            if ($resolution !== null) {
+                return $resolution;
+            }
+        }
+
+        return null;
     }
 
     /** Whether this token must not become an affiliation at all. §9.1's refusals, human-confirmed. */
@@ -393,7 +408,29 @@ final class ImportDecisionSet
      */
     public function overlapDecisionFor(string $subject): ?IssueResolutionDecision
     {
-        return ($this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory)] ?? null)?->decision;
+        $resolution = $this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory)] ?? null;
+
+        return $resolution?->decision;
+    }
+
+    /**
+     * §8.5's "motivo explícito" for an authorised parallel, for this overlap.
+     *
+     * Read here rather than reconstructed downstream, because `IssueResolution` is what trims and
+     * bounds it and A02 stores what it stored. Anything other than `authorize_parallel`, or an
+     * `authorize_parallel` without a reason, yields null — the value is never invented.
+     */
+    public function overlapParallelReason(string $subject): ?string
+    {
+        $resolution = $this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory)] ?? null;
+
+        if ($resolution?->decision !== IssueResolutionDecision::AuthorizeParallel) {
+            return null;
+        }
+
+        $reason = $resolution->value['reason'] ?? null;
+
+        return is_string($reason) && trim($reason) !== '' ? trim($reason) : null;
     }
 
     public function overlapBoundaryFor(string $subject): ?ResolvedBoundary

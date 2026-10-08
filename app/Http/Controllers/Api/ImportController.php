@@ -29,6 +29,7 @@ use App\Models\LegacyImportRow;
 use App\Services\Imports\ResolveImportIssue;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
@@ -697,20 +698,54 @@ final class ImportController extends Controller
         $resolved = [];
         $refused = [];
 
-        foreach ($issues as $issue) {
-            try {
-                $resolver->resolve($import, $issue, $validated['resolution'], $request->user()?->id);
-                $resolved[] = $issue->id;
-            } catch (InvalidIssueResolution $rejection) {
-                $refused[] = [
-                    'id' => $issue->id,
-                    'code' => $issue->code?->value,
-                    'message' => $rejection->getMessage(),
-                    'code_reason' => $rejection->reason,
-                ];
-            }
-        }
+        // One critical section for the whole operation. §12.2's discipline, applied to review.
+        //
+        // Each `ResolveImportIssue::resolve()` opened its own transaction, so the import row lock
+        // was taken and released once per issue: Apply could take it between resolution #1 and
+        // resolution #2, see a plan it was told was withdrawn, and apply a batch that had already
+        // been partly re-decided. The reviewer had answered five questions; the fifth was written
+        // after the data had already been committed.
+        //
+        // `resolve()` re-takes the same lock, which on PostgreSQL is a re-entrant no-op for the
+        // same connection, so the inner transactions nest as savepoints and per-issue refusal keeps
+        // working exactly as before. What is new is that nobody else gets in until all of them are
+        // done.
+        DB::transaction(function () use (
+            $import,
+            $issues,
+            $validated,
+            $request,
+            $resolver,
+            &$resolved,
+            &$refused,
+        ): void {
+            ImportLifecycle::mutate((int) $import->id, function (ImportLifecycle $lifecycle) use (
+                $issues,
+                $validated,
+                $request,
+                $resolver,
+                &$resolved,
+                &$refused,
+            ): void {
+                foreach ($issues as $issue) {
+                    try {
+                        $resolver->resolve($lifecycle->import(), $issue, $validated['resolution'], $request->user()?->id);
+                        $resolved[] = $issue->id;
+                    } catch (InvalidIssueResolution $rejection) {
+                        $refused[] = [
+                            'id' => $issue->id,
+                            'code' => $issue->code?->value,
+                            'message' => $rejection->getMessage(),
+                            'code_reason' => $rejection->reason,
+                        ];
+                    }
+                }
+            });
+        });
 
+        // One rebuild for the whole batch, and only if something actually changed. Dispatching
+        // after the commit means the job cannot see a half-resolved import, and one job means the
+        // plan cannot be rebuilt N times with N different intermediate answers.
         if ($resolved !== []) {
             BuildLegacyImportPlan::dispatch($import->id);
         }

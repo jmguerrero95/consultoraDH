@@ -42,10 +42,15 @@ use App\Domain\Imports\IssueResolutionDecision;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Models\Client;
+use App\Models\ClientAffiliation;
+use App\Models\ClientCompanyAssignment;
+use App\Models\ClientCompanyRate;
 use App\Models\Company;
+use App\Models\ImportSourceMapping;
 use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
 use App\Models\LegacyImportIssue as LegacyImportIssueModel;
+use App\Models\SocialSecurityEntity;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
@@ -91,6 +96,26 @@ function answerAndRebuild(LegacyImport $import, LegacyImportIssueModel $finding,
     $policy = $import->fresh()->interpretation_policy;
 
     return plannedImport($import, $policy)->fresh();
+}
+
+/**
+ * Answer a finding and read the state the endpoint's **own** rebuild left behind.
+ *
+ * `phpunit.xml` forces `QUEUE_CONNECTION=sync`, so `resolveIssue` dispatches `BuildLegacyImportPlan`
+ * and it runs inside the request: by the time the response arrives the plan is rebuilt. That is
+ * exactly one rebuild, which is what these assertions want.
+ *
+ * `Queue::fake()` would also give one rebuild, but the fake stays installed for the rest of the test
+ * — so a later `stagedImport()` in the same test dispatched `ParseLegacyImport` into a queue that
+ * discards everything, and the import sat in `queued` with no plan and no parse. Hence this helper
+ * rather than `answerAndRebuild()`, which is the right tool when the test must *also* control when
+ * the rebuild runs.
+ */
+function answerAndReadBack(LegacyImport $import, LegacyImportIssueModel $finding, string $decision, ?array $value = []): LegacyImport
+{
+    answerFinding($import, $finding, $decision, $value);
+
+    return $import->fresh();
 }
 
 /**
@@ -740,4 +765,349 @@ it('invalidates the plan identity as soon as a decision is recorded', function (
             'plan_digest' => $before->plan_digest,
         ])
         ->assertStatus(409);
+});
+
+// =============================================================================
+// §5.5 — an approved spelling has to outlive the import that approved it
+// =============================================================================
+
+it('records the approved spelling when the entity was created by the apply, and the next workbook resolves from it', function () {
+    // ## The link that was missing
+    //
+    // `create_entity` was honoured for exactly one import: the plan carried a
+    // `create_social_entity` action, the apply created the entity, the affiliation used it — and the
+    // approved spelling was forgotten. §9.2 asks for the opposite ("guardar un mapping sólo después
+    // de aprobación", so the *next* workbook resolves), and §5.5 names the table that does it.
+    // `grep -c ImportSourceMapping app/Domain/Imports/Actions/ApplyImportPlan.php` was `0`.
+    //
+    // So the same question came back for every subsequent workbook, about an entity that by then was
+    // already in the catalogue. The two halves are asserted separately because they are two claims:
+    // that the mapping was written, and that a later workbook really does stop asking.
+    //
+    // The token is a *named positive* one, because §9.1's bare affirmatives are the subject of the
+    // next test and must not reach this path.
+    $workbookFor = fn (string $document): SyntheticWorkbook => (new SyntheticWorkbook)
+        ->sheetWithBlocks('ENERO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow(['H' => $document, 'N' => 'COOPNUEVA', 'G' => 1_200_000])],
+        ]]);
+
+    $first = applicableImportFor($workbookFor('10101010'));
+
+    $finding = $first->issues()
+        ->where('code', LegacyImportIssue::UnresolvedSocialEntity->value)
+        ->get()
+        ->first(fn (LegacyImportIssueModel $candidate): bool => ($candidate->context['token'] ?? null) === 'COOPNUEVA');
+
+    expect($finding)->not->toBeNull('a spelling the catalogue does not have must raise a question');
+
+    // The endpoint's own synchronous rebuild is what turns the approval into an action; without it
+    // this would only prove that a decision can be stored, which is the defect being closed.
+    $planned = answerAndReadBack($first, $finding, IssueResolutionDecision::CreateEntity->value, [
+        'name' => 'COOPERATIVA NUEVA EPS',
+        'type' => 'EPS',
+    ]);
+
+    expect(LegacyImportAction::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('action_type', ImportActionType::CreateSocialEntity->value)
+        ->exists())->toBeTrue('§9.3 proposes the catalogue entry as a plan action');
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$planned->id}/apply", planConfirmation($planned))
+        ->assertOk();
+
+    $entity = SocialSecurityEntity::query()
+        ->where('type', 'EPS')
+        ->where('name', 'COOPERATIVA NUEVA EPS')
+        ->firstOrFail();
+
+    // The mapping points at the id the entity really has — which is only knowable here, after the
+    // apply. That is the whole reason the write cannot live in the review step.
+    $mapping = ImportSourceMapping::query()
+        ->where('type', 'EPS')
+        ->where('source_key', 'COOPNUEVA')
+        ->firstOrFail();
+
+    // `verified_by` is the import's **creator**, not whoever happens to be `$this->user`: the
+    // `a04.php` helpers stage each import as their own freshly created Operations user, and the
+    // importer is the person the approval belongs to. §5.5 asks for "verified_by / verified_at", and
+    // §13 wants the batch that caused it to be the same one the audit trail names.
+    expect((int) $mapping->social_security_entity_id)->toBe((int) $entity->id)
+        ->and($mapping->verified_at)->not->toBeNull()
+        ->and((int) $mapping->verified_by)->toBe((int) $planned->created_by);
+
+    // The second workbook, same spelling. §5.5: "la siguiente importación que diga `COOPNUEVA`
+    // resuelve sin que nadie decida de nuevo."
+    $second = applicableImportFor($workbookFor('20202020'));
+
+    expect($second->issues()
+        ->where('code', LegacyImportIssue::UnresolvedSocialEntity->value)
+        ->get()
+        ->contains(fn (LegacyImportIssueModel $candidate): bool => ($candidate->context['token'] ?? null) === 'COOPNUEVA'))
+        ->toBeFalse('the approved spelling resolves without a question');
+});
+
+it('never turns a bare affirmative into a global mapping', function () {
+    // ## §9.1
+    //
+    // "`SI` sin entidad concreta = `affiliation_entity_unknown` blocker/warning … **jamás crear una
+    // entidad llamada `SI`**."
+    //
+    // The parser already classified it — `SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE` — and that
+    // classification was private to `judge()`. Nothing stopped the *mapping* side: approving
+    // `map_entity` or `create_entity` for the token `SI` recorded a verified global mapping, and
+    // every later workbook whose EPS cell said merely `SI` resolved to that one entity. That is
+    // the exact failure §9.1 names, reached through the very feature §5.5 added to make the other
+    // half work: a spelling that identifies nothing became a permanent rule.
+    //
+    // The reviewer is not refused. §17.4's answer still applies to *this* import — that is the
+    // per-import decision layer, which is untouched. What must not happen is the generalisation.
+    $eps = SocialSecurityEntity::factory()->create(['type' => 'EPS', 'name' => 'SALUD TOTAL']);
+
+    $workbookFor = fn (string $document): SyntheticWorkbook => (new SyntheticWorkbook)
+        ->sheetWithBlocks('ENERO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow(['H' => $document, 'N' => 'SI', 'G' => 1_200_000])],
+        ]]);
+
+    // `reviewedImportFor()`, not `applicableImportFor()`: §9.1 makes the bare affirmative a
+    // *blocker* when the affiliation has to be reconstructed, so the batch settles in `review`.
+    // Asserting `ready` here would be asserting a state the fixture must not be in.
+    $first = reviewedImportFor($workbookFor('30303030'));
+
+    // §9.1 files a bare affirmative under `affiliation_entity_unknown`, not
+    // `unresolved_social_entity`: the first is "the cell names no entity", the second is "the cell
+    // names an entity nobody has confirmed". They are different questions and they resolve through
+    // different vocabulary.
+    $finding = $first->issues()
+        ->where('code', LegacyImportIssue::AffiliationEntityUnknown->value)
+        ->get()
+        ->first(fn (LegacyImportIssueModel $candidate): bool => ($candidate->context['token'] ?? null) === 'SI');
+
+    expect($finding)->not->toBeNull('a bare affirmative is a question, never a name');
+
+    answerAndReadBack($first, $finding, IssueResolutionDecision::MapEntity->value, [
+        'social_security_entity_id' => $eps->id,
+    ]);
+
+    expect(ImportSourceMapping::query()->where('source_key', 'SI')->exists())
+        ->toBeFalse('§9.1: a bare affirmative identifies no entity, so it may not be recorded globally');
+
+    // And the refusal is not merely about the first import: a later, unrelated cell that also says
+    // `SI` still asks. If the mapping existed, this second workbook would resolve silently.
+    $second = reviewedImportFor($workbookFor('40404040'));
+
+    expect($second->issues()
+        ->where('code', LegacyImportIssue::AffiliationEntityUnknown->value)
+        ->get()
+        ->contains(fn (LegacyImportIssueModel $candidate): bool => ($candidate->context['token'] ?? null) === 'SI'))
+        ->toBeTrue('a second `SI` must not inherit the first review\'s answer');
+});
+
+// =============================================================================
+// §8.5 — "autorizar paralelo con motivo explícito"
+// =============================================================================
+
+it('refuses to authorise a parallel without a reason', function () {
+    // §8.5: "autorizar paralelo con motivo explícito". With `optional_text` the reason could be
+    // absent, so the authorisation was accepted and A02 then refused the row — a parallel is the
+    // one relationship §8.5 never infers, and its record has to say who accepted an overlap the
+    // evidence did not prove.
+    $import = overlappingImport();
+
+    $finding = $import->issues()->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)->firstOrFail();
+
+    // No `value` at all: the decision's schema requires the reason.
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/issues/{$finding->id}/resolve", [
+            'resolution' => ['decision' => 'authorize_parallel', 'value' => []],
+        ])
+        ->assertStatus(422);
+
+    // And a reason that is only whitespace is the same answer wearing a disguise.
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/issues/{$finding->id}/resolve", [
+            'resolution' => ['decision' => 'authorize_parallel', 'value' => ['reason' => "   \t  "]],
+        ])
+        ->assertStatus(422);
+
+    expect($finding->fresh()->resolved_at)->toBeNull('a refused answer may not be recorded as given');
+});
+
+it('writes the reviewer\'s reason into the parallel relationship', function () {
+    $import = overlappingImport();
+
+    $finding = $import->issues()->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)->firstOrFail();
+
+    $planned = answerAndReadBack($import, $finding, IssueResolutionDecision::AuthorizeParallel->value, [
+        'reason' => 'Trabaja por días en las dos empresas',
+    ]);
+
+    $action = LegacyImportAction::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('action_type', ImportActionType::CreateRelationship->value)
+        ->where('payload->company_tax_id', '900123456')
+        ->firstOrFail();
+
+    // The machine vocabulary stays exactly the three codes the writer accepts, and the motive is
+    // on its own key — a sentence in `overlap_resolution` would be refused by
+    // `ApplyImportPlan::linkResolution()`.
+    expect($action->payload['overlap_resolution'])->toBe('parallel')
+        ->and($action->payload['parallel_reason'])->toBe('Trabaja por días en las dos empresas');
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$planned->id}/apply", planConfirmation($planned))
+        ->assertOk();
+
+    // A02's own columns, on the row that is genuinely open beside another one. `parallel_authorized_at`
+    // is A02's marker for an authorised parallel, and §8.5's motive lands in `parallel_reason`.
+    $parallel = ClientCompanyAssignment::query()
+        ->whereHas('company', fn ($query) => $query->where('tax_id', '900123456'))
+        ->sole();
+
+    expect($parallel->parallel_authorized_at)->not->toBeNull()
+        ->and($parallel->parallel_reason)->toBe('Trabaja por días en las dos empresas');
+});
+
+// =============================================================================
+// §7.1, §7.2, §8.4, §9.5, §10 — five paths the audit found only "verified by reading"
+// =============================================================================
+
+it('points the relationship, rate and affiliation at the linked existing client', function () {
+    // §7.1's `link_existing_client`. R4 recorded this path as "verified by reading, no test", which
+    // is precisely the claim A04-R5 was told not to accept.
+    //
+    // The workbook's document already belongs to somebody, and the names disagree — §11's conflict.
+    // Answering with the existing client's id has to redirect **everything** downstream at that
+    // client, because the alternative is the person the plan already half-built for the same
+    // document: a second row with the same document, and a history split across both.
+    $existing = existingWorkbookClient(['first_names' => 'MARIBEL', 'last_names' => 'KOVACEK']);
+
+    // §9.1 refuses to invent an affiliation to a name nobody has confirmed, so with an empty
+    // catalogue the plan writes no affiliation at all and the claim about it would be vacuous.
+    SocialSecurityEntity::factory()->create(['type' => 'EPS', 'name' => 'SALUD TOTAL']);
+
+    $import = reviewedImportFor((new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        'title' => 'ANDINA S.A.S. NIT 900123456-3',
+        'people' => [SyntheticWorkbook::personRow(['H' => $existing->document_number])],
+    ]]));
+
+    // §11 raises one conflict **per field that disagrees** — the names, the address, the phone, the
+    // email — and each one blocks. Answering only the first left the batch in `review` with three
+    // unanswered questions about the same person, so Apply was correctly refused. Every finding of
+    // the code takes the same answer.
+    $findings = $import->issues()
+        ->where('code', LegacyImportIssue::ExistingClientConflict->value)
+        ->get();
+
+    expect($findings)->not->toBeEmpty();
+
+    foreach ($findings as $finding) {
+        answerAndReadBack($import, $finding, IssueResolutionDecision::LinkExistingClient->value, [
+            'client_id' => $existing->id,
+        ]);
+    }
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import->fresh()))
+        ->assertOk();
+
+    // No second person: one document, one client.
+    expect(Client::where('document_number', $existing->document_number)->count())->toBe(1)
+        ->and(ClientCompanyAssignment::where('client_id', $existing->id)->exists())->toBeTrue()
+        ->and(ClientCompanyRate::where('client_id', $existing->id)->exists())->toBeTrue()
+        ->and(ClientAffiliation::where('client_id', $existing->id)->exists())->toBeTrue();
+});
+
+it('builds the company on the NIT the reviewer declared', function () {
+    // §7.2's `use_company_nit`. The title's own NIT is unreadable, so the reviewer names the
+    // company's identity; everything downstream has to follow that number rather than the one in
+    // the sheet, or the plan would propose a company nobody recognises and a relationship pointing
+    // at a different one.
+    $import = reviewedImportFor((new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        // `TaxIdSyntax::PATTERN` is `/^\d{1,12}(-\d)?$/`, and repeated hyphens are deliberately
+        // not collapsed — so this title is malformed in the one way the parser cannot forgive.
+        'title' => 'ANDINA S.A.S. NIT 900123456--',
+        'people' => [SyntheticWorkbook::personRow(['H' => '10101010'])],
+    ]]));
+
+    $finding = $import->issues()
+        ->where('code', LegacyImportIssue::InvalidCompanyTaxId->value)
+        ->firstOrFail();
+
+    answerAndReadBack($import, $finding, IssueResolutionDecision::UseCompanyNit->value, [
+        'company_tax_id' => '900555444',
+    ]);
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import->fresh()))
+        ->assertOk();
+
+    $company = Company::query()->where('tax_id', '900555444')->firstOrFail();
+
+    expect(Company::where('tax_id', '900555444')->count())->toBe(1)
+        ->and(ClientCompanyAssignment::where('company_id', $company->id)->exists())->toBeTrue()
+        ->and(ClientCompanyRate::where('company_id', $company->id)->exists())->toBeTrue();
+});
+
+it('answers §10\'s rate conflict without inventing a second row for the month', function () {
+    // §10's two answers, each on its own import so the second is not answering a question the
+    // first already settled.
+    //
+    // `accept_existing` keeps the stored amount; `accept_source_amount` replaces it. Both have to
+    // leave exactly one row for that (client, company, month) — a conflict that *adds* a rate would
+    // make the month's value depend on which file arrived last.
+    $existingCompany = existingWorkbookCompany();
+    $rateFor = fn (int $clientId): ClientCompanyRate => ClientCompanyRate::query()->create([
+        'client_id' => $clientId,
+        'company_id' => $existingCompany->id,
+        'effective_month' => '2026-01-01',
+        'amount_cop' => 999_000,
+    ]);
+
+    $workbook = (new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        'title' => 'ANDINA S.A.S. NIT 900123456-3',
+        'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'G' => 1_200_000])],
+    ]]);
+
+    // --- accept_existing: the stored amount stands.
+    $client = existingWorkbookClient();
+    $stored = $rateFor($client->id);
+
+    $kept = reviewedImportFor($workbook);
+
+    $answerFound = $kept->issues()->where('code', LegacyImportIssue::ExistingRateConflict->value)->firstOrFail();
+
+    $plannedKeep = answerAndReadBack($kept, $answerFound, IssueResolutionDecision::AcceptExisting->value);
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$plannedKeep->id}/apply", planConfirmation($plannedKeep))
+        ->assertOk();
+
+    expect($stored->fresh()->amount_cop)->toBe(999_000);
+
+    // --- accept_source_amount: the file's amount replaces it, in place.
+    $other = existingWorkbookClient(['document_number' => '20202020']);
+    $replaceable = $rateFor($other->id);
+
+    $changed = reviewedImportFor((new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        'title' => 'ANDINA S.A.S. NIT 900123456-3',
+        'people' => [SyntheticWorkbook::personRow(['H' => '20202020', 'G' => 1_200_000])],
+    ]]));
+
+    $answerFound = $changed->issues()->where('code', LegacyImportIssue::ExistingRateConflict->value)->firstOrFail();
+
+    $plannedChange = answerAndReadBack($changed, $answerFound, IssueResolutionDecision::AcceptSourceAmount->value);
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$plannedChange->id}/apply", planConfirmation($plannedChange))
+        ->assertOk();
+
+    expect($replaceable->fresh()->amount_cop)->toBe(1_200_000)
+        ->and(ClientCompanyRate::query()
+            ->where('client_id', $other->id)
+            ->where('company_id', $existingCompany->id)
+            ->where('effective_month', '2026-01-01')
+            ->count())->toBe(1);
 });

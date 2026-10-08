@@ -17,6 +17,7 @@ use App\Domain\Clients\Actions\CreateClient;
 use App\Domain\Clients\Actions\UpdateClient;
 use App\Domain\Companies\Actions\CreateCompany;
 use App\Domain\Companies\Actions\UpdateCompany;
+use App\Domain\Imports\ApprovedSourceMapping;
 use App\Domain\Imports\Exceptions\ImportApplyFailed;
 use App\Domain\Imports\Exceptions\UnusableImportAction;
 use App\Domain\Imports\HistoricalInterval;
@@ -26,6 +27,7 @@ use App\Domain\Imports\ImportActionType;
 use App\Domain\Imports\ImportLifecycle;
 use App\Domain\Imports\ImportPlan;
 use App\Domain\Imports\ImportPlanIdentity;
+use App\Domain\Imports\ImportProfile;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Models\Client;
 use App\Models\ClientAffiliation;
@@ -1244,7 +1246,7 @@ final class ApplyImportPlan
             ->first();
 
         if ($existing !== null) {
-            return ['type' => SocialSecurityEntity::class, 'id' => (int) $existing->id];
+            return $this->withApprovedMapping($import, $action, $payload, $type, $name, $existing);
         }
 
         // Through `ManageCatalogueEntities::create()`, which normalises the name, enforces the
@@ -1268,6 +1270,58 @@ final class ApplyImportPlan
             'action_fingerprint' => $action->batch_fingerprint,
             'source_rows' => $action->source_row_ids,
         ], subject: $entity);
+
+        return $this->withApprovedMapping($import, $action, $payload, $type, $name, $entity);
+    }
+
+    /**
+     * §5.5's missing link: the approved spelling, pointed at the entity that now really exists.
+     *
+     * ## Why here and not during the review
+     *
+     * `create_entity` proposes a catalogue entry that the plan writes as this action, so while the
+     * reviewer was answering the question the entity did not exist and no id could honestly be
+     * recorded — `import_source_mappings.social_security_entity_id` is `NOT NULL` with a
+     * restrictive foreign key, and inventing one is the fabrication §9.3 forbids. This is the first
+     * moment a real id exists, and it is inside the apply transaction, so the mapping commits or
+     * rolls back with the entity it names.
+     *
+     * ## What it buys
+     *
+     * §9.2 says an approved spelling is saved "sólo después de aprobación" so the *next* workbook
+     * resolves without anyone deciding again. Before this, the answer was honoured for exactly one
+     * import: the entity was created, the affiliation used it, and the spelling was forgotten — so
+     * every later workbook with the same name asked the same question again, about an entity that
+     * by then was in the catalogue.
+     *
+     * The write is delegated to {@see ApprovedSourceMapping}, which is also what
+     * `ResolveImportIssue::durableEffect()` uses when the entity already existed at review time.
+     * One writer means one answer to §5.5's uniqueness index and to §9.1's refusal of a bare
+     * affirmative — the two paths do not get to disagree about either.
+     *
+     * A skipped `CreateSocialEntity` action never reaches a writer, so the "the catalogue entry was
+     * created by hand in the meantime" case is handled by `durableEffect()` at review time instead.
+     * Both reach the same helper.
+     */
+    private function withApprovedMapping(
+        LegacyImport $import,
+        LegacyImportAction $action,
+        ImportActionPayload $payload,
+        SocialSecurityEntityType $type,
+        string $name,
+        SocialSecurityEntity $entity,
+    ): array {
+        $token = $payload->nullableString('source_key');
+
+        if ($token !== null && $token !== '') {
+            ApprovedSourceMapping::record(
+                $import->profile instanceof ImportProfile ? $import->profile : ImportProfile::from($import->profile),
+                $type,
+                $token,
+                (int) $entity->id,
+                $import->creator,
+            );
+        }
 
         return ['type' => SocialSecurityEntity::class, 'id' => (int) $entity->id];
     }

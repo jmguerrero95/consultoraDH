@@ -386,6 +386,32 @@ final readonly class SourcePersonRow
         return $problems;
     }
 
+    /**
+     * §9.1's bare affirmative on this row, with the column it was read from.
+     *
+     * `problems()` reports `affiliation_entity_unknown` as a code and a sentence, which is right for
+     * a message and useless for an *answer*: §17.4's dialog has to know which entity type and which
+     * spelling the reviewer is being asked about, and `ImportDecisionSet` has to index the answer
+     * under the same two values the reader asks for.
+     *
+     * Before this the finding carried neither, so `entity_type` and `token` were both null, the
+     * resolution was indexed under nothing, and `map_entity` / `create_entity` / `skip_affiliation`
+     * on this finding were unreachable — a bare `SI` could be answered on screen and the answer read
+     * by nobody. A04-R5 found this while closing the mapping side of the same rule.
+     *
+     * @return array{type: string, token: string}|null null when the row has no bare affirmative
+     */
+    public function bareAffirmativeEntity(): ?array
+    {
+        foreach ($this->entities as $type => $token) {
+            if ($token->problem === SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE) {
+                return ['type' => $type, 'token' => $token->token];
+            }
+        }
+
+        return null;
+    }
+
     /** Whether a blocking problem stands between this row and the plan. */
     public function isBlocked(): bool
     {

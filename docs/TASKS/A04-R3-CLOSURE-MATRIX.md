@@ -1,5 +1,9 @@
 # A04-R3 — Matriz de cierre del contrato
 
+> **Nota**: documento histórico. Las brechas que enumera fueron cerrándose en A04-R4 y
+> A04-R5; ver `A04-SPEC.md` (autoritativo) y `A04-R5.md`. Se conserva sin reescribir porque
+> registra el estado del contrato en el momento en que esa matriz se escribió.
+
 > Creado **antes** de implementar A04-R3, como exige §3 de la instrucción. Base auditada:
 > `3c169c1277eaf23a86c063c2a2ed57ec51f2dc8a`.
 >

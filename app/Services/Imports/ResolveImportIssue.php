@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Imports;
 
 use App\Domain\Affiliations\SocialSecurityEntityType;
+use App\Domain\Imports\ApprovedSourceMapping;
 use App\Domain\Imports\Exceptions\InvalidIssueResolution;
 use App\Domain\Imports\ImportProfile;
 use App\Domain\Imports\IssueResolution;
@@ -12,11 +13,13 @@ use App\Domain\Imports\IssueResolutionDecision;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\SheetMonth;
+use App\Domain\Imports\SourceEntityToken;
 use App\Models\ImportSourceMapping;
 use App\Models\LegacyImport;
 use App\Models\LegacyImportIssue as LegacyImportIssueModel;
 use App\Models\LegacyImportRow;
 use App\Models\SocialSecurityEntity;
+use App\Models\User;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -473,68 +476,104 @@ final class ResolveImportIssue
         IssueResolution $resolution,
         ?int $actorId,
     ): ?ImportSourceMapping {
-        if ($resolution->decision !== IssueResolutionDecision::MapEntity) {
+        // `create_entity` counts here **only** when the chosen entity already exists.
+        //
+        // §9.3 proposes the catalogue entry and the plan writes it as a `create_social_entity`
+        // action, so at review time a *new* entity has no id and nothing honest can be recorded:
+        // the column is `NOT NULL` with a restrictive foreign key, and a fabricated id is exactly
+        // the invention §9.3 forbids. Those mappings are written instead by
+        // `ApplyImportPlan::writeSocialEntity()`, inside the apply transaction, once the real id
+        // exists — which is the only moment there is one.
+        //
+        // When the reviewer pointed at an entity the catalogue already has, the id is real now, and
+        // the approved spelling becomes reusable immediately. `ApprovedSourceMapping::record()`
+        // decides what "may be recorded" means, so this path and the apply path cannot disagree.
+        if (! in_array($resolution->decision, [
+            IssueResolutionDecision::MapEntity,
+            IssueResolutionDecision::CreateEntity,
+        ], true)) {
             return null;
         }
 
         $context = is_array($issue->context) ? $issue->context : [];
-        $token = (string) ($context['token'] ?? '');
+        $token = self::tokenOf($context);
         $type = $this->expectedEntityType($issue, $context);
 
-        if ($token === '' || $type === null) {
+        if ($token === null || $type === null) {
             throw InvalidIssueResolution::inapplicable(
                 $issue->code,
                 'la incidencia no registra qué token hay que asociar',
             );
         }
 
-        $sourceKey = SheetMonth::fold($token);
-        $entityId = (int) $resolution->value['social_security_entity_id'];
+        $entityId = match ($resolution->decision) {
+            IssueResolutionDecision::MapEntity => (int) $resolution->value['social_security_entity_id'],
 
-        // §5.5's unique index is `(profile, type, source_key)`: one approved spelling per
-        // profile. Changing an existing approval is a decision about the *policy*, not about
-        // this import, so it is refused here rather than silently rewritten.
+            // `create_entity` names the entity rather than an id; the id has to be looked up in the
+            // catalogue the reviewer chose it from.
+            default => (int) SocialSecurityEntity::query()
+                ->where('type', $type->value)
+                ->whereRaw('LOWER(name) = ?', [mb_strtolower(trim((string) $resolution->value['name']))])
+                ->value('id'),
+        };
+
+        if ($entityId <= 0) {
+            // Not in the catalogue yet: the Apply will create it and record the mapping then.
+            return null;
+        }
+
+        // A bare affirmative gets no global mapping, from either decision. The per-import answer
+        // is already stored on the issue and still applies to this import.
+        if (SourceEntityToken::isBareAffirmativeEntityToken($token)) {
+            return null;
+        }
+
         $existing = ImportSourceMapping::query()
             ->where('profile', $import->profile instanceof ImportProfile ? $import->profile->value : $import->profile)
             ->where('type', $type->value)
-            ->where('source_key', $sourceKey)
+            ->where('source_key', SheetMonth::fold($token))
             ->first();
 
-        if ($existing !== null) {
-            if ($existing->verified_at !== null && (int) $existing->social_security_entity_id === $entityId) {
-                return $existing;
-            }
-
-            if ($existing->verified_at !== null) {
-                throw InvalidIssueResolution::inapplicable(
-                    $issue->code,
-                    sprintf(
-                        '«%s» ya está asociado a otra entidad del catálogo. Cambiar esa decisión afecta '
-                        .'a todas las importaciones futuras, y eso se decide fuera de una importación.',
-                        $token,
-                    ),
-                );
-            }
-
-            $existing->forceFill([
-                'social_security_entity_id' => $entityId,
-                'verified_at' => now(),
-                'verified_by' => $actorId,
-                'note' => 'Aprobado durante la revisión de la importación.',
-            ])->save();
-
-            return $existing->refresh();
+        // A verified mapping against a *different* entity is somebody else's decision about every
+        // future import. §5.5 puts that outside an import, so it is refused rather than rewritten —
+        // and refused loudly, because the reviewer is being told their answer will not generalise.
+        if ($existing !== null
+            && $existing->verified_at !== null
+            && (int) $existing->social_security_entity_id !== $entityId) {
+            throw InvalidIssueResolution::inapplicable(
+                $issue->code,
+                sprintf(
+                    '«%s» ya está asociado a otra entidad del catálogo. Cambiar esa decisión afecta '
+                    .'a todas las importaciones futuras, y eso se decide fuera de una importación.',
+                    $token,
+                ),
+            );
         }
 
-        return ImportSourceMapping::query()->create([
-            'profile' => $import->profile,
-            'type' => $type->value,
-            'source_key' => $sourceKey,
-            'social_security_entity_id' => $entityId,
-            'verified_at' => now(),
-            'verified_by' => $actorId,
-            'note' => 'Aprobado durante la revisión de la importación.',
-        ]);
+        return ApprovedSourceMapping::record(
+            $import->profile instanceof ImportProfile ? $import->profile : ImportProfile::from($import->profile),
+            $type,
+            $token,
+            $entityId,
+            $actorId === null ? null : User::find($actorId),
+        );
+    }
+
+    /**
+     * The folded token a finding names, or null when it records none.
+     *
+     * §5.3's `context` is sanitised on the way in, so the token is read from the same two keys the
+     * parser writes rather than from a column that may not exist.
+     */
+    private static function tokenOf(array $context): ?string
+    {
+        foreach (['token', 'entity_token'] as $key) {
+            if (isset($context[$key]) && is_string($context[$key]) && $context[$key] !== '') {
+                return SheetMonth::fold($context[$key]);
+            }
+        }
+
+        return null;
     }
 
     /**

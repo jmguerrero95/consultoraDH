@@ -185,12 +185,13 @@ enum IssueResolutionDecision: string
             // is the answer.
             self::RecognizeTransfer => [],
 
-            // §8.5's parallel authorization: a reason travels with the decision when the
-            // reviewer gives one, so the record can say why two employers were believed to overlap.
-            // `optional_text` is the only text rule the validator knows, and it treats an absent
-            // value as absent rather than as empty — a decision with no reason is still a decision.
+            // §8.5: "autorizar paralelo con motivo explícito". `text`, not `optional_text`: the
+            // motive is the authorisation. A02 refuses a parallel whose reason is empty, so
+            // accepting one here produced an answer the batch could not be written from — the
+            // reviewer had been told their decision was recorded and the import then failed at
+            // Apply for the reason they were never asked for.
             self::AuthorizeParallel => [
-                'reason' => 'optional_text',
+                'reason' => 'text',
             ],
         };
     }

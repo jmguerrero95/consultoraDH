@@ -53,10 +53,24 @@ final readonly class RelationshipEpisode implements \JsonSerializable
          * though the workbook had stated it.
          */
         public ?string $overlapResolution = null,
+        /**
+         * §8.5's "motivo explícito", and only ever that.
+         *
+         * Deliberately **not** folded into `overlapResolution`: that field is the machine vocabulary
+         * `ApplyImportPlan::linkResolution()` switches on (`none` / `transfer` / `parallel`) and
+         * anything else in it is refused. A02 stores the reason on its own column, so it travels on
+         * its own property and reaches `ManageClientCompanies::link()` as `$parallelReason`.
+         */
+        public ?string $parallelReason = null,
     ) {}
 
-    /** A copy carrying the reason a person gave for its boundary. */
-    public function withOverlapResolution(string $reason): self
+    /**
+     * A copy carrying the machine code and, when the code is `parallel`, §8.5's explicit reason.
+     *
+     * The reason is dropped for any other code: a transfer is not authorised by a motive, and
+     * carrying one would put a `parallel_reason` on a relationship A02 never asked to be parallel.
+     */
+    public function withOverlapResolution(string $reason, ?string $parallelReason = null): self
     {
         return new self(
             $this->clientKey,
@@ -71,6 +85,7 @@ final readonly class RelationshipEpisode implements \JsonSerializable
             $this->clientDisplayName,
             $this->companyVerificationDigit,
             $reason,
+            $reason === 'parallel' ? $parallelReason : null,
         );
     }
 

@@ -304,7 +304,19 @@ final class ParsedWorkbook
         $this->rows[] = $row;
         $this->fingerprints[$fingerprint] = new ParsedFingerprint($row, 1);
 
+        // §9.1's bare affirmative is the one row-level finding whose *subject* is a token rather
+        // than the row, so it has to say which one. Every other row problem is about a column of
+        // the row and is identified by the row, which is enough.
+        $bareAffirmative = $row->bareAffirmativeEntity();
+
         foreach ($row->problems() as $code => $message) {
+            $context = ['sheet' => $row->sheetName, 'row' => $row->sourceRowNumber];
+
+            if ($code === 'affiliation_entity_unknown' && $bareAffirmative !== null) {
+                $context['entity_type'] = $bareAffirmative['type'];
+                $context['token'] = $bareAffirmative['token'];
+            }
+
             $this->addIssue(
                 self::issueCodeFor($code),
                 $row->sheetName,
@@ -314,7 +326,7 @@ final class ParsedWorkbook
                     'severity' => self::severityFor($code),
                     'blocking' => $row->isBlocked(),
                     'message' => $message,
-                    'context' => ['sheet' => $row->sheetName, 'row' => $row->sourceRowNumber],
+                    'context' => $context,
                 ],
             );
         }

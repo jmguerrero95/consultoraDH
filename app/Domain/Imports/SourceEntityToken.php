@@ -155,7 +155,7 @@ final readonly class SourceEntityToken
         }
 
         // §9.1: a bare `SI` is not an entity name.
-        if ($folded === 'SI' || $folded === 'S' || $folded === 'S I') {
+        if (self::isBareAffirmativeEntityToken($folded)) {
             return self::OUTCOME_BARE_AFFIRMATIVE;
         }
 
@@ -163,6 +163,34 @@ final readonly class SourceEntityToken
         // later, against `import_source_mappings` and A02's catalogue — not here, because
         // §9.2 forbids the parser from deciding that two spellings are one entity.
         return self::OUTCOME_SUGGESTION;
+    }
+
+    /**
+     * Whether a cell is a bare affirmative — §9.1's `SI` with no entity named.
+     *
+     * ## Why this is one shared predicate and not a list written twice
+     *
+     * §9.1 says a bare `SI` is `affiliation_entity_unknown` and that *jamás* an entity called `SI`
+     * may be created. `judge()` below enforced the first half, in a private list, and nothing
+     * enforced the second: a reviewer could approve `create_entity` for the token `SI`, the plan
+     * created a catalogue entry for the occurrence, and the approved spelling `SI` became a
+     * **reusable global mapping**. Every later workbook whose EPS column said merely `SI` would then
+     * resolve to that one entity — which is precisely the failure §9.1 names, reached through the
+     * feature §5.5 added to make the other half work.
+     *
+     * So the classification and the mapping guard read the same answer. It is a whole-value test on
+     * the folded form, never a substring or fuzzy match: `SI` is a bare affirmative and `SI EPS` is
+     * a name that happens to start with two letters, and only one of them may be refused.
+     *
+     * Folds first, so a raw cell, an already-folded token and the value the parser judged all give
+     * the same answer. `SÍ` folds to `SI` and `S.I.` to `S I`, which is why the real file needs
+     * both spellings here.
+     */
+    public static function isBareAffirmativeEntityToken(string $value): bool
+    {
+        $folded = SheetMonth::fold($value);
+
+        return in_array($folded, ['SI', 'S', 'S I'], true);
     }
 
     /**
