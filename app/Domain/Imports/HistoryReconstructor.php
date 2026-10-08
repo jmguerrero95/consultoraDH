@@ -67,6 +67,28 @@ final class HistoryReconstructor
         // disagreeing, and `plan_digest` would cover an interval that is not the one the reviewer
         // approved.
         $episodes = $this->applyDisappearanceDecisions($episodes, $disappearances);
+
+        // ## Why the overlap list is rebuilt here, and not only below
+        //
+        // `§8.4`'s answer *creates* the overlap it did not exist before. A person with two
+        // employers whose episodes are both open raises no §8.5 question — two open episodes are
+        // refused on purpose, see `genuineOverlap()`. Answering that employer's disappearance bounds
+        // it, and a bounded episode overlapping a still-open one **is** a genuine overlap. The
+        // rebuild below already noticed: it raised the question, with the right subject, on the very
+        // next plan.
+        //
+        // But `applyOverlapDecisions()` was reading the list computed from the *pre-decision*
+        // episodes, so it saw nothing and applied nothing. The reviewer's `recognize_transfer` was
+        // accepted, the issue was marked resolved, and both relationship actions kept
+        // `overlap_resolution: none` — so A04 emitted two mutually exclusive ordinary opens and A02
+        // refused the second, rolling the whole batch back.
+        //
+        // The question was asked and answered correctly and had no effect, which is the same defect
+        // the comment above this method describes for A04-R1, one level along. Overlaps are now
+        // recomputed from the decided episodes before §8.5's answers are applied, so the decision is
+        // applied to the episodes the reviewer was actually shown.
+        $overlaps = $this->findOverlaps($episodes);
+
         $episodes = $this->applyOverlapDecisions($episodes, $overlaps);
 
         // Recomputed: a decision can create a boundary, and §8.4's "does absence look like a
@@ -221,6 +243,26 @@ final class HistoryReconstructor
                 default => null,
             };
 
+            if ($code === 'transfer' && ! $this->transferIsExecutable($overlap)) {
+                // §8.5's transfer needs a boundary it can name, and A02 closes the open relationship
+                // at the *destination's* `started_on`.
+                //
+                // When both episodes start on the same day, that date identifies nothing: A02 would
+                // close one employment on the day both began, which is the day the person was
+                // already there. There is no evidence in the file about which came first, so there
+                // is nothing to transfer from.
+                //
+                // Inventing one would be the worst outcome available: the reviewer's answer is
+                // consumed, the plan looks executable, and the closed row is given a boundary that
+                // says the employment ended before it started. So no code is written, neither episode
+                // is marked, and the batch stays unappliable until the reviewer supplies a date
+                // (`split_overlap_at`) or authorises the parallel (`authorize_parallel`) — both of
+                // which name what A02 should do instead.
+                //
+                // This is insufficient temporal evidence in A04, not a defect in A02.
+                continue;
+            }
+
             if ($code !== null) {
                 // On the **later** episode, in every case.
                 //
@@ -230,6 +272,12 @@ final class HistoryReconstructor
                 // when nothing is open. Marking the earlier episode would therefore either degrade
                 // silently or throw, and in the parallel case would fail the whole apply for a
                 // decision the reviewer got exactly right.
+                //
+                // "Later" is chronological, and `findOverlaps()` walks the episodes in start order,
+                // so `second` is the later one exactly when the starts differ — which is the only
+                // case the guard above lets a transfer through. Company tax id is the tiebreak in
+                // that sort and is never a substitute for chronology.
+                //
                 // §8.5's motive travels beside the machine code, never inside it:
                 // `ApplyImportPlan::linkResolution()` switches on the code and refuses anything
                 // else, and A02 stores the reason on its own column.
@@ -626,6 +674,26 @@ final class HistoryReconstructor
         //    that a real sequential move leaves behind is raised by `findDisappearances()`, which
         //    is the question a reviewer actually needs to answer.
         return false;
+    }
+
+    /**
+     * Can §8.5's transfer be carried out for this pair, from the evidence the file gives?
+     *
+     * `ManageClientCompanies::transferWithin()` closes the currently open relationship at the
+     * **destination's** `started_on`. That date can only mean "this employment ended when the next
+     * one began" if the two starts differ, so the pair is executable only then.
+     *
+     * Equal starts are the interesting case, not an edge: a payroll file that never carries a start
+     * date gives every block the same one, so a person at two employers is *always* a same-start
+     * pair. Refusing to guess here is what keeps the reviewer in the loop instead of letting A04
+     * close an employment on the day it began.
+     */
+    private function transferIsExecutable(CompanyOverlap $overlap): bool
+    {
+        $source = $overlap->first->interval->start?->toDateString();
+        $destination = $overlap->second->interval->start?->toDateString();
+
+        return $source !== null && $destination !== null && $source !== $destination;
     }
 
     /**

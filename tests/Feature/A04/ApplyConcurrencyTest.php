@@ -17,6 +17,7 @@ use App\Models\LegacyImportAction;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use Tests\Support\SecondConnection;
 use Tests\Support\SyntheticWorkbook;
 
@@ -609,4 +610,102 @@ it('never lets a completed apply be dragged back to review by a rebuild', functi
     // And it is not appliable a second time, which is the practical consequence.
     expect(fn () => app(ApplyImportPlan::class)->handle($after, $plan))
         ->toThrow(ImportNotApplicable::class);
+});
+
+/**
+ * R04-A03: the state decision belongs inside the lock, not before it.
+ *
+ * The endpoint checked `applied` / `applying` / `cancelled` against a model it had already loaded,
+ * then entered `ImportLifecycle::mutate()` — which takes `FOR UPDATE` — and wrote without reading the
+ * status again. Check and write were in different critical sections, so the check could not see what
+ * the write would meet:
+ *
+ *   T1  loads the import as `review`          ← the pre-read the old check decided on
+ *   T2  applies it, and the row becomes `applied`
+ *   T1  takes the lock, and writes
+ *
+ * Two plans built under different retirement rules are different plans, so the mutation rewrites
+ * `interpretation_policy` **and** withdraws the plan identity. Landing on an applied batch did both
+ * to a batch whose data was already in the masters.
+ *
+ * ## Why the transition is triggered from inside the request
+ *
+ * The window between the pre-read and the `FOR UPDATE` is real but tiny, so a test that tries to lose
+ * that race is a flake generator — and a test that passes half the time against the buggy code is
+ * worse than no test. The 400ms-timeout test above proves the *wait*; it says nothing about the
+ * *re-read*, and it is still green against the code being fixed here.
+ *
+ * A `DB::beforeExecuting` hook fires exactly as `ImportLifecycle::mutate()` is about to run
+ * `… FOR UPDATE` on `legacy_imports`, and that is where the row is made `applied`. So the sequence is
+ * fixed and reproducible with no sleep, no timeout and no second session: the pre-read has already
+ * returned `review`, and the locked read finds `applied`.
+ */
+it('re-reads the import state under the lock, so a pre-read cannot authorise a write after Apply', function () {
+    Queue::fake();
+
+    $importId = DB::table('legacy_imports')->insertGetId([
+        'uuid' => (string) Str::uuid(),
+        'profile' => 'blinden_legacy_monthly_v1',
+        'original_filename' => 'source.xlsx',
+        'stored_path' => 'imports/x/source.xlsx',
+        'sha256' => str_repeat('e', 64),
+        'file_size' => 1,
+        'status' => 'review',
+        'summary' => '{}',
+        'interpretation_policy' => 'manual_only',
+        'plan_revision' => 1,
+        'plan_digest' => str_repeat('f', 64),
+        'plan_built_at' => now(),
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    // The fixture is inserted on this connection and lives inside the test's transaction, so it is
+    // invisible to the second session and this file's `afterEach` cleanup never has to wait on it.
+    // `beforeExecuting()` has no remover, so the callback disarms itself and the list is emptied
+    // afterwards — a hook left armed would alter some later test's import.
+    $armed = true;
+
+    DB::beforeExecuting(function (string $sql) use ($importId, &$armed): void {
+        if (! $armed || ! str_contains($sql, 'legacy_imports') || ! str_contains(strtolower($sql), 'for update')) {
+            return;
+        }
+
+        $armed = false;
+
+        // `applied_at` comes with the status because `legacy_imports_applied_shape_check` holds the
+        // two together, so this is the shape a real apply leaves behind.
+        DB::table('legacy_imports')->where('id', $importId)->update([
+            'status' => 'applied',
+            'applied_at' => now(),
+            'updated_at' => now(),
+        ]);
+    });
+
+    try {
+        $response = $this->actingAs(userWithRole('Operations'))
+            ->putJson("/api/imports/{$importId}/interpretation-policy", [
+                'retirement_policy' => 'month_end_boundary',
+            ]);
+    } finally {
+        (new ReflectionProperty(DB::connection(), 'beforeExecutingCallbacks'))->setValue(DB::connection(), []);
+    }
+
+    $row = DB::table('legacy_imports')->where('id', $importId)->first();
+
+    // The row really did reach `applied` mid-request, so a 409 here is the locked re-read and not
+    // some unrelated refusal.
+    expect((string) $row->status)->toBe('applied')
+        ->and($response->status())->toBe(409)
+        // §8.2's rule is a decision about this batch, and an applied batch has none left to make.
+        ->and($row->interpretation_policy)->toBe('manual_only')
+        // The plan identity still describes the plan that was applied. Withdrawing it would leave an
+        // applied batch pointing at nothing.
+        ->and((int) $row->plan_revision)->toBe(1)
+        ->and($row->plan_digest)->not->toBeNull()
+        ->and($row->plan_built_at)->not->toBeNull();
+
+    // A refused mutation rebuilds nothing: §17.4 asks for a refresh because something changed, and
+    // nothing did.
+    Queue::assertNothingPushed();
 });

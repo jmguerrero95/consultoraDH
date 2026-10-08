@@ -536,24 +536,12 @@ final class ImportController extends Controller
             'retirement_policy' => ['required', Rule::enum(ImportRetirementPolicy::class)],
         ]);
 
-        if (in_array($import->status, [
-            LegacyImportStatus::Applied,
-            LegacyImportStatus::Applying,
-            LegacyImportStatus::Cancelled,
-        ], true)) {
-            return response()->json([
-                'message' => 'Esta importación ya no admite cambios de interpretación.',
-                'code' => 'wrong_state',
-            ], 409);
-        }
-
         // Stored in its own column rather than inside `summary`, because the rule is part of
         // what the reviewer approves: two plans built under different retirement rules are
         // different plans, and §8.2's boundary derivation depends on it. Inside a JSON blob it
         // was neither part of the plan identity nor readable by the reconstructor, which read
         // `$import->summary['retirement_policy']` — so `interpretation_policy` in the column and
         // the one the plan was built with could disagree.
-        // Written under the same lock `ResolveImportIssue` takes, and for the same reason.
         //
         // This endpoint's own comment says two plans built under different retirement rules are
         // different plans — which is an argument that the *identity* has to say so, not only the
@@ -565,23 +553,55 @@ final class ImportController extends Controller
         // So the identity is withdrawn in the same transaction that stores the rule. §5.4's
         // promise — the approval covers the plan that was shown — holds for this endpoint exactly
         // as it does for a resolution.
-        ImportLifecycle::mutate($import->id, function (ImportLifecycle $lifecycle) use ($validated): void {
-            $current = $lifecycle->import();
+        //
+        // ## Why the state test is inside the lock
+        //
+        // It used to run here, on the model `findImport()` had already loaded, and then the write
+        // happened later inside `mutate()`'s `FOR UPDATE` without the status being read again. That
+        // made the check advisory and the write authoritative, which is the shape `ImportLifecycle`
+        // exists to remove:
+        //
+        //   pre-read `review`  →  an apply wins the lock and commits `applied`  →  the write lands
+        //
+        // The mutation then rewrote `interpretation_policy` and withdrew the plan identity of a
+        // batch whose data was already in the masters — §8.2's rule reinterpreted after the fact,
+        // with the approval it belonged to no longer describing anything.
+        //
+        // `mutateWhen()` re-reads the row under the lock, so the decision is made against the state
+        // the write will actually meet. The accepted family is the one `BuildLegacyImportPlan`
+        // accepts, because changing the rule is only meaningful if a plan is then rebuilt from it:
+        // in `applying`, `applied` or `cancelled` there is no plan left to withdraw, and in
+        // `uploaded`, `queued` or `parsing` there is not yet one to invalidate.
+        $changed = ImportLifecycle::mutateWhen(
+            $import->id,
+            [LegacyImportStatus::Review, LegacyImportStatus::Ready, LegacyImportStatus::Failed],
+            function (ImportLifecycle $lifecycle) use ($validated): bool {
+                $current = $lifecycle->import();
 
-            $current->forceFill([
-                'interpretation_policy' => $validated['retirement_policy'],
-                'summary' => array_merge($current->summary ?? [], [
-                    'retirement_policy' => $validated['retirement_policy'],
-                ]),
-                // The zero state, not "clear the digest and advance the revision":
-                // `legacy_imports_plan_identity_check` holds that a revision without a plan is a
-                // revision of nothing. See `ResolveImportIssue::invalidatePlanIdentity()` for why
-                // that is also the better rule rather than merely the permitted one.
-                'plan_digest' => null,
-                'plan_revision' => 0,
-                'plan_built_at' => null,
-            ])->save();
-        });
+                $current->forceFill([
+                    'interpretation_policy' => $validated['retirement_policy'],
+                    'summary' => array_merge($current->summary ?? [], [
+                        'retirement_policy' => $validated['retirement_policy'],
+                    ]),
+                    // The zero state, not "clear the digest and advance the revision":
+                    // `legacy_imports_plan_identity_check` holds that a revision without a plan is a
+                    // revision of nothing. See `ResolveImportIssue::invalidatePlanIdentity()` for why
+                    // that is also the better rule rather than merely the permitted one.
+                    'plan_digest' => null,
+                    'plan_revision' => 0,
+                    'plan_built_at' => null,
+                ])->save();
+
+                return true;
+            },
+        );
+
+        if ($changed === null) {
+            return response()->json([
+                'message' => 'Esta importación ya no admite cambios de interpretación.',
+                'code' => 'wrong_state',
+            ], 409);
+        }
 
         // §17.4: "Persistir cada decisión; refrescar plan sin perder el resto." The plan is
         // rebuilt in the background because §10's rates and §8.2's closures both depend on it.

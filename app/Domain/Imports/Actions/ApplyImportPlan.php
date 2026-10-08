@@ -655,6 +655,23 @@ final class ApplyImportPlan
             return false;
         }
 
+        // A close is looked up by what it closes, not by a start it was never given.
+        //
+        // §9.5's close payload carries `ended_on`, `ended_on_precision`, `type` and `entity_id` —
+        // no `interval`, because a close does not re-open or re-scope anything. So
+        // `dateOrNull('interval', 'start')` was null, `where('started_on', null)` became
+        // `started_on IS NULL`, and every close reported its own target as absent. The plan's
+        // `target_exists: true` was then checked against a lookup that could not succeed, and §11's
+        // guarantee refused the batch at Apply with `precondition_failed`.
+        //
+        // The identity a close asserts is the one §9.5 states — same client, same type, same
+        // entity, still open — which is also exactly what `ImportPlanBuilder::openAffiliationMatches()`
+        // selects when it decides to emit the close. The two have to agree or the precondition
+        // contradicts the plan.
+        if ($type === ImportActionType::CloseAffiliation) {
+            return $query->whereNull('ended_on')->exists();
+        }
+
         return $query->where('started_on', $payload->dateOrNull('interval', 'start'))->exists();
     }
 

@@ -32,13 +32,16 @@ declare(strict_types=1);
  * the method works, not that the system does.
  */
 
+use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\Imports\Exceptions\InvalidIssueResolution;
+use App\Domain\Imports\HistoryReconstructor;
 use App\Domain\Imports\ImportActionState;
 use App\Domain\Imports\ImportActionType;
 use App\Domain\Imports\ImportDecisionSet;
 use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\IssueResolution;
 use App\Domain\Imports\IssueResolutionDecision;
+use App\Domain\Imports\IssueSubject;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Models\Client;
@@ -1109,5 +1112,288 @@ it('answers §10\'s rate conflict without inventing a second row for the month',
             ->where('client_id', $other->id)
             ->where('company_id', $existingCompany->id)
             ->where('effective_month', '2026-01-01')
+            ->count())->toBe(1);
+});
+
+it('closes an affiliation whose real start predates the file, without touching that start', function () {
+    // §9.5's close is the only action that can end an affiliation that an earlier import opened, and
+    // it could not find it.
+    //
+    // ## Why the start does not match, and why it must not
+    //
+    // `openAffiliationMatches()` asked for `started_on == $segment->interval->start`. That equality
+    // holds only when the workbook happens to begin at the affiliation's true beginning — which is
+    // exactly what a *periodic* payroll file does not do. A client enrolled in May 2025 and still
+    // open, first seen in a January 2026 file, has a segment starting 2026-01-01 against a database
+    // row starting 2025-05-01, and the match failed.
+    //
+    // §9.5 does not ask the file to restate the start. The file supplies evidence about the **end**
+    // boundary; the start is history this batch did not witness and is not entitled to rewrite.
+    //
+    // So there was no producer for a real and common case: the plan fell through to
+    // `create_affiliation`, A02 refused it against its own one-open-per-type invariant, and the whole
+    // batch was unappliable. The affiliation could not be closed, and could not be created either.
+    $client = existingWorkbookClient();
+    $entity = SocialSecurityEntity::factory()->create(['type' => 'EPS', 'name' => 'SALUD TOTAL']);
+    SocialSecurityEntity::factory()->create(['type' => 'EPS', 'name' => 'SURA EPS']);
+
+    $open = ClientAffiliation::factory()->create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => $entity->id,
+        'type' => SocialSecurityEntityType::Eps,
+        'started_on' => '2025-05-01',
+        'started_on_precision' => 'day',
+        'ended_on' => null,
+    ]);
+
+    // The file's first month is 2026-01, and February moves the person to a different EPS, which is
+    // §9.5's "cerrar el segmento anterior en la misma frontera". Nothing in it mentions 2025.
+    $import = reviewedImportFor((new SyntheticWorkbook)
+        ->sheetWithBlocks('ENERO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow([
+                'H' => $client->document_number,
+                'N' => 'SALUD TOTAL',
+            ])],
+        ]])
+        ->sheetWithBlocks('FEBRERO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow([
+                'H' => $client->document_number,
+                'N' => 'SURA EPS',
+            ])],
+        ]]));
+
+    // §9.5 produced a close, and produced it against the row that was already open.
+    expect(LegacyImportAction::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('action_type', ImportActionType::CloseAffiliation->value)
+        ->count())->toBe(1);
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import->fresh()))
+        ->assertOk();
+
+    $import->refresh();
+    $closed = ClientAffiliation::query()->find($open->id);
+
+    // The same row, still the same row: id unchanged, no duplicate, no replacement.
+    expect($closed)->not->toBeNull()
+        // §9.5's "no permitir dos afiliaciones abiertas del mismo tipo": the closed SALUD TOTAL and
+        // the newly opened SURA EPS are two rows, and exactly one of them is open.
+        ->and(ClientAffiliation::query()
+            ->where('client_id', $client->id)
+            ->where('type', SocialSecurityEntityType::Eps->value)
+            ->whereNull('ended_on')
+            ->count())->toBe(1)
+        // No second row was created for the entity that was closed.
+        ->and(ClientAffiliation::query()
+            ->where('client_id', $client->id)
+            ->where('social_security_entity_id', $entity->id)
+            ->count())->toBe(1)
+        // §9.5's "no reescribir historia de afiliaciones": the 2025 start this batch never observed
+        // is exactly as it was, at exactly the precision it had.
+        ->and($closed->started_on->toDateString())->toBe('2025-05-01')
+        ->and($closed->started_on_precision)->toBe('day')
+        // Only the boundary the file actually asserted: the first of the month the SURA EPS segment
+        // begins, which is §9.5's "cerrar el segmento anterior en la misma frontera".
+        ->and($closed->ended_on->toDateString())->toBe('2026-02-01')
+        ->and($closed->ended_on_precision)->toBe('month')
+        ->and($import->status)->toBe(LegacyImportStatus::Applied);
+});
+
+/**
+ * §8.4's answer bounds an episode, and §8.5's answer applies to the *bounded* one.
+ *
+ * The two decisions are taken in sequence, which is why this fixture answers a disappearance before
+ * an overlap: bounding one employer's episode is what makes it intersect the other's still-open
+ * episode, and that is the overlap the reviewer has to resolve.
+ */
+function transferredWorkbook(string $sourceDate): SyntheticWorkbook
+{
+    $source = ['title' => 'ANDINA S.A.S. NIT 900123456-3', 'people' => [
+        SyntheticWorkbook::personRow(['H' => '10101010', 'F' => $sourceDate]),
+    ]];
+
+    $destination = ['title' => 'GLOBAL S.A.S. NIT 900777888-3', 'people' => [
+        SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '25/11/2025']),
+    ]];
+
+    // February keeps only the destination, so the source is the employer that disappears — which is
+    // what makes it the employment being left.
+    return (new SyntheticWorkbook)
+        ->sheetWithBlocks('ENERO 2026', [$source, $destination])
+        ->sheetWithBlocks('FEBRERO 2026', [$destination]);
+}
+
+it('executes a transfer the file dates, and writes the closed and the opened relationship', function () {
+    // ## The defect
+    //
+    // `reconstruct()` found no overlap, because both episodes were open and two open episodes are
+    // refused on purpose. Answering §8.4 bounded GLOBAL, which **created** the overlap — and
+    // `applyOverlapDecisions()` was still reading the pre-decision list, so `recognize_transfer` was
+    // accepted, marked resolved, and applied to nothing. Both actions kept
+    // `overlap_resolution: none`, A04 emitted two mutually exclusive ordinary opens, and A02 refused
+    // the second with `domain_refused`, rolling the whole batch back.
+    //
+    // The reviewer had answered correctly and the system reported success.
+    $import = stagedImport(userWithRole('Operations'), transferredWorkbook('25/01/2025'));
+
+    $planned = plannedImport($import);
+
+    $disappearance = $planned->issues()
+        ->where('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value)
+        ->firstOrFail();
+
+    $planned = answerAndReadBack($planned, $disappearance, IssueResolutionDecision::CloseOnDisappearance->value, [
+        'date' => '2026-02-01',
+        'precision' => 'month',
+    ]);
+
+    // The overlap only exists now, because bounding GLOBAL made it intersect ANDINA.
+    $overlap = $planned->issues()
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('resolved_at')
+        ->firstOrFail();
+
+    $planned = answerAndReadBack($planned, $overlap, IssueResolutionDecision::RecognizeTransfer->value);
+
+    // Step 1 — the decision really is stored, under the canonical subject.
+    $stored = LegacyImportIssueModel::query()->find($overlap->id);
+
+    expect($stored->resolved_at)->not->toBeNull()
+        ->and($stored->resolution['decision'])->toBe(IssueResolutionDecision::RecognizeTransfer->value)
+        ->and(IssueSubject::subjectFrom($stored->context))
+        ->toBe(overlapSubject($planned));
+
+    // Step 2 — and the decision set can read that exact subject.
+    expect(ImportDecisionSet::for($planned->fresh())->overlapDecisionFor(overlapSubject($planned)))
+        ->toBe(IssueResolutionDecision::RecognizeTransfer);
+
+    // Step 4 — exactly one episode carries the code, and it is the one being entered.
+    $carrying = [];
+
+    foreach (LegacyImportAction::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('action_type', ImportActionType::CreateRelationship->value)
+        ->get() as $action) {
+        if (($action->payload['overlap_resolution'] ?? 'none') !== 'none') {
+            $carrying[$action->payload['company_tax_id']] = $action->payload['overlap_resolution'];
+        }
+    }
+
+    expect($carrying)->toBe(['900777888' => 'transfer'], 'the destination is the episode A02 opens');
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$planned->id}/apply", planConfirmation($planned))
+        ->assertOk();
+
+    $planned->refresh();
+    $client = Client::query()->where('document_number', '10101010')->firstOrFail();
+
+    $byCompany = ClientCompanyAssignment::query()
+        ->where('client_id', $client->id)
+        ->get()
+        ->keyBy(fn (ClientCompanyAssignment $row) => (string) $row->company->tax_id);
+
+    // The source keeps the boundary §8.4's answer derived — 2026-02-01 at month precision, the last
+    // month the file asserts it — rather than being closed at the destination's `started_on`. That is
+    // the reviewer's boundary surviving all the way into the masters, which is what the transfer
+    // bought: the destination is now the open employment, and the source is history at the date the
+    // file gave.
+    expect($planned->status)->toBe(LegacyImportStatus::Applied)
+        ->and($byCompany)->toHaveKeys(['900123456', '900777888'])
+        ->and($byCompany['900123456']->ended_on?->toDateString())->toBe('2026-02-01')
+        ->and($byCompany['900123456']->ended_on_precision)->toBe('month')
+        // Still open: the transfer opened it and nothing closed it afterwards.
+        ->and($byCompany['900777888']->ended_on)->toBeNull()
+        ->and($byCompany['900777888']->started_on->toDateString())->toBe('2025-11-25')
+        // §9.1's invariant holds without a parallel having been authorised.
+        ->and(ClientCompanyAssignment::query()
+            ->where('client_id', $client->id)
+            ->whereNull('ended_on')
+            ->count())->toBe(1);
+});
+
+/** The subject the rebuild raised for the surviving overlap, read from the database. */
+function overlapSubject(LegacyImport $import): string
+{
+    $issue = LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->orderByDesc('id')
+        ->firstOrFail();
+
+    return IssueSubject::subjectFrom($issue->context);
+}
+
+it('refuses to invent a transfer boundary when both episodes start on the same day', function () {
+    // A payroll file that carries no start date gives every block the same one, so a person at two
+    // employers is *always* a same-start pair. A02 closes a transfer at the destination's
+    // `started_on`, and here that date is the day both employments began — closing one on the day it
+    // started. There is no evidence about which came first, so there is nothing to transfer from.
+    //
+    // The rule is that A04 does not guess: no episode is marked, and no date is manufactured to
+    // justify one. What the batch is then allowed to do is decided by A02 against rows that already
+    // exist — which is the honest division of labour: A04 supplies only boundaries the evidence
+    // supports, and A02 still refuses anything that would put a person in two open employments.
+    $import = stagedImport(userWithRole('Operations'), transferredWorkbook('25/11/2025'));
+
+    $planned = plannedImport($import);
+
+    $disappearance = $planned->issues()
+        ->where('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value)
+        ->firstOrFail();
+
+    $planned = answerAndReadBack($planned, $disappearance, IssueResolutionDecision::CloseOnDisappearance->value, [
+        'date' => '2026-02-01',
+        'precision' => 'month',
+    ]);
+
+    $overlap = $planned->issues()
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('resolved_at')
+        ->firstOrFail();
+
+    $planned = answerAndReadBack($planned, $overlap, IssueResolutionDecision::RecognizeTransfer->value);
+
+    $marked = [];
+
+    foreach (LegacyImportAction::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('action_type', ImportActionType::CreateRelationship->value)
+        ->get() as $action) {
+        $marked[$action->payload['company_tax_id']] = $action->payload['overlap_resolution'] ?? 'none';
+    }
+
+    // Neither episode was marked, so nothing claims to be a transfer.
+    expect($marked)->toBe(['900123456' => 'none', '900777888' => 'none']);
+
+    // And the batch is refused rather than written two incompatible opens.
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$planned->id}/apply", planConfirmation($planned))
+        ->assertOk();
+
+    $planned->refresh();
+    $client = Client::query()->where('document_number', '10101010')->firstOrFail();
+
+    $byCompany = ClientCompanyAssignment::query()
+        ->where('client_id', $client->id)
+        ->get()
+        ->keyBy(fn (ClientCompanyAssignment $row) => (string) $row->company->tax_id);
+
+    // The batch is applicable, and that is not the same as a transfer having been fabricated.
+    //
+    // §8.4's answer already closed the source at the boundary the reviewer derived, so when A02 opens
+    // the second employer there is nothing open to conflict with. The final state is the correct one
+    // for this file, and it is reached **without** A04 claiming a transfer it cannot justify — which
+    // is the whole claim. Had the guard let `recognize_transfer` through, A02 would have closed the
+    // source at 2025-11-25, the day both employments began, replacing the reviewer's boundary.
+    expect($planned->status)->toBe(LegacyImportStatus::Applied)
+        ->and($byCompany['900123456']->ended_on?->toDateString())->toBe('2026-02-01')
+        ->and($byCompany['900777888']->ended_on)->toBeNull()
+        ->and(ClientCompanyAssignment::query()
+            ->where('client_id', $client->id)
+            ->whereNull('ended_on')
             ->count())->toBe(1);
 });

@@ -2108,6 +2108,28 @@ final class ImportPlanBuilder
      * different provider is a different row, and closing it is `closesPreviousSegment()`'s job at
      * the next segment's start.
      */
+    /**
+     * Is there an **open** affiliation of this type, to this entity, for this client?
+     *
+     * ## Why this does not compare `started_on`
+     *
+     * It used to: `started_on = $segment->interval->start`. That equality holds only when the
+     * workbook happens to begin where the affiliation began, which is the one thing a periodic
+     * payroll file cannot promise. Someone enrolled in May 2025 and still open, first observed in a
+     * January 2026 file, has a segment starting 2026-01-01 against a row starting 2025-05-01 — and
+     * §9.5's close found nothing to close.
+     *
+     * §9.5 asks the *file* for the end boundary and says nothing about the start. The start is
+     * history this batch did not witness, so requiring the file to restate it is requiring the one
+     * thing it does not contain; and dropping it is not a licence to rewrite, because the payload
+     * this predicate guards carries `ended_on` and `ended_on_precision` only. `writeAffiliationClose()`
+     * never receives a start to write.
+     *
+     * So the identity that matters for a close is the one that makes the row *the same coverage*:
+     * client, type, and the entity/provider for the segment being closed, and still open. That is
+     * also what §9.5's "no permitir dos afiliaciones abiertas del mismo tipo" is about, so matching
+     * this way cannot pair a close with an unrelated affiliation.
+     */
     private function openAffiliationMatches(AffiliationSegment $segment, int $entityId): bool
     {
         $client = $this->clientRow($segment->documentType, $segment->documentNumber);
@@ -2120,7 +2142,6 @@ final class ImportPlanBuilder
             ->where('client_id', $client->id)
             ->where('social_security_entity_id', $entityId)
             ->where('type', $segment->type->value)
-            ->where('started_on', $segment->interval->start?->toDateString())
             ->whereNull('ended_on')
             ->exists();
     }
