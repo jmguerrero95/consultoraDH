@@ -1366,34 +1366,42 @@ it('refuses to invent a transfer boundary when both episodes start on the same d
         $marked[$action->payload['company_tax_id']] = $action->payload['overlap_resolution'] ?? 'none';
     }
 
-    // Neither episode was marked, so nothing claims to be a transfer.
+    // No episode was marked. The answer was not turned into a parallel and no date was invented.
     expect($marked)->toBe(['900123456' => 'none', '900777888' => 'none']);
 
-    // And the batch is refused rather than written two incompatible opens.
-    $this->actingAs($this->user)
-        ->postJson("/api/imports/{$planned->id}/apply", planConfirmation($planned))
-        ->assertOk();
+    // And it does not count as having settled the question either.
+    //
+    // §8.5 wants a real overlap to carry one of three explicit meanings. A transfer that cannot be
+    // executed is none of them, so leaving the finding "resolved" made the batch applicable on an
+    // answer that meant nothing — two ordinary opens with no authorised parallel behind them.
+    // The question goes back, and the reviewer's record of answering it is kept rather than erased.
+    $reopened = LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('superseded_at')
+        ->firstOrFail();
+
+    expect($reopened->resolved_at)->toBeNull('§8.5 needs a boundary, a transfer or an authorised parallel')
+        ->and($reopened->isBlocking())->toBeTrue();
+
+    // §4.1's history is kept rather than erased: the answer is still on file, on a superseded row.
+    $answered = LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $planned->id)
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNotNull('superseded_at')
+        ->firstOrFail();
+
+    expect($answered->resolved_at)->not->toBeNull()
+        ->and($answered->resolution['decision'])->toBe(IssueResolutionDecision::RecognizeTransfer->value);
 
     $planned->refresh();
-    $client = Client::query()->where('document_number', '10101010')->firstOrFail();
 
-    $byCompany = ClientCompanyAssignment::query()
-        ->where('client_id', $client->id)
-        ->get()
-        ->keyBy(fn (ClientCompanyAssignment $row) => (string) $row->company->tax_id);
+    expect($planned->status)->toBe(LegacyImportStatus::Review);
 
-    // The batch is applicable, and that is not the same as a transfer having been fabricated.
-    //
-    // §8.4's answer already closed the source at the boundary the reviewer derived, so when A02 opens
-    // the second employer there is nothing open to conflict with. The final state is the correct one
-    // for this file, and it is reached **without** A04 claiming a transfer it cannot justify — which
-    // is the whole claim. Had the guard let `recognize_transfer` through, A02 would have closed the
-    // source at 2025-11-25, the day both employments began, replacing the reviewer's boundary.
-    expect($planned->status)->toBe(LegacyImportStatus::Applied)
-        ->and($byCompany['900123456']->ended_on?->toDateString())->toBe('2026-02-01')
-        ->and($byCompany['900777888']->ended_on)->toBeNull()
-        ->and(ClientCompanyAssignment::query()
-            ->where('client_id', $client->id)
-            ->whereNull('ended_on')
-            ->count())->toBe(1);
+    // §17.5: the count of unresolved blockers is the only thing that enables Apply.
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$planned->id}/apply", planConfirmation($planned))
+        ->assertStatus(409);
+
+    expect(ClientCompanyAssignment::query()->exists())->toBeFalse();
 });

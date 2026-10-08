@@ -20,6 +20,7 @@ use App\Domain\Imports\ImportPlanBuilder;
 use App\Domain\Imports\ImportPlanIdentity;
 use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\ImportRowState;
+use App\Domain\Imports\IssueResolutionDecision;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\LegacyIssueSeverity;
@@ -832,6 +833,66 @@ final class BuildLegacyImportPlan implements ShouldQueue
             // impersonated a human resolution on a row nobody approved and collided with the
             // unique index it was trying to satisfy.
             if ($current !== null) {
+                // A `recognize_transfer` that cannot be carried out does not answer the question.
+                //
+                // §8.5 asks a reviewer to give a real overlap one of three explicit meanings: a
+                // corrected boundary, an executable transfer, or an authorised parallel. When two
+                // episodes start on the same day there is no chronology saying which employment was
+                // left, so A02's transfer — which closes the open relationship at the destination's
+                // `started_on` — cannot be pointed at anything. `HistoryReconstructor` then marks no
+                // episode, and the plan comes back with `overlap_resolution: none`.
+                //
+                // That left the batch applicable on an answer that meant nothing: two ordinary opens,
+                // no reviewer-authorised parallel behind them, and Apply free to write them. The
+                // question has to go back, or an answer that was accepted is indistinguishable from
+                // one that was honoured.
+                //
+                // `resolved_at` is cleared so the finding is open again; the `resolution` JSON is
+                // **kept**, because §4.1's record of what a person answered is history and this is
+                // not the place to erase it. What changes is that the answer no longer counts as
+                // having settled the question.
+                if ($this->transferAnswerIsUnusable($current)) {
+                    // Supersede, do not rewrite. §4.1's record of the answer stays intact, and
+                    // `legacy_import_issues_resolution_check` requires it to: `resolved_at` and
+                    // `resolution` are only valid together, so "open again" cannot mean "clear the
+                    // resolution".
+                    //
+                    // The question is then re-raised under its own fingerprint, because the unique
+                    // index is over `(legacy_import_id, fingerprint)` and the finding is the same
+                    // overlap. Two rows for one overlap is honest here: the first says a person
+                    // answered, the second says the answer did not settle it.
+                    $current->forceFill([
+                        'blocking' => false,
+                        'severity' => LegacyIssueSeverity::Info->value,
+                        'superseded_at' => now(),
+                        'message' => 'La respuesta «reconocer transferencia» no pudo aplicarse: '
+                            .'ambos episodios empiezan el mismo día, así que no hay una fuente y un '
+                            .'destino que los distingan.',
+                    ])->save();
+
+                    unset($onFile[$fingerprint]);
+
+                    LegacyImportIssueModel::query()->create([
+                        'legacy_import_id' => $import->id,
+                        'row_id' => null,
+                        'code' => $issue->code->value,
+                        'severity' => $issue->severity->value,
+                        'blocking' => true,
+                        'field' => $issue->field(),
+                        'message' => 'Este solapamiento sigue sin resolver. Se pidió reconocer una '
+                            .'transferencia, pero ambos episodios empiezan el mismo día y no hay una '
+                            .'fuente y un destino que los distingan. Indique la fecha de corte o '
+                            .'autorice un paralelo.',
+                        'context' => $issue->context(),
+                        // `char(64)`, so the distinction has to live inside the hash rather than in
+                        // front of it. The suffix is stable: the same overlap always re-raises onto
+                        // the same row instead of accumulating one per rebuild.
+                        'fingerprint' => hash('sha256', $fingerprint.'|transfer-not-executable'),
+                    ]);
+
+                    continue;
+                }
+
                 $current->forceFill([
                     'message' => $issue->message,
                     'severity' => $issue->severity->value,
@@ -884,6 +945,29 @@ final class BuildLegacyImportPlan implements ShouldQueue
             ->whereNull('superseded_at')
             ->get()
             ->all();
+    }
+
+    /**
+     * Is this finding's stored answer a transfer the evidence cannot support?
+     *
+     * Reads only what is already on the issue: the decision a person chose, and the two episode
+     * starts `IssueSubject::overlap()` records. No reconstruction and no A02 call, so this cannot
+     * drift from the rule `HistoryReconstructor::transferIsExecutable()` applies — the two answer
+     * the same question about the same two dates.
+     */
+    private function transferAnswerIsUnusable(LegacyImportIssueModel $issue): bool
+    {
+        $resolution = is_array($issue->resolution) ? $issue->resolution : [];
+        $context = is_array($issue->context) ? $issue->context : [];
+
+        if (($resolution['decision'] ?? null) !== IssueResolutionDecision::RecognizeTransfer->value) {
+            return false;
+        }
+
+        $source = $context['start_a'] ?? null;
+        $destination = $context['start_b'] ?? null;
+
+        return ! is_string($source) || ! is_string($destination) || $source === $destination;
     }
 
     public function failed(?\Throwable $exception): void
