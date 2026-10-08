@@ -1444,13 +1444,6 @@ it('re-raises the unusable transfer blocker once, and lets the replacement answe
     // Step 3 — one active retry blocker after the first rebuild.
     expect($activeRetries())->toBe(1);
 
-    // Step 4 — and exactly one after another, with no unique violation and nothing accumulating.
-    $planned = plannedImport($planned->fresh());
-
-    expect($activeRetries())->toBe(1)
-        ->and($planned->status)->toBe(LegacyImportStatus::Review);
-
-    // Step 5 — the operator answers the question that is actually open.
     $retry = LegacyImportIssueModel::query()
         ->where('legacy_import_id', $planned->id)
         ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
@@ -1458,6 +1451,40 @@ it('re-raises the unusable transfer blocker once, and lets the replacement answe
         ->whereNull('resolved_at')
         ->firstOrFail();
 
+    // A — the retry does not offer the answer it exists because of.
+    //
+    // `recognize_transfer` was tried and the evidence cannot support it. Offering it again walks a
+    // person through a second identical round trip to the same refusal, so the marker in the
+    // context removes it — from the dialog *and* from the validator.
+    $offered = collect($this->actingAs($this->user)
+        ->getJson("/api/imports/{$planned->id}/issues?code=".LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->assertOk()
+        ->json('data'))
+        ->firstWhere('is_resolved', false);
+
+    expect(collect($offered['allowed_decisions'])->pluck('value')->all())
+        ->not->toContain(IssueResolutionDecision::RecognizeTransfer->value)
+        ->toContain(IssueResolutionDecision::SplitOverlapAt->value)
+        ->toContain(IssueResolutionDecision::AuthorizeParallel->value);
+
+    // B — and a crafted request is refused, not merely hidden.
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$planned->id}/issues/{$retry->id}/resolve", [
+            'resolution' => ['decision' => IssueResolutionDecision::RecognizeTransfer->value, 'value' => []],
+        ])
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'decision_not_allowed');
+
+    expect($retry->refresh()->resolved_at)->toBeNull()
+        ->and($retry->isBlocking())->toBeTrue();
+
+    // Step 4 — and exactly one after another, with no unique violation and nothing accumulating.
+    $planned = plannedImport($planned->fresh());
+
+    expect($activeRetries())->toBe(1)
+        ->and($planned->status)->toBe(LegacyImportStatus::Review);
+
+    // Step 5 — the operator answers the question that is actually open.
     $planned = answerAndReadBack($planned, $retry, IssueResolutionDecision::SplitOverlapAt->value, [
         'boundary' => '2026-02-01',
         'precision' => 'month',
@@ -1480,6 +1507,12 @@ it('re-raises the unusable transfer blocker once, and lets the replacement answe
         ->firstOrFail();
 
     expect($history->resolved_at)->not->toBeNull();
+
+    // The superseded answer contributes nothing, so the decision set reads the replacement and not
+    // the row it replaced. Both rows share the canonical subject; without the predicate, which one
+    // landed in `$intervals[$key]` last was left to the query.
+    expect(ImportDecisionSet::for($planned->fresh())->overlapDecisionFor(IssueSubject::subjectFrom($history->context)))
+        ->toBe(IssueResolutionDecision::SplitOverlapAt);
 
     $planned->refresh();
 

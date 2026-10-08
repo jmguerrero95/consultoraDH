@@ -145,7 +145,12 @@ final class ResolveImportIssue
 
             $issue->refresh();
 
-            $resolution = IssueResolution::make($issue->code, $payload['decision'] ?? null, $payload['value'] ?? null);
+            $resolution = IssueResolution::make(
+                $issue->code,
+                $payload['decision'] ?? null,
+                $payload['value'] ?? null,
+                is_array($issue->context) ? $issue->context : [],
+            );
 
             $this->assertApplicable($import, $issue, $resolution);
 

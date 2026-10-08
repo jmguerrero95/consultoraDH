@@ -379,10 +379,40 @@ enum IssueResolutionDecision: string
         };
     }
 
-    /** Whether this answer may be recorded for the given code at all. */
-    public function accepts(LegacyImportIssue $issue): bool
+    /**
+     * Whether this answer may be recorded for the given code at all.
+     *
+     * `$context` is the finding's own context, and it only ever *removes* an answer. The ordinary
+     * whitelist is per code and stays per code; a question that was re-raised because its previous
+     * answer was refused is not that question any more.
+     */
+    public function accepts(LegacyImportIssue $issue, array $context = []): bool
     {
-        return in_array($issue, $this->allowedFor(), true);
+        if (! in_array($issue, $this->allowedFor(), true)) {
+            return false;
+        }
+
+        return ! self::isRefusedByRetryReason($this, $context);
+    }
+
+    /**
+     * Does this finding's context refuse this answer?
+     *
+     * `transfer_not_executable` marks an overlap that was re-raised because
+     * `recognize_transfer` was tried and the evidence cannot support it: two episodes start on the
+     * same day, so A02's transfer — which closes the open relationship at the destination's
+     * `started_on` — has nothing to point at. Offering the same answer again would walk a person
+     * through a second identical round trip to reach the same refusal, so the retry offers only the
+     * two answers that can actually settle it: a corrected boundary, or an authorised parallel.
+     *
+     * An ordinary `overlapping_company_history` has no marker and is unaffected.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    public static function isRefusedByRetryReason(self $decision, array $context): bool
+    {
+        return ($context['retry_reason'] ?? null) === 'transfer_not_executable'
+            && $decision === self::RecognizeTransfer;
     }
 
     /**

@@ -95,6 +95,29 @@ final class ImportDecisionSet
             // the same canonical subject, so whichever the query happened to return last won, and a
             // reviewer's `split_overlap_at` could be silently overridden by the `recognize_transfer`
             // it replaced.
+            //
+            // Enforced in SQL rather than by an `ORDER BY`, because which of the two rows lands in
+            // `$intervals[$key]` last is not something to leave to the plan: the passing test relied
+            // on insertion order and nothing else. A superseded answer contributes nothing.
+            //
+            // ## Why §8.4 is the exception
+            //
+            // The two questions are superseded for opposite reasons, and only one of them has been
+            // acted on.
+            //
+            // A §8.4 question is superseded *because its answer was applied* — bounding the episode
+            // is exactly what makes the disappearance stop being a question. Dropping its row here
+            // un-bounds the episode, the overlap that answer was needed for never appears, and the
+            // retry below is never raised. The decision has to stay readable after the question it
+            // answered is gone.
+            //
+            // A §8.5 transfer is superseded *because its answer was refused as unusable* — nothing
+            // consumed it. That one must never be read, or it keeps deciding alongside the answer
+            // that replaced it.
+            ->where(function ($query) {
+                $query->whereNull('superseded_at')
+                    ->orWhere('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value);
+            })
             ->get();
 
         $cells = [];

@@ -895,7 +895,12 @@ final class BuildLegacyImportPlan implements ShouldQueue
                             'blocking' => true,
                             'field' => $issue->field(),
                             'message' => self::UNUSABLE_TRANSFER_MESSAGE,
-                            'context' => $issue->context(),
+                            // The marker is what stops this question from offering the answer it
+                            // exists because of. `IssueSubject` is untouched, so the subject stays
+                            // canonical and a boundary the reviewer supplies is still found.
+                            'context' => array_merge($issue->context(), [
+                                'retry_reason' => 'transfer_not_executable',
+                            ]),
                             'fingerprint' => $retryFingerprint,
                         ]);
                     } elseif ($retry->resolved_at === null) {

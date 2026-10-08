@@ -402,7 +402,10 @@ final class ImportController extends Controller
                 // §17.4 renders one dialog per code from this list. It is the *backend's*
                 // whitelist — the browser's copy exists for convenience and a crafted request
                 // that bypasses it is refused by `IssueResolution::make()`.
-                'allowed_decisions' => $this->decisionsFor($issue->code),
+                'allowed_decisions' => $this->decisionsFor(
+                    $issue->code,
+                    is_array($issue->context) ? $issue->context : [],
+                ),
             ])->all(),
             'meta' => [
                 'current_page' => $issues->currentPage(),
@@ -418,7 +421,7 @@ final class ImportController extends Controller
      *
      * @return list<array{value: string, label: string, value_schema: array<string, string>, resolves: bool}>
      */
-    private function decisionsFor(LegacyImportIssueCode $code): array
+    private function decisionsFor(LegacyImportIssueCode $code, array $context = []): array
     {
         return array_values(array_map(
             static fn (IssueResolutionDecision $decision): array => [
@@ -445,7 +448,7 @@ final class ImportController extends Controller
             // and the browser still shows the question.
             array_values(array_filter(
                 IssueResolutionDecision::cases(),
-                static fn (IssueResolutionDecision $decision): bool => $decision->accepts($code),
+                static fn (IssueResolutionDecision $decision): bool => $decision->accepts($code, $context),
             )),
         ));
     }

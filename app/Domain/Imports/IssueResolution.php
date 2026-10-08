@@ -88,7 +88,7 @@ final readonly class IssueResolution
      *
      * @throws InvalidIssueResolution
      */
-    public static function make(LegacyImportIssue $issue, mixed $decision, mixed $value): self
+    public static function make(LegacyImportIssue $issue, mixed $decision, mixed $value, array $context = []): self
     {
         if (! is_string($decision) || $decision === '') {
             throw InvalidIssueResolution::missingDecision();
@@ -100,7 +100,7 @@ final readonly class IssueResolution
             throw InvalidIssueResolution::unknownDecision($decision);
         }
 
-        if (! $resolved->accepts($issue)) {
+        if (! $resolved->accepts($issue, $context)) {
             throw InvalidIssueResolution::decisionNotAllowed($issue, $resolved);
         }
 
