@@ -244,90 +244,67 @@ de remediación.
 
 Detalle en [docs/TASKS/A04.md](TASKS/A04.md).
 
+### A05 — Operación integrada, portal y reportería — **entregada**
+
+Alcance fusionado de los antiguos A05, A06, A07, A08 y A11. Entrega el ciclo
+operacional completo alrededor de un cliente existente: planilla mensual con
+participantes generados desde la topología histórica de A02, validación de servidor,
+comprobantes privados y descargas internas; novedades y tareas como conceptos
+distintos, con recordatorios que se despachan de verdad; documentos con catálogo,
+retención congelada al subir y solicitudes con ciclo completo; portal de cliente con
+propiedad en lugar de permisos; y cinco reportes cerrados con PDF, CSV, XLSX,
+programación de ejecuciones y artefactos privados.
+
+Entregado: 21 permisos nuevos (`planillas.*`, `novelties.*`, `tasks.*`,
+`documents.*`, `portal_accounts.manage`, `client_update_requests.*`, `reports.*`),
+rol `Client` sin ningún permiso administrativo, 14 migraciones, un servicio
+`scheduler` en la misma imagen y un único paquete nuevo (`dompdf/dompdf`).
+
+**No está aprobada externamente.** Estado: entregada, auditoría externa pendiente.
+
+Detalle en [TASKS/A05.md](TASKS/A05.md) y contrato en
+[TASKS/A05-SPEC.md](TASKS/A05-SPEC.md).
+
+---
+
+---
+
 ## Tareas pendientes
 
-### A05 — Planillas y validación operativa — **bloqueada**
+La numeración antigua A05–A15 queda sustituida por tres macro hitos. La correspondencia
+con el alcance anterior es:
 
-> **No se empieza hasta que A04 tenga aprobación externa.** Las remediaciones de
-> A04-R1 y A04-R2 están verificadas localmente; eso no es una aprobación. A05
-> ampliaría la superficie sobre código que acaba de cambiar de forma sustancial.
+```
+A05 + A06 + A07 + A08 + A11  ->  nuevo A05   (entregado)
+A09 + A10 + A12              ->  nuevo A06
+A13 + A14 + A15              ->  nuevo A07
+```
 
-Alcance: generación de planillas, liquidación de aportes, validación de
-consistencias y descarga.
+Ningún alcance se elimina: se reagrupa. El motivo es la velocidad de ejecución y la
+calidad de integración: las cinco áreas del nuevo A05 comparten clientes, empresas,
+periodos, cartera, permisos, archivos e interfaz, así que implementarlas una vez como
+una capa operativa coherente es mejor que cinco proyectos pequeños con cinco rondas de
+auditoría sobre el mismo terreno.
 
-Prepara: generación de archivos y, en su momento, el servicio de PDF.
+### A06 — Soporte, correo, Telegram y automatización general
 
-### A06 — Novedades, tareas, recordatorios y calendario
+Alcance de los antiguos A09, A10 y A12: centro de soporte con conversación en tiempo
+real, correo entrante y responded, canal de avisos por Telegram, y motor general de
+automatizaciones por evento y por fecha.
 
-Alcance: novedades operativas, tareas con responsable y vencimiento,
-recordatorios y vista de calendario.
+Prepara: notificaciones internas y cola, que A05 ya dejó en pie.
 
-Prepara: notificaciones internas y, más adelante, el canal de Telegram.
+**Bloqueada** hasta la auditoría externa de A05.
 
-### A07 — Documentos y solicitudes de documentos
+### A07 — IA en la nube, MCP/OpenCode y endurecimiento final
 
-Alcance: carga, organización y revisión de documentos; solicitud de documentos
-al cliente.
-
-Prepara: almacenamiento de archivos, antivirus y políticas de retención.
-
-### A08 — Portal de clientes
-
-Alcance: acceso del cliente a su propia información, sus obligaciones y su
-estado de cuenta.
-
-Prepara: modelo de autorización por recurso (un cliente sólo ve lo suyo).
-
-### A09 — Centro de soporte y correo bidireccional
-
-Alcance: conversaciones con clientes, bandeja compartida, plantillas de
-respuesta y recepción de correo.
-
-Prepara: `MAIL_MAILER` real, procesamiento de correo entrante y encolado de
-mensajes.
-
-### A10 — Avisos al administrador por Telegram
-
-Alcance: notificaciones de eventos relevantes a un canal privado.
-
-Prepara: credenciales de Telegram, gestionadas como secretos.
-
-### A11 — Reportes, PDF y exportaciones
-
-Alcance: reportes en PDF, exportaciones a Excel, reportería dinámica y
-programación de envíos.
-
-Prepara: trabajo en cola, plantillas de PDF y filtros reutilizables.
-
-### A12 — Motor de automatizaciones
-
-Alcance: reglas disparadas por eventos y por fecha (recordatorios,
-vencimientos, cierres de periodo).
-
-Prepara: registro de eventos ya existente en A01 y un evaluador de
-condiciones.
-
-### A13 — Asistente de IA en la nube
-
-Alcance: asistente para consultas y sugerencias, con la información del
-cliente como contexto.
-
-Prepara: elección del proveedor y gestión de claves fuera del código.
-
-### A14 — Integración por MCP y OpenCode
-
-Alcance: exponer operaciones de Consultora DH como herramientas para
-asistentes de programación.
-
-Prepara: tabla de tokens de acceso personal de Sanctum, que A01 no crea por no
-tener uso.
-
-### A15 — Endurecimiento de seguridad, rendimiento y preparación de producción
-
-Alcance: revisión de seguridad externa, pruebas de carga, ajustes de
-rendimiento, backups y procedimiento de despliegue.
+Alcance de los antiguos A13, A14 y A15: asistente de IA en la nube, integración por
+MCP y OpenCode, y el endurecimiento final que incluye auditoría de seguridad externa,
+pruebas de carga, backups y despliegue de producción.
 
 Prepara: el resto del sistema.
+
+**Bloqueada** hasta la auditoría externa de A06.
 
 ---
 

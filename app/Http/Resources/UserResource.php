@@ -37,6 +37,13 @@ final class UserResource extends JsonResource
             'permissions' => $this->getAllPermissions()->pluck('name')->all(),
             'last_login_at' => $this->last_login_at?->toIso8601String(),
             'email_verified_at' => $this->email_verified_at?->toIso8601String(),
+
+            // §13 / §41: the interface has to know which of the two areas this account
+            // belongs to so it can send a client to `/portal` and a colleague to the
+            // administrative one. Presentation only — the server decides what each
+            // account may read on every request regardless of what is claimed here.
+            'account_type' => $this->account_type,
+            'client_id' => $this->client_id === null ? null : (int) $this->client_id,
         ];
     }
 }

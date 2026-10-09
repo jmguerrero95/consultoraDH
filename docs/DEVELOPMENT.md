@@ -178,6 +178,24 @@ docker compose exec -e DB_DATABASE=a02_check app php artisan migrate:rollback --
 docker compose exec postgres psql -U postgres -c 'DROP DATABASE a02_check'
 ```
 
+### 6-bis. La cuenta de portal (A05)
+
+Una cuenta de portal se crea desde la ficha del cliente, por alguien con
+`portal_accounts.manage`. No existe auto-registro público.
+
+```bash
+# Crear la cuenta de un cliente concreto
+curl -X POST /api/clients/{id}/portal-account \
+  -d 'name=...&email=...&password=...&password_confirmation=...'
+
+# Desactivarla (deja de funcionar la sesión abierta)
+curl -X POST /api/users/{id}/portal-account/deactivate
+```
+
+Dos reglas que conviene nosaltarse: la contraseña la fija una persona autorizada, no
+se genera ni se muestra en claro; y un correo interno que coincida con el de un
+cliente **no** crea una cuenta de portal — el vínculo es explícito.
+
 ## 7. Cuentas de administrador
 
 ```bash
@@ -487,6 +505,41 @@ repositorio: uno que una prueba fallida deje junto a las fuentes es exactamente 
 
 Los conteos que el verificador compara están escritos en el propio script, no derivados de
 la ejecución: un fingerprint que recalcula su propia expectativa no comprueba nada.
+
+## 10-bis. Planificador
+
+A05 añade un servicio `scheduler` que corre `php artisan schedule:work` con la misma
+imagen de la aplicación. No hay cron en el host.
+
+```bash
+docker compose up -d scheduler                     # arrancar el servicio
+docker compose logs -f scheduler                   # ver qué ejecuta
+docker compose exec app php artisan schedule:list  # ver las dos tareas registradas
+```
+
+Las dos tareas registradas:
+
+```
+*/5 * * * *  operations:dispatch-reminders
+*   * * * *  reports:run-schedules
+```
+
+Se pueden ejecutar a mano, que es la forma de probar recordatorios sin esperar al
+reloj:
+
+```bash
+docker compose exec app php artisan operations:dispatch-reminders
+docker compose exec app php artisan reports:run-schedules
+```
+
+Ambas son **idempotentes**. La primera reclama cada tarea vencida con
+`lockForUpdate` y escribe `reminder_sent_at` en la misma transacción, así que dos
+ejecuciones solapadas no envían dos veces. La segunda avanza `next_run_at` bajo
+bloqueo y lleva una clave de ocurrencia única sobre el artefacto, de modo que un
+reintento tras un fallo no duplica un reporte ya generado.
+
+Para probar un recordatorio en pruebas, se fija `reminder_at` en el pasado y se llama
+al despachador directamente; no hace falta esperar al reloj.
 
 ## 11. Registros (bitácora)
 

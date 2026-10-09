@@ -2,11 +2,16 @@
 
 declare(strict_types=1);
 
+use App\Domain\Documents\Actions\DocumentNotApplicable;
 use App\Domain\Imports\Actions\ImportNotApplicable;
 use App\Domain\Imports\Exceptions\ImportApplyFailed;
 use App\Domain\Imports\Exceptions\InvalidIssueResolution;
 use App\Domain\Imports\Exceptions\UnusableImportAction;
 use App\Domain\Imports\WorkbookRejected;
+use App\Domain\Operations\OperationNotApplicable;
+use App\Domain\Planillas\SheetNotApplicable;
+use App\Domain\Reports\Exceptions\UnknownReportFormat;
+use App\Domain\Reports\Exceptions\UnknownReportType;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\RequireAnyAbility;
 use App\Http\Middleware\SecurityHeaders;
@@ -39,6 +44,17 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    ->withSchedule(function (Illuminate\Console\Scheduling\Schedule $schedule): void {
+        $schedule->command('operations:dispatch-reminders')
+            ->everyFiveMinutes()
+            ->withoutOverlapping()
+            ->onOneServer();
+
+        $schedule->command('reports:run-schedules')
+            ->everyMinute()
+            ->withoutOverlapping()
+            ->onOneServer();
+    })
     ->withMiddleware(function (Middleware $middleware): void {
         // Baseline security headers on every dynamic response.
         $middleware->append(SecurityHeaders::class);
@@ -185,6 +201,52 @@ return Application::configure(basePath: dirname(__DIR__))
 
             return response()->json([
                 'message' => $e->userMessage(),
+                'code' => $e->reason,
+            ], 422);
+        });
+
+        $exceptions->render(function (SheetNotApplicable $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 409);
+        });
+
+        $exceptions->render(function (OperationNotApplicable $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 409);
+        });
+
+        // §51: the report catalogue is closed, so an unknown type is a 422 naming the
+        // field rather than a query against whatever table the value happened to match.
+        $exceptions->render(function (UnknownReportType|UnknownReportFormat $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 422);
+        });
+
+        $exceptions->render(function (DocumentNotApplicable $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->getMessage(),
                 'code' => $e->reason,
             ], 422);
         });

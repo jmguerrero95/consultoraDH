@@ -48,7 +48,12 @@ async function submit(): Promise<void> {
     try {
         await auth.login(email.value, password.value, remember.value);
 
-        await router.replace(redirect.value);
+        // §13: a client account goes to the portal, a member of staff to the
+        // administrative area. The redirect the user was originally heading for wins
+        // when it is a path they are entitled to, so a deep link still works.
+        const destino = auth.isClientAccount ? '/portal' : redirect.value;
+
+        await router.replace(destino);
     } catch (error) {
         if (error instanceof ApiError) {
             fieldErrors.value = {

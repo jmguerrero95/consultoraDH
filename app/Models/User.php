@@ -23,7 +23,7 @@ use Spatie\Permission\Traits\HasRoles;
  * Authentication is session based. The browser only ever receives an HttpOnly
  * session cookie, never a bearer token; see docs/SECURITY.md.
  */
-#[Fillable(['name', 'email', 'password', 'status', 'email_verified_at'])]
+#[Fillable(['name', 'email', 'password', 'status', 'email_verified_at', 'account_type', 'client_id'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {

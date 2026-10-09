@@ -10,12 +10,15 @@ use App\Domain\Affiliations\ManageAffiliations;
 use App\Domain\Affiliations\ManageClientCompanies;
 use App\Domain\Affiliations\ParallelRelationshipNotAllowed;
 use App\Domain\Affiliations\TransferSourceRequired;
+use App\Domain\Audit\AuditAction;
+use App\Domain\Audit\AuditRecorder;
 use App\Domain\Clients\Actions\ClientHasOpenRelationships;
 use App\Domain\Clients\Actions\CreateClient;
 use App\Domain\Clients\Actions\SetClientStatus;
 use App\Domain\Clients\Actions\UpdateClient;
 use App\Domain\DataQuality\DataQualityInspector;
 use App\Domain\Shared\RecordStatus;
+use App\Domain\Users\UserStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Affiliations\CloseAffiliationRequest;
 use App\Http\Requests\Affiliations\CloseRelationshipRequest;
@@ -23,6 +26,7 @@ use App\Http\Requests\Affiliations\LinkClientCompanyRequest;
 use App\Http\Requests\Affiliations\StoreAffiliationRequest;
 use App\Http\Requests\Affiliations\TransferRelationshipRequest;
 use App\Http\Requests\Clients\ChangeClientStatusRequest;
+use App\Http\Requests\Clients\CreatePortalAccountRequest;
 use App\Http\Requests\Clients\ListClientsRequest;
 use App\Http\Requests\Clients\StoreClientRequest;
 use App\Http\Requests\Clients\UpdateClientRequest;
@@ -38,6 +42,7 @@ use App\Models\ClientAffiliation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
 use App\Models\SocialSecurityEntity;
+use App\Models\User;
 use App\Support\Database\SchemaConstraint;
 use App\Support\Database\UniqueViolation;
 use App\Support\Validation\SafeSearch;
@@ -64,6 +69,7 @@ final class ClientController extends Controller
         private readonly ManageClientCompanies $relationships,
         private readonly ManageAffiliations $affiliations,
         private readonly DataQualityInspector $quality,
+        private readonly AuditRecorder $audit,
     ) {}
 
     /**
@@ -735,5 +741,51 @@ final class ClientController extends Controller
             'code' => 'duplicate_open_relationship',
             'company_id' => $company->id,
         ], 422);
+    }
+
+    public function createPortalAccount(CreatePortalAccountRequest $request, Client $client): JsonResponse
+    {
+        $data = $request->validated();
+
+        $existing = User::query()->where('client_id', $client->id)->first();
+        if ($existing !== null) {
+            return response()->json([
+                'message' => 'El cliente ya tiene una cuenta de portal.',
+                'code' => 'portal_account_exists',
+            ], 409);
+        }
+
+        $user = User::query()->create([
+            'name' => $data['name'],
+            'email' => $data['email'],
+            'password' => $data['password'],
+            'account_type' => 'client',
+            'client_id' => $client->id,
+            'status' => UserStatus::Active,
+        ]);
+
+        $this->audit->record(AuditAction::PortalAccountCreated, $request->user(), [
+            'client_id' => $client->id,
+            'email' => $data['email'],
+        ], null, $client);
+
+        return response()->json([
+            'id' => (int) $user->id,
+            'email' => $user->email,
+            'account_type' => $user->account_type,
+        ], 201);
+    }
+
+    public function deactivatePortalAccount(Request $request, User $user): JsonResponse
+    {
+        abort_unless($user->account_type === 'client', 404);
+
+        $user->forceFill(['status' => UserStatus::Inactive])->save();
+
+        $this->audit->record(AuditAction::PortalAccountDeactivated, $request->user(), [
+            'client_id' => $user->client_id,
+        ], null, $user->client);
+
+        return response()->json(['message' => 'Cuenta desactivada.']);
     }
 }

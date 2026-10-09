@@ -522,6 +522,74 @@ id existe. En un módulo cuyo tema es un archivo de documentos de identidad, eso
 lo que se protege. El controlador de importaciones resuelve el id a mano, el `can:` corre
 primero, y 404 significa que el id no existe **y** que quien pregunta podía preguntar.
 
+## 6.7 A05: la capa operativa
+
+A05 añade cinco dominios y un área autenticada nueva, sin tocar A02, A03 ni A04.
+
+```
+app/Domain/Planillas/     ContributionSheetStatus, PlanillaOperator,
+                          CandidateRoster, CreateContributionSheet,
+                          ValidateContributionSheet, SheetValidation,
+                          SheetNotApplicable, PlanillaFileStore,
+                          PlanillaExporter, PlanillaXlsxExport, PlanillaPdfExport
+                          y Actions/{ValidateSheetToReady, SubmitSheet,
+                          MarkSheetPaid, CancelSheet, ReturnSheetToDraft}
+
+app/Domain/Operations/    NoveltyCategory, NoveltyStatus, TaskPriority,
+                          TaskStatus, CalendarService, ReminderDispatcher,
+                          OperationNotApplicable y
+                          Actions/{ResolveNovelty, CancelNovelty,
+                          CompleteTask, CancelTask, ReassignTask}
+
+app/Domain/Documents/     DocumentRequestStatus, DocumentVisibility,
+                          DocumentReviewStatus, DocumentFileStore y
+                          Actions/{RequestDocument, ReviewDocumentRequest,
+                          CancelDocumentRequest, DocumentNotApplicable}
+
+app/Domain/Portal/        ProfileUpdateRequestStatus, ProfileUpdateHandler
+app/Domain/Reports/       ReportType, ReportFormat, ReportCadence, ReportResult,
+                          ReportFactory, ReportFilter, PortfolioReport,
+                          CompanyPortfolioReport, EntityReport,
+                          PlanillaSummaryReport, ReportGenerator,
+                          ReportScheduleRunner, Export/{FormulaGuard,
+                          CsvExporter, XlsxExporter, PdfExporter}
+```
+
+### 6.7.1 La planilla es una fotografía, no una vista
+
+`contribution_sheet_lines` guarda una **copia** de la evidencia de cada persona: su
+nombre, su documento, la empresa, la fechas de la relación y las entidades de
+seguridad social tal como eran para ese mes. La razón es histórica: si las líneas se
+derivaran en vivo de `client_company_assignments`, corregir el nombre de alguien o
+mover un cargo reescribiría silenciosamente cada planilla ya cerrada.
+
+Las líneas conservan `client_id` y `client_company_assignment_id` para que la copia
+sea rastreable, y el total se **deriva** sumando las líneas incluidas. No existe
+columna de saldo en la planilla, igual que no existe en el cliente.
+
+### 6.7.2 La vista previa y la creación no pueden divergir
+
+`CandidateRoster::digest()` resume la identidad de la evidencia: periodo, empresa,
+relaciones candidatas, su marca de actualización y las afiliaciones usadas. La vista
+previa devuelve ese resumen; la creación lo recalcula dentro de `BillingTopologyLock`
+y responde 409 si ya no coincide.
+
+A05 reutiliza el bloqueo de topología existente en lugar de inventar un segundo
+protocolo: dos bloqueos incompatibles significarían dos escritores, cada uno
+creyendo que está solo.
+
+### 6.7.3 El portal es propiedad, no permiso
+
+El rol `Client` no tiene **ningún** permiso interno. Sus endpoints comprueban
+`account_type = 'client'` y que el recurso pertenezca a su `client_id`. Un
+identificador de otro cliente devuelve 404, no un 403 con datos.
+
+### 6.7.4 El calendario no tiene tabla
+
+`CalendarService` agrega hechos que ya existen —tareas, vencimientos, solicitudes,
+planillas y obligaciones— y acota el rango a tres meses. Crear filas de evento sólo
+para dibujarlas sería una segunda fuente de verdad sobre datos que ya son hechos.
+
 ## 7. Base de datos
 
 - **PostgreSQL 18** para todo. No hay SQLite en desarrollo ni en pruebas: se
@@ -537,6 +605,16 @@ primero, y 404 significa que el id no existe **y** que quien pregunta podía pre
   concreta; un `deleted_at` global aplicado sin criterio es una decisión
   difícil de revertir. A03 no lo añade: sus siete tablas no tienen columna de
   borrado porque ninguna de sus filas se borra.
+- **A05** añade `BIGINT` de pesos enteros para el valor liquidado de la planilla y
+  para los totales derivados. Los reportes y el portal **no** agregan saldos: los
+  piden al servicio de A03, de modo que no existe una segunda fórmula de cartera
+  capaz de discrepar con la pantalla interna.
+- La pareja de la cuenta de portal es una restricción de base de datos, no una
+  validación de PHP: `account_type = 'client'` exige `client_id`, y
+  `account_type = 'staff'` lo prohíbe. Un índice único parcial sobre `client_id`
+  garantiza una sola cuenta por cliente. Ninguna vía de escritura —seeder,
+  consola, migración futura, un `update()` descuidado— puede producir una cuenta
+  que inicie sesión sin saber de quién son los datos.
 - Los importes de A03 son `BIGINT` de pesos enteros. No hay `NUMERIC`, no hay
   decimales y no hay coma flotante en ninguna parte del camino. Una cantidad con
   centavos es un dato que este sistema no sabe representar, y aceptarla
@@ -548,6 +626,24 @@ primero, y 404 significa que el id no existe **y** que quien pregunta podía pre
 (`consultora_dh_test`). Además, `tests/Pest.php` **aborta la suite** si esa
 base de datos coincide con la de desarrollo: la suite es destructiva y perder
 datos locales por una ejecución de tests sería inaceptable.
+
+### 7.2 Servicio de planificador
+
+A05 añade un servicio `scheduler` a `compose.yaml`. Usa la **misma** imagen
+`consultora-dh/app:local`, los mismos montajes de código y `vendor`, y ejecuta
+`php artisan schedule:work`. No hay cron en el host ni otro despliegue: es un
+proceso de la aplicación.
+
+```
+*/5 * * * *  php artisan operations:dispatch-reminders
+*   * * * *  php artisan reports:run-schedules
+```
+
+La idempotencia en la base de datos es la garantía; `withoutOverlapping` y
+`onOneServer` evitan trabajo duplicado pero no son la garantía. El recordatorio
+reclama la fila con `lockForUpdate` y escribe `reminder_sent_at` en la misma
+transacción, y la generación programada avanza `next_run_at` bajo bloqueo y lleva
+una clave de ocurrencia única.
 
 ## 8. Redis
 

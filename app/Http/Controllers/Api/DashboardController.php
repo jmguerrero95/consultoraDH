@@ -67,7 +67,69 @@ final class DashboardController extends Controller
                 'redis' => $this->redisStatus(),
             ],
             'portfolio' => $this->portfolioFor($user),
+            // §58: A05 figures. Each one is a single aggregate, and each is present only
+            // when the caller may read the table behind it. A role without the permission
+            // gets no key at all — not a zero, because "you cannot see this" and "there
+            // is nothing here" are different statements.
+            'operations' => $this->operationsFor($user),
         ]);
+    }
+
+    /**
+     * The A05 operational counts, for the roles that may see each of them.
+     *
+     * Every figure is one `count()` on a filtered query: no loops, no per-row work, so
+     * the dashboard does not become slower as the portfolio grows.
+     */
+    private function operationsFor(mixed $user): array
+    {
+        $can = $user instanceof Authorizable && method_exists($user, 'can') ? $user : null;
+
+        if ($can === null) {
+            return ['visible' => false];
+        }
+
+        $operations = ['visible' => true];
+        $counts = [];
+
+        if ($can->can('planillas.view')) {
+            $counts['planillas_draft'] = DB::table('contribution_sheets')
+                ->where('status', 'draft')
+                ->count();
+
+            // §58: "submitted and not paid" is the number an operator acts on. It is not
+            // the same as "not paid", because a draft has not been submitted to anybody.
+            $counts['planillas_submitted_unpaid'] = DB::table('contribution_sheets')
+                ->where('status', 'submitted')
+                ->count();
+        }
+
+        if ($can->can('tasks.view')) {
+            // Overdue means strictly before today: a task due today is not late yet.
+            $counts['tasks_overdue'] = DB::table('operational_tasks')
+                ->whereIn('status', ['pending', 'in_progress'])
+                ->whereNotNull('due_on')
+                ->whereDate('due_on', '<', now()->toDateString())
+                ->count();
+        }
+
+        if ($can->can('documents.view')) {
+            $counts['document_requests_open'] = DB::table('client_document_requests')
+                ->where('status', 'requested')
+                ->count();
+        }
+
+        if ($can->can('client_update_requests.view')) {
+            $counts['profile_update_requests_pending'] = DB::table('client_profile_update_requests')
+                ->where('status', 'pending')
+                ->count();
+        }
+
+        if ($counts !== []) {
+            $operations['counts'] = $counts;
+        }
+
+        return $operations;
     }
 
     /**

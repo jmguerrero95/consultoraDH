@@ -45,6 +45,22 @@ return [
             'report' => false,
         ],
 
+        'planillas' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private/planillas'),
+            'serve' => false,
+            'throw' => false,
+            'report' => false,
+        ],
+
+        'documents' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private/documents'),
+            'serve' => false,
+            'throw' => false,
+            'report' => false,
+        ],
+
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),

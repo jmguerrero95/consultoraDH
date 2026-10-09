@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import type { RouteRecordRaw, Router, RouterHistory } from 'vue-router';
 
 import AdminLayout from '@/layouts/AdminLayout.vue';
+import ClientPortalLayout from '@/layouts/ClientPortalLayout.vue';
 import { useAuthStore } from '@/stores/auth';
 import { puedeEntrar } from '@/router/permissions';
 
@@ -53,6 +54,13 @@ declare module 'vue-router' {
          * the title.
          */
         title?: string;
+        /**
+         * §41: the route belongs to the client portal rather than the administrative
+         * area. Presentation only — the server checks the account type and the resource
+         * ownership on every request — but it keeps a client from landing on the staff
+         * shell and a member of staff from landing in the portal.
+         */
+        portal?: boolean;
     }
 }
 
@@ -290,6 +298,61 @@ const routes: RouteRecordRaw[] = [
                 },
             },
             {
+                path: 'planillas',
+                name: 'planillas',
+                component: () => import('@/pages/planillas/PlanillaListPage.vue'),
+                meta: {
+                    title: 'Planillas',
+                    nav: { label: 'Planillas', icon: 'bi-file-earmark-spreadsheet', order: 15 },
+                    permission: 'planillas.view',
+                },
+            },
+            {
+                path: 'planillas/nueva',
+                name: 'planillas.create',
+                component: () => import('@/pages/planillas/PlanillaCreatePage.vue'),
+                meta: { title: 'Generar planilla', permission: 'planillas.create' },
+            },
+            {
+                path: 'planillas/:id(\\d+)',
+                name: 'planillas.show',
+                component: () => import('@/pages/planillas/PlanillaDetailPage.vue'),
+                props: true,
+                meta: { title: 'Detalle de la planilla', permission: 'planillas.view' },
+            },
+            {
+                path: 'operacion',
+                name: 'operacion',
+                component: () => import('@/pages/operacion/OperacionPage.vue'),
+                meta: {
+                    title: 'Operación',
+                    nav: { label: 'Operación', icon: 'bi-check2-square', order: 25 },
+                    // At least one: a collections role works tasks without opening
+                    // planillas, and a read-only role may read either.
+                    permissionsAny: ['novelties.view', 'tasks.view'],
+                },
+            },
+            {
+                path: 'documentos',
+                name: 'documentos',
+                component: () => import('@/pages/documentos/DocumentosPage.vue'),
+                meta: {
+                    title: 'Documentos',
+                    nav: { label: 'Documentos', icon: 'bi-folder2-open', order: 35 },
+                    permission: 'documents.view',
+                },
+            },
+            {
+                path: 'reportes',
+                name: 'reportes',
+                component: () => import('@/pages/reportes/ReportesPage.vue'),
+                meta: {
+                    title: 'Reportes',
+                    nav: { label: 'Reportes', icon: 'bi-bar-chart', order: 55 },
+                    permission: 'reports.view',
+                },
+            },
+            {
                 path: 'forbidden',
                 name: 'forbidden',
                 component: () => import('@/pages/errors/ForbiddenPage.vue'),
@@ -302,6 +365,51 @@ const routes: RouteRecordRaw[] = [
                 name: 'not-found',
                 component: () => import('@/pages/errors/NotFoundPage.vue'),
                 meta: { title: 'Página no encontrada' },
+            },
+        ],
+    },
+    {
+        // §41: the client portal. Its own layout, so the staff sidebar is not merely
+        // hidden here — it is never mounted.
+        path: '/portal',
+        component: ClientPortalLayout,
+        meta: { requiresAuth: true, portal: true },
+        children: [
+            {
+                path: '',
+                name: 'portal.home',
+                component: () => import('@/pages/portal/PortalHomePage.vue'),
+                meta: { title: 'Portal' },
+            },
+            {
+                path: 'cuenta',
+                name: 'portal.account',
+                component: () => import('@/pages/portal/PortalAccountPage.vue'),
+                meta: { title: 'Mi cuenta' },
+            },
+            {
+                path: 'relaciones',
+                name: 'portal.relationships',
+                component: () => import('@/pages/portal/PortalRelationshipsPage.vue'),
+                meta: { title: 'Mis relaciones' },
+            },
+            {
+                path: 'documentos',
+                name: 'portal.documents',
+                component: () => import('@/pages/portal/PortalDocumentsPage.vue'),
+                meta: { title: 'Documentos' },
+            },
+            {
+                path: 'solicitudes',
+                name: 'portal.requests',
+                component: () => import('@/pages/portal/PortalDocumentsPage.vue'),
+                meta: { title: 'Solicitudes de documentos' },
+            },
+            {
+                path: 'perfil',
+                name: 'portal.profile',
+                component: () => import('@/pages/portal/PortalProfilePage.vue'),
+                meta: { title: 'Mi perfil' },
             },
         ],
     },
@@ -359,7 +467,21 @@ export function createAppRouter(history: RouterHistory = createWebHistory()): Ro
         }
 
         if (to.meta.guestOnly && auth.isAuthenticated) {
+            // §13: a client lands in the portal after signing in, never in the
+            // administrative shell.
+            return auth.isClientAccount ? { name: 'portal.home' } : { name: 'home' };
+        }
+
+        // §41: the two areas are not interchangeable. A client account is sent to its own
+        // home, and a member of staff cannot wander into the portal by typing the path.
+        // The server enforces the same split on every request; this only stops the wrong
+        // screen being rendered first.
+        if (to.meta.portal === true && !auth.isClientAccount) {
             return { name: 'home' };
+        }
+
+        if (to.meta.portal !== true && auth.isClientAccount && !to.meta.guestOnly) {
+            return { name: 'portal.home' };
         }
 
         // Presentation, not authorisation: the server answers 403 regardless.

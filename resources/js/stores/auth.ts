@@ -28,6 +28,14 @@ export const useAuthStore = defineStore('auth', () => {
     const primaryRole = computed(() => user.value?.primary_role ?? null);
 
     /**
+     * §13 / §41: whether this account is a client portal login rather than a member of
+     * staff. Read from the server's own answer, never guessed from the email or the role
+     * name — §13 is explicit that a colleague's internal address must never turn into a
+     * portal account because it happens to match somebody.
+     */
+    const isClientAccount = computed(() => user.value?.account_type === 'client');
+
+    /**
      * Used only to decide which navigation entries to render. The server
      * enforces the same rule on every request, so hiding a link is a
      * convenience, never the control.
@@ -120,6 +128,7 @@ export const useAuthStore = defineStore('auth', () => {
     });
 
     return {
+        isClientAccount,
         user,
         initialised,
         loading,

@@ -33,12 +33,22 @@ Un sistema de gestión interna con tres grupos de requisitos:
 
 De esos tres grupos, A02 implementa el primero (clientes, empresas,
 afiliaciones y su historial), A03 el núcleo financiero del primero (periodos,
-fechas de corte, obligaciones, ajustes, pagos y cartera) y A04 la importación
-desde Excel con reconstrucción histórica —con sus dos rondas de remediación de
+fechas de corte, obligaciones, ajustes, pagos y cartera), A04 la importación
+desde Excel con reconstrucción histórica —con sus rondas de remediación de
 auditoría en [`docs/TASKS/A04-R1.md`](docs/TASKS/A04-R1.md) y
-[`docs/TASKS/A04-R2.md`](docs/TASKS/A04-R2.md), ninguna de las cuales **es** una
-aprobación externa. El servicio al cliente y la analítica con integración siguen
-sin empezar: son A08 a A14.
+[`docs/TASKS/A04-R2.md`](docs/TASKS/A04-R2.md)— y **A05** la capa operativa
+alrededor de todo eso: planillas mensuales, novedades, tareas con recordatorios,
+documentos y sus solicitudes, portal de clientes y reportería con PDF, Excel y
+programación de ejecuciones.
+
+A05 está **entregada y pendiente de auditoría externa**; eso no es una aprobación.
+Detalle en [`docs/TASKS/A05.md`](docs/TASKS/A05.md), contrato en
+[`docs/TASKS/A05-SPEC.md`](docs/TASKS/A05-SPEC.md).
+
+La hoja de ruta quedó condensada en tres macro hitos: el soporte con correo y
+Telegram junto con la automatización general es **A06**, y la IA en la nube, la
+integración MCP/OpenCode y el endurecimiento final son **A07**. Ambos bloqueados
+hasta la auditoría externa que toca.
 
 ## 2. Arquitectura en una frase
 
@@ -404,6 +414,8 @@ Los detalles y la lista completa están en [docs/SECURITY.md](docs/SECURITY.md).
 | [docs/TASKS/A04.md](docs/TASKS/A04.md) | Importación Excel, revisión y reconstrucción histórica |
 | [docs/TASKS/A04-R1.md](docs/TASKS/A04-R1.md) | Remediación de la auditoría externa de A04 |
 | [docs/TASKS/A04-R2.md](docs/TASKS/A04-R2.md) | Segunda remediación, tras la segunda auditoría de A04 |
+| [docs/TASKS/A05-SPEC.md](docs/TASKS/A05-SPEC.md) | Contrato cerrado del hito A05 |
+| [docs/TASKS/A05.md](docs/TASKS/A05.md) | Planillas, operación, documentos, portal y reportería |
 
 ## 13. Licencia
 

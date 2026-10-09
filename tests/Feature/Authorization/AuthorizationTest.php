@@ -20,6 +20,10 @@ it('seeds the roles the organisation uses', function (): void {
             'Collections',
             'Support',
             'Read Only',
+            // A05: the portal role. It holds **no** internal administrative permission —
+            // a portal account reaches its own data through ownership-scoped endpoints,
+            // never through a staff permission.
+            'Client',
         ]);
 });
 
@@ -117,6 +121,19 @@ it('creates no permission ahead of the module that enforces it', function (): vo
     ]);
     $expected = array_merge($expected, [
         'imports.view', 'imports.create', 'imports.review', 'imports.apply',
+    ]);
+    // A05: the integrated operational layer. Every one of these is enforced by at least
+    // one route in routes/api.php, which is what the "no permission ahead of the module
+    // that enforces it" half of this test is asserting.
+    $expected = array_merge($expected, [
+        'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
+        'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
+        'novelties.view', 'novelties.manage',
+        'tasks.view', 'tasks.manage',
+        'documents.view', 'documents.manage', 'documents.request', 'documents.review',
+        'portal_accounts.manage',
+        'client_update_requests.view', 'client_update_requests.review',
+        'reports.view', 'reports.export', 'reports.schedule',
     ]);
 
     expect($declared)->toEqualCanonicalizing($expected);

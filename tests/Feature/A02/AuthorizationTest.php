@@ -77,16 +77,27 @@ it('gives collections the reads and the money work, and nothing else', function 
     // collecting what is already owed.
     expect(Role::findByName('Collections', 'web')->permissions->pluck('name')->sort()->values()->all())
         ->toBe([
+            // A02 + A03 reads and the money work, plus the A05 operational layer:
+            // Collections follows up collection work, so it reads planillas, novelties
+            // and documents, works tasks, and exports the receivables reports. It still
+            // decides nothing about what is owed.
             'clients.view',
             'companies.view',
+            'documents.view',
+            'novelties.view',
             'obligations.view',
             'payments.allocate',
             'payments.create',
             'payments.view',
             'payments.void',
             'periods.view',
+            'planillas.view',
             'receivables.view',
             'relationships.view',
+            'reports.export',
+            'reports.view',
+            'tasks.manage',
+            'tasks.view',
         ])
         ->not->toContain('obligations.generate')
         ->not->toContain('obligations.adjust')
@@ -100,14 +111,26 @@ it('gives support reads including affiliations but no writes', function (): void
     // the directory or in the money.
     expect(Role::findByName('Support', 'web')->permissions->pluck('name')->sort()->values()->all())
         ->toBe([
+            // A02 + A03 reads, plus A05: Support runs novelties, tasks and document
+            // requests, and may administer a portal login. It holds no planilla
+            // authority at all and no financial mutation.
             'affiliations.view',
             'clients.view',
             'companies.view',
+            'documents.request',
+            'documents.review',
+            'documents.view',
+            'novelties.manage',
+            'novelties.view',
             'obligations.view',
             'payments.view',
             'periods.view',
+            'portal_accounts.manage',
             'receivables.view',
             'relationships.view',
+            'reports.view',
+            'tasks.manage',
+            'tasks.view',
         ])
         ->not->toContain('payments.create')
         ->not->toContain('obligations.adjust');

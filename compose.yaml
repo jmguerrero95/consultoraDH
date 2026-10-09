@@ -148,6 +148,23 @@ services:
     networks:
       - consultora-dh
 
+  scheduler:
+    <<: *app-image
+    container_name: consultora-dh-scheduler
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: ["php", "artisan", "schedule:work", "--verbose"]
+    volumes:
+      - .:/var/www/html
+      - vendor:/var/www/html/vendor
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - consultora-dh
+
   # ------------------------------------------------------------------- web
   nginx:
     image: nginx:1.31-alpine

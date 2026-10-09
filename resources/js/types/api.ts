@@ -25,6 +25,12 @@ export interface AuthUser {
     permissions: string[];
     last_login_at: string | null;
     email_verified_at: string | null;
+    /**
+     * §13: `staff` or `client`. The interface uses this only to choose which of the two
+     * areas to render; the server decides what the account may read on every request.
+     */
+    account_type?: 'staff' | 'client';
+    client_id?: number | null;
 }
 
 export interface ServiceCheck {
@@ -1327,4 +1333,373 @@ export interface ImportIssuesPayload {
 
 export interface ImportPlanPayload {
     data: ImportPlan;
+}
+
+/* -------------------------------------------------------------------------
+ * A05 — integrated operations, planillas, documents, portal and reports.
+ *
+ * The vocabularies (operator, status, category, format) are server-owned: the
+ * server is the authority for what a planilla may become and what a novelty is
+ * called, and a second copy of those lists in Vue would drift the first time a
+ * new case is added. Where a page needs them it fetches the vocabulary endpoint.
+ * ------------------------------------------------------------------------- */
+
+export interface AuthUserAccountType {
+    account_type: 'staff' | 'client';
+    client_id: number | null;
+}
+
+export interface VocabularyOption {
+    value: string;
+    label: string;
+}
+
+export interface PlanillaOperatorOption extends VocabularyOption {
+    requires_name: boolean;
+}
+
+/** One person's evidence as read from A02 history, before it becomes a line. */
+export interface PlanillaCandidate {
+    client_id: number;
+    assignment_id: number;
+    document_type: string;
+    document_number: string;
+    client_name: string;
+    job_title: string | null;
+    eps_name: string | null;
+    afp_name: string | null;
+    arl_name: string | null;
+    ccf_name: string | null;
+    arl_risk_class: string | null;
+    relationship_started_on: string;
+    relationship_ended_on: string | null;
+}
+
+/**
+ * §20: the digest identifies the evidence a preview was computed from. Creation
+ * takes it back and refuses a mismatch, so a preview and its creation can never
+ * describe different people.
+ */
+export interface PlanillaPreview {
+    period_id: number;
+    company_id: number;
+    candidate_count: number;
+    candidates: PlanillaCandidate[];
+    source_digest: string;
+}
+
+export interface PlanillaLine {
+    id: number;
+    client_name: string;
+    document_number: string;
+    document_type: string;
+    company_name: string;
+    job_title: string | null;
+    eps_name: string | null;
+    afp_name: string | null;
+    arl_name: string | null;
+    ccf_name: string | null;
+    arl_risk_class: string | null;
+    liquidated_amount_cop: number | null;
+    included: boolean;
+    exclusion_reason: string | null;
+}
+
+export interface PlanillaFile {
+    id: number;
+    kind: string;
+    original_name: string;
+    mime_type: string;
+    size_bytes: number;
+    created_at: string;
+}
+
+export interface PlanillaDetail {
+    id: number;
+    company_name: string;
+    company_tax_id: string;
+    period_month: string;
+    operator: string;
+    operator_label: string;
+    operator_other_name: string | null;
+    status: string;
+    status_label: string;
+    reference: string | null;
+    sheet_number: string | null;
+    submitted_on: string | null;
+    paid_on: string | null;
+    total_liquidated_cop: number;
+    included_line_count: number;
+    line_count: number;
+    notes: string | null;
+    source_digest: string;
+    revision: number;
+    files: PlanillaFile[];
+    lines: PlanillaLine[];
+}
+
+export interface PlanillaSummary {
+    id: number;
+    company_name: string | null;
+    period_month: string | null;
+    operator: string | null;
+    operator_label: string | null;
+    status: string | null;
+    status_label: string | null;
+    reference: string | null;
+    sheet_number: string | null;
+    submitted_on: string | null;
+    paid_on: string | null;
+    total_liquidated_cop: number;
+    included_line_count: number;
+}
+
+/**
+ * §22: errors and warnings are separate collections because they mean different
+ * things — an error blocks `ready`, a warning does not. Collapsing them would
+ * force the validator to guess which is which.
+ */
+export interface ValidationFinding {
+    code: string;
+    message: string;
+    line_id: number | null;
+}
+
+export interface PlanillaValidation {
+    errors: ValidationFinding[];
+    warnings: ValidationFinding[];
+    valid: boolean;
+    status?: string;
+}
+
+export interface Paginated<T> {
+    data: T[];
+    pagination: {
+        current_page: number;
+        last_page: number;
+        per_page: number;
+        total: number;
+    };
+}
+
+export interface Novelty {
+    id: number;
+    client_id: number;
+    client_name: string | null;
+    company_id: number | null;
+    company_name: string | null;
+    category: string;
+    category_label: string;
+    title: string;
+    details: string | null;
+    status: string;
+    status_label: string;
+    occurred_on: string | null;
+    resolved_at: string | null;
+    created_at: string;
+}
+
+export interface OperationalTask {
+    id: number;
+    client_id: number | null;
+    client_name: string | null;
+    title: string;
+    description: string | null;
+    assigned_to: number;
+    assignee_name: string | null;
+    priority: string;
+    priority_label: string;
+    status: string;
+    status_label: string;
+    due_on: string | null;
+    reminder_at: string | null;
+    reminder_sent_at: string | null;
+    completed_at: string | null;
+    created_at: string;
+}
+
+export interface CalendarEvent {
+    type: string;
+    date: string;
+    title: string;
+    priority: string;
+}
+
+export interface ClientDocumentType {
+    id: number;
+    name: string;
+    slug: string;
+    description: string | null;
+    retention_days: number | null;
+    client_visible_default: boolean;
+    active: boolean;
+}
+
+export interface ClientDocumentRequest {
+    id: number;
+    client_id: number;
+    client_name: string | null;
+    document_type_id: number;
+    document_type_name: string | null;
+    title: string;
+    instructions: string | null;
+    status: string;
+    status_label: string;
+    due_on: string | null;
+    requested_at: string | null;
+    received_at: string | null;
+    reviewed_at: string | null;
+    approved_at: string | null;
+    decision_note: string | null;
+    cancelled_at: string | null;
+}
+
+export interface ClientDocument {
+    id: number;
+    client_id: number;
+    client_name: string | null;
+    document_type_id: number;
+    document_type_name: string | null;
+    title: string;
+    description: string | null;
+    original_name: string | null;
+    mime_type: string | null;
+    size_bytes: number;
+    visibility: string;
+    review_status: string;
+    review_status_label: string;
+    uploaded_via_portal: boolean;
+    retention_until: string | null;
+    archived_at: string | null;
+    created_at: string;
+}
+
+export interface ClientProfileUpdateRequest {
+    id: number;
+    status: string;
+    status_label: string;
+    proposed_changes: Record<string, string>;
+    review_note: string | null;
+    created_at: string;
+    reviewed_at: string | null;
+}
+
+export interface PortalProfile {
+    id: number;
+    first_names: string;
+    last_names: string;
+    email: string | null;
+    phone: string | null;
+    address: string | null;
+    city: string | null;
+    department: string | null;
+    document_type: string;
+    document_number: string;
+}
+
+export interface PortalHome {
+    client_name: string;
+    pending_document_requests: number;
+    visible_documents: number;
+    open_update_requests: number;
+}
+
+export interface PortalRelationship {
+    id: number;
+    company_name: string | null;
+    company_tax_id: string | null;
+    started_on: string | null;
+    ended_on: string | null;
+    job_title: string | null;
+}
+
+export interface PortalAffiliation {
+    id: number;
+    type: string;
+    entity_name: string | null;
+    started_on: string | null;
+    ended_on: string | null;
+}
+
+export interface PortalRelationshipsPayload {
+    relationships: PortalRelationship[];
+    affiliations: PortalAffiliation[];
+}
+
+export interface PortalDocument {
+    id: number;
+    title: string;
+    document_type_name: string | null;
+    original_name: string | null;
+    review_status: string;
+    review_status_label: string;
+    created_at: string;
+}
+
+export interface PortalDocumentRequest {
+    id: number;
+    title: string;
+    instructions: string | null;
+    status: string;
+    status_label: string;
+    due_on: string | null;
+    decision_note: string | null;
+    created_at: string;
+}
+
+export interface ReportColumn {
+    key: string;
+    label: string;
+    type: string;
+}
+
+export interface ReportPayload {
+    meta: {
+        report_type: string;
+        title: string;
+        as_of: string;
+        filters: string[];
+        generated_at: string;
+        disclaimer: string;
+    };
+    columns: ReportColumn[];
+    rows: Record<string, string | number | null>[];
+    totals: Record<string, string | number | null>[];
+}
+
+export interface GeneratedReport {
+    id: number;
+    report_type: string;
+    format: string;
+    size_bytes: number;
+    status: string;
+    created_at: string;
+}
+
+export interface ReportSchedule {
+    id: number;
+    name: string;
+    report_type: string;
+    format: string;
+    cadence: string;
+    cadence_label: string;
+    run_time: string;
+    day_of_week: number | null;
+    day_of_month: number | null;
+    active: boolean;
+    next_run_at: string | null;
+    last_run_at: string | null;
+}
+
+export interface AppNotification {
+    id: string;
+    type: string;
+    data: {
+        type?: string;
+        title?: string;
+        message?: string;
+        route?: string;
+    };
+    read_at: string | null;
+    created_at: string;
 }

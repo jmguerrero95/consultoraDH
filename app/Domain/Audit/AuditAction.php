@@ -108,4 +108,58 @@ enum AuditAction: string
     case ImportApplied = 'import.applied';
     case ImportCancelled = 'import.cancelled';
     case ImportFailed = 'import.failed';
+
+    // --- A05: contribution sheets ("planillas") --------------------------------
+    //
+    // §9.8: every meaningful business mutation names who, when, and what changed. A planilla is the
+    // clearest case for it — it is the record of a monthly operational decision, so the trail has to
+    // say who validated, who submitted, who paid and who cancelled, not merely that the status
+    // changed.
+    case ContributionSheetCreated = 'planilla.created';
+    case ContributionSheetValidated = 'planilla.validated';
+    case ContributionSheetReturnedToDraft = 'planilla.returned_to_draft';
+    case ContributionSheetSubmitted = 'planilla.submitted';
+    case ContributionSheetPaid = 'planilla.paid';
+    case ContributionSheetCancelled = 'planilla.cancelled';
+    case ContributionSheetUpdated = 'planilla.updated';
+    case ContributionSheetFileUploaded = 'planilla.file_uploaded';
+
+    // --- A05: novelties and tasks -----------------------------------------------
+    case NoveltyCreated = 'novelty.created';
+    case NoveltyResolved = 'novelty.resolved';
+    case NoveltyCancelled = 'novelty.cancelled';
+    case TaskCreated = 'task.created';
+    case TaskReassigned = 'task.reassigned';
+    case TaskCompleted = 'task.completed';
+    case TaskCancelled = 'task.cancelled';
+
+    // --- A05: documents --------------------------------------------------------
+    case DocumentTypeCreated = 'document_type.created';
+    case DocumentUploaded = 'document.uploaded';
+    case DocumentReviewed = 'document.reviewed';
+    case DocumentApproved = 'document.approved';
+    case DocumentRejected = 'document.rejected';
+    case DocumentArchived = 'document.archived';
+    case DocumentRequestCreated = 'document_request.created';
+    case DocumentRequestReceived = 'document_request.received';
+    case DocumentRequestReviewed = 'document_request.reviewed';
+    case DocumentRequestApproved = 'document_request.approved';
+    case DocumentRequestRejected = 'document_request.rejected';
+    case DocumentRequestCancelled = 'document_request.cancelled';
+
+    // --- A05: portal -----------------------------------------------------------
+    case PortalAccountCreated = 'portal_account.created';
+    case PortalAccountActivated = 'portal_account.activated';
+    case PortalAccountDeactivated = 'portal_account.deactivated';
+    case ClientProfileUpdateRequested = 'client_profile_update.requested';
+    case ClientProfileUpdateApplied = 'client_profile_update.applied';
+    case ClientProfileUpdateRejected = 'client_profile_update.rejected';
+
+    // --- A05: reporting ----------------------------------------------------------
+    case GeneratedReportRequested = 'report.requested';
+    case GeneratedReportDownloaded = 'report.downloaded';
+    case ReportScheduleCreated = 'report_schedule.created';
+    case ReportScheduleUpdated = 'report_schedule.updated';
+    case ReportScheduleDeactivated = 'report_schedule.deactivated';
+    case ReportScheduleRan = 'report_schedule.ran';
 }

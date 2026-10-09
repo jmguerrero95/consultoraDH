@@ -786,6 +786,93 @@ está. Los fixtures de las pruebas se generan en el directorio temporal del sist
 el repositorio: un `.xlsx` que una prueba fallida deja junto a las fuentes es exactamente lo
 que un `git add .` posterior recogería.
 
+## 13-bis-2. Archivos privados de A05
+
+A05 almacena archivos de dos dominios: los comprobantes de una planilla
+(`contribution_sheets` + `contribution_sheet_files`) y los documentos de un cliente
+(`client_documents`). Ambos viven en discos privados con `serve => false`, fuera de
+`public/`.
+
+- **El nombre físico lo genera el sistema.** Es el hash SHA-256 del contenido; el
+  nombre que escribió el usuario es sólo metadato. Nada que llegue de una petición
+  toca la ruta del sistema de archivos, así que no hay recorrido de directorios ni
+  sobrescritura de un archivo vecino.
+- **Ninguna API expone `stored_path`.** La descarga pasa por un controlador que
+  comprueba autorización antes de leer un solo byte.
+- **Lista blanca de MIME, comprobada sobre el contenido.** Documentos: PDF, JPEG,
+  PNG, DOCX, XLSX y CSV. Comprobantes: PDF, JPEG y PNG. Se rechazan HTML, SVG,
+  JavaScript, ejecutables y los formatos de Office con macros habilitadas.
+- **A05 no afirma «antivirus limpio»** porque no hay antivirus. Se valida el tipo, el
+  tamaño y el almacenamiento privado; el escaneo de malware corresponde a A07.
+
+### La cuenta de portal
+
+Una cuenta de portal es un inicio de sesión: correo, contraseña, sesión y estado.
+Todo eso ya existía en `users`; construir una tabla `client_users` paralela habría
+significado una segunda pila de autenticación, un segundo flujo de recuperación y un
+segundo lugar donde anidar el siguiente error de contraseñas.
+
+La diferencia son **dos columnas y una restricción**:
+
+```
+staff  => client_id IS NULL
+client => client_id IS NOT NULL
+```
+
+Ambas mitades importan. Una cuenta de cliente sin `client_id` puede iniciar sesión y
+luego tener que responder en tiempo de ejecución «¿de quién son estos datos?», y esa
+pregunta no tiene una respuesta por omisión segura. Y una cuenta interna que
+cargara con un `client_id` quedaría **estrecha** a una cuenta de portal ante cualquier
+código que trate la presencia de la columna como autoritativa, así que `staff` está
+fijado a `NULL` con la misma firmeza.
+
+El índice único parcial sobre `client_id` hace de «una cuenta por cliente» un hecho y
+no una intención.
+
+**No hay auto-registro público.** El acceso al portal lo activa alguien autorizado
+desde la ficha del cliente. El correo de una cuenta interna que coincida con el de
+un cliente nunca convierte esa cuenta interna en una de portal: no existe ninguna vía
+de migración que infiera un cliente desde una dirección de correo.
+
+**Nunca se generan ni se muestran contraseñas en claro.** La cuenta se crea con una
+contraseña que fija un humano autorizado, o se envía el enlace de recuperación ya
+existente. La API de creación de cuenta de portal nunca devuelve la contraseña.
+
+### Aislamiento del portal
+
+Los endpoints del portal no son los endpoints internos con un permiso distinto. Son
+consultas con propiedad: filtran por el `client_id` de la cuenta autenticada y
+comprueban la pertenencia del recurso en cada petición, incluida cada descarga.
+
+- Un cliente que pide el documento de otro obtiene **404**, no un 403 con datos.
+- El rol `Client` no tiene ningún permiso administrativo, así que ninguna ruta
+  interna le responde 200 aunque el botón esté oculto. Ocultar un enlace es cortesía;
+  el rechazo es del servidor.
+- Una sesión abierta mientras la cuenta estaba activa deja de funcionar en cuanto la
+  cuenta se suspende: es el middleware `user.active` de A01, que corre antes que
+  cualquier controlador del portal.
+- El portal no muestra auditoría interna, notas internas, novedades internas ni
+  tareas del personal. No pertenecen al cliente.
+
+### La proposición de cambios de perfil
+
+El formulario del portal **propone**; no escribe. Crear una solicitud de
+actualización no modifica el registro del cliente, y sólo se aplica cuando alguien
+con `client_update_requests.review` la aprueba usando la acción de actualización de
+A02, con su auditoría. Si A02 rechaza el cambio, la solicitud no queda aprobada.
+
+Los campos de identidad —tipo y número de documento— no son editables desde el
+portal: corregirlos es una decisión del personal, no un ajuste que escriba el titular
+de la cuenta.
+
+### Lo que la interfaz no calcula
+
+Ni el saldo de una cuenta, ni el total de una planilla, ni las cifras de un reporte
+se calculan en Vue. Todo eso lo dice el servidor, y el portal pide a los servicios de
+A03 las cifras de la cuenta del cliente. Un número calculado en el navegador es una
+segunda respuesta a una pregunta que el servidor ya responde, y las dos pueden
+divergir sin que nadie lo note.
+
 ## 14. Registro (bitácora)
 
 - La bitácora vive en `storage/logs/laravel.log` y en la salida estándar de los
@@ -805,6 +892,32 @@ que un `git add .` posterior recogería.
   puede restablecer la contraseña de esa cuenta local. Por eso `storage/logs/` está
   fuera del repositorio, y por eso hay que borrarlo —o al menos `truncarlo`— antes de
   compartir el archivo de una sesión de desarrollo.
+
+## 14-bis. Lo que A05 audita
+
+Cada escritura significativa de A05 deja actor, momento, objetivo y decisión:
+
+```
+planilla creada, validada, devuelta a borrador, enviada, pagada, cancelada
+comprobante de planilla subido
+
+novedad creada, resuelta, cancelada
+tarea creada, reasignada, completada, cancelada
+
+documento subido, revisado, aprobado, rechazado, archivado
+solicitud creada, recibida, revisada, aprobada, rechazada, cancelada
+
+cuenta de portal creada, activada, desactivada
+
+cambio de perfil solicitado, aplicado, rechazado
+
+programación de reporte creada, actualizada, desactivada
+reporte generado, descargado
+```
+
+No se registran binarios de documento, ni contraseñas, ni tokens.
+
+---
 
 ## 15. Antes de publicar: lista de verificación
 

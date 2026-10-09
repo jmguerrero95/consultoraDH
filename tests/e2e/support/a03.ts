@@ -339,7 +339,19 @@ export async function apiSignIn(
 export async function apiUpload(
     page: Page,
     path: string,
-    multipart: Record<string, { name: string; mimeType: string; buffer: Buffer }>,
+    /**
+     * A multipart body: file descriptors and plain field values together.
+     *
+     * Playwright accepts either shape per part, and a real upload carries both — the
+     * bytes plus the identifiers that say what they are. Typing every part as a file
+     * descriptor would force a caller to fake a descriptor for a `client_id`, which is
+     * how a helper starts asserting things that are not true of the request a browser
+     * actually makes.
+     */
+    multipart: Record<
+        string,
+        { name: string; mimeType: string; buffer: Buffer } | string | number
+    >,
 ) {
     return page.request.post(path, {
         multipart,

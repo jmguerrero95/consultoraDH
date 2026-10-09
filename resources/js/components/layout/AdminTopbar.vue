@@ -2,6 +2,7 @@
 import { useRoute } from 'vue-router';
 
 import AppWordmark from '@/components/brand/AppWordmark.vue';
+import NotificationBell from '@/components/layout/NotificationBell.vue';
 import UserMenu from '@/components/layout/UserMenu.vue';
 import { useAuthStore } from '@/stores/auth';
 
@@ -39,19 +40,11 @@ const route = useRoute();
         <span class="cdh-topbar__spacer" />
 
         <!--
-            Placeholder. Notifications arrive with the operational modules
-            (A06, A10); the control is present so the layout is final.
+            A05 made this real. The unread count and the recent list exist because a task
+            reminder and a finished scheduled report have to reach the person they concern
+            without anybody watching a scheduler log.
         -->
-        <button
-            type="button"
-            class="cdh-icon-btn"
-            aria-label="Notificaciones (próximamente)"
-            title="Notificaciones (próximamente)"
-            disabled
-        >
-            <i class="bi bi-bell" aria-hidden="true" />
-            <span class="cdh-icon-btn__dot" aria-hidden="true" />
-        </button>
+        <NotificationBell />
 
         <UserMenu v-if="auth.user" />
     </header>

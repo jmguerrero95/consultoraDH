@@ -4,16 +4,26 @@ declare(strict_types=1);
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BillingConfigurationController;
+use App\Http\Controllers\Api\CalendarController;
 use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\ImportController;
+use App\Http\Controllers\Api\NotificationController;
+use App\Http\Controllers\Api\NoveltyController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\PeriodController;
+use App\Http\Controllers\Api\PlanillaController;
+use App\Http\Controllers\Api\Portal\PortalDocumentController;
+use App\Http\Controllers\Api\Portal\PortalProfileController;
+use App\Http\Controllers\Api\Portal\PortalRelationshipController;
 use App\Http\Controllers\Api\ProfileController;
 use App\Http\Controllers\Api\ReceivableController;
+use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\SocialSecurityEntityController;
+use App\Http\Controllers\Api\TaskController;
 use App\Http\Controllers\HealthController;
 use Illuminate\Support\Facades\Route;
 
@@ -51,6 +61,14 @@ foreach ([
     'rate',
     'rule',
     'user',
+    'planilla',
+    'novelty',
+    'task',
+    'document',
+    'documentRequest',
+    'updateRequest',
+    'reportSchedule',
+    'generatedReport',
 ] as $parameter) {
     Route::pattern($parameter, '[0-9]+');
 }
@@ -447,5 +465,161 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     // route a moment later.
     Route::middleware('can:imports.apply')->group(function (): void {
         Route::post('/imports/{import}/apply', [ImportController::class, 'apply'])->name('api.imports.apply');
+    });
+
+    // =================================================================
+    // A05: planillas
+    // =================================================================
+
+    Route::middleware('can:planillas.view')->group(function (): void {
+        Route::get('/planillas', [PlanillaController::class, 'index'])->name('api.planillas.index');
+        Route::get('/planillas/vocabulary', [PlanillaController::class, 'vocabulary'])->name('api.planillas.vocabulary');
+        Route::get('/planillas/{planilla}', [PlanillaController::class, 'show'])->name('api.planillas.show');
+        Route::get('/planillas/{planilla}/export/xlsx', [PlanillaController::class, 'exportXlsx'])->name('api.planillas.export.xlsx');
+        Route::get('/planillas/{planilla}/export/pdf', [PlanillaController::class, 'exportPdf'])->name('api.planillas.export.pdf');
+        Route::get('/planillas/{planilla}/files/{file}', [PlanillaController::class, 'downloadFile'])->name('api.planillas.files.download');
+    });
+
+    Route::middleware('can:planillas.create')->group(function (): void {
+        Route::post('/planillas/preview', [PlanillaController::class, 'preview'])->name('api.planillas.preview');
+        Route::post('/planillas', [PlanillaController::class, 'store'])->name('api.planillas.store');
+    });
+
+    Route::middleware('can:planillas.validate')->group(function (): void {
+        Route::post('/planillas/{planilla}/validate', [PlanillaController::class, 'validate'])->name('api.planillas.validate');
+    });
+
+    Route::middleware('can:planillas.submit')->group(function (): void {
+        Route::post('/planillas/{planilla}/submit', [PlanillaController::class, 'submit'])->name('api.planillas.submit');
+    });
+
+    Route::middleware('can:planillas.mark_paid')->group(function (): void {
+        Route::post('/planillas/{planilla}/mark-paid', [PlanillaController::class, 'markPaid'])->name('api.planillas.mark-paid');
+    });
+
+    Route::middleware('can:planillas.cancel')->group(function (): void {
+        Route::post('/planillas/{planilla}/cancel', [PlanillaController::class, 'cancel'])->name('api.planillas.cancel');
+    });
+
+    Route::middleware('can:planillas.update')->group(function (): void {
+        Route::post('/planillas/{planilla}/return-to-draft', [PlanillaController::class, 'returnToDraft'])->name('api.planillas.return-to-draft');
+        Route::post('/planillas/{planilla}/files', [PlanillaController::class, 'uploadFile'])->name('api.planillas.files.store');
+    });
+
+    // =================================================================
+    // A05: novelties, tasks, calendar
+    // =================================================================
+
+    Route::middleware('can:novelties.view')->group(function (): void {
+        Route::get('/novelties', [NoveltyController::class, 'index'])->name('api.novelties.index');
+        Route::get('/novelties/vocabulary', [NoveltyController::class, 'vocabulary'])->name('api.novelties.vocabulary');
+    });
+
+    Route::middleware('can:novelties.manage')->group(function (): void {
+        Route::post('/novelties', [NoveltyController::class, 'store'])->name('api.novelties.store');
+        Route::post('/novelties/{novelty}/resolve', [NoveltyController::class, 'resolve'])->name('api.novelties.resolve');
+        Route::post('/novelties/{novelty}/cancel', [NoveltyController::class, 'cancel'])->name('api.novelties.cancel');
+    });
+
+    Route::middleware('can:tasks.view')->group(function (): void {
+        Route::get('/tasks', [TaskController::class, 'index'])->name('api.tasks.index');
+        Route::get('/tasks/vocabulary', [TaskController::class, 'vocabulary'])->name('api.tasks.vocabulary');
+    });
+
+    Route::middleware('can:tasks.manage')->group(function (): void {
+        Route::post('/tasks', [TaskController::class, 'store'])->name('api.tasks.store');
+        Route::post('/tasks/{task}/complete', [TaskController::class, 'complete'])->name('api.tasks.complete');
+        Route::post('/tasks/{task}/cancel', [TaskController::class, 'cancel'])->name('api.tasks.cancel');
+        Route::post('/tasks/{task}/reassign', [TaskController::class, 'reassign'])->name('api.tasks.reassign');
+    });
+
+    Route::middleware('can:tasks.view')->group(function (): void {
+        Route::get('/calendar', [CalendarController::class, 'index'])->name('api.calendar.index');
+    });
+
+    // =================================================================
+    // A05: documents
+    // =================================================================
+
+    Route::middleware('can:documents.view')->group(function (): void {
+        Route::get('/document-types', [DocumentController::class, 'indexTypes'])->name('api.document-types.index');
+        Route::get('/document-requests', [DocumentController::class, 'indexRequests'])->name('api.document-requests.index');
+        Route::get('/documents', [DocumentController::class, 'indexDocuments'])->name('api.documents.index');
+        Route::get('/documents/{document}/download', [DocumentController::class, 'downloadDocument'])->name('api.documents.download');
+    });
+
+    Route::middleware('can:documents.manage')->group(function (): void {
+        Route::post('/document-types', [DocumentController::class, 'storeType'])->name('api.document-types.store');
+    });
+
+    Route::middleware('can:documents.request')->group(function (): void {
+        Route::post('/document-requests', [DocumentController::class, 'storeRequest'])->name('api.document-requests.store');
+    });
+
+    Route::middleware('can:documents.review')->group(function (): void {
+        Route::post('/document-requests/{documentRequest}/receive', [DocumentController::class, 'markReceived'])->name('api.document-requests.receive');
+        Route::post('/document-requests/{documentRequest}/review', [DocumentController::class, 'reviewRequest'])->name('api.document-requests.review');
+        Route::post('/document-requests/{documentRequest}/cancel', [DocumentController::class, 'cancelRequest'])->name('api.document-requests.cancel');
+    });
+
+    Route::middleware('can:documents.manage')->group(function (): void {
+        Route::post('/documents', [DocumentController::class, 'uploadDocument'])->name('api.documents.store');
+    });
+
+    // =================================================================
+    // A05: client portal
+    // =================================================================
+
+    Route::middleware('auth', 'auth.session', 'user.active')->group(function (): void {
+        Route::get('/portal/home', [PortalProfileController::class, 'home'])->name('api.portal.home');
+        Route::get('/portal/profile', [PortalProfileController::class, 'show'])->name('api.portal.profile');
+        Route::post('/portal/profile/update-request', [PortalProfileController::class, 'submitUpdateRequest'])->name('api.portal.profile.update-request');
+        Route::get('/portal/profile/update-requests', [PortalProfileController::class, 'updateRequests'])->name('api.portal.profile.update-requests');
+        Route::get('/portal/financial-account', [PortalProfileController::class, 'financialAccount'])->name('api.portal.financial-account');
+        Route::get('/portal/relationships', [PortalRelationshipController::class, 'index'])->name('api.portal.relationships');
+        Route::get('/portal/documents', [PortalDocumentController::class, 'index'])->name('api.portal.documents');
+        Route::get('/portal/documents/{document}/download', [PortalDocumentController::class, 'download'])->name('api.portal.documents.download');
+        Route::get('/portal/document-requests', [PortalDocumentController::class, 'indexRequests'])->name('api.portal.document-requests');
+        Route::post('/portal/document-requests/{documentRequest}/upload', [PortalDocumentController::class, 'uploadResponse'])->name('api.portal.document-requests.upload');
+    });
+
+    // =================================================================
+    // A05: portal account management (staff)
+    // =================================================================
+
+    Route::middleware('can:portal_accounts.manage')->group(function (): void {
+        Route::post('/clients/{client}/portal-account', [ClientController::class, 'createPortalAccount'])->name('api.clients.portal-account.store');
+        Route::post('/users/{user}/portal-account/deactivate', [ClientController::class, 'deactivatePortalAccount'])->name('api.users.portal-account.deactivate');
+    });
+
+    // =================================================================
+    // A05: reports
+    // =================================================================
+
+    Route::middleware('can:reports.view')->group(function (): void {
+        Route::get('/reports/vocabulary', [ReportController::class, 'vocabulary'])->name('api.reports.vocabulary');
+        Route::get('/reports', [ReportController::class, 'index'])->name('api.reports.index');
+        Route::get('/reports/generated', [ReportController::class, 'indexGenerated'])->name('api.reports.generated');
+    });
+
+    Route::middleware('can:reports.export')->group(function (): void {
+        Route::get('/reports/download', [ReportController::class, 'download'])->name('api.reports.download');
+        Route::get('/reports/generated/{generatedReport}/download', [ReportController::class, 'downloadGenerated'])->name('api.reports.generated.download');
+    });
+
+    // §59: the notification inbox. Not permission-gated: a notification is addressed to
+    // one account, and ownership is the authorisation. A client account has none of the
+    // permissions above, so it cannot reach the staff sections these routes sit beside.
+    Route::middleware('auth')->group(function (): void {
+        Route::get('/notifications', [NotificationController::class, 'index'])->name('api.notifications.index');
+        Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead'])->name('api.notifications.read-all');
+        Route::post('/notifications/{notification}/read', [NotificationController::class, 'markRead'])->name('api.notifications.read');
+    });
+
+    Route::middleware('can:reports.schedule')->group(function (): void {
+        Route::get('/report-schedules', [ReportController::class, 'indexSchedules'])->name('api.report-schedules.index');
+        Route::post('/report-schedules', [ReportController::class, 'storeSchedule'])->name('api.report-schedules.store');
+        Route::post('/report-schedules/{reportSchedule}/deactivate', [ReportController::class, 'deactivateSchedule'])->name('api.report-schedules.deactivate');
+        Route::post('/report-schedules/run-due', [ReportController::class, 'runDueSchedules'])->name('api.report-schedules.run-due');
     });
 });

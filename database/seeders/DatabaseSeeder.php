@@ -39,6 +39,7 @@ final class DatabaseSeeder extends Seeder
         'Collections',
         'Support',
         'Read Only',
+        'Client',
     ];
 
     /**
@@ -117,6 +118,42 @@ final class DatabaseSeeder extends Seeder
         'imports.create',
         'imports.review',
         'imports.apply',
+
+        /*
+         | The A05 permissions.
+         |
+         | The integrated operational layer: planillas, novelties, tasks, documents,
+         | the client portal, and reports. Each is its own domain with its own
+         | view/manage split, because the decisions are genuinely different —
+         | preparing a planilla is not the same authority as reviewing a document
+         | request, and neither is the same as scheduling a report.
+         */
+        'planillas.view',
+        'planillas.create',
+        'planillas.update',
+        'planillas.validate',
+        'planillas.submit',
+        'planillas.mark_paid',
+        'planillas.cancel',
+
+        'novelties.view',
+        'novelties.manage',
+
+        'tasks.view',
+        'tasks.manage',
+
+        'documents.view',
+        'documents.manage',
+        'documents.request',
+        'documents.review',
+
+        'portal_accounts.manage',
+        'client_update_requests.view',
+        'client_update_requests.review',
+
+        'reports.view',
+        'reports.export',
+        'reports.schedule',
     ];
 
     /**
@@ -143,6 +180,75 @@ final class DatabaseSeeder extends Seeder
         'Collections' => [],
         'Support' => [],
         'Read Only' => [],
+    ];
+
+    /**
+     * The A05 permissions each role holds.
+     *
+     * The Client role is deliberately absent from this matrix: it holds **zero**
+     * internal administrative permissions. Portal access is ownership-scoped, not
+     * permission-scoped — a client account sees only its own resources through
+     * dedicated portal endpoints, never through staff endpoints.
+     *
+     * @var array<string, list<string>>
+     */
+    private const MATRIX_A05 = [
+        'Super Admin' => [
+            'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
+            'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
+            'novelties.view', 'novelties.manage',
+            'tasks.view', 'tasks.manage',
+            'documents.view', 'documents.manage', 'documents.request', 'documents.review',
+            'portal_accounts.manage',
+            'client_update_requests.view', 'client_update_requests.review',
+            'reports.view', 'reports.export', 'reports.schedule',
+        ],
+
+        'Administrator' => [
+            'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
+            'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
+            'novelties.view', 'novelties.manage',
+            'tasks.view', 'tasks.manage',
+            'documents.view', 'documents.manage', 'documents.request', 'documents.review',
+            'portal_accounts.manage',
+            'client_update_requests.view', 'client_update_requests.review',
+            'reports.view', 'reports.export', 'reports.schedule',
+        ],
+
+        'Operations' => [
+            'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
+            'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
+            'novelties.view', 'novelties.manage',
+            'tasks.view', 'tasks.manage',
+            'documents.view', 'documents.manage', 'documents.request', 'documents.review',
+            'portal_accounts.manage',
+            'client_update_requests.view', 'client_update_requests.review',
+            'reports.view', 'reports.export', 'reports.schedule',
+        ],
+
+        'Collections' => [
+            'planillas.view',
+            'novelties.view',
+            'tasks.view', 'tasks.manage',
+            'documents.view',
+            'reports.view', 'reports.export',
+        ],
+
+        'Support' => [
+            'novelties.view', 'novelties.manage',
+            'tasks.view', 'tasks.manage',
+            'documents.view', 'documents.request', 'documents.review',
+            'portal_accounts.manage',
+            'reports.view',
+        ],
+
+        'Read Only' => [
+            'planillas.view',
+            'novelties.view',
+            'tasks.view',
+            'documents.view',
+            'reports.view',
+        ],
     ];
 
     /**
@@ -302,6 +408,7 @@ final class DatabaseSeeder extends Seeder
             ...self::PERMISSIONS,
             ...array_merge(...array_values(self::MATRIX_A03)),
             ...array_merge(...array_values(self::MATRIX_A04)),
+            ...array_merge(...array_values(self::MATRIX_A05)),
             'settings.view',
         ];
 
@@ -326,6 +433,13 @@ final class DatabaseSeeder extends Seeder
                 continue;
             }
 
+            Role::findByName($roleName, 'web')->givePermissionTo($permissions);
+        }
+
+        // The A05 matrix is a fourth pass. The Client role is intentionally absent: it
+        // holds no staff permissions, and the revocation pass below removes any that
+        // might have been granted by a previous seeding.
+        foreach (self::MATRIX_A05 as $roleName => $permissions) {
             Role::findByName($roleName, 'web')->givePermissionTo($permissions);
         }
 
