@@ -41,6 +41,14 @@ use Illuminate\Support\Facades\DB;
  * deleted, and the request's `decision_note` — the reason staff gave — is left alone
  * until the new answer is reviewed. That is what §36 requires: a rejected document stays
  * in history.
+ *
+ * ## Outer-transaction file cleanup
+ *
+ * The file is written inside the DB transaction, but if a later operation in that
+ * transaction throws (e.g., audit recording or request status persistence), the DB
+ * rolls back while the filesystem does not. Because physical filenames are now unique
+ * (UUID), we can safely compensate by deleting the newly written file on any exception
+ * that escapes the transaction.
  */
 final class RespondToDocumentRequest
 {
@@ -93,30 +101,41 @@ final class RespondToDocumentRequest
             // claiming a file that is not there.
             $this->files->store($document, $upload, (int) $actor->id, true);
 
-            $authoritative->forceFill([
-                'status' => DocumentRequestStatus::Received->value,
-                'received_at' => now(),
-            ])->save();
+            // If anything from here onward throws, the DB transaction rolls back but the
+            // file has already been written. Because physical filenames are unique (UUID),
+            // we can safely compensate by removing only this file.
+            try {
+                $authoritative->forceFill([
+                    'status' => DocumentRequestStatus::Received->value,
+                    'received_at' => now(),
+                ])->save();
 
-            $this->audit->record(
-                AuditAction::DocumentUploaded,
-                $actor,
-                [
-                    'via' => 'portal',
-                    'document_request_id' => (int) $authoritative->id,
-                    'replaces_rejection' => $request->status === DocumentRequestStatus::Rejected,
-                ],
-                null,
-                $document,
-            );
+                $this->audit->record(
+                    AuditAction::DocumentUploaded,
+                    $actor,
+                    [
+                        'via' => 'portal',
+                        'document_request_id' => (int) $authoritative->id,
+                        'replaces_rejection' => $request->status === DocumentRequestStatus::Rejected,
+                    ],
+                    null,
+                    $document,
+                );
 
-            $this->audit->record(
-                AuditAction::DocumentRequestReceived,
-                $actor,
-                ['document_id' => (int) $document->id],
-                null,
-                $authoritative,
-            );
+                $this->audit->record(
+                    AuditAction::DocumentRequestReceived,
+                    $actor,
+                    ['document_id' => (int) $document->id],
+                    null,
+                    $authoritative,
+                );
+            } catch (\Throwable $e) {
+                // Compensate: the DB will roll back, but the file remains orphaned.
+                // Delete only the file we just wrote for this document.
+                $this->files->delete($document);
+
+                throw $e;
+            }
 
             return $document;
         });

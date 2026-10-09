@@ -104,7 +104,8 @@ it('P1: walks preview to paid through the API, typing the amount as an operator 
     $this->actingAs($this->actor)
         ->postJson("/api/planillas/{$sheet['id']}/validate")
         ->assertOk()
-        ->assertJsonPath('valid', true);
+        ->assertJsonPath('valid', true)
+        ->assertJsonPath('status', ContributionSheetStatus::Ready->value);
 
     $this->actingAs($this->actor)
         ->postJson("/api/planillas/{$sheet['id']}/submit", [

@@ -9,6 +9,7 @@ use App\Models\ContributionSheetFile;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 final class PlanillaFileStore
 {
@@ -26,12 +27,20 @@ final class PlanillaFileStore
      * and the row second, because an orphan file is invisible and removable while a row
      * claiming a missing file is neither. If the metadata write throws, the bytes are
      * deleted and the original exception is rethrown untouched.
+     *
+     * ## Collision-safe physical filenames
+     *
+     * Two uploads with identical bytes must not share the same physical path. If they
+     * did, a failure on the second upload would delete the file the first upload still
+     * needs. Each upload therefore gets a unique random physical filename (UUID), while
+     * the SHA-256 remains stored as integrity metadata.
      */
     public function store(ContributionSheet $sheet, UploadedFile $upload, string $kind, int $userId): ContributionSheetFile
     {
         $hash = hash_file('sha256', $upload->getRealPath());
         $extension = strtolower($upload->extension());
-        $relative = 'sheets'.DIRECTORY_SEPARATOR.$sheet->id.DIRECTORY_SEPARATOR.$hash.'.'.$extension;
+        $physicalFilename = (string) Str::uuid().'.'.$extension;
+        $relative = 'sheets'.DIRECTORY_SEPARATOR.$sheet->id.DIRECTORY_SEPARATOR.$physicalFilename;
 
         $written = $this->disk()->putFileAs(
             dirname($relative),

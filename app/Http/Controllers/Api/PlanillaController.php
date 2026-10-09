@@ -132,6 +132,10 @@ final class PlanillaController extends Controller
             return response()->json(['message' => $e->getMessage(), 'reason' => $e->reason], 409);
         }
 
+        // The validator reads and writes under lock; the route-bound model is stale.
+        // Refresh to return the authoritative persisted status.
+        $planilla->refresh();
+
         return response()->json($result->toArray() + ['status' => $planilla->status->value]);
     }
 

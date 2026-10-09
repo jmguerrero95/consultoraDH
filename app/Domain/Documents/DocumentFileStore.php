@@ -9,6 +9,7 @@ use App\Models\ClientDocument;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 final class DocumentFileStore
 {
@@ -55,12 +56,20 @@ final class DocumentFileStore
      * So the bytes go first, and if the metadata write throws, the bytes are deleted and
      * the original exception is rethrown untouched — not wrapped, not swallowed. The
      * caller still sees why the database refused, which is the part they need.
+     *
+     * ## Collision-safe physical filenames
+     *
+     * Two uploads with identical bytes must not share the same physical path. If they
+     * did, a failure on the second upload would delete the file the first upload still
+     * needs. Each upload therefore gets a unique random physical filename (UUID), while
+     * the SHA-256 remains stored as integrity metadata.
      */
     public function store(ClientDocument $document, UploadedFile $upload, int $userId, bool $viaPortal): ClientDocument
     {
         $hash = hash_file('sha256', $upload->getRealPath());
         $extension = strtolower($upload->extension());
-        $relative = 'clients'.DIRECTORY_SEPARATOR.$document->client_id.DIRECTORY_SEPARATOR.$hash.'.'.$extension;
+        $physicalFilename = (string) Str::uuid().'.'.$extension;
+        $relative = 'clients'.DIRECTORY_SEPARATOR.$document->client_id.DIRECTORY_SEPARATOR.$physicalFilename;
 
         $written = $this->disk()->putFileAs(
             dirname($relative),
