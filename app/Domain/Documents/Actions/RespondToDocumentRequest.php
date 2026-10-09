@@ -49,6 +49,9 @@ use Illuminate\Support\Facades\DB;
  * rolls back while the filesystem does not. Because physical filenames are now unique
  * (UUID), we can safely compensate by deleting the newly written file on any exception
  * that escapes the transaction.
+ *
+ * The compensation wraps the ENTIRE DB::transaction call, not just the inner body.
+ * This covers failures that occur during commit itself, after the callback has returned.
  */
 final class RespondToDocumentRequest
 {
@@ -64,47 +67,49 @@ final class RespondToDocumentRequest
     ): ClientDocument {
         $this->files->assertAllowed($upload);
 
-        return DB::transaction(function () use ($request, $upload, $actor): ClientDocument {
-            $authoritative = ClientDocumentRequest::query()
-                ->whereKey($request->id)
-                ->lockForUpdate()
-                ->first();
+        $storedDocument = null;
 
-            if ($authoritative === null || $authoritative->client_id !== $actor->client_id) {
-                throw DocumentNotApplicable::wrongState('unknown', 'requested');
-            }
+        try {
+            return DB::transaction(function () use ($request, $upload, $actor, &$storedDocument): ClientDocument {
+                $authoritative = ClientDocumentRequest::query()
+                    ->whereKey($request->id)
+                    ->lockForUpdate()
+                    ->first();
 
-            // Only these two accept an answer. `approved` and `cancelled` are terminal, and
-            // `received`/`reviewed` already have a document attached.
-            if (! in_array(
-                $authoritative->status,
-                [DocumentRequestStatus::Requested, DocumentRequestStatus::Rejected],
-                true,
-            )) {
-                throw DocumentNotApplicable::wrongState(
-                    $authoritative->status->value,
-                    DocumentRequestStatus::Received->value,
-                );
-            }
+                if ($authoritative === null || $authoritative->client_id !== $actor->client_id) {
+                    throw DocumentNotApplicable::wrongState('unknown', 'requested');
+                }
 
-            $document = ClientDocument::query()->create([
-                'client_id' => $authoritative->client_id,
-                'document_type_id' => $authoritative->document_type_id,
-                'document_request_id' => $authoritative->id,
-                'title' => $authoritative->title,
-                'visibility' => 'internal',
-                'review_status' => 'received',
-            ]);
+                // Only these two accept an answer. `approved` and `cancelled` are terminal, and
+                // `received`/`reviewed` already have a document attached.
+                if (! in_array(
+                    $authoritative->status,
+                    [DocumentRequestStatus::Requested, DocumentRequestStatus::Rejected],
+                    true,
+                )) {
+                    throw DocumentNotApplicable::wrongState(
+                        $authoritative->status->value,
+                        DocumentRequestStatus::Received->value,
+                    );
+                }
 
-            // The file store deletes the physical file and rethrows if the metadata
-            // cannot be persisted, so the transaction above rolls back and leaves no row
-            // claiming a file that is not there.
-            $this->files->store($document, $upload, (int) $actor->id, true);
+                $document = ClientDocument::query()->create([
+                    'client_id' => $authoritative->client_id,
+                    'document_type_id' => $authoritative->document_type_id,
+                    'document_request_id' => $authoritative->id,
+                    'title' => $authoritative->title,
+                    'visibility' => 'internal',
+                    'review_status' => 'received',
+                ]);
 
-            // If anything from here onward throws, the DB transaction rolls back but the
-            // file has already been written. Because physical filenames are unique (UUID),
-            // we can safely compensate by removing only this file.
-            try {
+                // The file store deletes the physical file and rethrows if the metadata
+                // cannot be persisted, so the transaction above rolls back and leaves no row
+                // claiming a file that is not there.
+                $this->files->store($document, $upload, (int) $actor->id, true);
+
+                // Only set the compensation target AFTER file store succeeded.
+                $storedDocument = $document;
+
                 $authoritative->forceFill([
                     'status' => DocumentRequestStatus::Received->value,
                     'received_at' => now(),
@@ -129,15 +134,21 @@ final class RespondToDocumentRequest
                     null,
                     $authoritative,
                 );
-            } catch (\Throwable $e) {
-                // Compensate: the DB will roll back, but the file remains orphaned.
-                // Delete only the file we just wrote for this document.
-                $this->files->delete($document);
 
-                throw $e;
+                return $document;
+            });
+        } catch (\Throwable $e) {
+            // Compensate: the DB transaction did not commit, but the file was already written.
+            // Delete only the file we just wrote for this document.
+            if ($storedDocument !== null) {
+                try {
+                    $this->files->delete($storedDocument);
+                } catch (\Throwable) {
+                    // Best effort: never mask the original exception.
+                }
             }
 
-            return $document;
-        });
+            throw $e;
+        }
     }
 }
