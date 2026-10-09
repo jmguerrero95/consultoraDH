@@ -7,6 +7,7 @@ namespace App\Domain\Planillas\Actions;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Planillas\ContributionSheetStatus;
+use App\Domain\Planillas\LockedSheet;
 use App\Domain\Planillas\SheetNotApplicable;
 use App\Models\ContributionSheet;
 use App\Models\User;
@@ -28,30 +29,44 @@ final class SubmitSheet
         string $submittedOn,
         User $actor,
     ): ContributionSheet {
-        if (! $sheet->status->canTransitionTo(ContributionSheetStatus::Submitted)) {
-            throw SheetNotApplicable::wrongState($sheet->status, ContributionSheetStatus::Submitted);
-        }
-
         if (trim((string) $sheetNumber) === '' && trim((string) $reference) === '') {
+            // Checked before the lock: this is about what the caller sent, not about the
+            // sheet's state, and answering it early costs nothing.
             throw SheetNotApplicable::missingSubmissionData();
         }
 
-        $sheet->forceFill([
-            'status' => ContributionSheetStatus::Submitted->value,
-            'sheet_number' => trim((string) $sheetNumber) ?: null,
-            'reference' => trim((string) $reference) ?: null,
-            'submitted_on' => $submittedOn,
-            'submitted_by' => $actor->id,
-        ])->save();
+        return LockedSheet::of(
+            (int) $sheet->id,
+            function (ContributionSheet $authoritative) use ($sheetNumber, $reference, $submittedOn, $actor): ContributionSheet {
+                if (! $authoritative->status->canTransitionTo(ContributionSheetStatus::Submitted)) {
+                    throw SheetNotApplicable::wrongState(
+                        $authoritative->status,
+                        ContributionSheetStatus::Submitted,
+                    );
+                }
 
-        $this->audit->record(
-            AuditAction::ContributionSheetSubmitted,
-            $actor,
-            ['sheet_number' => $sheet->sheet_number, 'reference' => $sheet->reference, 'submitted_on' => $submittedOn],
-            null,
-            $sheet,
+                $authoritative->forceFill([
+                    'status' => ContributionSheetStatus::Submitted->value,
+                    'sheet_number' => trim((string) $sheetNumber) ?: null,
+                    'reference' => trim((string) $reference) ?: null,
+                    'submitted_on' => $submittedOn,
+                    'submitted_by' => $actor->id,
+                ])->save();
+
+                $this->audit->record(
+                    AuditAction::ContributionSheetSubmitted,
+                    $actor,
+                    [
+                        'sheet_number' => $authoritative->sheet_number,
+                        'reference' => $authoritative->reference,
+                        'submitted_on' => $submittedOn,
+                    ],
+                    null,
+                    $authoritative,
+                );
+
+                return $authoritative;
+            },
         );
-
-        return $sheet;
     }
 }

@@ -97,6 +97,24 @@ final class SheetNotApplicable extends RuntimeException
         return new self('line_not_found', 'La línea no pertenece a esta planilla.');
     }
 
+    /** §23: excluding a generated candidate requires a reason. */
+    public static function missingExclusionReason(): self
+    {
+        return new self('missing_exclusion_reason', 'Explique por qué se excluye esta persona.');
+    }
+
+    /** §9.3: money is an integer, and a negative amount is not money. */
+    public static function negativeAmount(): self
+    {
+        return new self('negative_amount', 'El valor liquidado no puede ser negativo.');
+    }
+
+    /** §16: `other` needs a name, on the sheet as well as on creation. */
+    public static function operatorNotNamedForSheet(): self
+    {
+        return new self('operator_not_named', 'Indique el nombre del operador cuando la opción sea «Otro».');
+    }
+
     /** §23: only a draft may be edited. */
     public static function notEditable(ContributionSheetStatus $status): self
     {

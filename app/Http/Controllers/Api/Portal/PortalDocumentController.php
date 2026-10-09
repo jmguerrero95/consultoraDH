@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api\Portal;
 
 use App\Domain\Documents\Actions\DocumentNotApplicable;
+use App\Domain\Documents\Actions\RespondToDocumentRequest;
 use App\Domain\Documents\DocumentFileStore;
 use App\Domain\Documents\DocumentVisibility;
 use App\Http\Controllers\Controller;
@@ -17,7 +18,10 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class PortalDocumentController extends Controller
 {
-    public function __construct(private readonly DocumentFileStore $files) {}
+    public function __construct(
+        private readonly DocumentFileStore $files,
+        private readonly RespondToDocumentRequest $responder,
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -49,6 +53,10 @@ final class PortalDocumentController extends Controller
 
         abort_unless($document->client_id === $client->id, 404);
         abort_unless($document->visibility === DocumentVisibility::Client, 404);
+        // An archived document is history, not something to hand out. The id is guessable
+        // and the ownership check above would pass for this client's own document, so
+        // retention has to be refused here explicitly.
+        abort_unless($document->archived_at === null, 404);
 
         $path = $this->files->absolutePath($document);
 
@@ -88,44 +96,44 @@ final class PortalDocumentController extends Controller
 
     public function uploadResponse(ClientDocumentRequest $documentRequest, Request $request): JsonResponse
     {
+        $user = $request->user();
+
         $client = $this->client($request);
 
+        // Ownership first, and as a 404 like every other portal reference: the id is a
+        // sequential number, so a 403 here would confirm that the request exists.
         abort_unless($documentRequest->client_id === $client->id, 404);
-        abort_unless($documentRequest->status === 'requested' || $documentRequest->status === 'rejected', 409);
 
         $request->validate([
             'file' => ['required', 'file', 'max:10240'],
         ]);
 
-        $upload = $request->file('file');
-
         try {
-            $this->files->assertAllowed($upload);
+            // The whole lifecycle in one place: claim the request, store the file, move it
+            // to `received`, audit. The client does not need a staff member to say that
+            // what they sent arrived.
+            $document = $this->responder->handle(
+                $documentRequest,
+                $request->file('file'),
+                $user,
+            );
         } catch (DocumentNotApplicable $e) {
-            return response()->json(['message' => $e->getMessage(), 'code' => $e->reason], 422);
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], $e->reason === 'unsafe_upload' ? 422 : 409);
         }
 
-        $document = ClientDocument::query()->create([
-            'client_id' => $client->id,
-            'document_type_id' => $documentRequest->document_type_id,
-            'document_request_id' => $documentRequest->id,
-            'title' => $documentRequest->title,
-            'visibility' => 'internal',
-            'review_status' => 'received',
-        ]);
-
-        try {
-            $this->files->store($document, $upload, (int) $request->user()->id, true);
-        } catch (\Throwable) {
-            $document->delete();
-
-            return response()->json(['message' => 'No se pudo guardar el documento.'], 500);
-        }
+        $documentRequest->refresh();
 
         return response()->json([
             'id' => (int) $document->id,
             'title' => $document->title,
             'review_status' => $document->review_status->value,
+            // The client is told the state the system actually reached, not the one it
+            // asked for.
+            'request_status' => $documentRequest->status->value,
+            'request_status_label' => $documentRequest->status->label(),
         ], 201);
     }
 

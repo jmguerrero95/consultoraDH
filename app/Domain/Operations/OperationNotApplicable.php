@@ -29,4 +29,23 @@ final class OperationNotApplicable extends RuntimeException
     {
         return new self('already_done', 'La tarea ya está completada.');
     }
+
+    /** §R1: an internal task may not be assigned to a portal account. */
+    public static function assigneeNotStaff(string $accountType): self
+    {
+        return new self(
+            'assignee_not_staff',
+            sprintf(
+                'Una tarea interna no puede asignarse a una cuenta de tipo «%s». '
+                .'Las tareas se asignan a cuentas del personal.',
+                $accountType,
+            ),
+        );
+    }
+
+    /** §R1: a suspended account cannot take new work. */
+    public static function assigneeNotActive(): self
+    {
+        return new self('assignee_not_active', 'La cuenta asignada no está activa.');
+    }
 }

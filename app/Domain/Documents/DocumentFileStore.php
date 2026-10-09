@@ -37,6 +37,25 @@ final class DocumentFileStore
         }
     }
 
+    /**
+     * Write the bytes and the metadata, or leave nothing behind.
+     *
+     * ## The ordering, and why it is this way
+     *
+     * The bytes go first and the row second. A database transaction cannot roll back a
+     * filesystem write, so the two orders each leak something and only one of them leaks
+     * something recoverable:
+     *
+     *   row first, bytes second  -> a row claiming a file that does not exist. A later
+     *                                download answers 404 for a document that looks
+     *                                present, and nobody can tell why.
+     *   bytes first, row second  -> an orphan file with no metadata. Invisible to the
+     *                                application, and removable.
+     *
+     * So the bytes go first, and if the metadata write throws, the bytes are deleted and
+     * the original exception is rethrown untouched — not wrapped, not swallowed. The
+     * caller still sees why the database refused, which is the part they need.
+     */
     public function store(ClientDocument $document, UploadedFile $upload, int $userId, bool $viaPortal): ClientDocument
     {
         $hash = hash_file('sha256', $upload->getRealPath());
@@ -53,18 +72,26 @@ final class DocumentFileStore
             throw new \RuntimeException('No se pudo guardar el documento.');
         }
 
-        $retentionDays = $document->documentType?->retention_days;
+        try {
+            $retentionDays = $document->documentType?->retention_days;
 
-        $document->forceFill([
-            'original_name' => $upload->getClientOriginalName(),
-            'stored_path' => $relative,
-            'mime_type' => $upload->getMimeType() ?? 'application/octet-stream',
-            'size_bytes' => $upload->getSize(),
-            'sha256' => $hash,
-            'uploaded_by_user_id' => $userId,
-            'uploaded_via_portal' => $viaPortal,
-            'retention_until' => $retentionDays !== null ? now()->addDays($retentionDays) : null,
-        ])->save();
+            $document->forceFill([
+                'original_name' => $upload->getClientOriginalName(),
+                'stored_path' => $relative,
+                'mime_type' => $upload->getMimeType() ?? 'application/octet-stream',
+                'size_bytes' => $upload->getSize(),
+                'sha256' => $hash,
+                'uploaded_by_user_id' => $userId,
+                'uploaded_via_portal' => $viaPortal,
+                'retention_until' => $retentionDays !== null ? now()->addDays($retentionDays) : null,
+            ])->save();
+        } catch (\Throwable $e) {
+            // The row was not saved, so nothing will ever point at this path. Remove it
+            // rather than leaving an unreadable file in the private tree for ever.
+            $this->disk()->delete($relative);
+
+            throw $e;
+        }
 
         return $document;
     }

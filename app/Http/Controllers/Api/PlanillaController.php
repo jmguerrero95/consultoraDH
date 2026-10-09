@@ -7,6 +7,8 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Planillas\Actions\CancelSheet;
+use App\Domain\Planillas\Actions\EditSheetHeader;
+use App\Domain\Planillas\Actions\EditSheetLine;
 use App\Domain\Planillas\Actions\MarkSheetPaid;
 use App\Domain\Planillas\Actions\ReturnSheetToDraft;
 use App\Domain\Planillas\Actions\SubmitSheet;
@@ -24,6 +26,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Company;
 use App\Models\ContributionSheet;
 use App\Models\ContributionSheetFile;
+use App\Models\ContributionSheetLine;
 use App\Models\MonthlyPeriod;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -42,6 +45,8 @@ final class PlanillaController extends Controller
         private readonly MarkSheetPaid $marker,
         private readonly CancelSheet $canceller,
         private readonly ReturnSheetToDraft $returner,
+        private readonly EditSheetLine $editLine,
+        private readonly EditSheetHeader $editHeader,
         private readonly PlanillaExporter $exporter,
         private readonly PlanillaFileStore $files,
         private readonly PlanillaXlsxExport $xlsxExport,
@@ -247,6 +252,110 @@ final class PlanillaController extends Controller
         }, 'planilla_'.$planilla->id.'.pdf', [
             'Content-Type' => 'application/pdf',
         ]);
+    }
+
+    /**
+     * §23 — edit one draft line's operational values.
+     *
+     * Each field is validated only when the caller actually sends it, so a request that
+     * types the amount does not have to restate `included`, and one that excludes a
+     * candidate does not have to restate the amount. `null` is a real value here — it
+     * clears the amount — which is why presence is read from the raw input rather than
+     * from the validated array, where a null would have been dropped.
+     *
+     * `included` is read with an explicit JSON-boolean comparison instead of the
+     * `boolean` rule, because `boolean` also accepts `false` and `null` for the same
+     * field, and the difference between them here is whether a line ends up included or
+     * excluded with no reason.
+     */
+    public function updateLine(Request $request, ContributionSheet $planilla, ContributionSheetLine $line): JsonResponse
+    {
+        abort_unless($line->contribution_sheet_id === $planilla->id, 404);
+
+        $rules = [];
+        $changes = [];
+
+        if ($request->has('liquidated_amount_cop')) {
+            $rules['liquidated_amount_cop'] = ['nullable', 'integer', 'min:0'];
+        }
+
+        if ($request->has('included')) {
+            $rules['included'] = ['boolean'];
+        }
+
+        if ($request->has('exclusion_reason')) {
+            $rules['exclusion_reason'] = ['nullable', 'string', 'max:500'];
+        }
+
+        // §23: excluding somebody requires saying why, answered as input validation (422)
+        // rather than as a state conflict — nothing about the sheet's state is wrong here,
+        // the request simply omits a field it depends on.
+        if (array_key_exists('included', $rules) && $this->toBool($request->input('included')) === false) {
+            $rules['exclusion_reason'] = ['required', 'string', 'max:500'];
+        }
+
+        if ($rules === []) {
+            return response()->json([
+                'message' => 'No se envió ningún campo editable.',
+                'code' => 'nothing_to_update',
+            ], 422);
+        }
+
+        $validated = $request->validate($rules);
+
+        foreach (array_keys($rules) as $field) {
+            if ($field === 'included') {
+                $changes['included'] = $this->toBool($request->input('included'));
+
+                continue;
+            }
+
+            if (! array_key_exists($field, $validated)) {
+                continue;
+            }
+
+            $changes[$field] = $field === 'liquidated_amount_cop'
+                ? ($validated[$field] === null ? null : (int) $validated[$field])
+                : $validated[$field];
+        }
+
+        try {
+            $this->editLine->handle($line, $changes, $request->user());
+        } catch (SheetNotApplicable $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], $e->reason === 'line_not_found' ? 404 : 409);
+        }
+
+        return response()->json($this->exporter->summary($planilla->refresh()));
+    }
+
+    /** §23 — operator, the name for "other", and the internal note, on a draft. */
+    public function update(Request $request, ContributionSheet $planilla): JsonResponse
+    {
+        $data = $request->validate([
+            'operator' => ['sometimes', 'string', 'in:simple,arus,other'],
+            'operator_other_name' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'notes' => ['sometimes', 'nullable', 'string', 'max:2000'],
+        ]);
+
+        try {
+            $this->editHeader->handle($planilla, $data, $request->user());
+        } catch (SheetNotApplicable $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 409);
+        }
+
+        return response()->json($this->exporter->summary($planilla->refresh()));
+    }
+
+    /** `null` is false here, and only the JSON boolean `false` means "exclude". */
+    private function toBool(mixed $value): bool
+    {
+        return $value === true || $value === 1 || $value === '1';
     }
 
     public function vocabulary(): JsonResponse

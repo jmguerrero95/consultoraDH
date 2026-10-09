@@ -10,11 +10,13 @@ use App\Domain\Operations\Actions\CancelTask;
 use App\Domain\Operations\Actions\CompleteTask;
 use App\Domain\Operations\Actions\ReassignTask;
 use App\Domain\Operations\OperationNotApplicable;
+use App\Domain\Operations\TaskAssignee;
 use App\Domain\Operations\TaskPriority;
 use App\Domain\Operations\TaskStatus;
 use App\Http\Controllers\Controller;
 use App\Models\OperationalTask;
 use App\Models\User;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -72,6 +74,15 @@ final class TaskController extends Controller
             'reminder_at' => ['nullable', 'date'],
         ]);
 
+        // §R1: an internal task goes to a colleague, never to a portal account.
+        try {
+            TaskAssignee::assertAssignable(User::query()->findOrFail($data['assigned_to']));
+        } catch (ModelNotFoundException) {
+            return response()->json(['message' => 'La cuenta asignada no existe.', 'code' => 'assignee_not_found'], 422);
+        } catch (OperationNotApplicable $e) {
+            return response()->json(['message' => $e->getMessage(), 'code' => $e->reason], 422);
+        }
+
         $task = OperationalTask::query()->create($data + [
             'status' => TaskStatus::Pending->value,
             'created_by' => $request->user()->id,
@@ -110,12 +121,20 @@ final class TaskController extends Controller
     public function reassign(OperationalTask $task, Request $request): JsonResponse
     {
         $newAssigneeId = $request->integer('assigned_to');
-        $newAssignee = User::query()->findOrFail($newAssigneeId);
 
         try {
+            $newAssignee = User::query()->findOrFail($newAssigneeId);
             $result = $this->reassigner->handle($task, $newAssignee, $request->user());
+        } catch (ModelNotFoundException) {
+            return response()->json(['message' => 'La cuenta asignada no existe.', 'code' => 'assignee_not_found'], 422);
         } catch (OperationNotApplicable $e) {
-            return response()->json(['message' => $e->getMessage(), 'reason' => $e->reason], 409);
+            // A refused assignee is bad input (422); a refused state is a conflict (409).
+            $esEntrada = in_array($e->reason, ['assignee_not_staff', 'assignee_not_active'], true);
+
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], $esEntrada ? 422 : 409);
         }
 
         return response()->json($this->present($result));

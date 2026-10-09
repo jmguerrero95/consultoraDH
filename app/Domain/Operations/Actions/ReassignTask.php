@@ -6,8 +6,9 @@ namespace App\Domain\Operations\Actions;
 
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
+use App\Domain\Operations\LockedTask;
 use App\Domain\Operations\OperationNotApplicable;
-use App\Domain\Operations\TaskStatus;
+use App\Domain\Operations\TaskAssignee;
 use App\Models\OperationalTask;
 use App\Models\User;
 
@@ -17,21 +18,31 @@ final class ReassignTask
 
     public function handle(OperationalTask $task, User $newAssignee, User $actor): OperationalTask
     {
-        if ($task->status->isTerminal()) {
-            throw OperationNotApplicable::wrongState($task->status->value, TaskStatus::Pending->value);
-        }
+        // Checked before the lock so a bad assignee is refused without taking one: the
+        // answer does not depend on the task's state.
+        TaskAssignee::assertAssignable($newAssignee);
 
-        $oldAssigneeId = $task->assigned_to;
+        return LockedTask::of(
+            (int) $task->id,
+            function (OperationalTask $authoritative) use ($newAssignee, $actor): OperationalTask {
+                if ($authoritative->status->isTerminal()) {
+                    throw OperationNotApplicable::wrongState(
+                        $authoritative->status->value,
+                        'in_progress',
+                    );
+                }
 
-        $task->forceFill([
-            'assigned_to' => $newAssignee->id,
-        ])->save();
+                $from = $authoritative->assigned_to;
 
-        $this->audit->record(AuditAction::TaskReassigned, $actor, [
-            'from' => $oldAssigneeId,
-            'to' => $newAssignee->id,
-        ], null, $task);
+                $authoritative->forceFill(['assigned_to' => $newAssignee->id])->save();
 
-        return $task;
+                $this->audit->record(AuditAction::TaskReassigned, $actor, [
+                    'from' => $from,
+                    'to' => $newAssignee->id,
+                ], null, $authoritative);
+
+                return $authoritative;
+            },
+        );
     }
 }

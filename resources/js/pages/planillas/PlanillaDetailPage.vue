@@ -40,6 +40,59 @@ const formularioPago = ref({ paid_on: '', sheet_number: '', reference: '', submi
 const motivoCancelacion = ref('');
 
 const archivos = ref<File[]>([]);
+
+// A05-R1 §1: the amount is entered here, through the product. Before R1 there was no path
+// to set it, so a planilla created by an operator could never reach `ready`.
+const lineaEnEdicion = ref<number | null>(null);
+// `v-model` on `input[type="number"]` hands back a number, not the typed string, so this
+// holds both and every read normalises. Declaring it string-only would type-check and
+// then throw `.trim is not a function` the first time anyone edits a line.
+const valorEnEdicion = ref<string | number>('');
+const editando = ref(false);
+const errorLinea = ref<string | null>(null);
+
+function editarLinea(lineaId: number, valor: number | null): void {
+    lineaEnEdicion.value = lineaId;
+    valorEnEdicion.value = valor === null ? '' : String(valor);
+    errorLinea.value = null;
+}
+
+function cancelarEdicion(): void {
+    lineaEnEdicion.value = null;
+    valorEnEdicion.value = '';
+    errorLinea.value = null;
+}
+
+async function guardarLinea(): Promise<void> {
+    // Both are non-null on this path: the button only exists for a loaded sheet, and the
+    // edit state is only set from a row.
+    const sheetId = sheet.value?.id;
+    const lineId = lineaEnEdicion.value;
+
+    if (sheetId === undefined || lineId === null) {
+        return;
+    }
+
+    errorLinea.value = null;
+    editando.value = true;
+
+    try {
+        const texto = String(valorEnEdicion.value ?? '').trim();
+
+        await a05.planillas.updateLine(sheetId, lineId, {
+            liquidated_amount_cop: texto === '' ? null : Number(texto),
+        });
+
+        cancelarEdicion();
+        actionMessage.value = 'Línea actualizada.';
+        await cargar();
+    } catch (e) {
+        errorLinea.value = e instanceof ApiError ? e.message : 'No se pudo guardar la línea.';
+    } finally {
+        editando.value = false;
+    }
+}
+
 const tipoArchivo = ref('operator_pdf');
 
 const errores = computed<ValidationFinding[]>(() => validacion.value?.errors ?? []);
@@ -238,6 +291,7 @@ function descargar(ruta: string): void {
 
             <AppAlert v-if="actionMessage" variant="success" :message="actionMessage" class="mb-3" />
             <AppAlert v-if="actionError" variant="danger" :message="actionError" class="mb-3" />
+            <AppAlert v-if="errorLinea" variant="danger" :message="errorLinea" class="mb-3" />
 
             <div class="row g-3">
                 <div class="col-12 col-lg-8">
@@ -292,7 +346,48 @@ function descargar(ruta: string): void {
                                         <td>{{ linea.arl_name ?? '—' }}</td>
                                         <td>{{ linea.ccf_name ?? '—' }}</td>
                                         <td class="text-end">
-                                            {{ pesos(linea.liquidated_amount_cop) }}
+                                            <template v-if="lineaEnEdicion === linea.id">
+                                                <div class="d-flex flex-column gap-1 align-items-end">
+                                                    <input
+                                                        v-model="valorEnEdicion"
+                                                        type="number"
+                                                        min="0"
+                                                        step="1"
+                                                        class="form-control form-control-sm"
+                                                        style="width: 9rem"
+                                                        aria-label="Valor liquidado (COP)"
+                                                        placeholder="0"
+                                                    />
+                                                    <div class="btn-group btn-group-sm">
+                                                        <button
+                                                            type="button"
+                                                            class="btn btn-primary"
+                                                            :disabled="editando"
+                                                            @click="guardarLinea"
+                                                        >
+                                                            Guardar línea
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            class="btn btn-outline-secondary"
+                                                            @click="cancelarEdicion"
+                                                        >
+                                                            Cancelar
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </template>
+                                            <template v-else>
+                                                <span>{{ pesos(linea.liquidated_amount_cop) }}</span>
+                                                <button
+                                                    v-if="auth.can('planillas.update')"
+                                                    type="button"
+                                                    class="btn btn-sm btn-link p-0 ms-1"
+                                                    @click="editarLinea(linea.id, linea.liquidated_amount_cop)"
+                                                >
+                                                    Editar línea
+                                                </button>
+                                            </template>
                                         </td>
                                     </tr>
                                 </tbody>

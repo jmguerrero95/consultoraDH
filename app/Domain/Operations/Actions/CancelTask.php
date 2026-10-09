@@ -6,6 +6,7 @@ namespace App\Domain\Operations\Actions;
 
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
+use App\Domain\Operations\LockedTask;
 use App\Domain\Operations\OperationNotApplicable;
 use App\Domain\Operations\TaskStatus;
 use App\Models\OperationalTask;
@@ -17,17 +18,27 @@ final class CancelTask
 
     public function handle(OperationalTask $task, User $actor): OperationalTask
     {
-        if ($task->status->isTerminal()) {
-            throw OperationNotApplicable::wrongState($task->status->value, TaskStatus::Cancelled->value);
-        }
+        return LockedTask::of(
+            (int) $task->id,
+            function (OperationalTask $authoritative) use ($actor): OperationalTask {
+                // A task that somebody else just completed cannot be cancelled from a
+                // copy that still says `pending`: the completion would be erased.
+                if ($authoritative->status->isTerminal()) {
+                    throw OperationNotApplicable::wrongState(
+                        $authoritative->status->value,
+                        TaskStatus::Cancelled->value,
+                    );
+                }
 
-        $task->forceFill([
-            'status' => TaskStatus::Cancelled->value,
-            'cancelled_at' => now(),
-        ])->save();
+                $authoritative->forceFill([
+                    'status' => TaskStatus::Cancelled->value,
+                    'cancelled_at' => now(),
+                ])->save();
 
-        $this->audit->record(AuditAction::TaskCancelled, $actor, [], null, $task);
+                $this->audit->record(AuditAction::TaskCancelled, $actor, [], null, $authoritative);
 
-        return $task;
+                return $authoritative;
+            },
+        );
     }
 }

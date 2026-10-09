@@ -7,6 +7,7 @@ namespace App\Domain\Planillas\Actions;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Planillas\ContributionSheetStatus;
+use App\Domain\Planillas\LockedSheet;
 use App\Domain\Planillas\SheetNotApplicable;
 use App\Models\ContributionSheet;
 use App\Models\User;
@@ -23,23 +24,37 @@ final class ReturnSheetToDraft
 
     public function handle(ContributionSheet $sheet, User $actor): ContributionSheet
     {
-        if ($sheet->status === ContributionSheetStatus::Paid) {
-            throw SheetNotApplicable::paidIsHistory();
-        }
+        return LockedSheet::of(
+            (int) $sheet->id,
+            function (ContributionSheet $authoritative) use ($actor): ContributionSheet {
+                if ($authoritative->status === ContributionSheetStatus::Paid) {
+                    throw SheetNotApplicable::paidIsHistory();
+                }
 
-        if (! $sheet->status->canTransitionTo(ContributionSheetStatus::Draft)) {
-            throw SheetNotApplicable::wrongState($sheet->status, ContributionSheetStatus::Draft);
-        }
+                if (! $authoritative->status->canTransitionTo(ContributionSheetStatus::Draft)) {
+                    throw SheetNotApplicable::wrongState(
+                        $authoritative->status,
+                        ContributionSheetStatus::Draft,
+                    );
+                }
 
-        $sheet->forceFill([
-            'status' => ContributionSheetStatus::Draft->value,
-            'returned_to_draft_by' => $actor->id,
-            'returned_to_draft_at' => now(),
-            'revision' => (int) $sheet->revision + 1,
-        ])->save();
+                $authoritative->forceFill([
+                    'status' => ContributionSheetStatus::Draft->value,
+                    'returned_to_draft_by' => $actor->id,
+                    'returned_to_draft_at' => now(),
+                    'revision' => (int) $authoritative->revision + 1,
+                ])->save();
 
-        $this->audit->record(AuditAction::ContributionSheetReturnedToDraft, $actor, [], null, $sheet);
+                $this->audit->record(
+                    AuditAction::ContributionSheetReturnedToDraft,
+                    $actor,
+                    [],
+                    null,
+                    $authoritative,
+                );
 
-        return $sheet;
+                return $authoritative;
+            },
+        );
     }
 }

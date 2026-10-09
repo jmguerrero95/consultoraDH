@@ -6,16 +6,20 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
+use App\Domain\Reports\Exceptions\InvalidSchedule;
 use App\Domain\Reports\Export\CsvExporter;
+use App\Domain\Reports\ReportCadence;
 use App\Domain\Reports\ReportFactory;
 use App\Domain\Reports\ReportFilter;
 use App\Domain\Reports\ReportFormat;
 use App\Domain\Reports\ReportGenerator;
+use App\Domain\Reports\ReportScheduleCalculator;
 use App\Domain\Reports\ReportScheduleRunner;
 use App\Domain\Reports\ReportType;
 use App\Http\Controllers\Controller;
 use App\Models\GeneratedReport;
 use App\Models\ReportSchedule;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -166,13 +170,15 @@ final class ReportController extends Controller
 
     public function storeSchedule(Request $request): JsonResponse
     {
+        // §R1: a cadence declares which day fields it needs, and the ones it ignores are
+        // left null rather than stored and never read.
         $data = $request->validate([
             'name' => ['required', 'string', 'max:200'],
             'report_type' => ['required', 'string'],
             'filters' => ['nullable', 'array'],
             'format' => ['required', 'string', 'in:pdf,csv,xlsx'],
             'cadence' => ['required', 'string', 'in:daily,weekly,monthly'],
-            'run_time' => ['required', 'string', 'date_format:H:i'],
+            'run_time' => ['required', 'string', 'regex:/^([01]\d|2[0-3]):[0-5]\d$/'],
             'day_of_week' => ['nullable', 'integer', 'between:0,6'],
             'day_of_month' => ['nullable', 'integer', 'between:1,31'],
         ]);
@@ -182,23 +188,47 @@ final class ReportController extends Controller
         abort_unless($request->user()?->can($type->permission()), 403);
         abort_unless($request->user()?->can('reports.schedule'), 403);
 
+        $cadence = ReportCadence::from($data['cadence']);
+
+        // The fields this cadence does not use are dropped, so `day_of_week` on a daily
+        // schedule can never be read back as if it meant something.
+        $dayOfWeek = $cadence === ReportCadence::Weekly ? ($data['day_of_week'] ?? null) : null;
+        $dayOfMonth = $cadence === ReportCadence::Monthly ? ($data['day_of_month'] ?? null) : null;
+
+        try {
+            ReportScheduleCalculator::assertValid($cadence, $dayOfWeek, $dayOfMonth);
+
+            // §R1: the first execution matches the schedule the user entered, not
+            // `now() + 1h`.
+            $nextRun = ReportScheduleCalculator::firstOccurrence(
+                $cadence,
+                $data['run_time'],
+                $dayOfWeek,
+                $dayOfMonth,
+                CarbonImmutable::now(),
+            );
+        } catch (InvalidSchedule $e) {
+            return response()->json(['message' => $e->getMessage(), 'code' => $e->reason], 422);
+        }
+
         $schedule = ReportSchedule::query()->create([
             'name' => $data['name'],
             'report_type' => $type->value,
             'filters' => $data['filters'] ?? [],
             'format' => $data['format'],
-            'cadence' => $data['cadence'],
+            'cadence' => $cadence,
             'run_time' => $data['run_time'],
-            'day_of_week' => $data['day_of_week'] ?? null,
-            'day_of_month' => $data['day_of_month'] ?? null,
+            'day_of_week' => $dayOfWeek,
+            'day_of_month' => $dayOfMonth,
             'owner_user_id' => $request->user()->id,
             'active' => true,
-            'next_run_at' => now()->addHour(),
+            'next_run_at' => $nextRun,
         ]);
 
         $this->audit->record(AuditAction::ReportScheduleCreated, $request->user(), [
             'name' => $schedule->name,
             'report_type' => $schedule->report_type,
+            'next_run_at' => $nextRun->toIso8601String(),
         ], null, $schedule);
 
         return response()->json($this->presentSchedule($schedule), 201);

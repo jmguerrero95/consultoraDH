@@ -7,6 +7,7 @@ namespace App\Domain\Planillas\Actions;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Planillas\ContributionSheetStatus;
+use App\Domain\Planillas\LockedSheet;
 use App\Domain\Planillas\SheetNotApplicable;
 use App\Models\ContributionSheet;
 use App\Models\User;
@@ -23,22 +24,36 @@ final class MarkSheetPaid
 
     public function handle(ContributionSheet $sheet, string $paidOn, User $actor): ContributionSheet
     {
-        if (! $sheet->status->canTransitionTo(ContributionSheetStatus::Paid)) {
-            throw SheetNotApplicable::wrongState($sheet->status, ContributionSheetStatus::Paid);
-        }
+        return LockedSheet::of(
+            (int) $sheet->id,
+            function (ContributionSheet $authoritative) use ($paidOn, $actor): ContributionSheet {
+                if (! $authoritative->status->canTransitionTo(ContributionSheetStatus::Paid)) {
+                    throw SheetNotApplicable::wrongState(
+                        $authoritative->status,
+                        ContributionSheetStatus::Paid,
+                    );
+                }
 
-        if (! $sheet->hasPaymentProof()) {
-            throw SheetNotApplicable::missingPaymentProof();
-        }
+                if (! $authoritative->hasPaymentProof()) {
+                    throw SheetNotApplicable::missingPaymentProof();
+                }
 
-        $sheet->forceFill([
-            'status' => ContributionSheetStatus::Paid->value,
-            'paid_on' => $paidOn,
-            'paid_by' => $actor->id,
-        ])->save();
+                $authoritative->forceFill([
+                    'status' => ContributionSheetStatus::Paid->value,
+                    'paid_on' => $paidOn,
+                    'paid_by' => $actor->id,
+                ])->save();
 
-        $this->audit->record(AuditAction::ContributionSheetPaid, $actor, ['paid_on' => $paidOn], null, $sheet);
+                $this->audit->record(
+                    AuditAction::ContributionSheetPaid,
+                    $actor,
+                    ['paid_on' => $paidOn],
+                    null,
+                    $authoritative,
+                );
 
-        return $sheet;
+                return $authoritative;
+            },
+        );
     }
 }

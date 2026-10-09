@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
+import ClientUpdateRequestsPanel from '@/components/clients/ClientUpdateRequestsPanel.vue';
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
@@ -827,6 +828,16 @@ Editar
                     </div>
                 </article>
             </div>
+
+            <!--
+                A05-R1 §3: proposals the client made about their own data. It lives here
+                because a proposal is about one client, and a separate screen would make a
+                reviewer open two pages to answer one question.
+            -->
+            <ClientUpdateRequestsPanel
+                v-if="payload.client"
+                :client-id="payload.client.id"
+            />
 
             <!--
                 Cuenta: what this client owes. A summary rather than the whole

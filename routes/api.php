@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BillingConfigurationController;
 use App\Http\Controllers\Api\CalendarController;
 use App\Http\Controllers\Api\ClientController;
+use App\Http\Controllers\Api\ClientProfileUpdateRequestController;
 use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DocumentController;
@@ -62,6 +63,7 @@ foreach ([
     'rule',
     'user',
     'planilla',
+    'line',
     'novelty',
     'task',
     'document',
@@ -504,6 +506,12 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:planillas.update')->group(function (): void {
         Route::post('/planillas/{planilla}/return-to-draft', [PlanillaController::class, 'returnToDraft'])->name('api.planillas.return-to-draft');
         Route::post('/planillas/{planilla}/files', [PlanillaController::class, 'uploadFile'])->name('api.planillas.files.store');
+
+        // §23: the operational values of a draft. Without these a generated line could
+        // never receive the amount validation asks for, and a real planilla could not
+        // reach `ready` at all.
+        Route::patch('/planillas/{planilla}', [PlanillaController::class, 'update'])->name('api.planillas.update');
+        Route::patch('/planillas/{planilla}/lines/{line}', [PlanillaController::class, 'updateLine'])->name('api.planillas.lines.update');
     });
 
     // =================================================================
@@ -564,6 +572,25 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 
     Route::middleware('can:documents.manage')->group(function (): void {
         Route::post('/documents', [DocumentController::class, 'uploadDocument'])->name('api.documents.store');
+    });
+
+    // =================================================================
+    // A05: staff review of a client's proposed profile change
+    // =================================================================
+    //
+    // §44: the client proposes, staff decide. These two permissions existed from A05 with
+    // nothing consuming them, which made the whole flow a one-way street.
+
+    Route::middleware('can:client_update_requests.view')->group(function (): void {
+        Route::get('/client-profile-update-requests', [ClientProfileUpdateRequestController::class, 'index'])
+            ->name('api.client-update-requests.index');
+    });
+
+    Route::middleware('can:client_update_requests.review')->group(function (): void {
+        Route::post('/client-profile-update-requests/{updateRequest}/approve', [ClientProfileUpdateRequestController::class, 'approve'])
+            ->name('api.client-update-requests.approve');
+        Route::post('/client-profile-update-requests/{updateRequest}/reject', [ClientProfileUpdateRequestController::class, 'reject'])
+            ->name('api.client-update-requests.reject');
     });
 
     // =================================================================

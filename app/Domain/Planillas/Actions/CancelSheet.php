@@ -7,6 +7,7 @@ namespace App\Domain\Planillas\Actions;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Planillas\ContributionSheetStatus;
+use App\Domain\Planillas\LockedSheet;
 use App\Domain\Planillas\SheetNotApplicable;
 use App\Models\ContributionSheet;
 use App\Models\User;
@@ -23,23 +24,40 @@ final class CancelSheet
 
     public function handle(ContributionSheet $sheet, string $reason, User $actor): ContributionSheet
     {
-        if (! $sheet->status->canTransitionTo(ContributionSheetStatus::Cancelled)) {
-            throw SheetNotApplicable::wrongState($sheet->status, ContributionSheetStatus::Cancelled);
-        }
-
         if (trim($reason) === '') {
             throw SheetNotApplicable::missingCancellationReason();
         }
 
-        $sheet->forceFill([
-            'status' => ContributionSheetStatus::Cancelled->value,
-            'cancelled_by' => $actor->id,
-            'cancelled_at' => now(),
-            'cancellation_reason' => trim($reason),
-        ])->save();
+        return LockedSheet::of(
+            (int) $sheet->id,
+            function (ContributionSheet $authoritative) use ($reason, $actor): ContributionSheet {
+                // The authoritative status, not the one the router bound. This is the exact
+                // line that kept a stale `submitted` copy from cancelling a sheet that had
+                // meanwhile been paid.
+                if (! $authoritative->status->canTransitionTo(ContributionSheetStatus::Cancelled)) {
+                    throw SheetNotApplicable::wrongState(
+                        $authoritative->status,
+                        ContributionSheetStatus::Cancelled,
+                    );
+                }
 
-        $this->audit->record(AuditAction::ContributionSheetCancelled, $actor, ['reason' => trim($reason)], null, $sheet);
+                $authoritative->forceFill([
+                    'status' => ContributionSheetStatus::Cancelled->value,
+                    'cancelled_by' => $actor->id,
+                    'cancelled_at' => now(),
+                    'cancellation_reason' => trim($reason),
+                ])->save();
 
-        return $sheet;
+                $this->audit->record(
+                    AuditAction::ContributionSheetCancelled,
+                    $actor,
+                    ['reason' => trim($reason)],
+                    null,
+                    $authoritative,
+                );
+
+                return $authoritative;
+            },
+        );
     }
 }

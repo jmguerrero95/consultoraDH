@@ -19,6 +19,14 @@ final class PlanillaFileStore
         return Storage::disk($this->diskName);
     }
 
+    /**
+     * Write the bytes and the metadata, or leave nothing behind.
+     *
+     * §66: a database transaction cannot roll back a filesystem write. The bytes go first
+     * and the row second, because an orphan file is invisible and removable while a row
+     * claiming a missing file is neither. If the metadata write throws, the bytes are
+     * deleted and the original exception is rethrown untouched.
+     */
     public function store(ContributionSheet $sheet, UploadedFile $upload, string $kind, int $userId): ContributionSheetFile
     {
         $hash = hash_file('sha256', $upload->getRealPath());
@@ -35,16 +43,22 @@ final class PlanillaFileStore
             throw new \RuntimeException('No se pudo guardar el archivo de la planilla.');
         }
 
-        return ContributionSheetFile::query()->create([
-            'contribution_sheet_id' => $sheet->id,
-            'kind' => $kind,
-            'original_name' => $upload->getClientOriginalName(),
-            'stored_path' => $relative,
-            'mime_type' => $upload->getMimeType() ?? 'application/octet-stream',
-            'size_bytes' => $upload->getSize(),
-            'sha256' => $hash,
-            'uploaded_by' => $userId,
-        ]);
+        try {
+            return ContributionSheetFile::query()->create([
+                'contribution_sheet_id' => $sheet->id,
+                'kind' => $kind,
+                'original_name' => $upload->getClientOriginalName(),
+                'stored_path' => $relative,
+                'mime_type' => $upload->getMimeType() ?? 'application/octet-stream',
+                'size_bytes' => $upload->getSize(),
+                'sha256' => $hash,
+                'uploaded_by' => $userId,
+            ]);
+        } catch (\Throwable $e) {
+            $this->disk()->delete($relative);
+
+            throw $e;
+        }
     }
 
     public function delete(ContributionSheetFile $file): void

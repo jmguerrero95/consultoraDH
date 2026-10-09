@@ -180,6 +180,69 @@ test('A05 Flow A: a planilla without liquidated amounts cannot advance, and the 
     // A draft is not submittable from the interface either: the control is absent.
     await expect(page.getByRole('button', { name: 'Marcar enviada' })).toHaveCount(0);
 
+    // --- A05-R1 §1 ---------------------------------------------------------
+    // The amount is entered through the product. Before R1 there was no path to set it:
+    // validation correctly demanded a figure, and nothing could supply one, so a planilla
+    // created by an operator could never reach `ready`.
+    //
+    // The screen is opened and its control exercised, and the claim that matters — the
+    // stored integer — is read back from the API rather than from a transient message.
+    await page.goto(`/planillas/${planilla.id}`);
+
+    const detalleAntes = await get<{ lines: { id: number; liquidated_amount_cop: number | null }[] }>(
+        page,
+        `/api/planillas/${planilla.id}`,
+    );
+
+    expect(detalleAntes.lines[0].liquidated_amount_cop, 'the line starts empty').toBeNull();
+
+    const edicion = page.getByRole('button', { name: 'Editar línea' }).first();
+
+    await expect(edicion).toBeVisible();
+    await edicion.click();
+
+    const campoValor = page.getByLabel('Valor liquidado (COP)');
+
+    await expect(campoValor).toBeVisible();
+    await campoValor.fill('1250000');
+
+    // `first()` because the table renders one control per line and this fixture has one
+    // row; without it, Playwright's strict mode refuses an ambiguous click.
+    const [respuestaLinea] = await Promise.all([
+        page.waitForResponse(
+            (r) => r.url().includes('/lines/') && r.request().method() === 'PATCH',
+            { timeout: 15000 },
+        ),
+        page.getByRole('button', { name: 'Guardar línea' }).first().click(),
+    ]);
+
+    expect(
+        respuestaLinea.status(),
+        `el PATCH de la línea debe responder 200: ${await respuestaLinea.text()}`,
+    ).toBe(200);
+
+    await expect
+        .poll(async () => {
+            const detalle = await get<{ total_liquidated_cop: number }>(
+                page,
+                `/api/planillas/${planilla.id}`,
+            );
+
+            return detalle.total_liquidated_cop;
+        })
+        .toBe(1_250_000);
+
+    // The screen shows the derived total, and validation can now succeed.
+    await page.reload();
+
+    // Both the line and the derived total show the figure, which is the point: the total
+    // is not typed, it is computed from the line.
+    await expect(page.getByText('1.250.000').first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Validar' }).click();
+
+    await expect(page.getByText(/quedó lista para enviar|Lista para enviar/)).toBeVisible();
+
     await cerrarRelacion(page, directory.assignment_id);
 });
 
@@ -308,6 +371,7 @@ test('A05 Flow C: a novelty resolves once, and a task completes', async ({ page 
 
 test('A05 Flow D: a rejected request keeps its rejection and the replacement is a new row', async ({
     page,
+    browser,
 }) => {
     await signIn(page, email, password);
 
@@ -349,26 +413,70 @@ test('A05 Flow D: a rejected request keeps its rejection and the replacement is 
     expect(rechazo.status()).toBe(200);
     expect(((await rechazo.json()) as { status: string }).status).toBe('rejected');
 
-    const reemplazo = await apiUpload(page, '/api/documents', {
-        file: {
-            name: 'reemplazo.pdf',
-            mimeType: 'application/pdf',
-            buffer: Buffer.from('%PDF-1.4 A05'),
-        },
-        client_id: String(directory.client_id),
-        document_type_id: String(typeId),
-        document_request_id: String(solicitudId),
-        title: 'Reemplazo A05',
-        visibility: 'internal',
+    // --- A05-R1 §2 ---------------------------------------------------------
+    // The replacement is uploaded by the **client**, through the portal endpoint, rather
+    // than by a staff member filing it on their behalf. Before R1 the portal upload
+    // compared a cast enum against strings, so it refused every answer, and even when it
+    // succeeded it left the request showing `requested` until somebody pressed "recibida"
+    // by hand.
+    const portalPassword = `Documento${stamp}a1`;
+    const portalEmail = `cuenta-documento-${stamp}@consultora-dh.test`;
+
+    const cuenta = await apiWrite(page, `/api/clients/${directory.client_id}/portal-account`, {
+        name: 'Cliente Documento A05',
+        email: portalEmail,
+        password: portalPassword,
+        password_confirmation: portalPassword,
     });
 
-    expect(reemplazo.status()).toBe(201);
+    expect(cuenta.status(), 'the portal account should be created').toBe(201);
 
-    const documentos = await get<{ data: { title: string }[] }>(
-        page,
-        `/api/documents?client_id=${directory.client_id}`,
-    );
-    expect(documentos.data.map((d) => d.title)).toContain('Reemplazo A05');
+    const context = await browser.newContext();
+
+    try {
+        expect((await apiSignIn(context.request, portalEmail, portalPassword)).status()).toBe(200);
+
+        const respuesta = await context.request.post(
+            `/api/portal/document-requests/${solicitudId}/upload`,
+            {
+                multipart: {
+                    file: {
+                        name: 'reemplazo.pdf',
+                        mimeType: 'application/pdf',
+                        buffer: Buffer.from('%PDF-1.4 A05'),
+                    },
+                },
+                headers: await csrfFrom(context.request),
+            },
+        );
+
+        expect(respuesta.status(), await respuesta.text()).toBe(201);
+
+        // The request moved on by itself, with no staff action.
+        expect(((await respuesta.json()) as { request_status: string }).request_status).toBe('received');
+
+        const documents = await get<{ data: { title: string; document_request_id: number | null }[] }>(
+            page,
+            `/api/documents?client_id=${directory.client_id}`,
+        );
+
+        // The document is found by the request it answers, not by a title: the portal
+        // upload titles the document after the request, and asserting on that string
+        // would be asserting on the copy rather than on the link.
+        const reemplazo = documents.data.find((d) => d.document_request_id === solicitudId);
+
+        expect(reemplazo, 'the replacement should be stored').toBeDefined();
+
+        // And staff can now approve it.
+        const aprobado = await apiWrite(page, `/api/document-requests/${solicitudId}/review`, {
+            decision: 'approve',
+            note: 'Reemplazo legible',
+        });
+
+        expect(aprobado.status()).toBe(200);
+    } finally {
+        await context.close();
+    }
 
     await cerrarRelacion(page, directory.assignment_id);
 });
@@ -577,6 +685,45 @@ test('A05 Flow F: a proposed profile change leaves the client untouched until st
         );
         expect(propia, 'the proposal should be visible to its owner').toBeDefined();
         expect(propia?.status).toBe('pending');
+
+        // --- A05-R1 §3 -----------------------------------------------------
+        // Staff act on it. Before R1 the review permissions existed and nothing consumed
+        // them, so a proposal could be submitted and never decided.
+        const pendientes = await get<{ data: { id: number; status: string }[] }>(
+            page,
+            '/api/client-profile-update-requests?status=pending',
+        );
+
+        const revision = pendientes.data.find((r) => r.id === propia?.id);
+
+        expect(revision, 'staff should see the pending proposal').toBeDefined();
+
+        const aprobada = await apiWrite(
+            page,
+            `/api/client-profile-update-requests/${propia?.id}/approve`,
+            { note: 'Verificado con el cliente' },
+        );
+
+        expect(aprobada.status(), await aprobada.text()).toBe(200);
+        expect(((await aprobada.json()) as { status: string }).status).toBe('approved');
+
+        // The master now holds the value, changed through A02's own action.
+        const trasAprobar = await get<{ client: { phone: string | null } }>(
+            page,
+            `/api/clients/${clientId}`,
+        );
+
+        expect(trasAprobar.client.phone).toBe(nuevoTelefono);
+
+        // And the client sees the decision on its own history.
+        const historialFinal = await context.request.get('/api/portal/profile/update-requests');
+        const decisiones = (await historialFinal.json()) as {
+            data: { id: number; status: string }[];
+        };
+
+        const resuelta = decisiones.data.find((r) => r.id === propia?.id);
+
+        expect(resuelta?.status).toBe('approved');
     } finally {
         await context.close();
     }

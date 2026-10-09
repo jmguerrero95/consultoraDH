@@ -190,6 +190,31 @@ final class DocumentController extends Controller
             'file' => ['required', 'file', 'max:10240'],
         ]);
 
+        // §39/R1: a request may only be attached to a document that belongs to the same
+        // client and the same document type. Without this, a staff member could file one
+        // client's file against another client's request, and the two records would
+        // disagree about whose document it is.
+        if ($request->filled('document_request_id')) {
+            $linked = ClientDocumentRequest::query()->find($request->integer('document_request_id'));
+
+            $mismatch = null;
+
+            if ($linked === null) {
+                $mismatch = 'request_not_found';
+            } elseif ((int) $linked->client_id !== $request->integer('client_id')) {
+                $mismatch = 'request_client_mismatch';
+            } elseif ((int) $linked->document_type_id !== $request->integer('document_type_id')) {
+                $mismatch = 'request_type_mismatch';
+            }
+
+            if ($mismatch !== null) {
+                return response()->json([
+                    'message' => 'La solicitud indicada no corresponde con el cliente o el tipo de documento.',
+                    'code' => $mismatch,
+                ], 422);
+            }
+        }
+
         $upload = $request->file('file');
 
         try {
@@ -275,6 +300,10 @@ final class DocumentController extends Controller
             'client_name' => $d->client?->fullName(),
             'document_type_id' => (int) $d->document_type_id,
             'document_type_name' => $d->documentType?->name,
+            // Which request this document answers, when it answers one. A reviewer sees
+            // a document attached to a request and needs to be able to say so without
+            // querying both tables.
+            'document_request_id' => $d->document_request_id,
             'title' => $d->title,
             'description' => $d->description,
             'original_name' => $d->original_name,

@@ -138,24 +138,21 @@ final class ReportScheduleRunner
         });
     }
 
-    /** The next due timestamp for a cadence. */
+    /**
+     * The next due timestamp, from the same calculator creation uses.
+     *
+     * Two implementations of this rule is how creation came to write `now() + 1h` while
+     * recurrence computed the real cadence, so the rule lives in one pure function and
+     * both callers use it.
+     */
     public function nextRun(ReportSchedule $schedule, Carbon $from): Carbon
     {
-        $time = $schedule->run_time ?? $from->copy()->setTime(8, 0);
-
-        return match ($schedule->cadence->value) {
-            'daily' => $from->addDay()->setTime((int) $time->format('H'), (int) $time->format('i')),
-            'weekly' => $from
-                ->addWeek()
-                ->startOfWeek()
-                ->addDays((int) $schedule->day_of_week)
-                ->setTime((int) $time->format('H'), (int) $time->format('i')),
-            'monthly' => $from
-                ->addMonth()
-                ->startOfMonth()
-                ->addDays(((int) $schedule->day_of_month) - 1)
-                ->setTime((int) $time->format('H'), (int) $time->format('i')),
-            default => $from->addDay(),
-        };
+        return Carbon::instance(ReportScheduleCalculator::nextAfter(
+            $schedule->cadence,
+            $schedule->run_time?->format('H:i') ?? '08:00',
+            $schedule->day_of_week,
+            $schedule->day_of_month,
+            CarbonImmutable::instance($from),
+        ));
     }
 }

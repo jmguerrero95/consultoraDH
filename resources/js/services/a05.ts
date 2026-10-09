@@ -70,6 +70,25 @@ export const a05 = {
             return request('POST', '/api/planillas', { body: input });
         },
 
+        /**
+         * §23: the operational values of a draft line. `liquidated_amount_cop` is an
+         * integer; the server refuses a float rather than rounding it.
+         */
+        updateLine(
+            sheetId: number,
+            lineId: number,
+            changes: { liquidated_amount_cop?: number | null; included?: boolean; exclusion_reason?: string | null },
+        ): Promise<PlanillaDetail> {
+            return request('PATCH', `/api/planillas/${sheetId}/lines/${lineId}`, { body: changes });
+        },
+
+        updateSheet(
+            id: number,
+            changes: { operator?: string; operator_other_name?: string | null; notes?: string | null },
+        ): Promise<PlanillaDetail> {
+            return request('PATCH', `/api/planillas/${id}`, { body: changes });
+        },
+
         validate(id: number): Promise<PlanillaValidation> {
             return request('POST', `/api/planillas/${id}/validate`);
         },
@@ -241,6 +260,22 @@ export const a05 = {
 
         cancelRequest(id: number, reason: string): Promise<ClientDocumentRequest> {
             return request('POST', `/api/document-requests/${id}/cancel`, { body: { reason } });
+        },
+    },
+
+    /* --- staff review of a client's profile proposal (§44) --------------- */
+
+    clients: {
+        updateRequests(clientId: number): Promise<{ data: ClientProfileUpdateRequest[] }> {
+            return request('GET', '/api/client-profile-update-requests', { query: { client_id: clientId } });
+        },
+
+        approveUpdateRequest(id: number): Promise<{ id: number; status: string }> {
+            return request('POST', `/api/client-profile-update-requests/${id}/approve`);
+        },
+
+        rejectUpdateRequest(id: number, note: string): Promise<{ id: number; status: string }> {
+            return request('POST', `/api/client-profile-update-requests/${id}/reject`, { body: { note } });
         },
     },
 
