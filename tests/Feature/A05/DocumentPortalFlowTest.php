@@ -476,3 +476,127 @@ it('F1: identical document upload failure preserves existing file and metadata',
     expect($allFiles)->toHaveCount(1)
         ->and($allFiles[0])->toBe($firstPath);
 });
+
+/**
+ * F2 — planilla same-content cleanup.
+ *
+ * Equivalent minimal test for PlanillaFileStore.
+ */
+it('F2: planilla identical proof upload failure preserves existing proof', function (): void {
+    Storage::fake('planillas');
+
+    $sheet = ContributionSheet::factory()->create();
+
+    // First proof succeeds.
+    $first = app(PlanillaFileStore::class)->store(
+        $sheet,
+        pdf(),
+        'operator_pdf',
+        (int) $this->staff->id,
+    );
+
+    $firstPath = $first->stored_path;
+    $originalBytes = Storage::disk('planillas')->get($firstPath);
+
+    // Second proof with IDENTICAL bytes — force its metadata create to fail AFTER
+    // the bytes are written.
+    $event = 'eloquent.creating: '.ContributionSheetFile::class;
+
+    Event::listen($event, function (): void {
+        throw new RuntimeException('la metadatos no se pudo guardar');
+    });
+
+    try {
+        expect(fn () => app(PlanillaFileStore::class)->store(
+            $sheet,
+            pdf(),
+            'operator_pdf',
+            (int) $this->staff->id,
+        ))->toThrow(RuntimeException::class, 'la metadatos no se pudo guardar');
+    } finally {
+        Event::forget($event);
+    }
+
+    // First proof row still exists.
+    $original = ContributionSheetFile::query()->findOrFail($first->id);
+
+    expect($original->stored_path)->toBe($firstPath)
+        ->and($original->sha256)->toBe($first->sha256);
+
+    // First physical file still exists with unchanged bytes.
+    expect(Storage::disk('planillas')->exists($firstPath))->toBeTrue()
+        ->and(Storage::disk('planillas')->get($firstPath))->toBe($originalBytes);
+
+    // No orphan from the failed second upload remains.
+    expect(Storage::disk('planillas')->allFiles())->toHaveCount(1)
+        ->and(Storage::disk('planillas')->allFiles()[0])->toBe($firstPath);
+});
+
+/**
+ * F3 — portal outer transaction rollback cleanup.
+ *
+ * Uses real RespondToDocumentRequest. Forces a failure AFTER DocumentFileStore::store()
+ * succeeds but BEFORE the outer business transaction commits.
+ */
+it('F3: portal outer transaction rollback removes only the newly written file', function (): void {
+    Storage::fake('documents');
+
+    $request = requestFor($this);
+
+    // First, upload a valid document so the request is in Received state.
+    $firstResponse = $this->actingAs($this->portal)
+        ->postJson("/api/portal/document-requests/{$request->id}/upload", ['file' => pdf()])
+        ->assertCreated()
+        ->json();
+
+    $firstDocument = ClientDocument::query()->findOrFail($firstResponse['id']);
+    $firstPath = $firstDocument->stored_path;
+
+    expect(Storage::disk('documents')->exists($firstPath))->toBeTrue();
+
+    // Now reject it so we can test the replacement flow.
+    $this->actingAs($this->staff)
+        ->postJson("/api/document-requests/{$request->id}/review", [
+            'decision' => 'reject',
+            'note' => 'Ilegible',
+        ])
+        ->assertOk();
+
+    // Force a failure AFTER the file store succeeds but BEFORE the transaction commits.
+    // We listen to the 'saved' event on ClientDocumentRequest which fires inside the
+    // transaction. Throwing here causes the transaction to roll back, triggering the
+    // outer catch in RespondToDocumentRequest which deletes the new file.
+    $failOnSave = true;
+
+    ClientDocumentRequest::saved(function ($model) use (&$failOnSave): void {
+        if ($failOnSave) {
+            $failOnSave = false; // only once
+            throw new RuntimeException('forzada: fallo tras guardar archivo');
+        }
+    });
+
+    try {
+        $this->actingAs($this->portal)
+            ->postJson("/api/portal/document-requests/{$request->id}/upload", ['file' => pdf()])
+            ->assertStatus(500);
+    } finally {
+        $failOnSave = false;
+    }
+
+    // Request remains in Rejected (original state before this upload attempt).
+    $request->refresh();
+    expect($request->status)->toBe(DocumentRequestStatus::Rejected);
+
+    // No ClientDocument row was created for the failed attempt.
+    $documents = ClientDocument::query()->where('document_request_id', $request->id)->get();
+    expect($documents)->toHaveCount(1)
+        ->and($documents->first()->id)->toBe($firstDocument->id);
+
+    // The ORIGINAL file still exists.
+    expect(Storage::disk('documents')->exists($firstPath))->toBeTrue();
+
+    // NO new orphan file remains (the failed upload's UUID file was deleted).
+    $allFiles = Storage::disk('documents')->allFiles();
+    expect($allFiles)->toHaveCount(1)
+        ->and($allFiles[0])->toBe($firstPath);
+});
