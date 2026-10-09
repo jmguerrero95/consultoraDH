@@ -122,7 +122,7 @@ services:
     container_name: consultora-dh-queue
     restart: unless-stopped
     working_dir: /var/www/html
-    # `--queue=default,imports` — the `imports` half is the fix.
+    # `--queue=default,imports,support,notifications,automations` — A06 adds support, notifications, automations queues.
     #
     # A04's three jobs call `onQueue(config('imports.queue.queue'))`, which is `imports`, so that
     # an import never competes with A03's generation backlog. But `queue:work` with no `--queue`
@@ -136,7 +136,34 @@ services:
     #
     # Both names are listed rather than only `imports` so this worker stays the single worker for
     # the application instead of needing a second container when another module starts queueing.
-    command: ["php", "artisan", "queue:work", "--queue=default,imports", "--sleep=3", "--tries=3", "--max-time=3600", "--verbose"]
+    command: ["php", "artisan", "queue:work", "--queue=default,imports,support,notifications,automations", "--sleep=3", "--tries=3", "--max-time=3600", "--verbose"]
+    volumes:
+      - .:/var/www/html
+      - vendor:/var/www/html/vendor
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - consultora-dh
+
+  # Reverb WebSocket server for realtime support
+  reverb:
+    <<: *app-image
+    container_name: consultora-dh-reverb
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      REVERB_APP_ID: ${REVERB_APP_ID}
+      REVERB_APP_KEY: ${REVERB_APP_KEY}
+      REVERB_APP_SECRET: ${REVERB_APP_SECRET}
+      REVERB_HOST: ${REVERB_HOST:-0.0.0.0}
+      REVERB_PORT: ${REVERB_PORT:-8080}
+      REVERB_SCHEME: ${REVERB_SCHEME:-http}
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor

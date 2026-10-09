@@ -7,13 +7,18 @@ periodos, pagos y documentos.
 administrador —clientes, afiliaciones, cortes, cartera, planillas, novedades,
 documentos y reportes— se concentra en un solo lugar, con trazabilidad.
 
-> **Estado actual: A03 — periodos, cortes, obligaciones, pagos y cartera.**
+> **Estado actual: A06 — soporte multicanal, realtime, automatizaciones.**
 > A01 (base técnica, autenticación, permisos, auditoría), A02 (clientes,
-> empresas, afiliaciones e historial) y A03 (el dominio financiero) están
-> implementados y probados. La planilla, los documentos, el portal y las
-> automatizaciones **todavía no** existen: el panel lo indica de forma
-> explícita en lugar de mostrar datos inventados. Consulte
-> [docs/ROADMAP.md](docs/ROADMAP.md) para el plan.
+> empresas, afiliaciones e historial), A03 (el dominio financiero), A04
+> (importación Excel, reconstrucción histórica), A05 (operación integrada,
+> portal, reportería) y **A06 (soporte multicanal, realtime, email bidireccional,
+> PWA/Web Push, Telegram admin, automatizaciones)** están implementados y probados.
+> A06 está **entregada y pendiente de auditoría externa**; eso no es una aprobación.
+> Detalle en [`docs/TASKS/A06.md`](docs/TASKS/A06.md), contrato en
+> [`docs/TASKS/A06-SPEC.md`](docs/TASKS/A06-SPEC.md).
+>
+> A07 (IA en la nube, MCP/OpenCode, endurecimiento final) queda **bloqueada**
+> hasta la auditoría externa de A06.
 
 ---
 
@@ -41,14 +46,18 @@ alrededor de todo eso: planillas mensuales, novedades, tareas con recordatorios,
 documentos y sus solicitudes, portal de clientes y reportería con PDF, Excel y
 programación de ejecuciones.
 
-A05 está **entregada y pendiente de auditoría externa**; eso no es una aprobación.
-Detalle en [`docs/TASKS/A05.md`](docs/TASKS/A05.md), contrato en
-[`docs/TASKS/A05-SPEC.md`](docs/TASKS/A05-SPEC.md).
+**A06** añade la capa de comunicación y automatización alrededor del sistema
+operacional: centro de soporte con colas, asignación, prioridad, ciclo de vida,
+notas internas, SLA, adjuntos, audio, tiempo real (Laravel Reverb), correo
+bidireccional (fallback + Reply-By-Email tokenizado), PWA/Web Push, Telegram
+admin y motor de automatizaciones por evento/fecha.
 
-La hoja de ruta quedó condensada en tres macro hitos: el soporte con correo y
-Telegram junto con la automatización general es **A06**, y la IA en la nube, la
-integración MCP/OpenCode y el endurecimiento final son **A07**. Ambos bloqueados
-hasta la auditoría externa que toca.
+A06 está **entregada y pendiente de auditoría externa**; eso no es una aprobación.
+Detalle en [`docs/TASKS/A06.md`](docs/TASKS/A06.md), contrato en
+[`docs/TASKS/A06-SPEC.md`](docs/TASKS/A06-SPEC.md).
+
+A07 (IA en la nube, MCP/OpenCode, endurecimiento final) queda **bloqueada**
+hasta la auditoría externa de A06.
 
 ## 2. Arquitectura en una frase
 
@@ -416,6 +425,8 @@ Los detalles y la lista completa están en [docs/SECURITY.md](docs/SECURITY.md).
 | [docs/TASKS/A04-R2.md](docs/TASKS/A04-R2.md) | Segunda remediación, tras la segunda auditoría de A04 |
 | [docs/TASKS/A05-SPEC.md](docs/TASKS/A05-SPEC.md) | Contrato cerrado del hito A05 |
 | [docs/TASKS/A05.md](docs/TASKS/A05.md) | Planillas, operación, documentos, portal y reportería |
+| [docs/TASKS/A06-SPEC.md](docs/TASKS/A06-SPEC.md) | Contrato cerrado del hito A06 |
+| [docs/TASKS/A06.md](docs/TASKS/A06.md) | Soporte, realtime, email, PWA, Telegram, automatizaciones |
 
 ## 13. Licencia
 

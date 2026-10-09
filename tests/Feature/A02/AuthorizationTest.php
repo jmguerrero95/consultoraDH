@@ -81,6 +81,8 @@ it('gives collections the reads and the money work, and nothing else', function 
             // Collections follows up collection work, so it reads planillas, novelties
             // and documents, works tasks, and exports the receivables reports. It still
             // decides nothing about what is owed.
+            // A06: Collections gets read-only support and automations visibility
+            'automations.view',
             'clients.view',
             'companies.view',
             'documents.view',
@@ -96,6 +98,7 @@ it('gives collections the reads and the money work, and nothing else', function 
             'relationships.view',
             'reports.export',
             'reports.view',
+            'support.view',
             'tasks.manage',
             'tasks.view',
         ])
@@ -103,7 +106,15 @@ it('gives collections the reads and the money work, and nothing else', function 
         ->not->toContain('obligations.adjust')
         ->not->toContain('periods.close')
         ->not->toContain('periods.reopen')
-        ->not->toContain('rates.manage');
+        ->not->toContain('rates.manage')
+        ->not->toContain('support.reply')
+        ->not->toContain('support.assign')
+        ->not->toContain('support.resolve')
+        ->not->toContain('support.manage_queues')
+        ->not->toContain('support.manage_sla')
+        ->not->toContain('support.review_unlinked_email')
+        ->not->toContain('notification_channels.manage')
+        ->not->toContain('automations.manage');
 });
 
 it('gives support reads including affiliations but no writes', function (): void {
@@ -114,7 +125,9 @@ it('gives support reads including affiliations but no writes', function (): void
             // A02 + A03 reads, plus A05: Support runs novelties, tasks and document
             // requests, and may administer a portal login. It holds no planilla
             // authority at all and no financial mutation.
+            // A06: Support gets queue-scoped support permissions
             'affiliations.view',
+            'automations.view',
             'clients.view',
             'companies.view',
             'documents.request',
@@ -129,11 +142,21 @@ it('gives support reads including affiliations but no writes', function (): void
             'receivables.view',
             'relationships.view',
             'reports.view',
+            'support.assign',
+            'support.reply',
+            'support.resolve',
+            'support.view',
             'tasks.manage',
             'tasks.view',
         ])
         ->not->toContain('payments.create')
-        ->not->toContain('obligations.adjust');
+        ->not->toContain('obligations.adjust')
+        ->not->toContain('support.view_all')
+        ->not->toContain('support.manage_queues')
+        ->not->toContain('support.manage_sla')
+        ->not->toContain('support.review_unlinked_email')
+        ->not->toContain('notification_channels.manage')
+        ->not->toContain('automations.manage');
 });
 
 it('gives read only every view permission and nothing else', function (): void {

@@ -154,6 +154,26 @@ final class DatabaseSeeder extends Seeder
         'reports.view',
         'reports.export',
         'reports.schedule',
+
+        /*
+         | The A06 permissions.
+         |
+         | Support center, realtime, bidirectional email, PWA/Web Push, Telegram admin,
+         | and general automation engine. Permissions are minimal and closed.
+         */
+        'support.view',
+        'support.view_all',
+        'support.reply',
+        'support.assign',
+        'support.resolve',
+        'support.manage_queues',
+        'support.manage_sla',
+        'support.review_unlinked_email',
+
+        'notification_channels.manage',
+
+        'automations.view',
+        'automations.manage',
     ];
 
     /**
@@ -248,6 +268,53 @@ final class DatabaseSeeder extends Seeder
             'tasks.view',
             'documents.view',
             'reports.view',
+        ],
+    ];
+
+    /**
+     * The A06 permissions each role holds.
+     *
+     * Client role gets zero A06 permissions. Portal access is ownership-based.
+     * Support role gets queue-scoped support permissions (limited by queue membership
+     * unless they also have support.view_all).
+     *
+     * @var array<string, list<string>>
+     */
+    private const MATRIX_A06 = [
+        'Super Admin' => [
+            'support.view', 'support.view_all', 'support.reply', 'support.assign',
+            'support.resolve', 'support.manage_queues', 'support.manage_sla',
+            'support.review_unlinked_email',
+            'notification_channels.manage',
+            'automations.view', 'automations.manage',
+        ],
+
+        'Administrator' => [
+            'support.view', 'support.view_all', 'support.reply', 'support.assign',
+            'support.resolve', 'support.manage_queues', 'support.manage_sla',
+            'support.review_unlinked_email',
+            'notification_channels.manage',
+            'automations.view', 'automations.manage',
+        ],
+
+        'Operations' => [
+            'support.view', 'support.reply', 'support.assign', 'support.resolve',
+            'automations.view',
+        ],
+
+        'Collections' => [
+            'support.view',
+            'automations.view',
+        ],
+
+        'Support' => [
+            'support.view', 'support.reply', 'support.assign', 'support.resolve',
+            'automations.view',
+        ],
+
+        'Read Only' => [
+            'support.view',
+            'automations.view',
         ],
     ];
 
@@ -409,6 +476,7 @@ final class DatabaseSeeder extends Seeder
             ...array_merge(...array_values(self::MATRIX_A03)),
             ...array_merge(...array_values(self::MATRIX_A04)),
             ...array_merge(...array_values(self::MATRIX_A05)),
+            ...array_merge(...array_values(self::MATRIX_A06)),
             'settings.view',
         ];
 
@@ -440,6 +508,13 @@ final class DatabaseSeeder extends Seeder
         // holds no staff permissions, and the revocation pass below removes any that
         // might have been granted by a previous seeding.
         foreach (self::MATRIX_A05 as $roleName => $permissions) {
+            Role::findByName($roleName, 'web')->givePermissionTo($permissions);
+        }
+
+        // The A06 matrix is a fifth pass. The Client role is intentionally absent: it
+        // holds no staff permissions, and the revocation pass below removes any that
+        // might have been granted by a previous seeding.
+        foreach (self::MATRIX_A06 as $roleName => $permissions) {
             Role::findByName($roleName, 'web')->givePermissionTo($permissions);
         }
 

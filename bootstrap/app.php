@@ -18,6 +18,7 @@ use App\Http\Middleware\SecurityHeaders;
 use App\Http\Middleware\TrustHosts;
 use App\Support\Security\TrustedHostsNotConfigured;
 use Illuminate\Auth\AuthenticationException;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -42,9 +43,10 @@ return Application::configure(basePath: dirname(__DIR__))
         },
 
         commands: __DIR__.'/../routes/console.php',
+        channels: __DIR__.'/../routes/channels.php',
         health: '/up',
     )
-    ->withSchedule(function (Illuminate\Console\Scheduling\Schedule $schedule): void {
+    ->withSchedule(function (Schedule $schedule): void {
         $schedule->command('operations:dispatch-reminders')
             ->everyFiveMinutes()
             ->withoutOverlapping()

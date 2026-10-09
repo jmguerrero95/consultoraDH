@@ -265,6 +265,47 @@ rol `Client` sin ningún permiso administrativo, 14 migraciones, un servicio
 Detalle en [TASKS/A05.md](TASKS/A05.md) y contrato en
 [TASKS/A05-SPEC.md](TASKS/A05-SPEC.md).
 
+**A05-R1** Cinco invariantes verificados de forma externa sobre esta entrega: una planilla creada por un
+operador no tenía forma de llegar a `ready`; responder una solicitud documental por el portal era
+imposible; las propuestas de perfil no tenían consumidor; el estado de una tarea se escribía desde
+un modelo obsoleto; y las programaciones de reportes no se calculaban.
+
+Sin migración, sin dependencias, sin A06 ni A07. Detalle, pruebas y una observación fuera de
+alcance en [`A05-R1.md`](TASKS/A05-R1.md).
+
+---
+
+**A05-R2** Dos residuos directos de R1 cerrados sin migración, sin dependencias, sin A06:
+
+1. **Atomicidad de archivos**: dos subidas con bytes idénticos compartían la misma ruta física (SHA-256). Si la segunda fallaba, la limpieza borraba el archivo que la primera seguía necesitando. Cada subida ahora usa un nombre físico único (UUID); el SHA-256 permanece como metadato. Además, `RespondToDocumentRequest` compensa el rollback de la transacción exterior borrando solo el archivo recién escrito.
+
+2. **Respuesta de validación**: `ValidateSheetToReady` escribe bajo lock, pero `PlanillaController::validate()` respondía con el modelo stale de la ruta, devolviendo `status=draft` mientras la BD ya tenía `ready`. Ahora refresca el modelo antes de responder.
+
+Pruebas nuevas: F1, F2, F3 en `DocumentPortalFlowTest.php`; P1 extendido en `PlanillaEditTest.php`.
+
+Detalle en [`A05-R2.md`](TASKS/A05-R2.md).
+
+---
+
+**A05-R3** Un residuo directo de R2 cerrado sin migración, sin dependencias, sin A06:
+
+1. **Compensación exterior de archivos**: `RespondToDocumentRequest` tenía el catch de compensación dentro del callback de `DB::transaction`, así que un fallo en el **commit** (después de que el callback retorna) dejaba el archivo recién escrito huérfano. Ahora la compensación envuelve la llamada completa a `DB::transaction`, fijando el objetivo solo después de que `DocumentFileStore::store()` tiene éxito.
+
+2. **F1 false-positive corregido**: F1 instalaba el fallo en `eloquent.saving` pero llamaba al endpoint HTTP, donde el controlador crea la fila ANTES de llamar a `DocumentFileStore`. El fallo podía dispararse antes de escribir el segundo archivo. F1 ahora usa `eloquent.saving` dentro de `DocumentFileStore::store()` directo, probando la secuencia real: bytes escritos -> metadato falla -> UUID borrado -> UUID original preservado.
+
+Sin migración, sin dependencias, sin A06.
+
+Detalle en [`A05-R3.md`](TASKS/A05-R3.md).
+
+---
+
+**A05-R4** Restauración de dos pruebas de regresión de R2 eliminadas accidentalmente en R3:
+
+1. **F2**: prueba de atomicidad para `PlanillaFileStore` (mismos bytes, segundo falla, primero preservado).
+2. **F3**: prueba de compensación exterior en `RespondToDocumentRequest` (rollback de transacción de negocio elimina solo archivo nuevo).
+
+Sin cambios en código de producción. Detalle en [`A05-R4.md`](TASKS/A05-R4.md).
+
 ---
 
 ---
@@ -276,7 +317,7 @@ con el alcance anterior es:
 
 ```
 A05 + A06 + A07 + A08 + A11  ->  nuevo A05   (entregado)
-A09 + A10 + A12              ->  nuevo A06
+A09 + A10 + A12              ->  nuevo A06   (entregado)
 A13 + A14 + A15              ->  nuevo A07
 ```
 
@@ -292,9 +333,14 @@ Alcance de los antiguos A09, A10 y A12: centro de soporte con conversación en t
 real, correo entrante y responded, canal de avisos por Telegram, y motor general de
 automatizaciones por evento y por fecha.
 
+**Entregada.** Centro de soporte con colas, asignación, prioridad, ciclo de vida,
+notas internas, SLA, adjuntos, audio, tiempo real (Laravel Reverb), correo
+bidireccional (fallback + Reply-By-Email tokenizado), PWA/Web Push, Telegram
+admin y motor de automatizaciones por evento/fecha.
+
 Prepara: notificaciones internas y cola, que A05 ya dejó en pie.
 
-**Bloqueada** hasta la auditoría externa de A05.
+**Estado: ENTREGADA / AUDITORÍA EXTERNA PENDIENTE**
 
 ### A07 — IA en la nube, MCP/OpenCode y endurecimiento final
 

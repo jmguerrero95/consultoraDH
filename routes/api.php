@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AutomationController;
 use App\Http\Controllers\Api\BillingConfigurationController;
 use App\Http\Controllers\Api\CalendarController;
 use App\Http\Controllers\Api\ClientController;
@@ -11,6 +12,7 @@ use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\ImportController;
+use App\Http\Controllers\Api\Internal\SupportEmailIngressController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\NoveltyController;
 use App\Http\Controllers\Api\PaymentController;
@@ -20,11 +22,18 @@ use App\Http\Controllers\Api\Portal\PortalDocumentController;
 use App\Http\Controllers\Api\Portal\PortalProfileController;
 use App\Http\Controllers\Api\Portal\PortalRelationshipController;
 use App\Http\Controllers\Api\ProfileController;
+use App\Http\Controllers\Api\PushController;
 use App\Http\Controllers\Api\ReceivableController;
 use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\SocialSecurityEntityController;
+use App\Http\Controllers\Api\SupportConversationController;
+use App\Http\Controllers\Api\SupportInboundEmailController;
+use App\Http\Controllers\Api\SupportInboxController;
+use App\Http\Controllers\Api\SupportPresenceController;
+use App\Http\Controllers\Api\SupportQueueController;
 use App\Http\Controllers\Api\TaskController;
+use App\Http\Controllers\Api\TelegramController;
 use App\Http\Controllers\HealthController;
 use Illuminate\Support\Facades\Route;
 
@@ -71,6 +80,12 @@ foreach ([
     'updateRequest',
     'reportSchedule',
     'generatedReport',
+    'supportQueue',
+    'supportConversation',
+    'supportMessage',
+    'automationRule',
+    'automationAction',
+    'telegramEndpoint',
 ] as $parameter) {
     Route::pattern($parameter, '[0-9]+');
 }
@@ -648,5 +663,161 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::post('/report-schedules', [ReportController::class, 'storeSchedule'])->name('api.report-schedules.store');
         Route::post('/report-schedules/{reportSchedule}/deactivate', [ReportController::class, 'deactivateSchedule'])->name('api.report-schedules.deactivate');
         Route::post('/report-schedules/run-due', [ReportController::class, 'runDueSchedules'])->name('api.report-schedules.run-due');
+    });
+
+    // =================================================================
+    // A06: Support Center
+    // =================================================================
+
+    Route::middleware('can:support.view')->group(function (): void {
+        Route::get('/support/inbox', [SupportInboxController::class, 'index'])
+            ->name('api.support.inbox');
+        Route::get('/support/conversations/{supportConversation}', [SupportConversationController::class, 'show'])
+            ->name('api.support.conversations.show');
+        Route::get('/support/queues', [SupportQueueController::class, 'index'])
+            ->name('api.support.queues.index');
+    });
+
+    Route::middleware('can:support.reply')->group(function (): void {
+        Route::post('/support/conversations/{supportConversation}/messages', [SupportConversationController::class, 'sendMessage'])
+            ->name('api.support.conversations.messages.store');
+        Route::post('/support/conversations/{supportConversation}/notes', [SupportConversationController::class, 'addNote'])
+            ->name('api.support.conversations.notes.store');
+        Route::post('/support/conversations/{supportConversation}/read', [SupportConversationController::class, 'markRead'])
+            ->name('api.support.conversations.read');
+    });
+
+    Route::middleware('can:support.assign')->group(function (): void {
+        Route::post('/support/conversations/{supportConversation}/assign', [SupportConversationController::class, 'assign'])
+            ->name('api.support.conversations.assign');
+        Route::post('/support/conversations/{supportConversation}/queue', [SupportConversationController::class, 'changeQueue'])
+            ->name('api.support.conversations.queue');
+        Route::post('/support/conversations/{supportConversation}/priority', [SupportConversationController::class, 'changePriority'])
+            ->name('api.support.conversations.priority');
+    });
+
+    Route::middleware('can:support.resolve')->group(function (): void {
+        Route::post('/support/conversations/{supportConversation}/resolve', [SupportConversationController::class, 'resolve'])
+            ->name('api.support.conversations.resolve');
+        Route::post('/support/conversations/{supportConversation}/close', [SupportConversationController::class, 'close'])
+            ->name('api.support.conversations.close');
+        Route::post('/support/conversations/{supportConversation}/reopen', [SupportConversationController::class, 'reopen'])
+            ->name('api.support.conversations.reopen');
+    });
+
+    Route::middleware('can:support.manage_queues')->group(function (): void {
+        Route::post('/support/queues', [SupportQueueController::class, 'store'])
+            ->name('api.support.queues.store');
+        Route::patch('/support/queues/{supportQueue}', [SupportQueueController::class, 'update'])
+            ->name('api.support.queues.update');
+        Route::post('/support/queues/{supportQueue}/members', [SupportQueueController::class, 'addMember'])
+            ->name('api.support.queues.members.store');
+        Route::delete('/support/queues/{supportQueue}/members/{user}', [SupportQueueController::class, 'removeMember'])
+            ->name('api.support.queues.members.destroy');
+    });
+
+    Route::middleware('can:support.manage_sla')->group(function (): void {
+        // SLA configuration is part of queue management
+    });
+
+    Route::middleware('can:support.review_unlinked_email')->group(function (): void {
+        Route::get('/support/unlinked-email', [SupportInboundEmailController::class, 'index'])
+            ->name('api.support.unlinked-email.index');
+        Route::post('/support/unlinked-email/{id}/link', [SupportInboundEmailController::class, 'link'])
+            ->name('api.support.unlinked-email.link');
+        Route::post('/support/unlinked-email/{id}/discard', [SupportInboundEmailController::class, 'discard'])
+            ->name('api.support.unlinked-email.discard');
+    });
+
+    // =================================================================
+    // A06: Client Portal Support
+    // =================================================================
+
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+        Route::get('/portal/support/conversations', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'index'])
+            ->name('api.portal.support.conversations.index');
+        Route::post('/portal/support/conversations', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'store'])
+            ->name('api.portal.support.conversations.store');
+        Route::get('/portal/support/conversations/{supportConversation}', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'show'])
+            ->name('api.portal.support.conversations.show');
+        Route::post('/portal/support/conversations/{supportConversation}/messages', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'sendMessage'])
+            ->name('api.portal.support.conversations.messages.store');
+        Route::post('/portal/support/conversations/{supportConversation}/attachments', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'uploadAttachment'])
+            ->name('api.portal.support.conversations.attachments.store');
+        Route::post('/portal/support/conversations/{supportConversation}/read', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'markRead'])
+            ->name('api.portal.support.conversations.read');
+    });
+
+    // =================================================================
+    // A06: Push Notifications
+    // =================================================================
+
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+        Route::get('/push/vapid-public-key', [PushController::class, 'vapidPublicKey'])
+            ->name('api.push.vapid-public-key');
+        Route::post('/push/subscriptions', [PushController::class, 'store'])
+            ->name('api.push.subscriptions.store');
+        Route::delete('/push/subscriptions/{subscription}', [PushController::class, 'destroy'])
+            ->name('api.push.subscriptions.destroy');
+    });
+
+    // =================================================================
+    // A06: Telegram Admin
+    // =================================================================
+
+    Route::middleware('can:notification_channels.manage')->group(function (): void {
+        Route::get('/telegram/endpoints', [TelegramController::class, 'index'])
+            ->name('api.telegram.endpoints.index');
+        Route::post('/telegram/endpoints', [TelegramController::class, 'store'])
+            ->name('api.telegram.endpoints.store');
+        Route::patch('/telegram/endpoints/{telegramEndpoint}', [TelegramController::class, 'update'])
+            ->name('api.telegram.endpoints.update');
+        Route::post('/telegram/endpoints/{telegramEndpoint}/test', [TelegramController::class, 'test'])
+            ->name('api.telegram.endpoints.test');
+    });
+
+    // =================================================================
+    // A06: Automations
+    // =================================================================
+
+    Route::middleware('can:automations.view')->group(function (): void {
+        Route::get('/automations/vocabulary', [AutomationController::class, 'vocabulary'])
+            ->name('api.automations.vocabulary');
+        Route::get('/automations', [AutomationController::class, 'index'])
+            ->name('api.automations.index');
+        Route::get('/automations/{automationRule}', [AutomationController::class, 'show'])
+            ->name('api.automations.show');
+        Route::get('/automations/{automationRule}/runs', [AutomationController::class, 'runs'])
+            ->name('api.automations.runs');
+    });
+
+    Route::middleware('can:automations.manage')->group(function (): void {
+        Route::post('/automations', [AutomationController::class, 'store'])
+            ->name('api.automations.store');
+        Route::patch('/automations/{automationRule}', [AutomationController::class, 'update'])
+            ->name('api.automations.update');
+        Route::post('/automations/{automationRule}/activate', [AutomationController::class, 'activate'])
+            ->name('api.automations.activate');
+        Route::post('/automations/{automationRule}/deactivate', [AutomationController::class, 'deactivate'])
+            ->name('api.automations.deactivate');
+        Route::post('/automations/validate-preview', [AutomationController::class, 'validatePreview'])
+            ->name('api.automations.validate-preview');
+    });
+
+    // =================================================================
+    // A06: Internal inbound email ingestion (HMAC protected)
+    // =================================================================
+
+    Route::prefix('internal')->group(function (): void {
+        Route::post('/support-email/inbound', [SupportEmailIngressController::class, 'ingest'])
+            ->name('api.internal.support-email.inbound');
+    });
+
+    // Presence heartbeat (no permission, just auth)
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+        Route::post('/support/presence/heartbeat', [SupportPresenceController::class, 'heartbeat'])
+            ->name('api.support.presence.heartbeat');
+        Route::post('/portal/support/presence/heartbeat', [App\Http\Controllers\Api\Portal\SupportPresenceController::class, 'heartbeat'])
+            ->name('api.portal.support.presence.heartbeat');
     });
 });
