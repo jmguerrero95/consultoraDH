@@ -49,23 +49,23 @@ class SupportInboundEmail extends Model
         return $this->belongsTo(User::class, 'linked_by');
     }
 
-    public function discarde(): BelongsTo
+    public function discarder(): BelongsTo
     {
         return $this->belongsTo(User::class, 'discarded_by');
     }
 
     public function isQuarantined(): bool
     {
-        return $this->status->is(SupportInboundEmailStatus::Quarantined);
+        return $this->status === SupportInboundEmailStatus::Quarantined;
     }
 
     public function isLinked(): bool
     {
-        return $this->status->is(SupportInboundEmailStatus::Linked);
+        return $this->status === SupportInboundEmailStatus::Linked;
     }
 
     public function isDiscarded(): bool
     {
-        return $this->status->is(SupportInboundEmailStatus::Discarded);
+        return $this->status === SupportInboundEmailStatus::Discarded;
     }
 }

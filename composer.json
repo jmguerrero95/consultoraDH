@@ -19,7 +19,8 @@
         "minishlink/web-push": "^11.0",
         "openspout/openspout": "^5.12",
         "spatie/laravel-permission": "^8.3",
-        "symfony/mime": "^8.1"
+        "symfony/mime": "^8.1",
+        "zbateson/mail-mime-parser": "^4.0"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",

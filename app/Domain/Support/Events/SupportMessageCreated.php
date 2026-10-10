@@ -5,14 +5,18 @@ declare(strict_types=1);
 namespace App\Domain\Support\Events;
 
 use App\Domain\Audit\AuditableEvent;
+use App\Domain\Audit\AuditAction;
+use App\Domain\Audit\SubjectAware;
 use App\Models\SupportMessage;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class SupportMessageCreated extends AuditableEvent implements ShouldBroadcast
+class SupportMessageCreated implements AuditableEvent, SubjectAware, ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
@@ -62,5 +66,39 @@ class SupportMessageCreated extends AuditableEvent implements ShouldBroadcast
             'message' => $this->message->load(['author', 'attachments']),
             'event' => 'message.created',
         ];
+    }
+
+    public function auditAction(): AuditAction
+    {
+        return match ($this->message->sender_kind->value) {
+            'client' => AuditAction::SupportMessageClientReceived,
+            'staff' => $this->message->message_kind->value === 'note'
+                ? AuditAction::SupportNoteCreated
+                : AuditAction::SupportMessageStaffSent,
+            default => AuditAction::SupportMessageCreated,
+        };
+    }
+
+    public function auditActor(): ?Authenticatable
+    {
+        return $this->message->author;
+    }
+
+    public function auditSubject(): ?Model
+    {
+        return $this->message;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function auditMetadata(): array
+    {
+        return [
+                'conversation_id' => $this->message->conversation_id,
+                'sender_kind' => $this->message->sender_kind->value,
+                'message_kind' => $this->message->message_kind->value,
+                'has_attachments' => $this->message->attachments->isNotEmpty(),
+            ];
     }
 }

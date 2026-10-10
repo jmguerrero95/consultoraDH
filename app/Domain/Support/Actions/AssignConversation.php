@@ -15,7 +15,7 @@ class AssignConversation
 {
     public function execute(SupportConversation $conversation, User $assignee, User $actor): SupportConversation
     {
-        if ($assignee->account_type !== 'staff' || !$assignee->status->is('active')) {
+        if ($assignee->account_type !== 'staff' || !$assignee->status->value === 'active') {
             throw new \InvalidArgumentException('Assignee must be an active staff user');
         }
 
@@ -45,7 +45,7 @@ class AssignConversation
             $conversation->save();
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($conversation, $assignee, $actor) {
+            DB::afterCommit(function () use ($conversation, $assignee, $actor) {
                 event(new SupportConversationAssigned($conversation->fresh(['assignee']), $assignee, $actor));
             });
 

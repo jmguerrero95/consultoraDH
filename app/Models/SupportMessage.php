@@ -63,6 +63,6 @@ class SupportMessage extends Model
 
     public function isInternalNote(): bool
     {
-        return $this->message_kind->is(SupportMessageKind::Note);
+        return $this->message_kind === SupportMessageKind::Note;
     }
 }

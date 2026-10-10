@@ -5,15 +5,19 @@ declare(strict_types=1);
 namespace App\Domain\Support\Events;
 
 use App\Domain\Audit\AuditableEvent;
+use App\Domain\Audit\AuditAction;
+use App\Domain\Audit\SubjectAware;
 use App\Models\SupportConversation;
 use App\Models\User;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class SupportConversationAssigned extends AuditableEvent implements ShouldBroadcast
+class SupportConversationAssigned implements AuditableEvent, SubjectAware, ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
@@ -47,5 +51,31 @@ class SupportConversationAssigned extends AuditableEvent implements ShouldBroadc
             'conversation' => $this->conversation->load(['assignee', 'queue']),
             'event' => 'conversation.assigned',
         ];
+    }
+
+    public function auditAction(): AuditAction
+    {
+        return AuditAction::SupportConversationAssigned;
+    }
+
+    public function auditActor(): ?Authenticatable
+    {
+        return $this->actor;
+    }
+
+    public function auditSubject(): ?Model
+    {
+        return $this->conversation;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function auditMetadata(): array
+    {
+        return [
+                'queue_id' => $this->conversation->queue_id,
+                'assignee_id' => $this->assignee->id,
+            ];
     }
 }

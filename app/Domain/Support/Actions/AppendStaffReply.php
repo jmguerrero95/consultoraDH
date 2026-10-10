@@ -73,7 +73,7 @@ class AppendStaffReply
             }
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($message, $conversation, $author) {
+            DB::afterCommit(function () use ($message, $conversation, $author) {
                 event(new SupportMessageCreated($message->fresh(['author', 'attachments'])));
                 event(new SupportReadStateUpdated($conversation, $author, $message->id));
             });
@@ -92,7 +92,17 @@ class AppendStaffReply
         }
 
         $queue = $conversation->queue;
-        $delay = $queue?->fallback_email_delay_minutes ?? config('support.default_fallback_delay_minutes', 5);
+
+        // The queue's own setting wins when it has one, so a queue can promise a
+        // faster acknowledgement than the deployment default. Falls back to the
+        // configured value, which is authoritative for the rest.
+        //
+        // A delay of zero is not a legitimate value: it would send a fallback
+        // email for every reply, which is precisely the noise the fallback
+        // exists to avoid. Treated as the default rather than honoured.
+        $configured = (int) config('support.fallback_delay_minutes', 15);
+        $delay = (int) ($queue?->fallback_email_delay_minutes ?? $configured);
+        $delay = $delay > 0 ? $delay : $configured;
 
         SendSupportFallbackEmail::dispatch($message->id, $conversation->client_id)
             ->delay(now()->addMinutes($delay))

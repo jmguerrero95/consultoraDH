@@ -84,6 +84,13 @@ foreach ([
     'supportConversation',
     'automationRule',
     'telegramEndpoint',
+    'conversation',
+    'queue',
+    'endpoint',
+    'rule',
+    'email',
+    'subscription',
+    'attachment',
 ] as $parameter) {
     Route::pattern($parameter, '[0-9]+');
 }
@@ -133,6 +140,20 @@ Route::middleware(['throttle:recovery-attempt', 'throttle:recovery-account'])->g
 Route::middleware(['throttle:reset-attempt', 'throttle:reset-account'])->group(function (): void {
     Route::post('/auth/reset-password', [AuthController::class, 'resetPassword'])
         ->name('api.auth.reset-password');
+});
+
+// =================================================================
+// A06: Internal inbound email ingestion (HMAC protected) — OUTSIDE AUTH
+// =================================================================
+//
+// This endpoint must be accessible to external email services (SendGrid, Mailgun, etc.)
+// that authenticate via HMAC signature only, not via Laravel session cookies.
+// It is deliberately placed OUTSIDE the authenticated route group above.
+
+Route::prefix('internal')->group(function (): void {
+    Route::post('/support-email/inbound', [SupportEmailIngressController::class, 'ingest'])
+        ->middleware(['throttle:support-inbound', 'support.email.hmac'])
+        ->name('api.internal.support-email.inbound');
 });
 
 // --- Authenticated ---------------------------------------------------------
@@ -672,6 +693,19 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.support.inbox');
         Route::get('/support/conversations/{conversation}', [SupportConversationController::class, 'show'])
             ->name('api.support.conversations.show');
+
+        /*
+         * Reading an attachment needs `support.view`, not `support.reply`.
+         *
+         * It was declared inside the reply group, so downloading a file required
+         * authority to write into the conversation. A role that could read a
+         * conversation but not post in it — a supervisor triaging, say — could
+         * read the thread and then be refused the documents attached to it.
+         * The per-conversation check in the controller still applies, so this
+         * widens who may *attempt* the read, not who may succeed.
+         */
+        Route::get('/support/conversations/{conversation}/attachments/{attachment}', [SupportConversationController::class, 'downloadAttachment'])
+            ->name('api.support.conversations.attachments.download');
         Route::get('/support/queues', [SupportQueueController::class, 'index'])
             ->name('api.support.queues.index');
     });
@@ -683,8 +717,6 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.support.conversations.notes.store');
         Route::post('/support/conversations/{conversation}/read', [SupportConversationController::class, 'markRead'])
             ->name('api.support.conversations.read');
-        Route::get('/support/conversations/{conversation}/attachments/{attachment}', [SupportConversationController::class, 'downloadAttachment'])
-            ->name('api.support.conversations.attachments.download');
     });
 
     Route::middleware('can:support.assign')->group(function (): void {
@@ -723,9 +755,9 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:support.review_unlinked_email')->group(function (): void {
         Route::get('/support/unlinked-email', [SupportInboundEmailController::class, 'index'])
             ->name('api.support.unlinked-email.index');
-        Route::post('/support/unlinked-email/{id}/link', [SupportInboundEmailController::class, 'link'])
+        Route::post('/support/unlinked-email/{email}/link', [SupportInboundEmailController::class, 'link'])
             ->name('api.support.unlinked-email.link');
-        Route::post('/support/unlinked-email/{id}/discard', [SupportInboundEmailController::class, 'discard'])
+        Route::post('/support/unlinked-email/{email}/discard', [SupportInboundEmailController::class, 'discard'])
             ->name('api.support.unlinked-email.discard');
     });
 
@@ -772,9 +804,9 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.telegram.endpoints.index');
         Route::post('/telegram/endpoints', [TelegramController::class, 'store'])
             ->name('api.telegram.endpoints.store');
-        Route::patch('/telegram/endpoints/{telegramEndpoint}', [TelegramController::class, 'update'])
+        Route::patch('/telegram/endpoints/{endpoint}', [TelegramController::class, 'update'])
             ->name('api.telegram.endpoints.update');
-        Route::post('/telegram/endpoints/{telegramEndpoint}/test', [TelegramController::class, 'test'])
+        Route::post('/telegram/endpoints/{endpoint}/test', [TelegramController::class, 'test'])
             ->name('api.telegram.endpoints.test');
     });
 
@@ -787,33 +819,23 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.automations.vocabulary');
         Route::get('/automations', [AutomationController::class, 'index'])
             ->name('api.automations.index');
-        Route::get('/automations/{automationRule}', [AutomationController::class, 'show'])
+        Route::get('/automations/{rule}', [AutomationController::class, 'show'])
             ->name('api.automations.show');
-        Route::get('/automations/{automationRule}/runs', [AutomationController::class, 'runs'])
+        Route::get('/automations/{rule}/runs', [AutomationController::class, 'runs'])
             ->name('api.automations.runs');
     });
 
     Route::middleware('can:automations.manage')->group(function (): void {
         Route::post('/automations', [AutomationController::class, 'store'])
             ->name('api.automations.store');
-        Route::patch('/automations/{automationRule}', [AutomationController::class, 'update'])
+        Route::patch('/automations/{rule}', [AutomationController::class, 'update'])
             ->name('api.automations.update');
-        Route::post('/automations/{automationRule}/activate', [AutomationController::class, 'activate'])
+        Route::post('/automations/{rule}/activate', [AutomationController::class, 'activate'])
             ->name('api.automations.activate');
-        Route::post('/automations/{automationRule}/deactivate', [AutomationController::class, 'deactivate'])
+        Route::post('/automations/{rule}/deactivate', [AutomationController::class, 'deactivate'])
             ->name('api.automations.deactivate');
         Route::post('/automations/validate-preview', [AutomationController::class, 'validatePreview'])
             ->name('api.automations.validate-preview');
-    });
-
-    // =================================================================
-    // A06: Internal inbound email ingestion (HMAC protected)
-    // =================================================================
-
-    Route::prefix('internal')->group(function (): void {
-        Route::post('/support-email/inbound', [SupportEmailIngressController::class, 'ingest'])
-            ->middleware('support.email.hmac')
-            ->name('api.internal.support-email.inbound');
     });
 
     // Presence heartbeat (no permission, just auth)

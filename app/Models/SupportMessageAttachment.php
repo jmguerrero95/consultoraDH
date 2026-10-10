@@ -17,6 +17,7 @@ class SupportMessageAttachment extends Model
 
     protected $fillable = [
         'support_message_id',
+        'conversation_id',
         'kind',
         'original_name',
         'stored_path',
@@ -32,6 +33,19 @@ class SupportMessageAttachment extends Model
         'size_bytes' => 'integer',
         'created_at' => 'datetime',
     ];
+
+    /**
+     * The conversation this attachment belongs to.
+     *
+     * Read directly rather than through the message, so an authorisation check
+     * is one comparison against a column that is NOT NULL — an attachment can
+     * never belong to "no conversation", so there is no ambiguous case to
+     * decide about at read time.
+     */
+    public function conversation(): BelongsTo
+    {
+        return $this->belongsTo(SupportConversation::class, 'conversation_id');
+    }
 
     public function message(): BelongsTo
     {

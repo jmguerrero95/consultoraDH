@@ -16,7 +16,7 @@ class TelegramController extends Controller
     public function index(Request $request): JsonResponse
     {
         $endpoints = TelegramEndpoint::query()
-            ->with('creator')
+            ->with(['creator', 'conversation'])
             ->orderByDesc('created_at')
             ->get();
 
@@ -28,6 +28,7 @@ class TelegramController extends Controller
         $validated = $request->validate([
             'label' => 'required|string|max:255',
             'chat_id' => 'required|string|max:255',
+            'conversation_id' => 'nullable|integer|exists:support_conversations,id',
             'enabled' => 'sometimes|boolean',
             'event_preferences' => 'sometimes|array',
             'event_preferences.*' => Rule::in([
@@ -51,6 +52,7 @@ class TelegramController extends Controller
         $validated = $request->validate([
             'label' => 'sometimes|required|string|max:255',
             'chat_id' => 'sometimes|required|string|max:255',
+            'conversation_id' => 'sometimes|nullable|integer|exists:support_conversations,id',
             'enabled' => 'sometimes|boolean',
             'event_preferences' => 'sometimes|array',
             'event_preferences.*' => Rule::in([

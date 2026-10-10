@@ -27,8 +27,30 @@ use Illuminate\Session\Middleware\AuthenticateSession;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
+use Dotenv\Dotenv;
 
-return Application::configure(basePath: dirname(__DIR__))
+/*
+|--------------------------------------------------------------------------
+| Load environment with overload so Docker env vars take precedence
+|--------------------------------------------------------------------------
+|
+| In the E2E test environment, the .env file from the host bind mount contains
+| development values (APP_ENV=local, etc.). Docker Compose sets the correct
+| E2E values as environment variables (APP_ENV=testing, DB_DATABASE=consultora_dh_e2e, etc.).
+| The entrypoint generates a complete .env file at /tmp/.env.e2e with all E2E values.
+| We load it using createUnsafeImmutable which allows env vars to override.
+|
+*/
+$isTesting = isset($_ENV['APP_ENV']) && in_array($_ENV['APP_ENV'], ['testing', 'e2e'], true);
+
+if ($isTesting) {
+    // The entrypoint has already generated the correct .env file in the bind mount.
+    // Ensure the environment is marked as loaded so Laravel doesn't reload it.
+    $_ENV['APP_RUNNING_IN_CONSOLE'] = 'true';
+    $_SERVER['APP_RUNNING_IN_CONSOLE'] = 'true';
+}
+
+return Application::configure(dirname(__DIR__))
     ->withRouting(
         web: __DIR__.'/../routes/web.php',
 
@@ -90,6 +112,39 @@ return Application::configure(basePath: dirname(__DIR__))
 
             // HMAC verification for support inbound email ingestion
             'support.email.hmac' => \App\Http\Middleware\VerifySupportEmailHmac::class,
+
+            // A dedicated limiter for the inbound webhook, so a flood of signed
+            // mail cannot consume the budget the browser session shares and a
+            // legitimate later delivery is not refused behind it.
+            'throttle:support-inbound' => \Illuminate\Routing\Middleware\ThrottleRequests::class.':support-inbound',
+        ]);
+
+        /*
+        |----------------------------------------------------------------------
+        | CSRF exemption for the inbound mail webhook
+        |----------------------------------------------------------------------
+        |
+        | `routes/api.php` is mounted under the `web` group so the single page
+        | application keeps its session and CSRF protection. That group also
+        | protects the JSON API against cross-site form posts.
+        |
+        | The inbound webhook is the one endpoint with no browser and therefore
+        | no CSRF token: its caller is a mail provider, it holds no session, and
+        | it authenticates with an HMAC signature over the exact request body.
+        | CSRF is a defence against a *browser* being made to send a request the
+        | user did not intend; there is nothing to forge here, and requiring a
+        | token would make the endpoint unreachable by its only real caller.
+        |
+        | The exemption is therefore named exactly, as a path pattern. It is
+        | deliberately not `api/*`, not `internal/*` and not
+        | `support-email/*`: a broad pattern would silently strip CSRF
+        | protection from every other endpoint, and the whole point of this
+        | file is that the session-authenticated API keeps it. Every other
+        | endpoint below is still covered.
+        |
+        */
+        $middleware->validateCsrfTokens(except: [
+            'api/internal/support-email/inbound',
         ]);
 
         /*

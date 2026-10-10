@@ -4,6 +4,11 @@ import Echo from 'laravel-echo'
 import Pusher from 'pusher-js'
 
 // Make Pusher available globally for Laravel Echo
+declare global {
+  interface Window {
+    Pusher: typeof Pusher
+  }
+}
 window.Pusher = Pusher
 
 interface RealtimeState {
@@ -21,7 +26,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
     channels: new Map(),
   })
 
-  let echo: Echo | null = null
+  let echo: Echo<any> | null = null
 
   const isConnected = computed(() => state.value.connected)
   const isConnecting = computed(() => state.value.connecting)
@@ -40,10 +45,10 @@ export const useRealtimeStore = defineStore('realtime', () => {
 
     return new Promise((resolve, reject) => {
       try {
-        // Get the VAPID public key from the server
+        // Get the VAPID public key from the server (not used in Echo config but needed for auth)
         fetch('/api/push/vapid-public-key')
           .then(response => response.json())
-          .then(data => {
+          .then(_data => {
             // Initialize Laravel Echo
             echo = new Echo({
               broadcaster: 'reverb',

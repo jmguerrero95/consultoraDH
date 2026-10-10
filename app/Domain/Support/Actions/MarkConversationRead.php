@@ -50,7 +50,7 @@ class MarkConversationRead
             }
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($conversation, $user, $upToMessage) {
+            DB::afterCommit(function () use ($conversation, $user, $upToMessage) {
                 event(new SupportReadStateUpdated($conversation, $user, $upToMessage->id));
             });
 

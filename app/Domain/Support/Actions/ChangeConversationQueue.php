@@ -47,7 +47,7 @@ class ChangeConversationQueue
 
             // If new assignee provided, validate
             if ($assigneeId && $newAssignee) {
-                if ($newAssignee->account_type !== 'staff' || !$newAssignee->status->is('active')) {
+                if ($newAssignee->account_type !== 'staff' || !$newAssignee->status->value === 'active') {
                     throw new \InvalidArgumentException('Assignee must be an active staff user');
                 }
 
@@ -65,7 +65,7 @@ class ChangeConversationQueue
             $conversation->save();
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($conversation, $actor, $newAssignee) {
+            DB::afterCommit(function () use ($conversation, $actor, $newAssignee) {
                 event(new SupportConversationQueueChanged($conversation->fresh(['queue', 'assignee']), $actor, $newAssignee));
             });
 

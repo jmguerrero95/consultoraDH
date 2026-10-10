@@ -120,27 +120,27 @@ class SupportConversation extends Model
 
     public function isOpen(): bool
     {
-        return $this->status->is(SupportConversationStatus::Open);
+        return $this->status === SupportConversationStatus::Open;
     }
 
     public function isWaitingStaff(): bool
     {
-        return $this->status->is(SupportConversationStatus::WaitingStaff);
+        return $this->status === SupportConversationStatus::WaitingStaff;
     }
 
     public function isWaitingClient(): bool
     {
-        return $this->status->is(SupportConversationStatus::WaitingClient);
+        return $this->status === SupportConversationStatus::WaitingClient;
     }
 
     public function isResolved(): bool
     {
-        return $this->status->is(SupportConversationStatus::Resolved);
+        return $this->status === SupportConversationStatus::Resolved;
     }
 
     public function isClosed(): bool
     {
-        return $this->status->is(SupportConversationStatus::Closed);
+        return $this->status === SupportConversationStatus::Closed;
     }
 
     public function isTerminal(): bool

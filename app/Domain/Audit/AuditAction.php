@@ -162,4 +162,22 @@ enum AuditAction: string
     case ReportScheduleUpdated = 'report_schedule.updated';
     case ReportScheduleDeactivated = 'report_schedule.deactivated';
     case ReportScheduleRan = 'report_schedule.ran';
+
+    // --- A06: soporte -----------------------------------------------------------
+    case SupportConversationCreated = 'support.conversation.created';
+    case SupportConversationAssigned = 'support.conversation.assigned';
+    case SupportConversationQueueChanged = 'support.conversation.queue_changed';
+    case SupportConversationUpdated = 'support.conversation.updated';
+    case SupportConversationResolved = 'support.conversation.resolved';
+    case SupportConversationClosed = 'support.conversation.closed';
+    case SupportConversationReopened = 'support.conversation.reopened';
+    case SupportMessageClientReceived = 'support.message.client_received';
+    case SupportMessageStaffSent = 'support.message.staff_sent';
+    case SupportNoteCreated = 'support.note.created';
+    case SupportMessageCreated = 'support.message.created';
+    case SupportReadStateUpdated = 'support.read.updated';
+    case SupportDeliveryRecorded = 'support.delivery.created';
+    case SupportSlaWarning = 'support.sla.warning';
+    case SupportSlaBreached = 'support.sla.breached';
+    case SupportSlaRecovered = 'support.sla.recovered';
 }

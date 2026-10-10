@@ -11,6 +11,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -42,9 +43,15 @@ class SendTelegramMessage implements ShouldQueue
 
         $dedupeKey = $this->dedupeKey ?? "telegram_{$endpoint->id}_".hash('sha256', $this->message);
 
-        // Check if already sent
-        if (SupportDelivery::where('dedupe_key', $dedupeKey)->where('status', 'sent')->exists()) {
-            Log::info('Telegram message already sent', ['dedupe_key' => $dedupeKey]);
+        // Claim the key before sending, not after. Asking whether a 'sent' row
+        // exists and only then inserting is a check-then-act race: two workers
+        // running the same escalation both read "not sent yet" and both post to
+        // the chat. The unique index on dedupe_key is what actually decides the
+        // winner, so the claim has to be the insert itself.
+        $delivery = $this->claimDedupeKey($dedupeKey);
+
+        if ($delivery === null) {
+            Log::info('Telegram message already delivered or in flight', ['dedupe_key' => $dedupeKey]);
 
             return;
         }
@@ -67,12 +74,10 @@ class SendTelegramMessage implements ShouldQueue
                 ]);
 
             if ($response->successful()) {
-                SupportDelivery::create([
-                    'channel' => 'telegram',
-                    'status' => 'sent',
-                    'dedupe_key' => $dedupeKey,
-                    'sent_at' => now(),
-                ]);
+                // Update the row this worker claimed rather than inserting a
+                // second one: the unique index would refuse it anyway, and the
+                // failure would be reported as a broken send.
+                $delivery->update(['status' => 'sent', 'sent_at' => now()]);
                 Log::info('Telegram message sent', ['endpoint_id' => $endpoint->id]);
             } else {
                 throw new \Exception('Telegram API error: '.$response->body());
@@ -83,15 +88,57 @@ class SendTelegramMessage implements ShouldQueue
                 'error' => $e->getMessage(),
             ]);
 
-            SupportDelivery::create([
-                'channel' => 'telegram',
+            $delivery->update([
                 'status' => 'failed',
-                'dedupe_key' => $dedupeKey,
-                'attempts' => $this->attempts(),
-                'last_error_code' => $e->getCode() ?? 'unknown',
+                'last_error_code' => $e->getCode() ?: 'unknown',
             ]);
 
             throw $e;
         }
+    }
+
+    /**
+     * Take exclusive ownership of a dedupe key, or report that someone else has it.
+     *
+     * A previous failure is handed back to the next attempt: inserting a fresh
+     * row would collide on the unique index and turn every retry into a
+     * permanent error.
+     *
+     * The claim is `ON CONFLICT DO NOTHING` rather than a try/catch around a
+     * plain insert. Letting the insert raise and catching it works on its own,
+     * but in PostgreSQL a failed statement aborts the surrounding transaction,
+     * so every later query in that transaction fails too. Asking the database
+     * to decline the insert keeps the transaction usable either way.
+     */
+    private function claimDedupeKey(string $dedupeKey): ?SupportDelivery
+    {
+        $retried = SupportDelivery::query()
+            ->where('dedupe_key', $dedupeKey)
+            ->where('status', 'failed')
+            ->update([
+                'status' => 'pending',
+                'attempts' => DB::raw('support_deliveries.attempts + 1'),
+                'last_error_code' => null,
+            ]);
+
+        if ($retried > 0) {
+            return SupportDelivery::where('dedupe_key', $dedupeKey)->first();
+        }
+
+        $inserted = DB::table('support_deliveries')->insertOrIgnore([
+            'channel' => 'telegram',
+            'status' => 'pending',
+            'dedupe_key' => $dedupeKey,
+            'attempts' => 1,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        if ($inserted === 0) {
+            // Either already delivered, or another worker is sending it right now.
+            return null;
+        }
+
+        return SupportDelivery::where('dedupe_key', $dedupeKey)->first();
     }
 }

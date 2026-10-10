@@ -38,33 +38,36 @@ class EscalateSupportSla
     {
         $queue = $conversation->queue;
 
+        // The escalation recipient is resolved once. Looking the user up inside
+        // each block, as this did, meant every later block re-read the row and
+        // silently operated on its own undefined copy when the first guard had
+        // not run.
+        $escalationUser = $queue && $queue->escalation_user_id
+            ? User::find($queue->escalation_user_id)
+            : null;
+
         // 1. Internal notification to escalation staff
-        if ($queue && $queue->escalation_user_id) {
-            $escalationUser = \App\Models\User::find($queue->escalation_user_id);
-            if ($escalationUser && $escalationUser->status->is('active')) {
-                \App\Domain\Notifications\DatabaseNotificationService::create(
-                    $escalationUser,
-                    'Incumplimiento SLA',
-                    $this->buildBreachMessage($slaEvent, $conversation),
-                    [
-                        'type' => 'sla_breach',
-                        'conversation_id' => $conversation->id,
-                        'metric' => $slaEvent->metric,
-                        'level' => 'breach',
-                    ]
-                );
-            }
+        if ($escalationUser && $escalationUser->status->value === 'active') {
+            \App\Domain\Notifications\DatabaseNotificationService::create(
+                $escalationUser,
+                'Incumplimiento SLA',
+                $this->buildBreachMessage($slaEvent, $conversation),
+                [
+                    'type' => 'sla_breach',
+                    'conversation_id' => $conversation->id,
+                    'metric' => $slaEvent->metric,
+                    'level' => 'breach',
+                ]
+            );
+        }
 
         // 2. Email to escalation staff (if configured and user has email)
-        if ($queue && $queue->escalation_user_id) {
-            $escalationUser = \App\Models\User::find($queue->escalation_user_id);
-            if ($escalationUser && $escalationUser->email) {
-                \App\Jobs\SendSupportEscalationEmail::dispatch(
-                    $escalationUser->id,
-                    $slaEvent->id,
-                    'breach'
-                );
-            }
+        if ($escalationUser && $escalationUser->email) {
+            SendSupportEscalationEmail::dispatch(
+                $escalationUser->id,
+                $slaEvent->id,
+                'breach'
+            );
         }
 
         // 3. Telegram escalation if enabled
@@ -78,7 +81,7 @@ class EscalateSupportSla
         // For warnings, only send internal notification to assigned staff
         if ($conversation->assigned_to_user_id) {
             $assignee = \App\Models\User::find($conversation->assigned_to_user_id);
-            if ($assignee && $assignee->status->is('active')) {
+            if ($assignee && $assignee->status->value === 'active') {
                 \App\Domain\Notifications\DatabaseNotificationService::create(
                     $assignee,
                     'Advertencia SLA',
@@ -124,7 +127,14 @@ class EscalateSupportSla
 
     private function sendTelegramEscalation(\App\Models\SupportSlaEvent $slaEvent, \App\Models\SupportConversation $conversation): void
     {
+        // An endpoint scoped to this conversation, plus every admin-wide one.
+        // Fetching all endpoints regardless of scope would route a private
+        // conversation's breach into the general operations group.
         $endpoints = TelegramEndpoint::where('enabled', true)
+            ->where(function ($query) use ($conversation): void {
+                $query->whereNull('conversation_id')
+                    ->orWhere('conversation_id', $conversation->id);
+            })
             ->whereJsonContains('event_preferences', 'support_sla_breach')
             ->get();
 

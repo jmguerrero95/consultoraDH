@@ -56,12 +56,18 @@ services:
       # composer.lock, and a second copy would double a 300 MB volume to save a
       # dependency install that happens once either way.
       - vendor:/var/www/html/vendor
+    # The .env file from the host bind mount contains development values.
+    # Use a tmpfs mount for a directory, then symlink .env to it in the entrypoint.
+    tmpfs:
+      - /var/www/html/.env.docker
     environment:
       # --- The database. This is the whole point of the file.
       APP_ENV: testing
       DB_CONNECTION: pgsql
       DB_HOST: postgres
       DB_DATABASE: ${DB_E2E_DATABASE:-consultora_dh_e2e}
+      DB_USERNAME: ${DB_USERNAME:-consultora_dh_app}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
 
       # --- Identity. The host is the internal service name, because nothing is
       # published and the browser Playwright drives is inside the network.
@@ -94,6 +100,7 @@ services:
       # development application to reset rate-limit counters between runs, which
       # meant a test run could discard a developer's cache.
       REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
       REDIS_DB: "2"
       REDIS_CACHE_DB: "3"
       REDIS_PREFIX: consultora-dh-e2e-
@@ -159,16 +166,23 @@ services:
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor
+    # The .env file from the host bind mount contains development values.
+    # Use a tmpfs mount for a directory, then symlink .env to it in the entrypoint.
+    tmpfs:
+      - /var/www/html/.env.docker
     environment:
       APP_ENV: testing
       DB_CONNECTION: pgsql
       DB_HOST: postgres
       DB_DATABASE: ${DB_E2E_DATABASE:-consultora_dh_e2e}
+      DB_USERNAME: ${DB_USERNAME:-consultora_dh_app}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
       APP_URL: http://nginx-e2e
       API_RATE_LIMIT_PER_MINUTE: "2000"
       LOGIN_RATE_LIMIT_PER_ATTEMPT: "2000"
       LOGIN_RATE_LIMIT_PER_ACCOUNT: "2000"
       TRUSTED_HOSTS: nginx-e2e,nginx-e2e.local,localhost,127.0.0.1
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
       # The same namespace as `app-e2e`: a worker on a different Redis database would drain
       # a queue the application never writes to, and the symptom would be identical to the
       # one this service was added to fix.

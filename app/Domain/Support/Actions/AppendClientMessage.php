@@ -74,7 +74,7 @@ class AppendClientMessage
             $readState->update(['last_read_message_id' => $message->id, 'read_at' => now()]);
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($message, $conversation, $author, $wasWaitingStaff) {
+            DB::afterCommit(function () use ($message, $conversation, $author, $wasWaitingStaff) {
                 event(new SupportMessageCreated($message->fresh(['author', 'attachments'])));
                 event(new SupportReadStateUpdated($conversation, $author, $message->id));
 

@@ -80,7 +80,23 @@ class DispatchAutomations implements ShouldQueue
             ->get();
 
         foreach ($events as $event) {
-            $this->createAutomationRun($rule, $event, $cursor);
+            $run = $this->findOrCreateAutomationRun($rule, [
+                'audit_event_id' => $event->id,
+                'action' => $event->action,
+                'subject_type' => $event->subject_type,
+                'subject_id' => $event->subject_id,
+                'metadata' => $event->metadata,
+            ], "audit:{$event->id}");
+
+            if ($run->wasRecentlyCreated) {
+                if ($this->evaluateConditions($rule, $event)) {
+                    ExecuteAutomationRun::dispatch($run->id);
+                } else {
+                    $run->update(['status' => 'skipped', 'finished_at' => now()]);
+                }
+            }
+
+            $cursor->update(['last_source_id' => $event->id]);
         }
 
         if ($events->isNotEmpty()) {
@@ -88,35 +104,27 @@ class DispatchAutomations implements ShouldQueue
         }
     }
 
-    private function createAutomationRun(AutomationRule $rule, AuditEvent $triggerEvent, AutomationRuleCursor $cursor): void
+    /**
+     * Create the run for one occurrence, or return the run that already exists.
+     *
+     * There used to be two methods with this name: one for audit triggers that
+     * evaluated conditions and advanced a cursor, and a generic one for the
+     * scheduled triggers. PHP does not allow the duplicate, so loading this
+     * class was a fatal and the whole dispatch command exited 255.
+     *
+     * Returning the run lets the audit caller inspect `wasRecentlyCreated` and
+     * apply its own conditions; the scheduled callers simply dispatch.
+     */
+    private function findOrCreateAutomationRun(AutomationRule $rule, array $triggerSnapshot, string $occurrenceKey): AutomationRun
     {
-        $occurrenceKey = "audit:{$triggerEvent->id}";
-
-        $run = AutomationRun::firstOrCreate(
+        return AutomationRun::firstOrCreate(
             ['automation_rule_id' => $rule->id, 'occurrence_key' => $occurrenceKey],
             [
                 'status' => 'pending',
-                'trigger_snapshot' => [
-                    'audit_event_id' => $triggerEvent->id,
-                    'action' => $triggerEvent->action,
-                    'subject_type' => $triggerEvent->subject_type,
-                    'subject_id' => $triggerEvent->subject_id,
-                    'metadata' => $triggerEvent->metadata,
-                ],
+                'trigger_snapshot' => $triggerSnapshot,
                 'started_at' => now(),
             ]
         );
-
-        if ($run->wasRecentlyCreated) {
-            // Check conditions
-            if ($this->evaluateConditions($rule, $triggerEvent)) {
-                ExecuteAutomationRun::dispatch($run->id);
-            } else {
-                $run->update(['status' => 'skipped', 'finished_at' => now()]);
-            }
-        }
-
-        $cursor->update(['last_source_id' => $triggerEvent->id]);
     }
 
     private function dispatchScheduledRules(): void
@@ -250,7 +258,11 @@ class DispatchAutomations implements ShouldQueue
                 ->get();
 
             foreach ($tasks as $task) {
-                $this->createAutomationRun($rule, $task, "task_due:{$task->id}:{$dueDate}");
+                $run = $this->findOrCreateAutomationRun($rule, $task->toArray(), "task_due:{$task->id}:{$dueDate}");
+
+                if ($run->wasRecentlyCreated) {
+                    ExecuteAutomationRun::dispatch($run->id);
+                }
             }
         }
     }
@@ -279,7 +291,11 @@ class DispatchAutomations implements ShouldQueue
                 ->get();
 
             foreach ($requests as $request) {
-                $this->createAutomationRun($rule, $request, "document_due:{$request->id}:{$dueDate}");
+                $run = $this->findOrCreateAutomationRun($rule, $request->toArray(), "document_due:{$request->id}:{$dueDate}");
+
+                if ($run->wasRecentlyCreated) {
+                    ExecuteAutomationRun::dispatch($run->id);
+                }
             }
         }
     }
@@ -304,7 +320,11 @@ class DispatchAutomations implements ShouldQueue
             $overdueClients = ReceivablesService::getOverdueClients($asOf);
 
             foreach ($overdueClients as $clientData) {
-                $this->createAutomationRun($rule, $clientData, "receivable_overdue:{$clientData['client_id']}:{$asOf}");
+                $run = $this->findOrCreateAutomationRun($rule, $clientData, "receivable_overdue:{$clientData['client_id']}:{$asOf}");
+
+                if ($run->wasRecentlyCreated) {
+                    ExecuteAutomationRun::dispatch($run->id);
+                }
             }
         }
     }
@@ -405,21 +425,5 @@ class DispatchAutomations implements ShouldQueue
             'subject_id' => $event->subject_id,
             default => $event->metadata?->{$field} ?? null,
         };
-    }
-
-    private function createAutomationRun(AutomationRule $rule, $triggerData, string $occurrenceKey): void
-    {
-        $run = AutomationRun::firstOrCreate(
-            ['automation_rule_id' => $rule->id, 'occurrence_key' => $occurrenceKey],
-            [
-                'status' => 'pending',
-                'trigger_snapshot' => is_array($triggerData) ? $triggerData : (is_object($triggerData) ? $triggerData->toArray() : ['data' => $triggerData]),
-                'started_at' => now(),
-            ]
-        );
-
-        if ($run->wasRecentlyCreated) {
-            ExecuteAutomationRun::dispatch($run->id);
-        }
     }
 }

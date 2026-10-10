@@ -51,7 +51,7 @@ class AddInternalNote
             $conversation->save();
 
             // Dispatch broadcast after commit (internal notes only to staff on conversation channel)
-            Dispatch::afterCommit(function () use ($message) {
+            DB::afterCommit(function () use ($message) {
                 event(new SupportMessageCreated($message->fresh(['author', 'attachments'])));
             });
 

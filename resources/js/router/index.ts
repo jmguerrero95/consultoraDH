@@ -5,10 +5,6 @@ import AdminLayout from '@/layouts/AdminLayout.vue';
 import ClientPortalLayout from '@/layouts/ClientPortalLayout.vue';
 import { useAuthStore } from '@/stores/auth';
 import { puedeEntrar } from '@/router/permissions';
-import SupportInbox from '@/pages/support/Inbox.vue';
-import SupportConversation from '@/pages/support/Conversation.vue';
-import PortalSupportInbox from '@/pages/portal/SupportInbox.vue';
-import PortalSupportConversation from '@/pages/portal/SupportConversation.vue';
 
 /**
  * Routes of the single page application.

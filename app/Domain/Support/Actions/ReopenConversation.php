@@ -43,8 +43,8 @@ class ReopenConversation
             }
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($conversation, $actor) {
-                event(new SupportConversationReopened($conversation->fresh(['status', 'resolved_at', 'closed_at']), $actor));
+            DB::afterCommit(function () use ($conversation, $actor) {
+                event(new SupportConversationReopened($conversation->fresh(['queue']), $actor));
             });
 
             return $conversation->fresh();

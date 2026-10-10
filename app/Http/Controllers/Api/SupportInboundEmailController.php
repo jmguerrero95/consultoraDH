@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\SupportConversation;
 use App\Models\SupportInboundEmail;
+use App\Models\SupportMessage;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;

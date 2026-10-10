@@ -18,6 +18,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Illuminate\Support\Str;
 
 class SupportConversationController extends Controller
@@ -159,44 +160,103 @@ class SupportConversationController extends Controller
         }
 
         $validated = $request->validate([
-            'file' => 'required|file|max:10240|mimetypes:application/pdf,image/jpeg,image/png,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,audio/webm,audio/ogg,audio/mpeg,audio/mp4',
+            'file' => [
+                'required',
+                'file',
+                'max:10240',
+                'mimetypes:application/pdf,image/jpeg,image/png,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,audio/webm,audio/ogg,audio/mpeg,audio/mp4',
+            ],
         ]);
 
         $file = $validated['file'];
-        $uuid = Str::uuid();
-        $extension = $file->getClientOriginalExtension() ?: 'bin';
-        $storedPath = "support-attachments/{$uuid}.{$extension}";
 
-        // Store file with atomic cleanup on failure
+        /*
+         * The stored extension comes from the type this server accepts, never
+         * from the name the client sent.
+         *
+         * `getClientOriginalExtension()` reflects whatever the uploading browser
+         * claimed. A file called `payload.php` — or `x.php.pdf` with the real
+         * type omitted — would otherwise be written to disk under an extension
+         * the sender chose. The bytes are already restricted to a list of inert
+         * types by the `mimetypes` rule above; this keeps the *name* consistent
+         * with them rather than trusting the label.
+         */
+        $extensions = [
+            'application/pdf' => 'pdf',
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'text/csv' => 'csv',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+            'audio/webm' => 'webm',
+            'audio/ogg' => 'ogg',
+            'audio/mpeg' => 'mp3',
+            'audio/mp4' => 'm4a',
+        ];
+
+        $mimeType = $file->getMimeType();
+        $extension = $extensions[$mimeType] ?? 'bin';
+
+        $storedPath = sprintf('support-attachments/%s.%s', Str::uuid()->toString(), $extension);
+
+        $bytes = $file->get();
+        $sha256 = hash('sha256', $bytes);
+
+        /*
+         * Bytes first, row second.
+         *
+         * `put()` reports failure rather than throwing, so its return value is
+         * checked: ignoring it left metadata rows pointing at files that were
+         * never written whenever the disk refused the write.
+         */
+        if (Storage::disk('local')->put($storedPath, $bytes) === false) {
+            throw new RuntimeException('The attachment could not be stored.');
+        }
+
         try {
-            Storage::disk('local')->put($storedPath, $file->get());
-
-            // Calculate SHA-256
-            $sha256 = hash_file('sha256', $file->getRealPath());
-
             $attachment = SupportMessageAttachment::create([
-                'support_message_id' => null, // Will be linked when message is sent
-                'kind' => str_starts_with($file->getMimeType(), 'audio/') ? 'audio' : 'file',
-                'original_name' => $file->getClientOriginalName(),
+                // The conversation is known at upload time and is recorded here,
+                // so ownership never depends on a message existing first.
+                'conversation_id' => $conversation->id,
+                // The message is linked when the attachment is actually sent.
+                'support_message_id' => null,
+                'kind' => str_starts_with($mimeType, 'audio/') ? 'audio' : 'file',
+                // The client's name is kept for display only; it is reduced to a
+                // basename so a path in it cannot be replayed anywhere.
+                'original_name' => basename($file->getClientOriginalName()),
                 'stored_path' => $storedPath,
-                'mime_type' => $file->getMimeType(),
-                'size_bytes' => $file->getSize(),
+                'mime_type' => $mimeType,
+                'size_bytes' => strlen($bytes),
                 'sha256' => $sha256,
                 'uploaded_by_user_id' => $user->id,
                 'source_channel' => 'portal',
             ]);
-        } catch (\Throwable $e) {
-            // Cleanup on failure
-            if (Storage::disk('local')->exists($storedPath)) {
-                Storage::disk('local')->delete($storedPath);
-            }
+        } catch (Throwable $e) {
+            // Compensating cleanup, so a failure leaves neither an orphan file
+            // nor a row pointing at nothing.
+            Storage::disk('local')->delete($storedPath);
+
             throw $e;
         }
 
         return response()->json($attachment, 201);
     }
 
-    public function downloadAttachment(Request $request, SupportConversation $conversation, SupportMessageAttachment $attachment): JsonResponse
+    /**
+     * Serve an attachment as a download.
+     *
+     * Two outcomes, and the signature says so.
+     *
+     * A refusal is a `JsonResponse` — 403 or 404 with a message the interface
+     * can show. A success is a `StreamedResponse`, because `Storage::download()`
+     * streams rather than buffering the file into memory.
+     *
+     * Declaring only `JsonResponse` meant every successful download raised a
+     * `TypeError`: the endpoint could refuse correctly but could never actually
+     * serve a file. Declaring only `StreamedResponse` simply moved the same
+     * error onto every refusal.
+     */
+    public function downloadAttachment(Request $request, SupportConversation $conversation, SupportMessageAttachment $attachment): JsonResponse|StreamedResponse
     {
         $user = $request->user();
 
@@ -204,14 +264,17 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'Conversación no encontrada'], 404);
         }
 
-        // Verify attachment belongs to this conversation
-        $message = $attachment->message;
-        if (!$message || $message->conversation_id !== $conversation->id) {
+        // Ownership from the attachment's own NOT NULL column, so there is no
+        // join to miss and nothing to dereference if a message is not attached
+        // yet. See the staff endpoint for the same reasoning at more length.
+        if ($attachment->conversation_id !== $conversation->id) {
             return response()->json(['message' => 'Adjunto no encontrado'], 404);
         }
 
-        // Only allow download of client-visible attachments
-        if (!$attachment->message->client_visible) {
+        // A client may only download what is visible to a client. An attachment
+        // whose message is not attached yet is treated as not visible: it has
+        // been uploaded but not sent, so there is nothing to disclose it under.
+        if ($attachment->message === null || ! $attachment->message->client_visible) {
             return response()->json(['message' => 'No puede descargar adjuntos de notas internas'], 403);
         }
 

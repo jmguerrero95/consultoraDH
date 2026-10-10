@@ -47,8 +47,8 @@ class ResolveConversation
             }
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($conversation, $resolver, $readState, $lastMessage) {
-                event(new SupportConversationResolved($conversation->fresh(['status', 'resolved_at', 'resolver']), $resolver));
+            DB::afterCommit(function () use ($conversation, $resolver, $readState, $lastMessage) {
+                event(new SupportConversationResolved($conversation->fresh(['queue', 'resolver']), $resolver));
                 if ($lastMessage = $conversation->lastMessage) {
                     event(new SupportReadStateUpdated($conversation, $resolver, $lastMessage->id));
                 }

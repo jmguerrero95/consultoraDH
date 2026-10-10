@@ -46,14 +46,14 @@ class SupportQueueController extends Controller
         // Validate fallback/escalation users are active staff
         if ($validated['fallback_user_id'] ?? null) {
             $fallback = User::find($validated['fallback_user_id']);
-            if ($fallback->account_type !== 'staff' || ! $fallback->status->is('active')) {
+            if ($fallback->account_type !== 'staff' || ! $fallback->status->value === 'active') {
                 return response()->json(['message' => 'El usuario de respaldo debe ser staff activo'], 422);
             }
         }
 
         if ($validated['escalation_user_id'] ?? null) {
             $escalation = User::find($validated['escalation_user_id']);
-            if ($escalation->account_type !== 'staff' || ! $escalation->status->is('active')) {
+            if ($escalation->account_type !== 'staff' || ! $escalation->status->value === 'active') {
                 return response()->json(['message' => 'El usuario de escalación debe ser staff activo'], 422);
             }
         }
@@ -93,14 +93,14 @@ class SupportQueueController extends Controller
         // Validate fallback/escalation users are active staff
         if ($validated['fallback_user_id'] ?? null) {
             $fallback = User::find($validated['fallback_user_id']);
-            if ($fallback->account_type !== 'staff' || ! $fallback->status->is('active')) {
+            if ($fallback->account_type !== 'staff' || ! $fallback->status->value === 'active') {
                 return response()->json(['message' => 'El usuario de respaldo debe ser staff activo'], 422);
             }
         }
 
         if ($validated['escalation_user_id'] ?? null) {
             $escalation = User::find($validated['escalation_user_id']);
-            if ($escalation->account_type !== 'staff' || ! $escalation->status->is('active')) {
+            if ($escalation->account_type !== 'staff' || ! $escalation->status->value === 'active') {
                 return response()->json(['message' => 'El usuario de escalación debe ser staff activo'], 422);
             }
         }
@@ -123,7 +123,7 @@ class SupportQueueController extends Controller
 
         $user = User::find($validated['user_id']);
 
-        if ($user->account_type !== 'staff' || ! $user->status->is('active')) {
+        if ($user->account_type !== 'staff' || ! $user->status->value === 'active') {
             return response()->json(['message' => 'Solo se pueden agregar usuarios staff activos a una cola'], 422);
         }
 

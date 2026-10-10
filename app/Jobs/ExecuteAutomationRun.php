@@ -114,7 +114,7 @@ class ExecuteAutomationRun implements ShouldQueue
     {
         $owner = $run->rule->owner;
 
-        if (! $owner || !$owner->status->is('active')) {
+        if (! $owner || !$owner->status->value === 'active') {
             return false;
         }
 
@@ -129,7 +129,7 @@ class ExecuteAutomationRun implements ShouldQueue
     {
         $owner = $run->rule->owner;
 
-        if (! $owner || !$owner->status->is('active')) {
+        if (! $owner || !$owner->status->value === 'active') {
             return false;
         }
 
@@ -204,7 +204,7 @@ class ExecuteAutomationRun implements ShouldQueue
         $config = $action->config;
         $assignee = User::find($config['assignee_user_id'] ?? 0);
 
-        if (! $assignee || $assignee->account_type !== 'staff' || !$assignee->status->is('active')) {
+        if (! $assignee || $assignee->account_type !== 'staff' || !$assignee->status->value === 'active') {
             throw new \InvalidArgumentException('Invalid or inactive assignee');
         }
 
@@ -304,7 +304,7 @@ class ExecuteAutomationRun implements ShouldQueue
         $userId = $config['user_id'];
 
         $user = User::find($userId);
-        if (! $user || $user->account_type !== 'staff' || !$user->status->is('active')) {
+        if (! $user || $user->account_type !== 'staff' || !$user->status->value === 'active') {
             throw new \InvalidArgumentException('Invalid or inactive user');
         }
 

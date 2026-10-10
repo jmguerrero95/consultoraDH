@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Support\Actions\AddInternalNote;
 use App\Domain\Support\Actions\AppendStaffReply;
 use App\Domain\Support\Actions\AssignConversation;
+use App\Domain\Support\Actions\CloseConversation;
 use App\Domain\Support\Actions\ChangeConversationPriority;
 use App\Domain\Support\Actions\ChangeConversationQueue;
 use App\Domain\Support\Actions\MarkConversationRead;
@@ -24,6 +25,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Illuminate\Validation\Rule;
 
 class SupportConversationController extends Controller
@@ -187,24 +189,13 @@ class SupportConversationController extends Controller
     {
         $this->authorizeConversationAccess($request->user(), $conversation);
 
-        return DB::transaction(function () use ($conversation, $request) {
-            // Re-read conversation under row lock to ensure authoritative state
-            $conversation = SupportConversation::query()
-                ->whereKey($conversation->id)
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            if ($conversation->isTerminal()) {
-                return response()->json(['message' => 'La conversación ya está cerrada'], 409);
-            }
-
-            $conversation->status = $conversation->status->onClose();
-            $conversation->closed_at = now();
-            $conversation->closed_by = $request->user()->id;
-            $conversation->save();
+        try {
+            $conversation = app(CloseConversation::class)->execute($conversation, $request->user());
 
             return response()->json($conversation);
-        });
+        } catch (\DomainException $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
     }
 
     public function reopen(Request $request, SupportConversation $conversation): JsonResponse
@@ -216,22 +207,53 @@ class SupportConversationController extends Controller
         return response()->json($conversation);
     }
 
-    public function downloadAttachment(Request $request, SupportConversation $conversation, SupportMessageAttachment $attachment): JsonResponse
+    /**
+     * Serve an attachment as a download.
+     *
+     * Two outcomes, and the signature says so.
+     *
+     * A refusal is a `JsonResponse` — 403 or 404 with a message the interface
+     * can show. A success is a `StreamedResponse`, because `Storage::download()`
+     * streams rather than buffering the file into memory.
+     *
+     * Declaring only `JsonResponse` meant every successful download raised a
+     * `TypeError`: the endpoint could refuse correctly but could never actually
+     * serve a file. Declaring only `StreamedResponse` simply moved the same
+     * error onto every refusal.
+     */
+    public function downloadAttachment(Request $request, SupportConversation $conversation, SupportMessageAttachment $attachment): JsonResponse|StreamedResponse
     {
         $this->authorizeConversationAccess($request->user(), $conversation);
 
-        // Verify attachment belongs to this conversation
-        $message = $attachment->message;
-        if (!$message || $message->conversation_id !== $conversation->id) {
+        /*
+         * Ownership is read from the attachment's own `conversation_id`.
+         *
+         * It previously went through `$attachment->message`, which has two
+         * problems. An attachment may exist with no message yet — it is uploaded
+         * before the message that carries it is sent — so the join could be null;
+         * and the follow-up `!$attachment->message->client_visible` then
+         * dereferenced that null unconditionally, turning a denied download into
+         * a 500. Reading the NOT NULL ownership column makes both impossible:
+         * there is no null to reach through, and no question about what a
+         * missing message should mean.
+         */
+        if ($attachment->conversation_id !== $conversation->id) {
             return response()->json(['message' => 'Adjunto no encontrado'], 404);
         }
 
-        // Internal notes attachments can only be downloaded by staff
-        if (!$attachment->message->client_visible) {
-            $user = $request->user();
-            if ($user->account_type === 'client') {
-                return response()->json(['message' => 'No puede descargar adjuntos de notas internas'], 403);
-            }
+        /*
+         * An attachment on an internal note is staff-only.
+         *
+         * Client visibility is a property of the message the attachment hangs
+         * off, so that is where it is read — but only once it is known to be
+         * there.
+         */
+        if ($attachment->message === null) {
+            return response()->json(['message' => 'Adjunto no encontrado'], 404);
+        }
+
+        if (! $attachment->message->client_visible && $request->user()->account_type === 'client') {
+            return response()->json(['message' => 'No puede descargar adjuntos de notas internas'], 403);
         }
 
         if (!Storage::disk('local')->exists($attachment->stored_path)) {

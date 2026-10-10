@@ -13,7 +13,11 @@ class PushController extends Controller
 {
     public function vapidPublicKey(Request $request): JsonResponse
     {
-        $publicKey = config('app.vapid_public_key');
+        // The keys live in config/services.php under `webpush`, alongside the
+        // Telegram bot token. Reading them from `app` returned nothing, so this
+        // endpoint answered 503 for every deployment and no browser could ever
+        // subscribe.
+        $publicKey = config('services.webpush.public_key');
 
         if (! $publicKey) {
             return response()->json(['message' => 'VAPID no configurado'], 503);

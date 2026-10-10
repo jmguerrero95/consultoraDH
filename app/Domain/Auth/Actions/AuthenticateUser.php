@@ -11,7 +11,9 @@ use App\Domain\Users\UserStatus;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -42,9 +44,37 @@ final class AuthenticateUser
      */
     public function execute(Request $request, string $email, string $password, bool $remember = false): User
     {
+        \Log::info('AuthenticateUser execute', [
+            'email_received' => $email,
+            'password_length' => strlen($password),
+            'email_normalized' => mb_strtolower(trim($email)),
+            'request_ip' => $request->ip(),
+        ]);
+
         $email = mb_strtolower(trim($email));
 
         $user = User::query()->where('email', $email)->first();
+
+        DB::enableQueryLog();
+        $user = User::query()->where('email', $email)->first();
+        $queries = DB::getQueryLog();
+        \Log::info('AuthenticateUser query', ['queries' => $queries]);
+
+        \Log::info('AuthenticateUser connection', [
+            'connection' => $user?->getConnectionName() ?? 'no user',
+            'table' => $user?->getTable() ?? 'no user',
+            'db_name' => DB::connection()->getDatabaseName(),
+            'app_env' => app()->environment(),
+            'config_db' => config('database.connections.pgsql.database'),
+        ]);
+
+        \Log::info('AuthenticateUser user lookup', [
+            'user_found' => $user !== null,
+            'user_id' => $user?->id,
+            'user_email' => $user?->email,
+            'user_status' => $user?->status?->value,
+            'user_account_type' => $user?->account_type,
+        ]);
 
         if ($user === null) {
             $this->burnTime();
@@ -52,7 +82,11 @@ final class AuthenticateUser
             $this->reject($request, $email, null);
         }
 
-        if (! Hash::check($password, $user->password)) {
+        \Log::info('AuthenticateUser password check', [
+            'password_check' => \Illuminate\Support\Facades\Hash::check($password, $user->password),
+        ]);
+
+        if (! \Illuminate\Support\Facades\Hash::check($password, $user->password)) {
             $this->reject($request, $email, $user);
         }
 

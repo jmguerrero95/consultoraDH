@@ -14,6 +14,14 @@ class SupportSlaEvent extends Model
 
     protected $table = 'support_sla_events';
 
+    /**
+     * An SLA event is an immutable record of a measurement taken at a moment
+     * in time; `emitted_at` already carries that moment, so the table carries
+     * no bookkeeping timestamps.
+     */
+    public const UPDATED_AT = null;
+    public const CREATED_AT = null;
+
     protected $fillable = [
         'conversation_id',
         'metric',

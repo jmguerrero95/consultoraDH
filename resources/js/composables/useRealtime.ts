@@ -19,13 +19,11 @@ export function useRealtime() {
     onResolution?: (data: any) => void
     onReopen?: (data: any) => void
   }) {
-    const realtime = useRealtimeStore()
-
     if (!realtime.isConnected) {
       realtime.initialize()
     }
 
-    const channel = realtime.joinPrivateChannel(`support.conversation.${conversationId}`, {
+    realtime.joinPrivateChannel(`support.conversation.${conversationId}`, {
       'message.created': (data: any) => {
         if (data.message?.message_kind === 'note') {
           callbacks.onNote?.(data.message)
@@ -70,13 +68,11 @@ export function useRealtime() {
   function subscribeToStaffConversation(conversationId: number, callbacks: {
     onNote?: (message: any) => void
   }) {
-    const realtime = useRealtimeStore()
-
     if (!realtime.isConnected) {
       realtime.initialize()
     }
 
-    const channel = realtime.joinPrivateChannel(`support.staff.conversation.${conversationId}`, {
+    realtime.joinPrivateChannel(`support.staff.conversation.${conversationId}`, {
       'note.created': (data: any) => {
         callbacks.onNote?.(data.message)
       },
@@ -94,13 +90,11 @@ export function useRealtime() {
     onNewConversation?: (conversation: any) => void
     onConversationUpdate?: (data: any) => void
   }) {
-    const realtime = useRealtimeStore()
-
     if (!realtime.isConnected) {
       realtime.initialize()
     }
 
-    const channel = realtime.joinPrivateChannel(`support.queue.${queueId}`, {
+    realtime.joinPrivateChannel(`support.queue.${queueId}`, {
       'conversation.created': (data: any) => {
         callbacks.onNewConversation?.(data.conversation)
       },
@@ -122,13 +116,11 @@ export function useRealtime() {
     onJoining?: (member: any) => void
     onLeaving?: (member: any) => void
   }) {
-    const realtime = useRealtimeStore()
-
     if (!realtime.isConnected) {
       realtime.initialize()
     }
 
-    const channel = realtime.joinPresenceChannel(`support.user.${userId}`, {
+    realtime.joinPresenceChannel(`support.user.${userId}`, {
       'presence:here': (members: any) => {
         callbacks.onHere?.(members)
       },
@@ -145,10 +137,18 @@ export function useRealtime() {
     }
   }
 
+  /**
+   * Leave a channel by name
+   */
+  function leaveChannel(channelName: string) {
+    realtime.leaveChannel(channelName)
+  }
+
   return {
     subscribeToConversation,
     subscribeToStaffConversation,
     subscribeToQueue,
     subscribeToPresence,
+    leaveChannel,
   }
 }

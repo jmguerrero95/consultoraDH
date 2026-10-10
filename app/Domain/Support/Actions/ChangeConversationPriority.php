@@ -29,7 +29,7 @@ class ChangeConversationPriority
             $conversation->save();
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($conversation) {
+            DB::afterCommit(function () use ($conversation) {
                 event(new SupportConversationUpdated($conversation->fresh(['priority']), 'priority'));
             });
 

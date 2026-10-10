@@ -55,9 +55,18 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/badge-72x72.png",
+      "sizes": "72x72",
+      "type": "image/png",
+      "purpose": "monochrome"
     }
   ],
-  "categories": ["business", "productivity"],
+  "categories": [
+    "business",
+    "productivity"
+  ],
   "lang": "es",
   "dir": "ltr"
 }

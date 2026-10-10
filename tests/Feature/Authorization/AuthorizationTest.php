@@ -135,6 +135,16 @@ it('creates no permission ahead of the module that enforces it', function (): vo
         'client_update_requests.view', 'client_update_requests.review',
         'reports.view', 'reports.export', 'reports.schedule',
     ]);
+    // A06: the support desk. `support.view_all` is the one permission that is
+    // not a `can:` guard of its own — it is checked inside the controllers to
+    // let a supervisor read every queue instead of only their own.
+    $expected = array_merge($expected, [
+        'support.view', 'support.view_all', 'support.reply', 'support.assign',
+        'support.resolve', 'support.manage_queues', 'support.manage_sla',
+        'support.review_unlinked_email',
+        'automations.view', 'automations.manage',
+        'notification_channels.manage',
+    ]);
 
     expect($declared)->toEqualCanonicalizing($expected);
 });

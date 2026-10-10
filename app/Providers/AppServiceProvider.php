@@ -190,6 +190,24 @@ final class AppServiceProvider extends ServiceProvider
             // the production figure.
             (int) env('API_RATE_LIMIT_PER_MINUTE', 120),
         )->by('api|'.($request->user()?->getAuthIdentifier() ?: $request->ip())));
+
+        /*
+         * A budget of its own for the inbound mail webhook.
+         *
+         * It cannot join the `api` limiter: that one is keyed on the
+         * authenticated account, and this endpoint deliberately has none, so
+         * every provider would share the single key of the anonymous address
+         * and a busy mailbox would exhaust the same pool the browser session
+         * draws from. Keyed on the provider's own address instead, so one
+         * sender cannot refuse delivery to another.
+         *
+         * Generous, because a burst of genuine replies is normal after an
+         * outage, while a flood with bad signatures is refused here before the
+         * HMAC comparison runs for each one.
+         */
+        RateLimiter::for('support-inbound', fn (Request $request): Limit => Limit::perMinute(
+            (int) env('SUPPORT_INBOUND_RATE_LIMIT_PER_MINUTE', 120),
+        )->by('support-inbound|'.$request->ip()));
     }
 
     /**

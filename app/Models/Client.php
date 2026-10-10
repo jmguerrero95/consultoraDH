@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
  * A person Consultora DH administers.
@@ -62,6 +63,24 @@ class Client extends Model
     /**
      * The full name, for display and for sorting.
      */
+    /**
+     * The portal account that belongs to this client.
+     *
+     * A client reaches the application through a login, and that login carries
+     * `client_id`, so the link runs from the user to the client rather than from
+     * a column on this table.
+     *
+     * The support ingress uses it to decide whether an inbound email really came
+     * from this client: the token proves the sender may reach the conversation,
+     * and this proves *which* client is writing. The relation was missing, so
+     * `$client->user` was null and every client reply was treated as a sender
+     * mismatch — including the client's own.
+     */
+    public function user(): HasOne
+    {
+        return $this->hasOne(User::class, 'client_id');
+    }
+
     public function fullName(): string
     {
         return trim($this->first_names.' '.$this->last_names);

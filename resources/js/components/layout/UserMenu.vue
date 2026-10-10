@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref, useTemplateRef } from 'vue';
 import { useRouter } from 'vue-router';
 
 import AppModal from '@/components/ui/AppModal.vue';
+import { usePushNotifications } from '@/composables/usePushNotifications';
 import { useAuthStore } from '@/stores/auth';
 import { useToastStore } from '@/stores/toast';
 
@@ -21,6 +22,8 @@ const trigger = useTemplateRef<HTMLButtonElement>('trigger');
 const open = ref(false);
 const confirmOpen = ref(false);
 const busy = ref(false);
+
+const push = usePushNotifications();
 
 function toggle(): void {
     open.value = !open.value;
@@ -64,9 +67,37 @@ async function confirmLogout(): Promise<void> {
     }
 }
 
+/**
+ * Turning notifications on and off.
+ *
+ * Each outcome is reported rather than collapsed into a single failure: a user
+ * who declines the browser prompt is not in an error state, and being told
+ * they are would be simply wrong.
+ */
+async function togglePush(): Promise<void> {
+    if (push.subscribed.value) {
+        await push.disable();
+
+        if (push.error.value === null) {
+            toasts.success('Notificaciones desactivadas', 'No recibirá avisos en este dispositivo.');
+        }
+    } else {
+        const enabled = await push.enable();
+
+        if (enabled) {
+            toasts.success('Notificaciones activadas', 'Recibirá avisos en este dispositivo.');
+        }
+    }
+
+    if (push.error.value !== null) {
+        toasts.error('No se pudo cambiar la configuración', push.error.value);
+    }
+}
+
 onMounted(() => {
     document.addEventListener('pointerdown', onDocumentPointerDown);
     document.addEventListener('keydown', onDocumentKeydown);
+    void push.refresh();
 });
 
 onBeforeUnmount(() => {
@@ -114,6 +145,23 @@ onBeforeUnmount(() => {
                 <i class="bi bi-person" aria-hidden="true" />
                 <span>Mi perfil</span>
             </RouterLink>
+
+            <button
+                v-if="push.supported.value"
+                type="button"
+                class="cdh-dropdown__item"
+                role="menuitemcheckbox"
+                :aria-checked="push.subscribed.value"
+                :disabled="push.busy.value"
+                @click="togglePush"
+            >
+                <i
+                    class="bi"
+                    :class="push.subscribed.value ? 'bi-bell-fill' : 'bi-bell'"
+                    aria-hidden="true"
+                />
+                <span>{{ push.subscribed.value ? 'Notificaciones: activadas' : 'Notificaciones: desactivadas' }}</span>
+            </button>
 
             <button
                 type="button"

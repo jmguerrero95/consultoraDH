@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
-import { useAuthStore } from '@/stores/auth';
 import { api } from '@/services/api';
 
 interface Conversation {
@@ -21,8 +20,7 @@ interface InboxFilters {
   per_page: number;
 }
 
-const router = useRouter();
-const auth = useAuthStore();
+const _router = useRouter();
 
 const conversations = ref<Conversation[]>([]);
 const loading = ref(false);
@@ -43,91 +41,7 @@ const statusOptions = [
   { value: 'closed', label: 'Cerrada' },
 ];
 
-const priorityOptions = [
-  { value: 'normal', label: 'Normal' },
-  { value: 'high', label: 'Alta' },
-  { value: 'urgent', label: 'Urgente' },
-];
-
-async function loadConversations() {
-  loading.value = true;
-  error.value = null;
-
-  try {
-    const params: Record<string, any> = {
-      page: filters.value.page,
-      per_page: filters.value.per_page,
-    };
-
-    if (filters.value.status) params.status = filters.value.status;
-
-    const response = await api.get('/portal/support/conversations', { params });
-    conversations.value = response.data.data;
-    pagination.value = {
-      current_page: response.data.current_page,
-      last_page: response.data.last_page,
-      total: response.data.total,
-      per_page: response.data.per_page,
-    };
-  } catch (e) {
-    error.value = 'Error al cargar conversaciones';
-    console.error(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-function onPageChange(page: number) {
-  filters.value.page = page;
-  loadConversations();
-}
-
-function onFilterChange() {
-  filters.value.page = 1;
-  loadConversations();
-}
-
-function openConversation(conversation: Conversation) {
-  router.push(`/portal/soporte/${conversation.id}`);
-}
-
-const statusLabel = (status: string) => {
-  const labels: Record<string, string> = {
-    open: 'Abierta',
-    waiting_staff: 'Esperando staff',
-    waiting_client: 'Esperando cliente',
-    resolved: 'Resuelta',
-    closed: 'Cerrada',
-  };
-  return labels[status] || status;
-};
-
-const priorityLabel = (priority: string) => {
-  const labels: Record<string, string> = {
-    normal: 'Normal',
-    high: 'Alta',
-    urgent: 'Urgente',
-  };
-  return labels[priority] || priority;
-};
-
-const formatRelativeTime = (dateString: string) => {
-  const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'Ahora';
-  if (diffMins < 60) return `hace ${diffMins} min`;
-  if (diffHours < 24) return `hace ${diffHours} h`;
-  if (diffDays < 7) return `hace ${diffDays} d`;
-  return date.toLocaleDateString('es-ES');
-};
-
 const paginationRange = computed(() => {
-  const current = pagination.value.current_page;
   const last = pagination.value.last_page;
   const range: number[] = [];
 
@@ -145,64 +59,6 @@ const paginationRange = computed(() => {
 
   return range;
 });
-
-const router = useRouter();
-const auth = useAuthStore();
-
-const conversations = ref<Conversation[]>([]);
-const loading = ref(false);
-const error = ref<string | null>(null);
-const pagination = ref({ current_page: 1, last_page: 1, total: 0, per_page: 25 });
-
-const filters = ref<InboxFilters>({
-  status: undefined,
-  page: 1,
-  per_page: 25,
-});
-
-const statusOptions = [
-  { value: 'open', label: 'Abierta' },
-  { value: 'waiting_staff', label: 'Esperando staff' },
-  { value: 'waiting_client', label: 'Esperando cliente' },
-  { value: 'resolved', label: 'Resuelta' },
-  { value: 'closed', label: 'Cerrada' },
-];
-
-const priorityOptions = [
-  { value: 'normal', label: 'Normal' },
-  { value: 'high', label: 'Alta' },
-  { value: 'urgent', label: 'Urgente' },
-];
-
-const loading = ref(false);
-const error = ref<string | null>(null);
-const pagination = ref({ current_page: 1, last_page: 1, total: 0, per_page: 25 });
-
-const filters = ref<InboxFilters>({
-  status: undefined,
-  page: 1,
-  per_page: 25,
-});
-
-const router = useRouter();
-const auth = useAuthStore();
-
-interface Conversation {
-  id: number;
-  subject: string;
-  status: string;
-  priority: string;
-  origin_channel: string;
-  queue: { id: number; name: string };
-  last_message_at: string;
-  unread_count: number;
-}
-
-interface InboxFilters {
-  status?: string;
-  page: number;
-  per_page: number;
-}
 
 onMounted(() => {
   loadConversations();
@@ -220,13 +76,13 @@ async function loadConversations() {
 
     if (filters.value.status) params.status = filters.value.status;
 
-    const response = await api.get('/portal/support/conversations', { params });
-    conversations.value = response.data.data;
+    const response = await api.support.inbox(params);
+    conversations.value = response.data;
     pagination.value = {
-      current_page: response.data.current_page,
-      last_page: response.data.last_page,
-      total: response.data.total,
-      per_page: response.data.per_page,
+      current_page: response.current_page,
+      last_page: response.last_page,
+      total: response.total,
+      per_page: response.per_page,
     };
   } catch (e) {
     error.value = 'Error al cargar conversaciones';
@@ -247,7 +103,7 @@ function onFilterChange() {
 }
 
 function openConversation(conversation: Conversation) {
-  router.push(`/portal/soporte/${conversation.id}`);
+  _router.push(`/portal/soporte/${conversation.id}`);
 }
 
 const statusLabel = (status: string) => {
@@ -268,76 +124,27 @@ const priorityLabel = (priority: string) => {
     urgent: 'Urgente',
   };
   return labels[priority] || priority;
-}
-
-const formatRelativeTime = (dateString: string) => {
-  const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'Ahora';
-  if (diffMins < 60) return `hace ${diffMins} min`;
-  if (diffHours < 24) return `hace ${diffHours} h`;
-  if (diffDays < 7) return `hace ${diffDays} d`;
-  return date.toLocaleDateString('es-ES');
-}
-
-const paginationRange = computed(() => {
-  const current = pagination.value.current_page;
-  const last = pagination.value.last_page;
-  const range: number[] = [];
-
-  let start = Math.max(1, pagination.value.current_page - 2);
-  let end = Math.min(last, pagination.value.current_page + 2);
-
-  if (end - start < 4) {
-    if (start === 1) end = Math.min(5, last);
-    if (end === last) start = Math.max(1, last - 4);
-  }
-
-  for (let i = start; i <= end; i++) {
-    range.push(i);
-  }
-
-  return range;
-}
-
-function onPageChange(page: number) {
-  filters.value.page = page;
-  loadConversations();
-}
-
-function onFilterChange() {
-  filters.value.page = 1;
-  loadConversations();
-}
-
-function openConversation(conversation: Conversation) {
-  router.push(`/portal/soporte/${conversation.id}`);
-}
-
-const statusLabel = (status: string) => {
-  const labels: Record<string, string> = {
-    open: 'Abierta',
-    waiting_staff: 'Esperando staff',
-    waiting_client: 'Esperando cliente',
-    resolved: 'Resuelta',
-    closed: 'Cerrada',
-  };
-  return labels[status] || status;
 };
 
-const priorityLabel = (priority: string) => {
-  const labels: Record<string, string> = {
-    normal: 'Normal',
-    high: 'Alta',
-    urgent: 'Urgente',
+const statusBadgeClass = (status: string) => {
+  const classes: Record<string, string> = {
+    open: 'bg-gray-100 text-gray-800',
+    waiting_staff: 'bg-yellow-100 text-yellow-800',
+    waiting_client: 'bg-blue-100 text-blue-800',
+    resolved: 'bg-green-100 text-green-800',
+    closed: 'bg-gray-100 text-gray-600',
   };
-  return labels[priority] || priority;
-}
+  return classes[status] || 'bg-gray-100 text-gray-800';
+};
+
+const priorityBadgeClass = (priority: string) => {
+  const classes: Record<string, string> = {
+    normal: 'bg-gray-100 text-gray-800',
+    high: 'bg-orange-100 text-orange-800',
+    urgent: 'bg-red-100 text-red-800',
+  };
+  return classes[priority] || 'bg-gray-100 text-gray-800';
+};
 
 const formatRelativeTime = (dateString: string) => {
   const date = new Date(dateString);
@@ -352,48 +159,14 @@ const formatRelativeTime = (dateString: string) => {
   if (diffHours < 24) return `hace ${diffHours} h`;
   if (diffDays < 7) return `hace ${diffDays} d`;
   return date.toLocaleDateString('es-ES');
-}
-
-const paginationRange = computed(() => {
-  const current = pagination.value.current_page;
-  const last = pagination.value.last_page;
-  const range: number[] = [];
-
-  let start = Math.max(1, pagination.value.current_page - 2);
-  let end = Math.min(last, pagination.value.current_page + 2);
-
-  if (end - start < 4) {
-    if (start === 1) end = Math.min(5, last);
-    if (end === last) start = Math.max(1, last - 4);
-  }
-
-  for (let i = start; i <= end; i++) {
-    range.push(i);
-  }
-
-  return range;
-}
-
-function onPageChange(page: number) {
-  filters.value.page = page;
-  loadConversations();
-}
-
-function onFilterChange() {
-  filters.value.page = 1;
-  loadConversations();
-}
-
-function openConversation(conversation: Conversation) {
-  router.push(`/portal/soporte/${conversation.id}`);
-}
+};
 </script>
 
 <template>
   <div class="portal-support-inbox">
     <div class="d-flex justify-content-between align-items-center mb-4">
       <h1 class="h3 mb-0">Mis conversaciones de soporte</h1>
-      <button class="btn btn-primary" @click="router.push('/portal/soporte/nueva')">
+      <button class="btn btn-primary" @click="_router.push('/portal/soporte/nueva')">
         <i class="bi bi-plus-lg me-1"></i> Nueva conversación
       </button>
     </div>
@@ -426,7 +199,7 @@ function openConversation(conversation: Conversation) {
 
     <div v-else-if="conversations.length === 0" class="text-center py-5">
       <i class="bi bi-inbox display-1 text-muted"></i>
-      <p class="text-muted mt-3">No tienes conversaciones de soporte</p>
+      <p class="text-muted mt-3">No hay conversaciones que coincidan con los filtros</p>
     </div>
 
     <div v-else class="table-responsive">
@@ -434,17 +207,19 @@ function openConversation(conversation: Conversation) {
         <thead class="table-light">
           <tr>
             <th>Asunto</th>
-            <th class="text-center" style="width: 100px;">Estado</th>
-            <th class="text-center" style="width: 100px;">Prioridad</th>
-            <th class="text-center" style="width: 120px;">Último mensaje</th>
+            <th class="d-none d-md-table-cell">Cola</th>
+            <th class="text-center" style="width: 120px;">Estado</th>
+            <th class="text-center" style="width: 120px;">Prioridad</th>
+            <th class="text-center" style="width: 150px;">Último mensaje</th>
             <th class="text-center" style="width: 80px;">No leídos</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="c in conversations" :key="c.id" @click="openConversation(c)" class="cursor-pointer">
+          <tr v-for="c in conversations" :key="c.id" @click="openConversation(c)" class="cursor-pointer" :class="{ 'table-primary': c.unread_count > 0 }">
             <td>
               <strong>{{ c.subject }}</strong>
             </td>
+            <td class="d-none d-md-table-cell">{{ c.queue?.name }}</td>
             <td class="text-center">
               <span :class="statusBadgeClass(c.status)" class="badge px-2 py-1">
                 {{ statusLabel(c.status) }}
@@ -487,5 +262,9 @@ function openConversation(conversation: Conversation) {
 <style scoped>
 .cursor-pointer:hover {
   background-color: rgba(0, 0, 0, 0.03);
+}
+
+.table-primary {
+  background-color: rgba(13, 110, 253, 0.1) !important;
 }
 </style>

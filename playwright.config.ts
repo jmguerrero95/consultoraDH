@@ -7,7 +7,7 @@ import { defineConfig, devices } from '@playwright/test';
  * container over the Docker network. `APP_URL` is honoured so the same file
  * works for a browser running on the host.
  */
-const baseURL = process.env.E2E_BASE_URL ?? process.env.APP_URL ?? 'http://localhost:8080';
+const baseURL = process.env.E2E_BASE_URL ?? process.env.APP_URL ?? 'http://nginx:80';
 
 export default defineConfig({
     testDir: './tests/e2e',
