@@ -35,4 +35,13 @@ return [
         ],
     ],
 
+    'webpush' => [
+        'subject' => env('VAPID_SUBJECT', 'mailto:support@consultora-dh.local'),
+        'public_key' => env('VAPID_PUBLIC_KEY'),
+        'private_key' => env('VAPID_PRIVATE_KEY'),
+    ],
+
+    'telegram' => [
+        'bot_token' => env('TELEGRAM_BOT_TOKEN'),
+    ],
 ];

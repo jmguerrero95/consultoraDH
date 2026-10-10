@@ -15,7 +15,7 @@ use Illuminate\Support\Facades\Broadcast;
 |
 */
 
-// Support conversation channel - for realtime messages and updates
+// Support conversation channel - for realtime messages and updates (client-visible)
 Broadcast::channel('support.conversation.{conversationId}', function (User $user, string $conversationId) {
     $conversation = SupportConversation::find($conversationId);
 
@@ -26,6 +26,41 @@ Broadcast::channel('support.conversation.{conversationId}', function (User $user
     // Client can only join their own conversation
     if ($user->account_type === 'client') {
         return $user->client_id !== null && $conversation->client_id === $user->client_id;
+    }
+
+    // Staff can join if they have support.view_all or are a member of the queue
+    // or are assigned to the conversation
+    if ($user->hasPermissionTo('support.view_all')) {
+        return true;
+    }
+
+    // Check queue membership
+    $isQueueMember = SupportQueueMember::where('queue_id', $conversation->queue_id)
+        ->where('user_id', $user->id)
+        ->exists();
+
+    if ($isQueueMember) {
+        return true;
+    }
+
+    // Check if assigned
+    if ($conversation->assigned_to_user_id === $user->id) {
+        return true;
+    }
+
+    return false;
+});
+
+// Staff-only conversation channel - for internal notes and staff-only messages
+Broadcast::channel('support.staff.conversation.{conversationId}', function (User $user, string $conversationId) {
+    if ($user->account_type === 'client') {
+        return false;
+    }
+
+    $conversation = SupportConversation::find($conversationId);
+
+    if (! $conversation) {
+        return false;
     }
 
     // Staff can join if they have support.view_all or are a member of the queue

@@ -27,8 +27,11 @@ class AppendClientMessage
         }
 
         return DB::transaction(function () use ($conversation, $bodyText, $author, $attachmentIds) {
-            $conversation->lockForUpdate();
-            $conversation = $conversation->fresh();
+            // Re-read conversation under row lock to ensure authoritative state
+            $conversation = SupportConversation::query()
+                ->whereKey($conversation->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
             if (! $conversation->canReceiveClientMessage()) {
                 throw new \DomainException('Conversation cannot receive client messages');

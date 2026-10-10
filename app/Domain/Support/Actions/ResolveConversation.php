@@ -8,6 +8,7 @@ use App\Domain\Support\Events\SupportConversationResolved;
 use App\Domain\Support\Events\SupportReadStateUpdated;
 use App\Domain\Support\SupportConversationStatus;
 use App\Models\SupportConversation;
+use App\Models\SupportMessage;
 use App\Models\SupportReadState;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -18,8 +19,11 @@ class ResolveConversation
     public function execute(SupportConversation $conversation, User $resolver): SupportConversation
     {
         return DB::transaction(function () use ($conversation, $resolver) {
-            $conversation->lockForUpdate();
-            $conversation = $conversation->fresh();
+            // Re-read conversation under row lock to ensure authoritative state
+            $conversation = SupportConversation::query()
+                ->whereKey($conversation->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
             if ($conversation->isTerminal()) {
                 throw new \DomainException('Cannot resolve a terminal conversation');
@@ -43,7 +47,7 @@ class ResolveConversation
             }
 
             // Dispatch broadcast after commit
-            Dispatch::afterCommit(function () use ($conversation, $resolver) {
+            Dispatch::afterCommit(function () use ($conversation, $resolver, $readState, $lastMessage) {
                 event(new SupportConversationResolved($conversation->fresh(['status', 'resolved_at', 'resolver']), $resolver));
                 if ($lastMessage = $conversation->lastMessage) {
                     event(new SupportReadStateUpdated($conversation, $resolver, $lastMessage->id));

@@ -20,8 +20,11 @@ class AddInternalNote
     public function execute(SupportConversation $conversation, string $bodyText, User $author, array $attachmentIds = []): SupportMessage
     {
         return DB::transaction(function () use ($conversation, $bodyText, $author, $attachmentIds) {
-            $conversation->lockForUpdate();
-            $conversation = $conversation->fresh();
+            // Re-read conversation under row lock to ensure authoritative state
+            $conversation = SupportConversation::query()
+                ->whereKey($conversation->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
             if ($conversation->isTerminal()) {
                 throw new \DomainException('Cannot add note to a terminal conversation');

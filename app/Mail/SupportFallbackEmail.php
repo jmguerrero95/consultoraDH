@@ -53,11 +53,19 @@ class SupportFallbackEmail extends Mailable implements ShouldQueue
             ->first();
 
         if (! $token) {
-            return null;
+            // Generate a new token for this conversation
+            $tokenData = \App\Models\SupportReplyToken::generateToken();
+            $token = \App\Models\SupportReplyToken::create([
+                'conversation_id' => $this->conversation->id,
+                'participant_kind' => 'client',
+                'client_id' => $this->conversation->client_id,
+                'token_hash' => $tokenData['token_hash'],
+                'expires_at' => now()->addDays(30),
+            ]);
         }
 
         $domain = config('support.inbound_domain', 'support.consultora-dh.local');
 
-        return "reply+{$token->token_hash}@{$domain}";
+        return "reply+{$token->raw_token}@{$domain}";
     }
 }

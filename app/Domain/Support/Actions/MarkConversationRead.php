@@ -20,16 +20,28 @@ class MarkConversationRead
             throw new \InvalidArgumentException('Message does not belong to this conversation');
         }
 
-        if (! $upToMessage->isClientVisible() && $user->account_type === 'client') {
+        if (!$upToMessage->isClientVisible() && $user->account_type === 'client') {
             throw new \DomainException('Cannot mark internal note as read');
         }
 
         return DB::transaction(function () use ($conversation, $user, $upToMessage) {
-            $readState = SupportReadState::firstOrCreate(
-                ['conversation_id' => $conversation->id, 'user_id' => $user->id],
-                ['last_read_message_id' => null, 'read_at' => null]
-            );
+            // Lock the read state row to ensure monotonic cursor advancement
+            $readState = SupportReadState::query()
+                ->where('conversation_id', $conversation->id)
+                ->where('user_id', $user->id)
+                ->lockForUpdate()
+                ->first();
 
+            if (!$readState) {
+                $readState = SupportReadState::create([
+                    'conversation_id' => $conversation->id,
+                    'user_id' => $user->id,
+                    'last_read_message_id' => null,
+                    'read_at' => null,
+                ]);
+            }
+
+            // Atomic monotonic advancement: only advance if the new message ID is greater
             if ($readState->last_read_message_id === null || $readState->last_read_message_id < $upToMessage->id) {
                 $readState->update([
                     'last_read_message_id' => $upToMessage->id,
@@ -72,7 +84,7 @@ class MarkConversationRead
     private function calculateGlobalUnread(User $user): int
     {
         if ($user->account_type === 'client') {
-            if (! $user->client_id) {
+            if (!$user->client_id) {
                 return 0;
             }
 
@@ -98,7 +110,7 @@ class MarkConversationRead
 
         $query = SupportConversation::query()
             ->whereHas('queue', function ($q) use ($user) {
-                if (! $user->hasPermissionTo('support.view_all')) {
+                if (!$user->hasPermissionTo('support.view_all')) {
                     $q->whereHas('members', function ($mq) use ($user) {
                         $mq->where('user_id', $user->id);
                     });

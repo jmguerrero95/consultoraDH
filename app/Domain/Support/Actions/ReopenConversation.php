@@ -16,10 +16,13 @@ class ReopenConversation
     public function execute(SupportConversation $conversation, User $actor): SupportConversation
     {
         return DB::transaction(function () use ($conversation, $actor) {
-            $conversation->lockForUpdate();
-            $conversation = $conversation->fresh();
+            // Re-read conversation under row lock to ensure authoritative state
+            $conversation = SupportConversation::query()
+                ->whereKey($conversation->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-            if (! $conversation->isResolved() && ! $conversation->isClosed()) {
+            if (!$conversation->isResolved() && !$conversation->isClosed()) {
                 throw new \DomainException('Only resolved or closed conversations can be reopened');
             }
 
@@ -29,6 +32,15 @@ class ReopenConversation
             $conversation->closed_at = null;
             $conversation->closed_by = null;
             $conversation->save();
+
+            // Set first response SLA on reopen
+            if ($conversation->queue && $conversation->queue->first_response_minutes) {
+                $conversation->update([
+                    'first_response_due_at' => now()->addMinutes($conversation->queue->first_response_minutes),
+                    'next_staff_response_due_at' => null,
+                    'resolution_due_at' => null,
+                ]);
+            }
 
             // Dispatch broadcast after commit
             Dispatch::afterCommit(function () use ($conversation, $actor) {

@@ -6,6 +6,8 @@ namespace App\Providers;
 
 use App\Domain\Audit\AuditableEvent;
 use App\Domain\Audit\Listeners\RecordAuditEvent;
+use App\Domain\Support\Events\SupportSlaEventEmitted;
+use App\Domain\Support\Listeners\EscalateSupportSla;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -197,6 +199,7 @@ final class AppServiceProvider extends ServiceProvider
     private function registerAuditListener(): void
     {
         Event::listen(AuditableEvent::class, RecordAuditEvent::class);
+        Event::listen(\App\Domain\Support\Events\SupportSlaEventEmitted::class, \App\Domain\Support\Listeners\EscalateSupportSla::class);
     }
 
     /**

@@ -5,6 +5,10 @@ import AdminLayout from '@/layouts/AdminLayout.vue';
 import ClientPortalLayout from '@/layouts/ClientPortalLayout.vue';
 import { useAuthStore } from '@/stores/auth';
 import { puedeEntrar } from '@/router/permissions';
+import SupportInbox from '@/pages/support/Inbox.vue';
+import SupportConversation from '@/pages/support/Conversation.vue';
+import PortalSupportInbox from '@/pages/portal/SupportInbox.vue';
+import PortalSupportConversation from '@/pages/portal/SupportConversation.vue';
 
 /**
  * Routes of the single page application.
@@ -343,6 +347,31 @@ const routes: RouteRecordRaw[] = [
                 },
             },
             {
+                path: 'documentos',
+                name: 'documentos',
+                component: () => import('@/pages/documentos/DocumentosPage.vue'),
+                meta: { title: 'Documentos', nav: { label: 'Documentos', icon: 'bi-folder2-open', order: 35 }, permission: 'documents.view' },
+            },
+            {
+                path: 'soporte',
+                name: 'support',
+                component: () => import('@/pages/support/Inbox.vue'),
+                meta: { title: 'Soporte', nav: { label: 'Soporte', icon: 'bi-headset', order: 60 }, permission: 'support.view' },
+            },
+            {
+                path: 'soporte/nueva',
+                name: 'support.create',
+                component: () => import('@/pages/support/Conversation.vue'),
+                meta: { title: 'Nueva conversación', permission: 'support.reply' },
+            },
+            {
+                path: 'soporte/:id(\\d+)',
+                name: 'support.show',
+                component: () => import('@/pages/support/Conversation.vue'),
+                props: true,
+                meta: { title: 'Conversación', permission: 'support.view' },
+            },
+            {
                 path: 'reportes',
                 name: 'reportes',
                 component: () => import('@/pages/reportes/ReportesPage.vue'),
@@ -404,6 +433,31 @@ const routes: RouteRecordRaw[] = [
                 name: 'portal.requests',
                 component: () => import('@/pages/portal/PortalDocumentsPage.vue'),
                 meta: { title: 'Solicitudes de documentos' },
+            },
+            {
+                path: 'solicitudes',
+                name: 'portal.requests',
+                component: () => import('@/pages/portal/PortalDocumentsPage.vue'),
+                meta: { title: 'Solicitudes de documentos' },
+            },
+            {
+                path: 'soporte',
+                name: 'portal.support',
+                component: () => import('@/pages/portal/SupportInbox.vue'),
+                meta: { title: 'Soporte' },
+            },
+            {
+                path: 'soporte/nueva',
+                name: 'portal.support.create',
+                component: () => import('@/pages/portal/SupportConversation.vue'),
+                meta: { title: 'Nueva conversación' },
+            },
+            {
+                path: 'soporte/:id(\\d+)',
+                name: 'portal.support.show',
+                component: () => import('@/pages/portal/SupportConversation.vue'),
+                props: true,
+                meta: { title: 'Conversación' },
             },
             {
                 path: 'perfil',

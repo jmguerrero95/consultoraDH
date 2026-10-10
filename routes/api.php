@@ -82,9 +82,7 @@ foreach ([
     'generatedReport',
     'supportQueue',
     'supportConversation',
-    'supportMessage',
     'automationRule',
-    'automationAction',
     'telegramEndpoint',
 ] as $parameter) {
     Route::pattern($parameter, '[0-9]+');
@@ -672,47 +670,49 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:support.view')->group(function (): void {
         Route::get('/support/inbox', [SupportInboxController::class, 'index'])
             ->name('api.support.inbox');
-        Route::get('/support/conversations/{supportConversation}', [SupportConversationController::class, 'show'])
+        Route::get('/support/conversations/{conversation}', [SupportConversationController::class, 'show'])
             ->name('api.support.conversations.show');
         Route::get('/support/queues', [SupportQueueController::class, 'index'])
             ->name('api.support.queues.index');
     });
 
     Route::middleware('can:support.reply')->group(function (): void {
-        Route::post('/support/conversations/{supportConversation}/messages', [SupportConversationController::class, 'sendMessage'])
+        Route::post('/support/conversations/{conversation}/messages', [SupportConversationController::class, 'sendMessage'])
             ->name('api.support.conversations.messages.store');
-        Route::post('/support/conversations/{supportConversation}/notes', [SupportConversationController::class, 'addNote'])
+        Route::post('/support/conversations/{conversation}/notes', [SupportConversationController::class, 'addNote'])
             ->name('api.support.conversations.notes.store');
-        Route::post('/support/conversations/{supportConversation}/read', [SupportConversationController::class, 'markRead'])
+        Route::post('/support/conversations/{conversation}/read', [SupportConversationController::class, 'markRead'])
             ->name('api.support.conversations.read');
+        Route::get('/support/conversations/{conversation}/attachments/{attachment}', [SupportConversationController::class, 'downloadAttachment'])
+            ->name('api.support.conversations.attachments.download');
     });
 
     Route::middleware('can:support.assign')->group(function (): void {
-        Route::post('/support/conversations/{supportConversation}/assign', [SupportConversationController::class, 'assign'])
+        Route::post('/support/conversations/{conversation}/assign', [SupportConversationController::class, 'assign'])
             ->name('api.support.conversations.assign');
-        Route::post('/support/conversations/{supportConversation}/queue', [SupportConversationController::class, 'changeQueue'])
+        Route::post('/support/conversations/{conversation}/queue', [SupportConversationController::class, 'changeQueue'])
             ->name('api.support.conversations.queue');
-        Route::post('/support/conversations/{supportConversation}/priority', [SupportConversationController::class, 'changePriority'])
+        Route::post('/support/conversations/{conversation}/priority', [SupportConversationController::class, 'changePriority'])
             ->name('api.support.conversations.priority');
     });
 
     Route::middleware('can:support.resolve')->group(function (): void {
-        Route::post('/support/conversations/{supportConversation}/resolve', [SupportConversationController::class, 'resolve'])
+        Route::post('/support/conversations/{conversation}/resolve', [SupportConversationController::class, 'resolve'])
             ->name('api.support.conversations.resolve');
-        Route::post('/support/conversations/{supportConversation}/close', [SupportConversationController::class, 'close'])
+        Route::post('/support/conversations/{conversation}/close', [SupportConversationController::class, 'close'])
             ->name('api.support.conversations.close');
-        Route::post('/support/conversations/{supportConversation}/reopen', [SupportConversationController::class, 'reopen'])
+        Route::post('/support/conversations/{conversation}/reopen', [SupportConversationController::class, 'reopen'])
             ->name('api.support.conversations.reopen');
     });
 
     Route::middleware('can:support.manage_queues')->group(function (): void {
         Route::post('/support/queues', [SupportQueueController::class, 'store'])
             ->name('api.support.queues.store');
-        Route::patch('/support/queues/{supportQueue}', [SupportQueueController::class, 'update'])
+        Route::patch('/support/queues/{queue}', [SupportQueueController::class, 'update'])
             ->name('api.support.queues.update');
-        Route::post('/support/queues/{supportQueue}/members', [SupportQueueController::class, 'addMember'])
+        Route::post('/support/queues/{queue}/members', [SupportQueueController::class, 'addMember'])
             ->name('api.support.queues.members.store');
-        Route::delete('/support/queues/{supportQueue}/members/{user}', [SupportQueueController::class, 'removeMember'])
+        Route::delete('/support/queues/{queue}/members/{user}', [SupportQueueController::class, 'removeMember'])
             ->name('api.support.queues.members.destroy');
     });
 
@@ -738,13 +738,15 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.portal.support.conversations.index');
         Route::post('/portal/support/conversations', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'store'])
             ->name('api.portal.support.conversations.store');
-        Route::get('/portal/support/conversations/{supportConversation}', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'show'])
+        Route::get('/portal/support/conversations/{conversation}', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'show'])
             ->name('api.portal.support.conversations.show');
-        Route::post('/portal/support/conversations/{supportConversation}/messages', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'sendMessage'])
+        Route::post('/portal/support/conversations/{conversation}/messages', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'sendMessage'])
             ->name('api.portal.support.conversations.messages.store');
-        Route::post('/portal/support/conversations/{supportConversation}/attachments', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'uploadAttachment'])
+        Route::post('/portal/support/conversations/{conversation}/attachments', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'uploadAttachment'])
             ->name('api.portal.support.conversations.attachments.store');
-        Route::post('/portal/support/conversations/{supportConversation}/read', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'markRead'])
+        Route::get('/portal/support/conversations/{conversation}/attachments/{attachment}', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'downloadAttachment'])
+            ->name('api.portal.support.conversations.attachments.download');
+        Route::post('/portal/support/conversations/{conversation}/read', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'markRead'])
             ->name('api.portal.support.conversations.read');
     });
 
@@ -810,6 +812,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 
     Route::prefix('internal')->group(function (): void {
         Route::post('/support-email/inbound', [SupportEmailIngressController::class, 'ingest'])
+            ->middleware('support.email.hmac')
             ->name('api.internal.support-email.inbound');
     });
 

@@ -15,8 +15,11 @@ class ChangeConversationPriority
     public function execute(SupportConversation $conversation, SupportConversationPriority $priority): SupportConversation
     {
         return DB::transaction(function () use ($conversation, $priority) {
-            $conversation->lockForUpdate();
-            $conversation = $conversation->fresh();
+            // Re-read conversation under row lock to ensure authoritative state
+            $conversation = SupportConversation::query()
+                ->whereKey($conversation->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
             if ($conversation->isTerminal()) {
                 throw new \DomainException('Cannot change priority of a terminal conversation');

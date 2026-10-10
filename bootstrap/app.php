@@ -56,6 +56,18 @@ return Application::configure(basePath: dirname(__DIR__))
             ->everyMinute()
             ->withoutOverlapping()
             ->onOneServer();
+
+        // A06: SLA scanner runs every minute
+        $schedule->command('support:scan-sla')
+            ->everyMinute()
+            ->withoutOverlapping()
+            ->onOneServer();
+
+        // A06: Automation dispatcher runs every minute
+        $schedule->command('automations:dispatch')
+            ->everyMinute()
+            ->withoutOverlapping()
+            ->onOneServer();
     })
     ->withMiddleware(function (Middleware $middleware): void {
         // Baseline security headers on every dynamic response.
@@ -75,6 +87,9 @@ return Application::configure(basePath: dirname(__DIR__))
             // the routes that guard two independently permitted domains, such as
             // /settings/billing and the generation preview.
             'anyAbility' => RequireAnyAbility::class,
+
+            // HMAC verification for support inbound email ingestion
+            'support.email.hmac' => \App\Http\Middleware\VerifySupportEmailHmac::class,
         ]);
 
         /*

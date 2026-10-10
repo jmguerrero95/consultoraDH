@@ -49,11 +49,11 @@ enum SupportConversationStatus: string
 
     public function canReceiveClientMessage(): bool
     {
-        return ! $this->is(self::Closed);
+        return $this !== self::Closed;
     }
 
     public function isTerminal(): bool
     {
-        return $this->is(self::Closed);
+        return $this === self::Closed;
     }
 }

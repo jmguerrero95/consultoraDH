@@ -74,8 +74,8 @@ class TelegramController extends Controller
 
         $message = $validated['message'] ?? 'Mensaje de prueba desde Consultora DH';
 
-        // Queue the test message
-        SendTelegramMessage::dispatch($endpoint, $message);
+        // Queue the test message with endpoint ID
+        SendTelegramMessage::dispatch($endpoint->id, $message);
 
         return response()->json(['message' => 'Mensaje de prueba encolado']);
     }

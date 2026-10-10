@@ -18,9 +18,12 @@ use App\Models\SupportConversation;
 use App\Models\SupportMessage;
 use App\Models\SupportQueue;
 use App\Models\SupportQueueMember;
+use App\Models\SupportMessageAttachment;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 
 class SupportConversationController extends Controller
@@ -29,15 +32,38 @@ class SupportConversationController extends Controller
     {
         $this->authorizeConversationAccess($request->user(), $conversation);
 
-        $conversation->load([
-            'client',
-            'queue',
-            'assignee',
-            'messages.author',
-            'messages.attachments',
-        ]);
+        $perPage = $request->integer('per_page', 50);
+        $beforeId = $request->integer('before_id');
 
-        return response()->json($conversation);
+        $messagesQuery = SupportMessage::where('conversation_id', $conversation->id)
+            ->with(['author', 'attachments'])
+            ->orderByDesc('created_at');
+
+        if ($beforeId) {
+            $messagesQuery->where('id', '<', $beforeId);
+        }
+
+        $messages = $messagesQuery->limit($perPage + 1)->get();
+
+        $hasMore = $messages->count() > $perPage;
+        if ($hasMore) {
+            $messages = $messages->take($perPage);
+        }
+
+        $conversation->load(['client', 'queue', 'assignee']);
+        $conversation->setRelation('messages', $messages->reverse()->values());
+
+        $response = response()->json($conversation);
+        
+        if ($hasMore) {
+            $response->header('X-Has-More', 'true');
+            $lastMessage = $messages->last();
+            if ($lastMessage) {
+                $response->header('X-Next-Cursor', (string) $lastMessage->id);
+            }
+        }
+
+        return $response;
     }
 
     public function sendMessage(Request $request, SupportConversation $conversation): JsonResponse
@@ -94,7 +120,7 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'El mensaje no pertenece a esta conversación'], 422);
         }
 
-        if (! $message->isClientVisible() && $request->user()->account_type === 'client') {
+        if (!$message->isClientVisible() && $request->user()->account_type === 'client') {
             return response()->json(['message' => 'No puede marcar como leído un mensaje interno'], 422);
         }
 
@@ -162,8 +188,11 @@ class SupportConversationController extends Controller
         $this->authorizeConversationAccess($request->user(), $conversation);
 
         return DB::transaction(function () use ($conversation, $request) {
-            $conversation->lockForUpdate();
-            $conversation = $conversation->fresh();
+            // Re-read conversation under row lock to ensure authoritative state
+            $conversation = SupportConversation::query()
+                ->whereKey($conversation->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
             if ($conversation->isTerminal()) {
                 return response()->json(['message' => 'La conversación ya está cerrada'], 409);
@@ -187,6 +216,31 @@ class SupportConversationController extends Controller
         return response()->json($conversation);
     }
 
+    public function downloadAttachment(Request $request, SupportConversation $conversation, SupportMessageAttachment $attachment): JsonResponse
+    {
+        $this->authorizeConversationAccess($request->user(), $conversation);
+
+        // Verify attachment belongs to this conversation
+        $message = $attachment->message;
+        if (!$message || $message->conversation_id !== $conversation->id) {
+            return response()->json(['message' => 'Adjunto no encontrado'], 404);
+        }
+
+        // Internal notes attachments can only be downloaded by staff
+        if (!$attachment->message->client_visible) {
+            $user = $request->user();
+            if ($user->account_type === 'client') {
+                return response()->json(['message' => 'No puede descargar adjuntos de notas internas'], 403);
+            }
+        }
+
+        if (!Storage::disk('local')->exists($attachment->stored_path)) {
+            return response()->json(['message' => 'Archivo no encontrado'], 404);
+        }
+
+        return Storage::disk('local')->download($attachment->stored_path, $attachment->original_name);
+    }
+
     private function authorizeConversationAccess(User $user, SupportConversation $conversation): void
     {
         if ($user->hasPermissionTo('support.view_all')) {
@@ -197,7 +251,7 @@ class SupportConversationController extends Controller
             ->where('user_id', $user->id)
             ->exists();
 
-        if (! $isMember && $conversation->assigned_to_user_id !== $user->id) {
+        if (!$isMember && $conversation->assigned_to_user_id !== $user->id) {
             abort(403, 'No tiene acceso a esta conversación');
         }
     }

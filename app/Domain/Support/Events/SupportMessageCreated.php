@@ -44,10 +44,10 @@ class SupportMessageCreated extends AuditableEvent implements ShouldBroadcast
             return [];
         }
 
-        // Internal notes only go to staff
+        // Internal notes only go to staff channel (separate from client-visible channel)
         if ($this->message->message_kind->value === 'note') {
             return [
-                new PrivateChannel('support.conversation.'.$conversation->id),
+                new PrivateChannel('support.staff.conversation.'.$conversation->id),
             ];
         }
 

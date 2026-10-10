@@ -7,11 +7,15 @@
 
     {{-- The document itself carries no user data. The interface resolves the
          session through GET /api/auth/me, so an expired session is handled by
-         the router instead of by a server side redirect loop. --}}
+         a server side redirect loop. --}}
     <meta name="app-name" content="{{ config('app.name') }}">
     <meta name="app-version" content="{{ config('app.version') }}">
 
     <title>{{ config('app.name') }}</title>
+
+    {{-- PWA manifest --}}
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#2563eb">
 
     @vite(['resources/css/app.css', 'resources/js/app.ts'])
 </head>

@@ -12,6 +12,6 @@ enum SupportMessageKind: string
 
     public function isClientVisible(): bool
     {
-        return $this->is(self::Message) || $this->is(self::System);
+        return $this === self::Message || $this === self::System;
     }
 }

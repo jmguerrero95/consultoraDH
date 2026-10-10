@@ -160,8 +160,9 @@ class SupportEmailIngressService
         // 1. Check Reply-To token
         $toAddresses = is_array($parsed['to']) ? $parsed['to'] : [$parsed['to']];
         foreach ($toAddresses as $to) {
-            if (preg_match('/reply\+([a-f0-9]+)@/', $to, $matches)) {
-                $tokenHash = $matches[1];
+            if (preg_match('/reply\+([a-zA-Z0-9]+)@/', $to, $matches)) {
+                $rawToken = $matches[1];
+                $tokenHash = hash('sha256', $rawToken);
                 $token = SupportReplyToken::where('token_hash', $tokenHash)
                     ->where('revoked_at', null)
                     ->where('expires_at', '>', now())
@@ -169,34 +170,22 @@ class SupportEmailIngressService
                     ->first();
 
                 if ($token && $token->conversation) {
-                    // Verify sender matches token participant
-                    if ($this->verifySender($token, $parsed['from'])) {
-                        return ['conversation' => $token->conversation, 'via' => 'token'];
+                    // Verify the raw token matches the stored hash
+                    if (!$token->verifyRawToken($rawToken)) {
+                        return ['conversation' => null, 'reason' => 'token_verification_failed'];
                     }
 
-                    return ['conversation' => null, 'reason' => 'token_sender_mismatch'];
+                    // Verify sender matches token participant
+                    if ($this->verifySender($token, $parsed['from'])) {
+return ['conversation' => null, 'reason' => 'token_sender_mismatch'];
                 }
             }
         }
-
-        // 2. Check In-Reply-To / References against stored external_message_id
-        $messageId = $parsed['in_reply_to'] ?? $parsed['references'][0] ?? null;
-        if ($messageId) {
-            $existingDelivery = SupportDelivery::where('channel', 'email')
-                ->where('support_message_id', '!=', null)
-                ->whereHas('message', function ($q) use ($messageId) {
-                    $q->where('external_message_id', $messageId);
-                })
-                ->with('message.conversation')
-                ->first();
-
-            if ($existingDelivery && $existingDelivery->message && $existingDelivery->message->conversation) {
-                $conversation = $existingDelivery->message->conversation;
-                if (! $conversation->isTerminal()) {
-                    return ['conversation' => $conversation, 'via' => 'in_reply_to'];
-                }
-            }
         }
+
+        // In-Reply-To / References are NOT used for automatic correlation
+        // They can only serve as hints for staff review in quarantine
+        // This prevents attackers from hijacking conversations by knowing Message-IDs
 
         return ['conversation' => null, 'reason' => 'no_correlation'];
     }
@@ -366,18 +355,27 @@ class SupportEmailIngressService
         $extension = pathinfo($attachment['filename'], PATHINFO_EXTENSION) ?? 'bin';
         $storedPath = "support-attachments/{$uuid}.{$extension}";
 
+        // Store file first (bytes first, row second - A05 pattern)
         Storage::disk('local')->put($storedPath, $attachment['content']);
         $sha256 = hash('sha256', $attachment['content']);
 
-        SupportMessageAttachment::create([
-            'support_message_id' => $message->id,
-            'kind' => str_starts_with($attachment['mime_type'], 'audio/') ? 'audio' : 'file',
-            'original_name' => $attachment['filename'],
-            'stored_path' => $storedPath,
-            'mime_type' => $attachment['mime_type'],
-            'size_bytes' => $attachment['size'],
-            'sha256' => $sha256,
-            'source_channel' => 'email',
-        ]);
+        try {
+            SupportMessageAttachment::create([
+                'support_message_id' => $message->id,
+                'kind' => str_starts_with($attachment['mime_type'], 'audio/') ? 'audio' : 'file',
+                'original_name' => $attachment['filename'],
+                'stored_path' => $storedPath,
+                'mime_type' => $attachment['mime_type'],
+                'size_bytes' => $attachment['size'],
+                'sha256' => $sha256,
+                'source_channel' => 'email',
+            ]);
+        } catch (\Throwable $e) {
+            // Compensating cleanup: delete the file if metadata creation fails
+            if (Storage::disk('local')->exists($storedPath)) {
+                Storage::disk('local')->delete($storedPath);
+            }
+            throw $e;
+        }
     }
 }
