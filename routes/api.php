@@ -160,7 +160,7 @@ Route::prefix('internal')->group(function (): void {
 // The general API limiter is applied here, so a valid session cannot be used to
 // hammer the application, and `user.active` so a session opened while the
 // account was active stops working the moment it is suspended.
-Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->group(function (): void {
+    Route::middleware(["web"])->group(function (): void {
     Route::get('/auth/me', [AuthController::class, 'me'])->name('api.auth.me');
     Route::post('/auth/logout', [AuthController::class, 'logout'])->name('api.auth.logout');
 
@@ -185,7 +185,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::get('/clients', [ClientController::class, 'index'])->name('api.clients.index');
         Route::get('/clients/{client}', [ClientController::class, 'show'])->name('api.clients.show');
 
-    });
+});
 
     // The nested read endpoints need the parent's permission **and** the section's.
     //
@@ -631,7 +631,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     // A05: client portal
     // =================================================================
 
-    Route::middleware('auth', 'auth.session', 'user.active')->group(function (): void {
+    Route::middleware(["web"])->group(function (): void {
         Route::get('/portal/home', [PortalProfileController::class, 'home'])->name('api.portal.home');
         Route::get('/portal/profile', [PortalProfileController::class, 'show'])->name('api.portal.profile');
         Route::post('/portal/profile/update-request', [PortalProfileController::class, 'submitUpdateRequest'])->name('api.portal.profile.update-request');
@@ -642,7 +642,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::get('/portal/documents/{document}/download', [PortalDocumentController::class, 'download'])->name('api.portal.documents.download');
         Route::get('/portal/document-requests', [PortalDocumentController::class, 'indexRequests'])->name('api.portal.document-requests');
         Route::post('/portal/document-requests/{documentRequest}/upload', [PortalDocumentController::class, 'uploadResponse'])->name('api.portal.document-requests.upload');
-    });
+});
 
     // =================================================================
     // A05: portal account management (staff)
@@ -765,7 +765,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     // A06: Client Portal Support
     // =================================================================
 
-    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+    Route::middleware(["web"])->group(function (): void {
         Route::get('/portal/support/conversations', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'index'])
             ->name('api.portal.support.conversations.index');
         Route::post('/portal/support/conversations', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'store'])
@@ -780,20 +780,20 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.portal.support.conversations.attachments.download');
         Route::post('/portal/support/conversations/{conversation}/read', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'markRead'])
             ->name('api.portal.support.conversations.read');
-    });
+});
 
     // =================================================================
     // A06: Push Notifications
     // =================================================================
 
-    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+    Route::middleware(["web"])->group(function (): void {
         Route::get('/push/vapid-public-key', [PushController::class, 'vapidPublicKey'])
             ->name('api.push.vapid-public-key');
         Route::post('/push/subscriptions', [PushController::class, 'store'])
             ->name('api.push.subscriptions.store');
         Route::delete('/push/subscriptions/{subscription}', [PushController::class, 'destroy'])
             ->name('api.push.subscriptions.destroy');
-    });
+});
 
     // =================================================================
     // A06: Telegram Admin
@@ -839,7 +839,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     });
 
     // A07-1: cloud assistant
-    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+    Route::middleware(["web"])->group(function (): void {
         Route::get('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'index'])
             ->name('api.ai.conversations.index');
         Route::post('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'store'])
@@ -856,13 +856,13 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 
         Route::get('/ai/status', [\App\Http\Controllers\Api\AiAssistantController::class, 'status'])
             ->name('api.ai.status');
-    });
+});
 
     // Presence heartbeat (no permission, just auth)
-    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+    Route::middleware(["web"])->group(function (): void {
         Route::post('/support/presence/heartbeat', [SupportPresenceController::class, 'heartbeat'])
             ->name('api.support.presence.heartbeat');
         Route::post('/portal/support/presence/heartbeat', [App\Http\Controllers\Api\Portal\SupportPresenceController::class, 'heartbeat'])
             ->name('api.portal.support.presence.heartbeat');
-    });
+});
 });
