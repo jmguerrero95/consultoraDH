@@ -174,6 +174,16 @@ final class DatabaseSeeder extends Seeder
 
         'automations.view',
         'automations.manage',
+
+        // A07: the cloud assistant. Two permissions, deliberately.
+        //
+        // `ai.use` is the whole feature: asking questions and confirming a
+        // proposed write. `ai.manage` is narrower and is not implied by it — it is
+        // the right to look at whether a provider is configured and which model it
+        // names, which is operational rather than productive. Neither of them can
+        // reveal a credential, because no endpoint returns one.
+        'ai.use',
+        'ai.manage',
     ];
 
     /**
@@ -316,6 +326,20 @@ final class DatabaseSeeder extends Seeder
             'support.view',
             'automations.view',
         ],
+    ];
+
+    /**
+     * The A07 permissions each role holds.
+     *
+     * Only Super Admin holds them in A07-1. The assistant answers over the whole
+     * portfolio, so handing it to an operational role would widen what that role
+     * can read by giving it a way to ask in natural language instead of opening
+     * screens; a narrower grant belongs with a narrower set of tools.
+     *
+     * @var array<string, list<string>>
+     */
+    private const MATRIX_A07 = [
+        'Super Admin' => ['ai.use', 'ai.manage'],
     ];
 
     /**
@@ -477,6 +501,7 @@ final class DatabaseSeeder extends Seeder
             ...array_merge(...array_values(self::MATRIX_A04)),
             ...array_merge(...array_values(self::MATRIX_A05)),
             ...array_merge(...array_values(self::MATRIX_A06)),
+            ...array_merge(...array_values(self::MATRIX_A07)),
             'settings.view',
         ];
 
@@ -515,6 +540,14 @@ final class DatabaseSeeder extends Seeder
         // holds no staff permissions, and the revocation pass below removes any that
         // might have been granted by a previous seeding.
         foreach (self::MATRIX_A06 as $roleName => $permissions) {
+            Role::findByName($roleName, 'web')->givePermissionTo($permissions);
+        }
+
+        // The A07 matrix is a sixth pass. The Client role is intentionally absent:
+        // a portal account gets no assistant in A07-1, because every tool available
+        // today answers about the portfolio rather than about one person's own
+        // records.
+        foreach (self::MATRIX_A07 as $roleName => $permissions) {
             Role::findByName($roleName, 'web')->givePermissionTo($permissions);
         }
 

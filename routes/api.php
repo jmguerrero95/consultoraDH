@@ -838,6 +838,26 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.automations.validate-preview');
     });
 
+    // A07-1: cloud assistant
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+        Route::get('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'index'])
+            ->name('api.ai.conversations.index');
+        Route::post('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'store'])
+            ->name('api.ai.conversations.store');
+        Route::get('/ai/conversations/{conversation}', [\App\Http\Controllers\Api\AiAssistantController::class, 'show'])
+            ->name('api.ai.conversations.show');
+        Route::post('/ai/conversations/{conversation}/messages', [\App\Http\Controllers\Api\AiAssistantController::class, 'messages'])
+            ->name('api.ai.conversations.messages');
+
+        Route::post('/ai/action-proposals/{proposal}/confirm', [\App\Http\Controllers\Api\AiAssistantController::class, 'confirm'])
+            ->name('api.ai.action-proposals.confirm');
+        Route::post('/ai/action-proposals/{proposal}/reject', [\App\Http\Controllers\Api\AiAssistantController::class, 'reject'])
+            ->name('api.ai.action-proposals.reject');
+
+        Route::get('/ai/status', [\App\Http\Controllers\Api\AiAssistantController::class, 'status'])
+            ->name('api.ai.status');
+    });
+
     // Presence heartbeat (no permission, just auth)
     Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
         Route::post('/support/presence/heartbeat', [SupportPresenceController::class, 'heartbeat'])

@@ -1,0 +1,80 @@
+<?php
+
+declare(strict_types=1);
+
+/*
+|--------------------------------------------------------------------------
+| A07: cloud AI assistant configuration
+|--------------------------------------------------------------------------
+|
+| Every value here is authoritative configuration reached through `config()`,
+| never `env()` at the call site, so a cached configuration and a test see the
+| same mapping.
+|
+| ## Neutral provider names
+|
+| The two provider slots are named for their *role*, not for a vendor. The
+| implementation speaks the OpenAI-compatible chat-completions HTTP shape,
+| which several hosts serve, so the operator chooses the host through
+| AI_PRIMARY_BASE_URL without any code change here. No vendor name appears in
+| domain code, and no key is ever stored in the database.
+|
+| ## What is deliberately absent
+|
+| No embedding model, no vector store, no retrieval index. The assistant answers
+| from the application's own services through a closed tool registry, so there is
+| nothing to embed and nothing to retrieve from.
+|
+| ## Secrets
+|
+| An API key is a credential and is treated as one: it is never written to the
+| database, never returned by an endpoint, and never placed in audit metadata.
+| `/api/ai/status` reports only whether a slot is configured and which model it
+| names.
+|
+*/
+return [
+    /*
+     * Master switch. AI_ENABLED=false is the default, and the assistant answers
+     * 503 rather than pretending to work without a provider.
+     *
+     * AI_ENABLED
+     */
+    'enabled' => (bool) env('AI_ENABLED', false),
+
+    /*
+     * Whole-request budget. Also the timeout applied to each provider attempt.
+     *
+     * AI_TIMEOUT_SECONDS
+     */
+    'timeout_seconds' => (int) env('AI_TIMEOUT_SECONDS', 30),
+
+    /*
+     * How long a proposed write waits for a person before it can no longer be
+     * confirmed. Short, because the proposal is a live intent rather than a
+     * record of one.
+     *
+     * AI_PROPOSAL_TTL_MINUTES
+     */
+    'proposal_ttl_minutes' => (int) env('AI_PROPOSAL_TTL_MINUTES', 15),
+
+    /*
+     * The two provider slots.
+     *
+     * `required` reports whether the slot is usable: a base URL, a key and a
+     * model all present. A half-configured slot is not "configured"; the status
+     * endpoint says no, and the resolver skips it rather than attempting a call
+     * that cannot succeed.
+     */
+    'primary' => [
+        'base_url' => env('AI_PRIMARY_BASE_URL'),
+        'api_key' => env('AI_PRIMARY_API_KEY'),
+        'model' => env('AI_PRIMARY_MODEL'),
+    ],
+
+    'fallback' => [
+        'base_url' => env('AI_FALLBACK_BASE_URL'),
+        'api_key' => env('AI_FALLBACK_API_KEY'),
+        'model' => env('AI_FALLBACK_MODEL'),
+    ],
+];

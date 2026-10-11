@@ -180,4 +180,19 @@ enum AuditAction: string
     case SupportSlaWarning = 'support.sla.warning';
     case SupportSlaBreached = 'support.sla.breached';
     case SupportSlaRecovered = 'support.sla.recovered';
+
+    /*
+     * A07: the cloud assistant.
+     *
+     * What is recorded is the shape of the request and its outcome: which tool,
+     * whether it was allowed, which provider and model answered. Never the
+     * credential — a provider key is a secret and an audit row is read by people
+     * and exported to files.
+     */
+    case AiQuestionAsked = 'ai.question.asked';
+    case AiAnswered = 'ai.answered';
+    case AiProposalCreated = 'ai.proposal.created';
+    case AiProposalConfirmed = 'ai.proposal.confirmed';
+    case AiProposalRejected = 'ai.proposal.rejected';
+    case AiProposalFailed = 'ai.proposal.failed';
 }
