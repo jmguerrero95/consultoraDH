@@ -16,10 +16,9 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SupportConversationController extends Controller
 {
@@ -66,7 +65,14 @@ class SupportConversationController extends Controller
 
         $conversation = app(CreateSupportConversation::class)->execute([
             'client_id' => $user->client_id,
-            'queue_id' => $validated['queue_id'],
+            // Read with a default, not by key. The rule is `nullable`, so a
+            // request that simply does not choose a queue leaves the key out of
+            // the validated array entirely, and reading it directly raised
+            // "Undefined array key" — a 500 on every conversation opened from
+            // the portal without naming a queue, which is what the portal's own
+            // form does. `CreateSupportConversation` resolves the default queue
+            // when this is null.
+            'queue_id' => $validated['queue_id'] ?? null,
             'subject' => $validated['subject'],
             'priority' => SupportConversationPriority::Normal,
             'origin_channel' => SupportMessageChannel::Portal,
@@ -136,7 +142,7 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'Conversación no encontrada'], 404);
         }
 
-        if (!$conversation->canReceiveClientMessage()) {
+        if (! $conversation->canReceiveClientMessage()) {
             return response()->json(['message' => 'Esta conversación está cerrada'], 409);
         }
 
@@ -278,7 +284,7 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'No puede descargar adjuntos de notas internas'], 403);
         }
 
-        if (!Storage::disk('local')->exists($attachment->stored_path)) {
+        if (! Storage::disk('local')->exists($attachment->stored_path)) {
             return response()->json(['message' => 'Archivo no encontrado'], 404);
         }
 
@@ -303,7 +309,7 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'El mensaje no pertenece a esta conversación'], 422);
         }
 
-        if (!$message->client_visible) {
+        if (! $message->client_visible) {
             return response()->json(['message' => 'No puede marcar como leído un mensaje interno'], 422);
         }
 

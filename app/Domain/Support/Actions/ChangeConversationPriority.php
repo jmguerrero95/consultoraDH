@@ -28,9 +28,15 @@ class ChangeConversationPriority
             $conversation->priority = $priority;
             $conversation->save();
 
-            // Dispatch broadcast after commit
+            // Dispatch broadcast after commit.
+            //
+            // `fresh()` takes relations to eager load, so passing 'priority'
+            // asked for a relationship that does not exist — priority is a cast,
+            // not a relation — and every priority change raised
+            // RelationNotFoundException from inside the after-commit hook. The
+            // plain re-read already carries the value that was just written.
             DB::afterCommit(function () use ($conversation) {
-                event(new SupportConversationUpdated($conversation->fresh(['priority']), 'priority'));
+                event(new SupportConversationUpdated($conversation->fresh(), 'priority'));
             });
 
             return $conversation->fresh();

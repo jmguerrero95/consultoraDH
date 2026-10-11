@@ -1703,3 +1703,140 @@ export interface AppNotification {
     read_at: string | null;
     created_at: string;
 }
+
+/* -------------------------------------------------------------------------- */
+/* A06 — automatizaciones                                                       */
+/* -------------------------------------------------------------------------- */
+
+export type AutomationTriggerType =
+    | 'audit_action'
+    | 'schedule'
+    | 'task_due'
+    | 'document_request_due'
+    | 'receivable_overdue'
+    | 'support_sla_breach';
+
+export type AutomationActionType =
+    | 'internal_notification'
+    | 'create_task'
+    | 'send_email'
+    | 'send_telegram'
+    | 'assign_support_queue'
+    | 'assign_support_user'
+    | 'set_support_priority';
+
+export interface AutomationAction {
+    id: number;
+    automation_rule_id: number;
+    position: number;
+    action_type: AutomationActionType;
+    label: string;
+    config: Record<string, unknown>;
+    active: boolean;
+}
+
+export interface AutomationActionRun {
+    id: number;
+    automation_run_id: number;
+    automation_action_id: number;
+    status: 'pending' | 'running' | 'succeeded' | 'failed' | 'blocked';
+    error_code: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+    action?: AutomationAction | null;
+}
+
+export interface AutomationRun {
+    id: number;
+    automation_rule_id: number;
+    occurrence_key: string;
+    status: 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'blocked' | 'skipped';
+    error_code: string | null;
+    trigger_snapshot: Record<string, unknown>;
+    started_at: string | null;
+    finished_at: string | null;
+    actionRuns?: AutomationActionRun[];
+}
+
+export interface AutomationRule {
+    id: number;
+    name: string;
+    description: string | null;
+    trigger_type: AutomationTriggerType;
+    trigger_config: Record<string, unknown>;
+    condition_config: unknown[];
+    owner_user_id: number;
+    active: boolean;
+    revision: number;
+    next_run_at: string | null;
+    last_run_at: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+    owner?: { id: number; name: string } | null;
+    actions?: AutomationAction[];
+    runs?: AutomationRun[];
+}
+
+export interface AutomationRuleListPayload {
+    data: AutomationRule[];
+    current_page: number;
+    last_page: number;
+    per_page: number;
+    total: number;
+}
+
+export interface AutomationRunListPayload {
+    data: AutomationRun[];
+    current_page: number;
+    last_page: number;
+    per_page: number;
+    total: number;
+}
+
+/** One configurable field, as the server describes it. */
+export interface VocabularyField {
+    type: 'string' | 'integer';
+    label: string;
+    options?: string[];
+}
+
+export interface AutomationVocabulary {
+    triggers: Record<string, { label: string; fields: Record<string, VocabularyField> }>;
+    conditions: Record<string, { field: string; operators: string[] }>;
+    actions: Record<
+        string,
+        { label: string; config: Record<string, VocabularyField> }
+    >;
+}
+
+export interface AutomationRulePayload {
+    name: string;
+    description?: string | null;
+    trigger_type: AutomationTriggerType;
+    trigger_config: Record<string, unknown>;
+    condition_config?: unknown[];
+    actions: { action_type: AutomationActionType; config: Record<string, unknown>; position: number }[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* A06 — Telegram                                                              */
+/* -------------------------------------------------------------------------- */
+
+export type TelegramEventPreference =
+    | 'support_sla_breach'
+    | 'urgent_unassigned'
+    | 'automation_alert'
+    | 'document_overdue';
+
+export interface TelegramEndpoint {
+    id: number;
+    label: string;
+    chat_id: string;
+    conversation_id: number | null;
+    enabled: boolean;
+    event_preferences: TelegramEventPreference[] | null;
+    created_by: number | null;
+    created_at: string | null;
+    updated_at: string | null;
+    conversation?: { id: number; subject: string } | null;
+}

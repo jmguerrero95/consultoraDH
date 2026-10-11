@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Database\Factories;
 
+use App\Domain\Support\SupportMessageChannel;
+use App\Domain\Support\SupportMessageKind;
+use App\Domain\Support\SupportMessageSenderKind;
 use App\Models\SupportMessage;
 use Illuminate\Database\Eloquent\Factories\Factory;
 
@@ -16,9 +19,9 @@ class SupportMessageFactory extends Factory
         return [
             'conversation_id' => null,
             'author_user_id' => null,
-            'sender_kind' => 'client',
-            'message_kind' => 'message',
-            'channel' => 'portal',
+            'sender_kind' => SupportMessageSenderKind::Client,
+            'message_kind' => SupportMessageKind::Message,
+            'channel' => SupportMessageChannel::Portal,
             'body_text' => fake()->paragraph(),
             'client_visible' => true,
             'external_message_id' => null,

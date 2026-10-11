@@ -76,7 +76,10 @@ async function loadConversations() {
 
     if (filters.value.status) params.status = filters.value.status;
 
-    const response = await api.support.inbox(params);
+    // The portal's own endpoint, not the staff inbox: the staff route is guarded
+    // by permissions a client does not hold, so asking it answered 403 and the
+    // list rendered as empty.
+    const response = await api.portal.inbox(params);
     conversations.value = response.data;
     pagination.value = {
       current_page: response.current_page,

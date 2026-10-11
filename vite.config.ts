@@ -83,7 +83,25 @@ export default defineConfig(({ mode }) => {
                 protocol: 'ws',
             },
             watch: {
-                ignored: ['**/storage/framework/views/**', '**/vendor/**'],
+                ignored: [
+                    '**/storage/framework/views/**',
+                    '**/vendor/**',
+                    // The environment file is written by the end to end stack's
+                    // application entrypoint, which is documented as generating a
+                    // disposable environment. Watching it made Vite restart on
+                    // every rewrite — and because `strictPort` is set, the
+                    // restart found port 5173 still held by the previous server,
+                    // logged "Port 5173 is already in use" and then answered
+                    // every request, including the asset ones, with an empty
+                    // `504 Outdated Request`. The suite saw a blank page and the
+                    // failure looked like a defect in the application rather
+                    // than a dev server that could no longer start.
+                    //
+                    // Nothing about a `.env` change requires a reload: it holds
+                    // no module, no asset and no stylesheet.
+                    '**/.env',
+                    '**/.env.*',
+                ],
                 usePolling,
                 interval: 400,
             },

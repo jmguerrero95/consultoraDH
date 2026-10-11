@@ -145,8 +145,8 @@ async function loadConversation() {
   error.value = null;
   try {
     const response = await api.support.conversation(parseInt(route.params.id as string), { per_page: 50 });
-    conversation.value = response.data;
-    messages.value = response.data.messages?.reverse() || [];
+    conversation.value = response as any;
+    messages.value = (response as any).messages?.reverse() || [];
     await loadMetadata();
   } catch (e) {
     error.value = 'Error al cargar la conversación';
@@ -175,7 +175,7 @@ async function loadMoreMessages() {
   try {
     const lastMessage = messages.value[0];
     const response = await api.support.loadMoreMessages(conversation.value!.id, lastMessage.id, 50);
-    const olderMessages = response.data.messages?.reverse() || [];
+    const olderMessages = (response as any).messages?.reverse() || [];
     messages.value = [...olderMessages, ...messages.value];
     hasMoreMessages.value = olderMessages.length >= 50;
   } catch (e) {
@@ -191,7 +191,7 @@ async function sendMessage() {
     const response = await api.support.sendMessage(conversation.value!.id, {
       body_text: replyText.value.trim(),
     });
-    const newMessage = response.data;
+    const newMessage = response as any;
     messages.value.push(newMessage);
     replyText.value = '';
     scrollToBottom();
@@ -210,7 +210,7 @@ async function sendNote() {
     const response = await api.support.sendNote(conversation.value!.id, {
       body_text: noteText.value.trim(),
     });
-    const newNote = response.data;
+    const newNote = response as any;
     messages.value.push(newNote);
     noteText.value = '';
     showNoteForm.value = false;
@@ -330,7 +330,7 @@ async function uploadAudio(blob: Blob) {
 async function uploadAttachment(file: File) {
   try {
     const response = await api.support.uploadAttachment(conversation.value!.id, file);
-    const attachment = response.data;
+    const attachment = response as any;
     await sendMessageWithAttachment(attachment.id);
   } catch (e) {
     console.error('Error uploading attachment:', e);

@@ -130,7 +130,16 @@ export const useRealtimeStore = defineStore('realtime', () => {
    */
   function joinPrivateChannel(channelName: string, callbacks: Record<string, Function> = {}): any {
     if (!echo) {
-      throw new Error('Echo not initialized')
+      // Not an error, and deliberately not thrown.
+      //
+      // `initialize()` is asynchronous — it fetches the VAPID key before Echo
+      // exists — so a caller that subscribes straight after asking for a
+      // connection is racing it. Throwing here took the whole screen down: the
+      // exception escaped `onMounted`, and the conversation being read rendered
+      // with no subject and no error, because realtime is an enhancement the
+      // reading and sending of messages do not depend on.
+      state.value.error = 'Realtime no disponible'
+      return null
     }
 
     const channelNameWithPrefix = `private-${channelName}`
@@ -155,7 +164,10 @@ export const useRealtimeStore = defineStore('realtime', () => {
    */
   function joinPresenceChannel(channelName: string, callbacks: Record<string, Function> = {}): any {
     if (!echo) {
-      throw new Error('Echo not initialized')
+      // Same reasoning as `joinPrivateChannel`: realtime not being available is
+      // a recorded state, not an exception that takes a screen down with it.
+      state.value.error = 'Realtime no disponible'
+      return null
     }
 
     const channelNameWithPrefix = `presence-${channelName}`

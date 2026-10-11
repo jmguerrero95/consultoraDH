@@ -61,6 +61,12 @@ import type {
     UserPayload,
     AdjustmentListPayload,
     AdjustmentVocabularyPayload,
+    AutomationRule,
+    AutomationRuleListPayload,
+    AutomationRulePayload,
+    AutomationRunListPayload,
+    AutomationVocabulary,
+    TelegramEndpoint,
     AllocatableResponse,
     PaymentVocabularyPayload,
 } from '@/types/api';
@@ -199,22 +205,49 @@ interface ApiClient {
         };
     };
 
+    /**
+     * The client's own support conversations.
+     *
+     * Separate endpoints from the staff ones on purpose: the staff routes are
+     * guarded by permissions a client does not hold, so the portal screens have
+     * to use these rather than the staff client.
+     *
+     * The return types are `any` because `request` resolves to the parsed body:
+     * these endpoints answer with the model itself, not an envelope. Declaring
+     * `{ data: ... }` here is what led both conversation screens to read
+     * `response.data`, which was always undefined, so the page rendered with no
+     * conversation in it and no error either.
+     */
+    portal: {
+        inbox(params: Record<string, any>): Promise<{
+            data: any[];
+            current_page: number;
+            last_page: number;
+            total: number;
+            per_page: number;
+        }>;
+        conversation(id: number, params: Record<string, any>): Promise<any>;
+        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<any>;
+        uploadAttachment(conversationId: number, file: File): Promise<any>;
+        markRead(conversationId: number, upToMessageId: number): Promise<any>;
+    },
+
     support: {
         queues(): Promise<{ data: { id: number; name: string }[] }>;
         inbox(params: Record<string, any>): Promise<{ data: any[]; current_page: number; last_page: number; total: number; per_page: number }>;
-        conversation(id: number, params: Record<string, any>): Promise<{ data: any }>;
+        conversation(id: number, params: Record<string, any>): Promise<any>;
         createConversation(payload: Record<string, any>): Promise<{ data: any }>;
-        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<{ data: any }>;
-        sendNote(conversationId: number, payload: { body_text: string }): Promise<{ data: any }>;
-        uploadAttachment(conversationId: number, file: File): Promise<{ data: any }>;
-        sendMessageWithAttachment(conversationId: number, payload: { body_text: string; attachment_ids: number[] }): Promise<{ data: any }>;
+        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<any>;
+        sendNote(conversationId: number, payload: { body_text: string }): Promise<any>;
+        uploadAttachment(conversationId: number, file: File): Promise<any>;
+        sendMessageWithAttachment(conversationId: number, payload: { body_text: string; attachment_ids: number[] }): Promise<any>;
         changePriority(conversationId: number, priority: string): Promise<{ data: any }>;
         changeQueue(conversationId: number, payload: { queue_id: number; assignee_user_id?: number | null }): Promise<{ data: any }>;
         resolveConversation(conversationId: number): Promise<{ data: any }>;
         closeConversation(conversationId: number): Promise<{ data: any }>;
         reopenConversation(conversationId: number): Promise<{ data: any }>;
         assignConversation(conversationId: number, userId: number | null): Promise<{ data: any }>;
-        loadMoreMessages(conversationId: number, beforeId: number, perPage: number): Promise<{ data: { messages: any[] } }>;
+        loadMoreMessages(conversationId: number, beforeId: number, perPage: number): Promise<any>;
     };
 
     /**
@@ -694,6 +727,89 @@ export const api: ApiClient = {
             },
         },
 
+        automations: {
+            vocabulary(): Promise<AutomationVocabulary> {
+                return request<AutomationVocabulary>('GET', '/api/automations/vocabulary');
+            },
+
+            list(params: ListParams & { active?: string | null; trigger_type?: string | null } = {}): Promise<
+                AutomationRuleListPayload
+            > {
+                return request<AutomationRuleListPayload>('GET', '/api/automations', { query: params });
+            },
+
+            show(id: number): Promise<AutomationRule> {
+                return request<AutomationRule>('GET', `/api/automations/${id}`);
+            },
+
+            create(payload: AutomationRulePayload): Promise<{ message: string; rule: AutomationRule }> {
+                return request('POST', '/api/automations', { body: payload });
+            },
+
+            update(id: number, payload: Partial<AutomationRulePayload>): Promise<{
+                message: string;
+                rule: AutomationRule;
+            }> {
+                return request('PATCH', `/api/automations/${id}`, { body: payload });
+            },
+
+            activate(id: number): Promise<{ message: string; rule: AutomationRule }> {
+                return request('POST', `/api/automations/${id}/activate`);
+            },
+
+            deactivate(id: number): Promise<{ message: string; rule: AutomationRule }> {
+                return request('POST', `/api/automations/${id}/deactivate`);
+            },
+
+            runs(id: number, params: ListParams = {}): Promise<AutomationRunListPayload> {
+                return request<AutomationRunListPayload>('GET', `/api/automations/${id}/runs`, { query: params });
+            },
+
+            validatePreview(payload: {
+                trigger_type: string;
+                trigger_config: Record<string, unknown>;
+                condition_config?: unknown[];
+                actions: { action_type: string; config: Record<string, unknown>; position: number }[];
+            }): Promise<{ valid: boolean; errors: string[]; warnings: string[]; matched_events?: number }> {
+                return request('POST', '/api/automations/validate-preview', { body: payload });
+            },
+        },
+
+        telegram: {
+            list(): Promise<TelegramEndpoint[]> {
+                return request<TelegramEndpoint[]>('GET', '/api/telegram/endpoints');
+            },
+
+            create(payload: {
+                label: string;
+                chat_id: string;
+                conversation_id?: number | null;
+                enabled?: boolean;
+                event_preferences?: string[];
+            }): Promise<TelegramEndpoint> {
+                return request('POST', '/api/telegram/endpoints', { body: payload });
+            },
+
+            update(
+                id: number,
+                payload: {
+                    label?: string;
+                    chat_id?: string;
+                    conversation_id?: number | null;
+                    enabled?: boolean;
+                    event_preferences?: string[];
+                },
+            ): Promise<TelegramEndpoint> {
+                return request('PATCH', `/api/telegram/endpoints/${id}`, { body: payload });
+            },
+
+            test(id: number, message?: string): Promise<{ message: string }> {
+                return request('POST', `/api/telegram/endpoints/${id}/test`, {
+                    body: message === undefined ? {} : { message },
+                });
+            },
+        },
+
         imports: {
             list(params: ListParams & { status?: string | null } = {}): Promise<ImportListPayload> {
                 return request<ImportListPayload>('GET', '/api/imports', { query: params });
@@ -780,10 +896,57 @@ export const api: ApiClient = {
         },
     },
 
+    /**
+     * The client's own support conversations.
+     *
+     * Separate endpoints from the staff ones on purpose: the staff routes are
+     * guarded by permissions a client does not hold, so the portal screens have
+     * to use these rather than the staff client.
+     */
+    portal: {
+        inbox(params: Record<string, any> = {}): Promise<{
+            data: any[];
+            current_page: number;
+            last_page: number;
+            total: number;
+            per_page: number;
+        }> {
+            return request('GET', '/api/portal/support/conversations', { query: params });
+        },
+
+        conversation(id: number, params: Record<string, any> = {}): Promise<{ data: any }> {
+            return request('GET', `/api/portal/support/conversations/${id}`, { query: params });
+        },
+
+        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<{
+            data: any;
+        }> {
+            return request('POST', `/api/portal/support/conversations/${conversationId}/messages`, {
+                body: payload,
+            });
+        },
+
+        uploadAttachment(conversationId: number, file: File): Promise<{ data: any }> {
+            const form = new FormData();
+            form.append('file', file);
+
+            return request('POST', `/api/portal/support/conversations/${conversationId}/attachments`, {
+                body: form,
+            });
+        },
+
+        markRead(conversationId: number, upToMessageId: number): Promise<{ data: any }> {
+            return request('POST', `/api/portal/support/conversations/${conversationId}/read`, {
+                body: { up_to_message_id: upToMessageId },
+            });
+        },
+    },
+
     support: {
         queues(): Promise<{ data: { id: number; name: string }[] }> {
             return request('GET', '/api/support/queues');
         },
+
 
         inbox(params: Record<string, any> = {}): Promise<{ data: any[]; current_page: number; last_page: number; total: number; per_page: number }> {
             return request('GET', '/api/support/inbox', { query: params });

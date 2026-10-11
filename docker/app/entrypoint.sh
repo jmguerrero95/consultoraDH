@@ -5,7 +5,8 @@
 # Responsibilities:
 #   1. Guarantee that the writable Laravel directories exist.
 #   2. Guarantee that PHP dependencies are installed, without printing secrets.
-#   3. Generate E2E environment file in /tmp (not bind-mounted).
+#   3. Apply the E2E environment to the process, via the container's tmpfs and
+#      the exported variables — never through the bind-mounted `.env`.
 #   4. Hand over control to the requested command (php-fpm, artisan, ...).
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -32,31 +33,58 @@ chmod -R ug+rwx storage bootstrap/cache 2>/dev/null || true
 # framework cache and the application log.
 chown -R www-data:www-data storage bootstrap/cache 2>/dev/null || true
 
-# 2. E2E environment file generation ------------------------------------------
-# In the E2E environment, we overwrite the bind-mounted .env file with E2E values.
-# The host's .env file will be restored manually or from .env.example after E2E runs.
+# 2. E2E environment ---------------------------------------------------------
+# Applied to this process and written to the container's tmpfs, and never to the
+# bind-mounted `.env`.
+#
+# ## Why this is not written to `.env`
+#
+# The application source is bind-mounted from the host, so `/var/www/html/.env`
+# **is the developer's `.env`**. Writing the test environment there replaced a real
+# file with E2E values: `APP_ENV=testing`, `DB_DATABASE=consultora_dh_e2e`, the E2E
+# Redis and the E2E rate limits. After a single `./scripts/run-e2e.sh`, the
+# development instance was pointed at the test database and nine tests that have
+# nothing to do with A06 — `RateLimitTest`, `Auth/LoginTest`,
+# `A02/EndToEndIsolationTest` — failed, with the developer's real VAPID keys and
+# database password replaced by the defaults below. It happened on every run, and
+# it happened silently.
+#
+# `compose.e2e.yaml` already mounts a tmpfs at `/var/www/html/.env.docker` for
+# exactly this purpose. The file is generated there, and the values are exported
+# into this process's environment, which is what the application actually reads:
+# Laravel loads `.env` with an *immutable* dotenv, so a real environment variable
+# wins over the file and the host's development `.env` is never consulted for the
+# keys that matter here.
+#
+# The host's `.env` is left exactly as it was found.
 if [ "${APP_ENV:-}" = "testing" ] || [ "${APP_ENV:-}" = "e2e" ]; then
-    echo "[consultora-dh] Generating E2E environment in bind-mounted .env..."
+    echo "[consultora-dh] applying the E2E environment (tmpfs + process env)..."
 
-    ENV_FILE="/var/www/html/.env"
+    ENV_DIR="/var/www/html/.env.docker"
+    ENV_FILE="$ENV_DIR/env"
 
-    # Start with the example as a template
+    mkdir -p "$ENV_DIR"
+
+    # Start from the example as a template, for any key this script does not set.
     if [ -f .env.example ]; then
         cp .env.example "$ENV_FILE"
     else
-        touch "$ENV_FILE"
+        : > "$ENV_FILE"
     fi
 
-    # Override with E2E-specific values from environment variables
+    # Record the value in the tmpfs copy *and* put it in this process's
+    # environment. The export is what the application reads.
     set_env() {
         local key="$1"
         local value="$2"
-        local escaped_value=$(printf '%s\n' "$value" | sed 's/[&/\]/\\&/g')
+        local escaped_value
+        escaped_value=$(printf '%s\n' "$value" | sed 's/[&/\]/\\&/g')
         if grep -qE "^${key}=" "$ENV_FILE"; then
             sed -i "s|^${key}=.*|${key}=${escaped_value}|" "$ENV_FILE"
         else
             echo "${key}=${escaped_value}" >> "$ENV_FILE"
         fi
+        export "${key}=${value}"
     }
 
     # Core application
@@ -102,13 +130,27 @@ if [ "${APP_ENV:-}" = "testing" ] || [ "${APP_ENV:-}" = "e2e" ]; then
         set_env "VAPID_SUBJECT" "${VAPID_SUBJECT:-mailto:test@e2e.local}"
     fi
 
-    # Ensure APP_KEY exists
-    if ! grep -qE '^APP_KEY=' "$ENV_FILE" || [ -z "$(grep '^APP_KEY=' "$ENV_FILE" | cut -d'=' -f2-)" ]; then
-        echo "[consultora-dh] APP_KEY missing - generating a new key..."
-        php artisan key:generate --ansi --force >/dev/null
+    # Ensure APP_KEY exists, without writing one to the host.
+    #
+    # `key:generate --force` writes to `.env`, which is the file this whole block
+    # exists to avoid touching. `--show` prints the key instead, so it is
+    # exported here and recorded in the tmpfs copy.
+    if [ -z "${APP_KEY:-}" ] && ! grep -qE '^APP_KEY=.+' "$ENV_FILE"; then
+        echo "[consultora-dh] APP_KEY missing - generating one for this process..."
+        GENERATED_KEY="$(php artisan key:generate --show 2>/dev/null | tail -n 1 | tr -d '\r')"
+        if [ -n "$GENERATED_KEY" ]; then
+            export APP_KEY="$GENERATED_KEY"
+            echo "APP_KEY=${GENERATED_KEY}" >> "$ENV_FILE"
+        fi
     fi
 
-    echo "[consultora-dh] E2E environment generated in $ENV_FILE"
+    if [ -n "${APP_KEY:-}" ]; then
+        export APP_KEY
+    elif grep -qE '^APP_KEY=.+' "$ENV_FILE"; then
+        export APP_KEY="$(grep '^APP_KEY=' "$ENV_FILE" | cut -d'=' -f2-)"
+    fi
+
+    echo "[consultora-dh] E2E environment ready (host .env untouched)"
 fi
 
 # 3. Dependencies --------------------------------------------------------------
@@ -128,9 +170,15 @@ fi
 # 4. Application key ----------------------------------------------------------
 # Generated once and persisted in the .env file, which is never committed.
 # Skipped while the application is not installed yet (first bootstrap run).
-if [ -f artisan ] && [ -f .env ] && ! grep -qE '^APP_KEY=.+' .env; then
-    echo "[consultora-dh] APP_KEY missing - generating a new key..."
-    php artisan key:generate --ansi --force >/dev/null
+#
+# Skipped entirely in the E2E environment, where `.env` is the host's development
+# file: writing a key there would change the developer's configuration, and the
+# key this container needs was already exported in step 2.
+if [ "${APP_ENV:-}" != "testing" ] && [ "${APP_ENV:-}" != "e2e" ]; then
+    if [ -f artisan ] && [ -f .env ] && ! grep -qE '^APP_KEY=.+' .env; then
+        echo "[consultora-dh] APP_KEY missing - generating a new key..."
+        php artisan key:generate --ansi --force >/dev/null
+    fi
 fi
 
 exec "$@"

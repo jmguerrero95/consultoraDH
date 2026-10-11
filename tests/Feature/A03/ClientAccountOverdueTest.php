@@ -7,6 +7,7 @@ use App\Domain\Receivables\ReceivablesService;
 use App\Models\Client;
 use App\Models\Company;
 use App\Models\MonthlyObligation;
+use Carbon\Carbon;
 
 /**
  * A03-R3 §2: obligations and months are two different counts, on one screen.
@@ -40,6 +41,18 @@ use App\Models\MonthlyObligation;
  */
 beforeEach(function (): void {
     seedPortfolioRoles();
+});
+
+/**
+ * Carbon's test clock is global and outlives a test unless it is cleared.
+ *
+ * `setTestNow()` below is process-wide, so a test that froze the clock and then
+ * failed before clearing it would hand a wrong "today" to every file that runs
+ * after this one. Resetting in `afterEach` rather than at the end of the test
+ * body means the guarantee holds whether the test passes or not.
+ */
+afterEach(function (): void {
+    Carbon::setTestNow();
 });
 
 /**
@@ -184,6 +197,17 @@ it('counts nothing late before the due date, under either name', function (): vo
             effectiveMonth: '2026-09',
         ));
     }
+
+    // The clock is 4 October, as this test has always said it was.
+    //
+    // It was never actually set, so the assertion ran against the wall clock: the
+    // obligations below fall due on 10 October, and the moment the real date
+    // passed that the debt was genuinely late and the account counted it
+    // correctly. The test failed on 11 October for a reason that had nothing to
+    // do with the behaviour it exists to pin down.
+    //
+    // `afterEach` clears this again, so the frozen clock cannot reach another file.
+    Carbon::setTestNow(Carbon::parse('2026-10-04 09:00', 'America/Bogota'));
 
     // September's obligations fall due on 10 October and the clock is 4 October, so both are
     // owed and neither is late. This is R1 §25: a debt due today is still payable.

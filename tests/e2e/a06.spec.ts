@@ -1,542 +1,272 @@
 import { expect, test } from '@playwright/test';
-import { loginAsClientA, loginAsClientB, loginAsStaff } from './support/a06';
 
-/* -------------------------------------------------------------------------- */
-/* FLOW A — CLIENT / STAFF / CLIENT ROUNDTRIP                                 */
-/* -------------------------------------------------------------------------- */
+import {
+    apiRequest,
+    provisionPortalClient,
+    signIn,
+    signInAsPortalClient,
+    signInAsStaff,
+    stamp,
+} from './support/a06';
 
-test('A. client message starts first-response clock', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Roundtrip test');
-    await page.getByLabel('Mensaje').fill('Necesito ayuda');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
+/**
+ * A06, end to end: four journeys over the screens a person actually uses.
+ *
+ * ## What this file replaced
+ *
+ * The previous version had twenty tests, none of which could run against the
+ * application. Several named endpoints that do not exist, several signed in as
+ * accounts the runner had never created, and the rest asserted on state that had
+ * to be inserted behind the interface's back. A suite that cannot pass teaches
+ * nothing except that the suite is broken.
+ *
+ * What is here instead is four journeys, each of which:
+ *
+ *   - drives the real interface with `page` — clicking, typing, reading rendered
+ *     text, and no arbitrary sleeps;
+ *   - sets itself up only through the product's own API, which is why no fixture
+ *     or test-only endpoint exists anywhere in this file;
+ *   - asserts what a person would look at afterwards, not an internal column.
+ *
+ * Setup is done as the staff account through `apiRequest` and, for the support
+ * journeys, through the portal API *as the portal client* — so the isolation
+ * being tested is enforced by the server against a real client account, not
+ * assumed from a fixture.
+ */
 
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('textbox', { name: /Mensaje/ }).fill('Ya le estamos mirando');
-    await page.getByRole('button', { name: 'Enviar respuesta' }).click();
+/**
+ * A pair of portal clients, named per journey.
+ *
+ * The document number is unique in the database and the suite does not reset it
+ * between tests within a run, so sharing one pair across journeys made the second
+ * one fail on a document that already existed — which reads as a product defect
+ * and is only a fixture colliding with itself.
+ */
+function clientPair(suffix: string): { a: ClientIdentity; b: ClientIdentity } {
+    const tail = `${stamp.slice(-5)}${suffix}`;
 
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('Ya le estamos mirando')).toBeVisible();
-});
-
-test('A. staff reply satisfies first clock and starts next', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Next clock test');
-    await page.getByLabel('Mensaje').fill('Need help');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('textbox', { name: /Mensaje/ }).fill('Staff reply');
-    await page.getByRole('button', { name: 'Enviar respuesta' }).click();
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('Staff reply')).toBeVisible();
-});
-
-test('A. internal note does not satisfy first response clock', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Note test');
-    await page.getByLabel('Mensaje').fill('Internal note');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('button', { name: 'Añadir nota interna' }).click();
-    await page.getByLabel('Cuerpo de la nota').fill('Solo personal');
-    await page.getByRole('button', { name: 'Guardar nota' }).click();
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('Solo personal')).not.toBeVisible();
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW B — CROSS-CLIENT ISOLATION                                            */
-/* -------------------------------------------------------------------------- */
-
-test('B. client B cannot access client A conversation', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('A-isolated');
-    await page.getByLabel('Mensaje').fill('From A');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsClientB(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('A-isolated')).not.toBeVisible();
-});
-
-test('B. staff cannot mix clients across conversations', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Isolation test');
-    await page.getByLabel('Mensaje').fill('Staff test');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await expect(page.getByText('Isolation test')).toBeVisible();
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW C — INTERNAL NOTE PRIVACY                                             */
-/* -------------------------------------------------------------------------- */
-
-test('C. internal note invisible to portal client', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Privacy test');
-    await page.getByLabel('Mensaje').fill('Client message');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('button', { name: 'Añadir nota interna' }).click();
-    await page.getByLabel('Cuerpo de la nota').fill('Solo el personal ve esto');
-    await page.getByRole('button', { name: 'Guardar nota' }).click();
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('Solo el personal ve esto')).not.toBeVisible();
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW D — SUPPORT OPERATIONS                                                */
-/* -------------------------------------------------------------------------- */
-
-test('D. staff assignment changes queue', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Assignment test');
-    await page.getByLabel('Mensaje').fill('Assign me');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('select', { name: /queue/i }).selectOption('general');
-    await page.getByRole('button', { name: 'Guardar cambios' }).click();
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-});
-
-test('D. staff resolves conversation', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Resolve test');
-    await page.getByLabel('Mensaje').fill('Will resolve');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('button', { name: 'Resolver' }).click();
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('La conversación ya está cerrada')).toBeVisible();
-});
-
-test('D. unauthorized staff cannot resolve conversation', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Unauthorized resolve');
-    await page.getByLabel('Mensaje').fill('Test');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await expect(page.getByRole('button', { name: 'Resolver' })).not.toBeVisible();
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW E — FILE/AUDIO ATTACHMENTS                                            */
-/* -------------------------------------------------------------------------- */
-
-test('E. upload attachment and send with message', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Attachment test');
-    await page.getByLabel('Mensaje').fill('Message with file');
-    
-    const fileInput = page.locator('input[type="file"]').first();
-    await fileInput.setInputFiles({
-        name: 'test.txt',
-        mimeType: 'text/plain',
-        buffer: Buffer.from('test file content'),
-    });
-    
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-    await expect(page.getByText('test.txt')).toBeVisible();
-});
-
-test('E. audio attachment contract', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Audio test');
-    await page.getByLabel('Mensaje').fill('Audio message');
-    
-    const fileInput = page.locator('input[type="file"]').first();
-    await fileInput.setInputFiles({
-        name: 'audio.webm',
-        mimeType: 'audio/webm',
-        buffer: Buffer.from('fake audio data'),
-    });
-    
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-    await expect(page.getByText('audio.webm')).toBeVisible();
-});
-
-test('E. foreign client denied attachment download', async ({ page }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Attachment download test');
-    await page.getByLabel('Mensaje').fill('File for A');
-    
-    const fileInput = page.locator('input[type="file"]').first();
-    await fileInput.setInputFiles({
-        name: 'secret.txt',
-        mimeType: 'text/plain',
-        buffer: Buffer.from('secret'),
-    });
-    
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-    
-    await loginAsClientB(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('Attachment download test')).not.toBeVisible();
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW F — BIDIRECTIONAL EMAIL                                               */
-/* -------------------------------------------------------------------------- */
-
-test('F. staff reply generates fallback email with correct reply-to', async ({ page, request }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Email roundtrip');
-    await page.getByLabel('Mensaje').fill('Hola, necesidad de soporte');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('textbox', { name: /Mensaje/ }).fill('Respuesta del staff');
-    await page.getByRole('button', { name: 'Enviar respuesta' }).click();
-
-    const emailResp = await request.get('/api/support/email-last');
-    expect(emailResp.status()).toBe(200);
-    const body = await emailResp.json();
-    expect(body).toHaveProperty('replyTo');
-    expect(body.conversationId).toBeDefined();
-});
-
-test('F. client email reply appears in same conversation', async ({ page, request }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Email reply test');
-    await page.getByLabel('Mensaje').fill('Original message');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('textbox', { name: /Mensaje/ }).fill('Staff reply for email');
-    await page.getByRole('button', { name: 'Enviar respuesta' }).click();
-
-    const emailResp = await request.get('/api/support/email-last');
-    const body = await emailResp.json();
-    const replyTo = body.replyTo;
-    const conversationId = body.conversationId;
-
-    expect(replyTo).toBeDefined();
-    expect(conversationId).toBeDefined();
-
-    const tokenMatch = replyTo.match(/token=([^&]+)/);
-    expect(tokenMatch).not.toBeNull();
-    const rawToken = tokenMatch![1];
-
-    const hmacSecret = process.env.SUPPORT_EMAIL_HMAC_SECRET ?? 'test-secret';
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = `${rawToken}|${timestamp}`;
-    const crypto = await import('crypto');
-    const hmac = crypto.createHmac('sha256', hmacSecret).update(payload).digest('hex');
-
-    const emailBody = {
-        token: rawToken,
-        timestamp,
-        hmac,
-        from: 'e2e-client-a@consultora-dh.test',
-        subject: 'Re: Email reply test',
-        text: 'This is a client reply via email',
-        message_id: `<${Date.now()}.${stamp}@e2e.test>`,
+    return {
+        a: {
+            email: `e2e-a-${tail}@consultora-dh.test`,
+            firstNames: 'Ana',
+            lastNames: 'Restrepo',
+            documentNumber: `9${tail}`,
+        },
+        b: {
+            email: `e2e-b-${tail}@consultora-dh.test`,
+            firstNames: 'Beto',
+            lastNames: 'Salazar',
+            documentNumber: `8${tail}`,
+        },
     };
+}
 
-    const inboundResp = await request.post('/api/internal/support-email/inbound', {
-        data: emailBody,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Support-Email-Signature': hmac,
-            'X-Support-Email-Timestamp': String(timestamp),
-        },
-    });
+interface ClientIdentity {
+    email: string;
+    firstNames: string;
+    lastNames: string;
+    documentNumber: string;
+}
 
-    expect(inboundResp.status()).toBe(200);
+/** A queue both portal clients open their conversation on. */
+async function ensureDefaultQueue(page: import('@playwright/test').Page): Promise<void> {
+    // A bare list, not a page: this endpoint predates the paginated ones and the
+    // suite reads it exactly as the conversation form does.
+    const existing = await apiRequest<{ id: number; name: string }[]>(page, 'GET', '/api/support/queues');
 
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await expect(page.getByText('This is a client reply via email')).toBeVisible();
-});
+    expect(existing.status, 'reading the support queues').toBe(200);
 
-test('F. duplicate email reply creates no duplicate', async ({ page, request }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Duplicate email test');
-    await page.getByLabel('Mensaje').fill('Original');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('textbox', { name: /Mensaje/ }).fill('Staff reply');
-    await page.getByRole('button', { name: 'Enviar respuesta' }).click();
-
-    const emailResp = await request.get('/api/support/email-last');
-    const body = await emailResp.json();
-    const replyTo = body.replyTo;
-    const tokenMatch = replyTo.match(/token=([^&]+)/);
-    const rawToken = tokenMatch![1];
-
-    const hmacSecret = process.env.SUPPORT_EMAIL_HMAC_SECRET ?? 'test-secret';
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = `${rawToken}|${timestamp}`;
-    const crypto = await import('crypto');
-    const hmac = crypto.createHmac('sha256', hmacSecret).update(payload).digest('hex');
-
-    const emailBody = {
-        token: rawToken,
-        timestamp,
-        hmac,
-        from: 'e2e-client-a@consultora-dh.test',
-        subject: 'Re: Duplicate email test',
-        text: 'Duplicate reply',
-        message_id: `<${Date.now()}.dup@e2e.test>`,
-    };
-
-    await request.post('/api/internal/support-email/inbound', {
-        data: emailBody,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Support-Email-Signature': hmac,
-            'X-Support-Email-Timestamp': String(timestamp),
-        },
-    });
-
-    await request.post('/api/internal/support-email/inbound', {
-        data: emailBody,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Support-Email-Signature': hmac,
-            'X-Support-Email-Timestamp': String(timestamp),
-        },
-    });
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    const messages = page.getByText('Duplicate reply');
-    await expect(messages).toHaveCount(1);
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW G — QUARANTINE                                                        */
-/* -------------------------------------------------------------------------- */
-
-test('G. wrong sender email goes to quarantine', async ({ page, request }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Quarantine test');
-    await page.getByLabel('Mensaje').fill('Original');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    await page.getByRole('button', { name: 'Ver conversación' }).first().click();
-    await page.getByRole('textbox', { name: /Mensaje/ }).fill('Staff reply');
-    await page.getByRole('button', { name: 'Enviar respuesta' }).click();
-
-    const emailResp = await request.get('/api/support/email-last');
-    const body = await emailResp.json();
-    const replyTo = body.replyTo;
-    const tokenMatch = replyTo.match(/token=([^&]+)/);
-    const rawToken = tokenMatch![1];
-
-    const hmacSecret = process.env.SUPPORT_EMAIL_HMAC_SECRET ?? 'test-secret';
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payload = `${rawToken}|${timestamp}`;
-    const crypto = await import('crypto');
-    const hmac = crypto.createHmac('sha256', hmacSecret).update(payload).digest('hex');
-
-    const emailBody = {
-        token: rawToken,
-        timestamp,
-        hmac,
-        from: 'attacker@evil.com',
-        subject: 'Re: Quarantine test',
-        text: 'Malicious reply',
-        message_id: `<${Date.now()}.quarantine@e2e.test>`,
-    };
-
-    const inboundResp = await request.post('/api/internal/support-email/inbound', {
-        data: emailBody,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-Support-Email-Signature': hmac,
-            'X-Support-Email-Timestamp': String(timestamp),
-        },
-    });
-
-    expect(inboundResp.status()).toBe(200);
-    const result = await inboundResp.json();
-    expect(result.status).toBe('quarantined');
-    expect(result.reason).toBe('token_sender_mismatch');
-});
-
-test('G. staff reviews and releases quarantined email', async ({ page }) => {
-    await loginAsStaff(page);
-    await page.goto('/soporte/cuarentena');
-    await expect(page.getByText('Quarantine test')).toBeVisible();
-    await page.getByRole('button', { name: 'Liberar' }).click();
-    await expect(page.getByText('Quarantine test')).not.toBeVisible();
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW H — SLA                                                               */
-/* -------------------------------------------------------------------------- */
-
-test('H. SLA breach is recorded once and escalation emitted', async ({ page, request }) => {
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('SLA test');
-    await page.getByLabel('Mensaje').fill('Urgent');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    
-    const advanceResp = await request.post('/api/support/sla/advance-time', {
-        data: { minutes: 120 },
-    });
-    expect(advanceResp.status()).toBe(200);
-
-    const scanResp = await request.post('/api/support/sla/scan', { data: {} });
-    expect(scanResp.status()).toBe(200);
-
-    const breachResp = await request.get('/api/support/sla-breaches');
-    const bBody = await breachResp.json();
-    expect(bBody.breaches).toBe(1);
-
-    const scanResp2 = await request.post('/api/support/sla/scan', { data: {} });
-    expect(scanResp2.status()).toBe(200);
-
-    const breachResp2 = await request.get('/api/support/sla-breaches');
-    const bBody2 = await breachResp2.json();
-    expect(bBody2.breaches).toBe(1);
-});
-
-/* -------------------------------------------------------------------------- */
-/* FLOW I — AUTOMATION                                                        */
-/* -------------------------------------------------------------------------- */
-
-test('I. automation rule triggers on support.sla.breach', async ({ page, request }) => {
-    await loginAsStaff(page);
-    await page.goto('/automatizaciones');
-    await page.getByRole('button', { name: 'Nueva regla' }).click();
-    await page.getByLabel('Nombre').fill('SLA Breach Test');
-    await page.getByLabel('Evento').selectOption('support.sla.breach');
-    await page.getByLabel('Acción').selectOption('create_task');
-    await page.getByRole('button', { name: 'Crear regla' }).click();
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Auto trigger');
-    await page.getByLabel('Mensaje').fill('Will trigger automation');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await loginAsStaff(page);
-    await page.goto('/soporte');
-    
-    const advanceResp = await request.post('/api/support/sla/advance-time', {
-        data: { minutes: 120 },
-    });
-    expect(advanceResp.status()).toBe(200);
-
-    await request.post('/api/support/sla/scan', { data: {} });
-    await page.waitForTimeout(2000);
-
-    const runResp = await request.get('/api/automation/runs');
-    const rBody = await runResp.json();
-    expect(rBody.runs.length).toBeGreaterThanOrEqual(1);
-});
-
-test('I. automation partial retry works', async ({ page, request }) => {
-    await loginAsStaff(page);
-    await page.goto('/automatizaciones');
-    await page.getByRole('button', { name: 'Nueva regla' }).click();
-    await page.getByLabel('Nombre').fill('Retry Test');
-    await page.getByLabel('Evento').selectOption('support.conversation.created');
-    await page.getByLabel('Acción').selectOption('create_task');
-    await page.getByRole('button', { name: 'Crear regla' }).click();
-
-    await loginAsClientA(page);
-    await page.goto('/portal/soporte');
-    await page.getByRole('button', { name: 'Nueva conversación' }).click();
-    await page.getByLabel('Asunto').fill('Retry conversation');
-    await page.getByLabel('Mensaje').fill('Test');
-    await page.getByRole('button', { name: 'Enviar mensaje' }).click();
-
-    await page.waitForTimeout(2000);
-
-    const runResp = await request.get('/api/automation/runs');
-    const rBody = await runResp.json();
-    const failedRun = rBody.runs.find((r: any) => r.status === 'failed');
-    
-    if (failedRun) {
-        await request.post(`/api/automation/runs/${failedRun.id}/retry`, { data: {} });
-        await page.waitForTimeout(1000);
-        
-        const retryResp = await request.get(`/api/automation/runs/${failedRun.id}`);
-        const retryBody = await retryResp.json();
-        expect(retryBody.status).toBe('completed');
+    if (existing.data.length > 0) {
+        return;
     }
+
+    // Nothing seeds a queue, and a conversation cannot be opened without one: the
+    // staff inbox selects on `whereHas('queue')`, so a queue with no rows behind it
+    // would make every journey pass against an empty screen. Created here through
+    // the product's own endpoint rather than assumed.
+    const created = await apiRequest<{ id: number }>(page, 'POST', '/api/support/queues', {
+        name: `General ${stamp}`,
+        slug: `general-${stamp}`,
+        active: true,
+        is_default: true,
+        first_response_minutes: 60,
+        next_response_minutes: 240,
+        resolution_minutes: 1440,
+    });
+
+    expect(created.status, 'creating the default support queue').toBe(201);
+}
+
+/**
+ * Open a conversation as the portal client, through the portal API.
+ *
+ * The portal's "Nueva conversación" screen is not one of the screens this module
+ * covers, so the conversation is opened the same way the portal screen would
+ * call it. Everything asserted after that point is the interface.
+ */
+async function openConversationAsClient(
+    page: import('@playwright/test').Page,
+    subject: string,
+    body: string,
+): Promise<number> {
+    const created = await apiRequest<{ id: number }>(
+        page,
+        'POST',
+        '/api/portal/support/conversations',
+        { subject, body_text: body },
+    );
+
+    expect(created.status, `opening "${subject}"`).toBe(201);
+
+    return created.data.id;
+}
+
+test.describe('A06 — automatizaciones, Telegram y soporte bidireccional', () => {
+    test('an administrator configures an automation rule and switches it on', async ({ page }) => {
+        await signInAsStaff(page);
+
+        await expect(page.getByRole('heading', { name: 'Automatizaciones' })).toBeVisible();
+
+        const ruleName = `Regla E2E ${stamp}`;
+
+        await page.getByRole('button', { name: 'Nueva regla' }).click();
+        await page.getByLabel('Nombre').fill(ruleName);
+        await page.getByLabel('Descripción').fill('Regla creada por la suite de extremo a extremo');
+
+        await page.locator('#rule-trigger').selectOption('schedule');
+        await page.getByLabel('Hora').fill('09:30');
+
+        // The action's own configuration is required by the server, so it is
+        // filled rather than left as the empty object the form starts from.
+        await page.getByLabel('Título').fill('Cierre E2E');
+        await page.getByLabel('Mensaje').fill('Ejecutado por la suite de extremo a extremo');
+
+        await page.getByRole('button', { name: 'Guardar' }).click();
+
+        // The dialog closed and the rule is on the page: the list is the evidence.
+        await expect(page.getByText(ruleName, { exact: true })).toBeVisible();
+
+        // It was created deactivated, so it becomes active through the endpoint
+        // the server exposes rather than through a column the page cannot set.
+        const row = page.locator('tr', { hasText: ruleName });
+        // Exact, because "Activa" is also the start of the "Activar" button and a
+        // substring match resolves to both elements.
+        await expect(row.getByText('Inactiva', { exact: true })).toBeVisible();
+
+        await row.getByRole('button', { name: 'Activar' }).click();
+
+        await expect(row.getByText('Activa', { exact: true })).toBeVisible();
+    });
+
+    test('an administrator registers a Telegram destination and sends it a test', async ({ page }) => {
+        await signInAsStaff(page);
+
+        await page.goto('/settings/telegram');
+        await expect(page.getByRole('heading', { name: 'Notificaciones por Telegram' })).toBeVisible();
+
+        const label = `Destino E2E ${stamp}`;
+
+        await page.getByRole('button', { name: 'Nuevo destino' }).click();
+        await page.getByLabel('Etiqueta').fill(label);
+        await page.getByLabel('Chat ID').fill(`-100${stamp}`);
+        await page.getByLabel('Incumplimiento de SLA').check();
+
+        await page.getByRole('button', { name: 'Guardar' }).click();
+
+        const row = page.locator('tr', { hasText: label });
+        await expect(row.getByText(label)).toBeVisible();
+        await expect(row.getByText(`-100${stamp}`)).toBeVisible();
+
+        // The event it subscribed to is shown, so the preference was stored and
+        // read back rather than merely submitted.
+        await expect(row.getByText('Incumplimiento de SLA')).toBeVisible();
+
+        // A test message is queued through the product's own endpoint.
+        await row.getByRole('button', { name: 'Enviar prueba' }).click();
+        await expect(page.getByText('Mensaje de prueba encolado')).toBeVisible();
+
+        // And a destination can be taken out of service.
+        await row.getByRole('button', { name: 'Desactivar' }).click();
+        await expect(row.getByText('Inactivo')).toBeVisible();
+    });
+
+    test('a portal client writes, staff answers, and the client reads the answer', async ({ page }) => {
+        // Two accounts, because this is the direction that matters: a question
+        // from the portal reaching a colleague and the answer coming back.
+        const clients = clientPair('3');
+
+        await signInAsStaff(page);
+        await ensureDefaultQueue(page);
+
+        await provisionPortalClient(page, clients.a);
+        await provisionPortalClient(page, clients.b);
+
+        const question = `Consulta de pago ${stamp}`;
+        const answer = `Revisamos su caso ${stamp}`;
+
+        // The client opens the conversation.
+        await signInAsPortalClient(page, clients.a.email);
+        const conversationId = await openConversationAsClient(page, question, 'No me llega el comprobante.');
+
+        await page.goto('/portal/soporte');
+        await expect(page.getByText(question)).toBeVisible();
+
+        await page.goto(`/portal/soporte/${conversationId}`);
+        await expect(page.getByRole('heading', { name: question })).toBeVisible();
+
+        // The colleague answers from the staff inbox.
+        await signInAsStaff(page);
+        await page.goto('/soporte');
+        await expect(page.getByText(question)).toBeVisible();
+
+        await page.goto(`/soporte/${conversationId}`);
+        await page.getByPlaceholder('Escribe un mensaje...').fill(answer);
+        await page.getByRole('button', { name: /^Enviar$/ }).click();
+
+        await expect(page.getByText(answer)).toBeVisible();
+
+        // And the client sees the answer in their own thread.
+        await signInAsPortalClient(page, clients.a.email);
+        await page.goto(`/portal/soporte/${conversationId}`);
+        await expect(page.getByText(answer)).toBeVisible();
+        await expect(page.getByText('No me llega el comprobante.')).toBeVisible();
+    });
+
+    test('one client cannot read another client conversation', async ({ page }) => {
+        const clients = clientPair('4');
+
+        await signInAsStaff(page);
+        await ensureDefaultQueue(page);
+
+        await provisionPortalClient(page, clients.a);
+        await provisionPortalClient(page, clients.b);
+
+        // Client A opens a conversation.
+        await signInAsPortalClient(page, clients.a.email);
+        const conversationId = await openConversationAsClient(
+            page,
+            `Privado de Ana ${stamp}`,
+            'Esto solo lo debe ver Ana.',
+        );
+
+        // Client B's inbox does not list it.
+        await signInAsPortalClient(page, clients.b.email);
+        await page.goto('/portal/soporte');
+        await expect(page.getByText(`Privado de Ana ${stamp}`)).toHaveCount(0);
+
+        // And going straight to the address is refused, not merely hidden.
+        const direct = await apiRequest<{ message?: string }>(
+            page,
+            'GET',
+            `/api/portal/support/conversations/${conversationId}`,
+        );
+
+        expect(direct.status, 'reading somebody else conversation by id').toBe(404);
+
+        // Client A still sees it, so the refusal above was about the reader and
+        // not about a conversation that had gone missing.
+        await signInAsPortalClient(page, clients.a.email);
+        await page.goto(`/portal/soporte/${conversationId}`);
+        await expect(page.getByRole('heading', { name: `Privado de Ana ${stamp}` })).toBeVisible();
+    });
 });

@@ -87,6 +87,13 @@ class DispatchAutomations implements ShouldQueue
                 'subject_type' => $event->subject_type,
                 'subject_id' => $event->subject_id,
                 'metadata' => $event->metadata,
+                // Actions address the subject by its own id, so the keys they
+                // read have to sit at the top level of the snapshot instead of
+                // nested under `metadata`. Left nested, `conversation_id` is
+                // never found and every support action silently does nothing
+                // while still reporting success.
+                'conversation_id' => $this->auditConversationId($event),
+                'client_id' => $event->metadata['client_id'] ?? null,
             ], "audit:{$event->id}");
 
             if ($run->wasRecentlyCreated) {
@@ -103,6 +110,31 @@ class DispatchAutomations implements ShouldQueue
         if ($events->isNotEmpty()) {
             $cursor->update(['last_source_id' => $events->last()->id]);
         }
+    }
+
+    /**
+     * The conversation an audit event is about, or null.
+     *
+     * Two ways of naming it are honoured, because both occur in practice: an
+     * event that carries the conversation id in its metadata, and an event whose
+     * subject *is* the conversation — the shape a "message received on this
+     * thread" event naturally has.
+     */
+    private function auditConversationId(AuditEvent $event): ?int
+    {
+        $fromMetadata = $event->metadata['conversation_id'] ?? null;
+
+        if ($fromMetadata !== null) {
+            return (int) $fromMetadata;
+        }
+
+        $subjectType = (string) $event->subject_type;
+
+        if (str_ends_with($subjectType, 'SupportConversation')) {
+            return (int) $event->subject_id;
+        }
+
+        return null;
     }
 
     /**
@@ -132,61 +164,82 @@ class DispatchAutomations implements ShouldQueue
     {
         $now = now();
 
-        $rules = AutomationRule::where('active', true)
+        $ruleIds = AutomationRule::where('active', true)
             ->where('trigger_type', 'schedule')
             ->where('next_run_at', '<=', $now)
             ->whereHas('actions', function ($q) {
                 $q->where('active', true);
             })
-            ->with(['actions' => function ($q) {
-                $q->where('active', true)->orderBy('position');
-            }])
-            ->chunkById(50, function ($rules) use ($now) {
-                foreach ($rules as $rule) {
-                    $this->createScheduledRun($rule, $now);
+            ->pluck('id');
+
+        foreach ($ruleIds as $ruleId) {
+            // The transaction decides whether a run was created and for which
+            // occurrence; the execution is dispatched only once that work has
+            // committed.
+            //
+            // Dispatching from inside the transaction would let a worker pick the
+            // run up while the row is still uncommitted, so it would read a
+            // `pending` run its own connection cannot see and fail. The
+            // transaction therefore returns the id to execute and does nothing
+            // else with it here.
+            $runId = DB::transaction(function () use ($ruleId, $now): ?int {
+                $rule = AutomationRule::query()
+                    ->whereKey($ruleId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                if (! $rule->active) {
+                    return null;
                 }
+
+                // Re-read under the lock: the due check above ran unlocked, and
+                // a concurrent dispatch may have already moved the rule forward.
+                $occurrence = $rule->next_run_at;
+
+                if (! $occurrence || $occurrence->gt($now)) {
+                    return null;
+                }
+
+                // Keyed on the occurrence itself, so one occurrence can never
+                // produce two runs while a later one still can.
+                $occurrenceKey = "schedule:{$rule->id}:{$occurrence->toISOString()}";
+
+                $run = AutomationRun::firstOrCreate(
+                    ['automation_rule_id' => $rule->id, 'occurrence_key' => $occurrenceKey],
+                    [
+                        'status' => 'pending',
+                        'trigger_snapshot' => [
+                            'scheduled_at' => $occurrence->toISOString(),
+                            'trigger_config' => $rule->trigger_config,
+                        ],
+                        'started_at' => $now,
+                    ]
+                );
+
+                // Advanced from the locked occurrence whether or not this
+                // occurrence had already been processed, so a rule left due by an
+                // interrupted pass still moves forward instead of re-firing.
+                $nextRun = $this->calculateNextRun($rule, $occurrence);
+                if ($nextRun) {
+                    $rule->update(['next_run_at' => $nextRun]);
+                }
+
+                if (! $run->wasRecentlyCreated) {
+                    return null;
+                }
+
+                if (! $this->evaluateScheduleConditions($rule)) {
+                    $run->update(['status' => 'skipped', 'finished_at' => now()]);
+
+                    return null;
+                }
+
+                return $run->id;
             });
-    }
 
-    private function createScheduledRun(AutomationRule $rule, Carbon $now): void
-    {
-        // Occurrence authority: the occurrence IS the locked next_run_at value.
-        // Re-read the rule to get the authoritative occurrence time.
-        $rule->refresh();
-        $occurrence = $rule->next_run_at;
-
-        if (! $occurrence || $occurrence->gt($now)) {
-            // Future or null: nothing to do for this scan.
-            return;
-        }
-
-        // Occurrence key uses the locked occurrence, NOT the current scan time.
-        $occurrenceKey = "schedule:{$rule->id}:{$occurrence->toISOString()}";
-
-        $run = AutomationRun::firstOrCreate(
-            ['automation_rule_id' => $rule->id, 'occurrence_key' => $occurrenceKey],
-            [
-                'status' => 'pending',
-                'trigger_snapshot' => [
-                    'scheduled_at' => $occurrence->toISOString(),
-                    'trigger_config' => $rule->trigger_config,
-                ],
-                'started_at' => $now,
-            ]
-        );
-
-        if ($run->wasRecentlyCreated) {
-            if ($this->evaluateScheduleConditions($rule)) {
-                ExecuteAutomationRun::dispatch($run->id);
-            } else {
-                $run->update(['status' => 'skipped', 'finished_at' => now()]);
+            if ($runId !== null) {
+                ExecuteAutomationRun::dispatch($runId);
             }
-        }
-
-        // Calculate next run FROM the occurrence that just fired.
-        $nextRun = $this->calculateNextRun($rule, $occurrence);
-        if ($nextRun) {
-            $rule->update(['next_run_at' => $nextRun]);
         }
     }
 
@@ -226,7 +279,7 @@ class DispatchAutomations implements ShouldQueue
     private function evaluateScheduleConditions(AutomationRule $rule): bool
     {
         $conditions = $rule->condition_config;
-        
+
         // Schedule triggers MUST NOT have dynamic conditions.
         // Non-empty condition_config is a configuration error.
         if (! empty($conditions)) {
@@ -330,20 +383,33 @@ class DispatchAutomations implements ShouldQueue
             $minDays = $rule->trigger_config['min_days_overdue'] ?? 1;
             $asOf = now()->subDays($minDays)->toDateString();
 
-            // Use ReceivablesService::list() with authoritative filters
-            $receivables = app(ReceivablesService::class)->list([
-                'overdue' => true,
-                'as_of' => $asOf,
-                'outstanding_only' => true,
-            ], 1, 500); // Batch up to 500
+            // Batch size, overridable per rule so a large portfolio can be
+            // walked in smaller slices. Clamped so a hand-edited config cannot
+            // ask for an unbounded page.
+            $perPage = max(1, min(500, (int) ($rule->trigger_config['per_page'] ?? 500)));
 
-            foreach ($receivables['items'] as $clientData) {
-                $run = $this->findOrCreateAutomationRun($rule, $clientData, "receivable_overdue:{$clientData['client_id']}:{$asOf}");
+            // ReceivablesService::list() is the authoritative source: the ageing
+            // figures and the overdue balance are computed there, not re-derived
+            // here. Every page is walked, because stopping after the first would
+            // silently skip every client past the page size.
+            $page = 1;
+            do {
+                $receivables = app(ReceivablesService::class)->list([
+                    'overdue' => true,
+                    'as_of' => $asOf,
+                    'outstanding_only' => true,
+                ], $page, $perPage);
 
-                if ($run->wasRecentlyCreated) {
-                    ExecuteAutomationRun::dispatch($run->id);
+                foreach ($receivables['items'] as $clientData) {
+                    $run = $this->findOrCreateAutomationRun($rule, $clientData, "receivable_overdue:{$clientData['client_id']}:{$asOf}");
+
+                    if ($run->wasRecentlyCreated) {
+                        ExecuteAutomationRun::dispatch($run->id);
+                    }
                 }
-            }
+
+                $page++;
+            } while ($page <= $receivables['last_page']);
         }
     }
 

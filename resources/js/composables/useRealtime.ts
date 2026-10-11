@@ -1,10 +1,42 @@
 import { useRealtimeStore } from '@/stores/realtime'
 
 /**
- * Composable for using the realtime store with type-safe channel subscriptions
+ * Composable for using the realtime store with type-safe channel subscriptions.
  */
 export function useRealtime() {
   const realtime = useRealtimeStore()
+
+  /**
+   * Join a channel, once the connection actually exists.
+   *
+   * `initialize()` is asynchronous — it fetches the VAPID public key before Echo
+   * is constructed — so a caller that subscribed straight after asking for a
+   * connection was racing it and lost the subscription every time. The throw from
+   * `joinPrivateChannel` on a missing Echo then escaped `onMounted` and took the
+   * whole screen down: the conversation rendered with no subject and no error,
+   * because realtime is an enhancement that reading and sending messages over
+   * HTTP do not depend on.
+   *
+   * So the ordering is fixed here, in one place, and a connection that never
+   * arrives is recorded by the store and shrugged off. Callers get an
+   * unsubscribe function either way.
+   */
+  function join(channel: string, handlers: Record<string, Function>): () => void {
+    if (!realtime.isConnected) {
+      void realtime
+        .initialize()
+        .catch(() => undefined)
+        .finally(() => {
+          realtime.joinPrivateChannel(channel, handlers)
+        })
+    } else {
+      realtime.joinPrivateChannel(channel, handlers)
+    }
+
+    return () => {
+      realtime.leaveChannel(channel)
+    }
+  }
 
   /**
    * Subscribe to a support conversation channel
@@ -19,11 +51,7 @@ export function useRealtime() {
     onResolution?: (data: any) => void
     onReopen?: (data: any) => void
   }) {
-    if (!realtime.isConnected) {
-      realtime.initialize()
-    }
-
-    realtime.joinPrivateChannel(`support.conversation.${conversationId}`, {
+    return join(`support.conversation.${conversationId}`, {
       'message.created': (data: any) => {
         if (data.message?.message_kind === 'note') {
           callbacks.onNote?.(data.message)
@@ -56,10 +84,6 @@ export function useRealtime() {
         callbacks.onConversationUpdate?.(data)
       },
     })
-
-    return () => {
-      realtime.leaveChannel(`support.conversation.${conversationId}`)
-    }
   }
 
   /**
@@ -68,19 +92,11 @@ export function useRealtime() {
   function subscribeToStaffConversation(conversationId: number, callbacks: {
     onNote?: (message: any) => void
   }) {
-    if (!realtime.isConnected) {
-      realtime.initialize()
-    }
-
-    realtime.joinPrivateChannel(`support.staff.conversation.${conversationId}`, {
+    return join(`support.staff.conversation.${conversationId}`, {
       'note.created': (data: any) => {
         callbacks.onNote?.(data.message)
       },
     })
-
-    return () => {
-      realtime.leaveChannel(`support.staff.conversation.${conversationId}`)
-    }
   }
 
   /**
@@ -90,11 +106,7 @@ export function useRealtime() {
     onNewConversation?: (conversation: any) => void
     onConversationUpdate?: (data: any) => void
   }) {
-    if (!realtime.isConnected) {
-      realtime.initialize()
-    }
-
-    realtime.joinPrivateChannel(`support.queue.${queueId}`, {
+    return join(`support.queue.${queueId}`, {
       'conversation.created': (data: any) => {
         callbacks.onNewConversation?.(data.conversation)
       },
@@ -102,10 +114,6 @@ export function useRealtime() {
         callbacks.onConversationUpdate?.(data)
       },
     })
-
-    return () => {
-      realtime.leaveChannel(`support.queue.${queueId}`)
-    }
   }
 
   /**
@@ -116,11 +124,32 @@ export function useRealtime() {
     onJoining?: (member: any) => void
     onLeaving?: (member: any) => void
   }) {
+    const channel = `support.user.${userId}`
+
     if (!realtime.isConnected) {
-      realtime.initialize()
+      void realtime
+        .initialize()
+        .catch(() => undefined)
+        .finally(() => {
+          realtime.joinPresenceChannel(channel, {
+            'presence:here': (members: any) => {
+              callbacks.onHere?.(members)
+            },
+            'presence:joining': (member: any) => {
+              callbacks.onJoining?.(member)
+            },
+            'presence:leaving': (member: any) => {
+              callbacks.onLeaving?.(member)
+            },
+          })
+        })
+
+      return () => {
+        realtime.leaveChannel(channel)
+      }
     }
 
-    realtime.joinPresenceChannel(`support.user.${userId}`, {
+    realtime.joinPresenceChannel(channel, {
       'presence:here': (members: any) => {
         callbacks.onHere?.(members)
       },
@@ -133,7 +162,7 @@ export function useRealtime() {
     })
 
     return () => {
-      realtime.leaveChannel(`support.user.${userId}`)
+      realtime.leaveChannel(channel)
     }
   }
 

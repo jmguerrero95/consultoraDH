@@ -141,9 +141,11 @@ async function loadConversation() {
   loading.value = true;
   error.value = null;
   try {
-    const response = await api.support.conversation(parseInt(route.params.id as string), {});
-    conversation.value = response.data;
-    messages.value = response.data.messages || [];
+    // The portal's own endpoint. The staff one is permission-guarded, so a client
+    // asking it was refused and the screen rendered with no conversation in it.
+    const response = await api.portal.conversation(parseInt(route.params.id as string), {});
+    conversation.value = response as any;
+    messages.value = (response as any).messages || [];
   } catch (e) {
     error.value = 'Error al cargar la conversación';
     console.error(e);
@@ -157,10 +159,10 @@ async function sendMessage() {
   
   sending.value = true;
   try {
-    const response = await api.support.sendMessage(conversation.value!.id, {
+    const response = await api.portal.sendMessage(conversation.value!.id, {
       body_text: replyText.value.trim(),
     });
-    const newMessage = response.data;
+    const newMessage = response as any;
     messages.value.push(newMessage);
     replyText.value = '';
     scrollToBottom();
@@ -173,8 +175,8 @@ async function sendMessage() {
 
 async function uploadAttachment(file: File) {
   try {
-    const response = await api.support.uploadAttachment(conversation.value!.id, file);
-    const attachment = response.data;
+    const response = await api.portal.uploadAttachment(conversation.value!.id, file);
+    const attachment = response as any;
     await sendMessageWithAttachment(attachment.id);
   } catch (e) {
     console.error('Error uploading attachment:', e);
@@ -183,7 +185,7 @@ async function uploadAttachment(file: File) {
 
 async function sendMessageWithAttachment(attachmentId: number) {
   try {
-    await api.support.sendMessageWithAttachment(conversation.value!.id, {
+    await api.portal.sendMessage(conversation.value!.id, {
       body_text: 'Adjunto',
       attachment_ids: [attachmentId]
     });

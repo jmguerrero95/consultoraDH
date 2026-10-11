@@ -14,6 +14,8 @@ class AutomationActionRun extends Model
 
     protected $table = 'automation_action_runs';
 
+    public $timestamps = false;
+
     protected $fillable = [
         'automation_run_id',
         'automation_action_id',

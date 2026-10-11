@@ -6,7 +6,6 @@ namespace App\Services;
 
 use App\Models\Client;
 use App\Models\SupportConversation;
-use App\Models\SupportDelivery;
 use App\Models\SupportInboundEmail;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
@@ -17,6 +16,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Throwable;
+use ZBateson\MailMimeParser\Header\AbstractHeader;
 use ZBateson\MailMimeParser\Header\AddressHeader;
 use ZBateson\MailMimeParser\MailMimeParser;
 use ZBateson\MailMimeParser\Message as MimeMessage;
@@ -97,7 +97,7 @@ class SupportEmailIngressService
     {
         try {
             $message = $this->mimeParser->parse($rawEmail, false);
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             Log::error('Email parse failed', [
                 'exception' => $e::class,
                 'error' => $e->getMessage(),
@@ -136,7 +136,7 @@ class SupportEmailIngressService
     {
         // Typed header objects expose their decoded form already; anything else
         // is treated as the raw header text.
-        if ($value instanceof \ZBateson\MailMimeParser\Header\AbstractHeader) {
+        if ($value instanceof AbstractHeader) {
             $value = $value->getDecodedValue();
         }
 
@@ -420,13 +420,29 @@ class SupportEmailIngressService
     private function createReply(SupportConversation $conversation, array $parsed, string $rawEmail, string $fingerprint): array
     {
         return DB::transaction(function () use ($conversation, $parsed, $rawEmail, $fingerprint) {
-            $conversation->lockForUpdate();
-            $conversation = $conversation->fresh();
+            // The lock has to be part of the query that reads the row. Calling
+            // `lockForUpdate()` for its side effect locks nothing — it returns a
+            // builder, and discarding it leaves the conversation unprotected, so
+            // the following read can still observe a state another delivery has
+            // already changed.
+            $conversation = SupportConversation::query()
+                ->whereKey($conversation->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            if ($conversation === null) {
+                return ['status' => 'quarantined', 'inbound_email_id' => null];
+            }
 
             if ($conversation->isTerminal()) {
-                $inbound = $this->quarantineEmail($parsed, $rawEmail, $fingerprint, 'conversation_terminal');
+                // `quarantineEmail` returns the result array, not the model.
+                $quarantine = $this->quarantineEmail($parsed, $rawEmail, $fingerprint, 'conversation_terminal');
 
-                return ['status' => 'quarantined', 'inbound_email_id' => $inbound->id];
+                return [
+                    'status' => 'quarantined',
+                    'inbound_email_id' => $quarantine['inbound_email_id'],
+                    'reason' => $quarantine['reason'],
+                ];
             }
 
             // Determine sender kind
@@ -625,5 +641,4 @@ class SupportEmailIngressService
             throw $e;
         }
     }
-
 }

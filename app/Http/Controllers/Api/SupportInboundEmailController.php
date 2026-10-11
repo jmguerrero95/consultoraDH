@@ -55,7 +55,9 @@ class SupportInboundEmailController extends Controller
             // Create or find existing conversation
             $conversation = SupportConversation::create([
                 'client_id' => $client->id,
-                'queue_id' => $validated['queue_id'],
+                // `nullable` means the key is absent when the caller does not
+                // name a queue, so it cannot be read by key.
+                'queue_id' => $validated['queue_id'] ?? null,
                 'subject' => $validated['subject'],
                 'status' => 'waiting_staff',
                 'priority' => 'normal',

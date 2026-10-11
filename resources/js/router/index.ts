@@ -298,6 +298,40 @@ const routes: RouteRecordRaw[] = [
                 },
             },
             {
+                // Under Configuración: a Telegram destination is configuration of
+                // where notifications go, not an activity that happens to be
+                // performed from a settings screen.
+                path: 'settings/telegram',
+                name: 'telegram-settings',
+                component: () => import('@/pages/settings/TelegramSettingsPage.vue'),
+                meta: {
+                    title: 'Notificaciones por Telegram',
+                    nav: {
+                        label: 'Notificaciones por Telegram',
+                        icon: 'bi-telegram',
+                        order: 92,
+                    },
+                    permission: 'notification_channels.manage',
+                },
+            },
+            {
+                // Its own entry rather than a setting: a rule is executable
+                // configuration with its own lifecycle (activate, deactivate, run
+                // history), which does not belong under another module's settings.
+                path: 'automatizaciones',
+                name: 'automations',
+                component: () => import('@/pages/automations/AutomationPage.vue'),
+                meta: {
+                    title: 'Automatizaciones',
+                    nav: {
+                        label: 'Automatizaciones',
+                        icon: 'bi-magic',
+                        order: 65,
+                    },
+                    permission: 'automations.view',
+                },
+            },
+            {
                 path: 'planillas',
                 name: 'planillas',
                 component: () => import('@/pages/planillas/PlanillaListPage.vue'),

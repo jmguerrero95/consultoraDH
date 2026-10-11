@@ -2,29 +2,47 @@
 
 declare(strict_types=1);
 
-namespace Tests\Feature\A06;
-
+/**
+ * A06 — the automation dispatcher and the executor it hands work to.
+ *
+ * ## What these tests are actually asserting
+ *
+ * The earlier version of this file passed while the feature was inert. Every
+ * support action reported `succeeded` having changed nothing, because the
+ * conversation it was supposed to act on was never reachable from the trigger
+ * snapshot; the schedule tests called `firstOrCreate()` from the test body, so
+ * they were asserting the test's own copy of the logic rather than the job's; and
+ * the partial-retry test retried with the cause still unfixed and expected it to
+ * fail again, which a permanently broken action would also satisfy.
+ *
+ * So the rule applied throughout this file is: **drive the real jobs and assert
+ * the resulting business state**, never the bookkeeping that describes it. An
+ * action that ran is proven by the queue, the assignee or the priority having
+ * moved; a retry that worked is proven by the run reaching `succeeded`.
+ */
+use App\Domain\Periods\MonthlyPeriod as MonthValue;
+use App\Domain\Support\SupportConversationPriority;
+use App\Domain\Users\UserStatus;
+use App\Jobs\DispatchAutomations;
+use App\Jobs\ExecuteAutomationRun;
 use App\Models\AuditEvent;
-use App\Domain\Receivables\ReceivablesService;
-use App\Domain\Support\Actions\AssignConversation;
-use App\Domain\Support\Actions\ChangeConversationPriority;
-use App\Domain\Support\Actions\ChangeConversationQueue;
 use App\Models\AutomationAction;
 use App\Models\AutomationActionRun;
 use App\Models\AutomationRule;
 use App\Models\AutomationRun;
 use App\Models\Client;
+use App\Models\MonthlyObligation;
+use App\Models\MonthlyPeriod;
 use App\Models\OperationalTask;
 use App\Models\SupportConversation;
 use App\Models\SupportQueue;
-use App\Models\SupportSlaEvent;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Event;
-use Tests\TestCase;
+use Illuminate\Support\Facades\Notification;
 
-uses(TestCase::class, RefreshDatabase::class)->in('Feature');
+uses()->group('A06');
+uses(RefreshDatabase::class);
 
 beforeEach(function (): void {
     seedRoles();
@@ -36,284 +54,18 @@ beforeEach(function (): void {
     $this->assignee->assignRole('Support');
 });
 
-test('schedule occurrence authority uses locked next_run_at', function (): void {
+/**
+ * A rule with one action, wired to a trigger of the given type.
+ *
+ * @param  array<string, mixed>  $triggerConfig
+ * @param  array<string, mixed>  $actionConfig
+ */
+function automationRule(string $triggerType, array $triggerConfig, string $actionType, array $actionConfig, User $owner, int $position = 0): AutomationRule
+{
     $rule = AutomationRule::create([
-        'name' => 'Schedule Test',
-        'trigger_type' => 'schedule',
-        'trigger_config' => [
-            'frequency' => 'daily',
-            'time' => '12:00',
-        ],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => true,
-        'next_run_at' => Carbon::parse('2026-10-10 12:00:00'),
-    ]);
-
-    $occurrence = Carbon::parse('2026-10-10 12:00:00');
-    $laterScan = Carbon::parse('2026-10-10 12:05:00');
-
-    // First scan at 12:05 - should create run with occurrence 12:00
-    $run = AutomationRun::firstOrCreate(
-        ['automation_rule_id' => $rule->id, 'occurrence_key' => "schedule:{$rule->id}:{$occurrence->toISOString()}"],
-        ['status' => 'pending', 'trigger_snapshot' => ['scheduled_at' => $occurrence->toISOString()], 'started_at' => $laterScan]
-    );
-
-    expect($run->wasRecentlyCreated)->toBeTrue();
-    expect($run->trigger_snapshot['scheduled_at'])->toBe($occurrence->toISOString());
-
-    // Second scan at 12:10 - should NOT create duplicate run
-    $laterScan2 = Carbon::parse('2026-10-10 12:10:00');
-    $run2 = AutomationRun::firstOrCreate(
-        ['automation_rule_id' => $rule->id, 'occurrence_key' => "schedule:{$rule->id}:{$occurrence->toISOString()}"],
-        ['status' => 'pending', 'trigger_snapshot' => ['scheduled_at' => $occurrence->toISOString()], 'started_at' => $laterScan2]
-    );
-
-    expect($run2->wasRecentlyCreated)->toBeFalse();
-    expect($run2->id)->toBe($run->id);
-});
-
-test('repeated scan creates only one run', function (): void {
-    $rule = AutomationRule::create([
-        'name' => 'Schedule Test',
-        'trigger_type' => 'schedule',
-        'trigger_config' => [
-            'frequency' => 'daily',
-            'time' => '12:00',
-        ],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => true,
-        'next_run_at' => Carbon::parse('2026-10-10 12:00:00'),
-    ]);
-
-    // Simulate the dispatch logic
-    $occurrence = $rule->next_run_at;
-    $occurrenceKey = "schedule:{$rule->id}:{$occurrence->toISOString()}";
-
-    // First dispatch
-    $run1 = AutomationRun::firstOrCreate(
-        ['automation_rule_id' => $rule->id, 'occurrence_key' => $occurrenceKey],
-        ['status' => 'pending', 'trigger_snapshot' => ['scheduled_at' => $occurrence->toISOString()], 'started_at' => now()]
-    );
-    expect($run1->wasRecentlyCreated)->toBeTrue();
-
-    // Second dispatch (late scan)
-    $run2 = AutomationRun::firstOrCreate(
-        ['automation_rule_id' => $rule->id, 'occurrence_key' => $occurrenceKey],
-        ['status' => 'pending', 'trigger_snapshot' => ['scheduled_at' => $occurrence->toISOString()], 'started_at' => now()->addMinutes(10)]
-    );
-    expect($run2->wasRecentlyCreated)->toBeFalse();
-    expect($run2->id)->toBe($run1->id);
-
-    // Only one run exists
-    expect(AutomationRun::where('automation_rule_id', $rule->id)->count())->toBe(1);
-});
-
-test('nonempty schedule condition rejected', function (): void {
-    $response = $this->actingAs($this->owner)
-        ->postJson('/api/automations', [
-            'name' => 'Test Rule',
-            'trigger_type' => 'schedule',
-            'trigger_config' => [
-                'frequency' => 'daily',
-                'time' => '12:00',
-            ],
-            'condition_config' => [
-                ['field' => 'queue_id', 'operator' => 'eq', 'value' => 1],
-            ],
-            'actions' => [
-                [
-                    'action_type' => 'internal_notification',
-                    'config' => [
-                        'user_ids' => [$this->owner->id],
-                        'title' => 'Test',
-                        'message' => 'Test',
-                    ],
-                    'position' => 0,
-                ],
-            ],
-        ]);
-
-    $response->assertStatus(422);
-    $response->assertJsonPath('errors.0', 'Los disparadores programados no admiten condiciones dinámicas');
-});
-
-test('schedule condition validation in update', function (): void {
-    $rule = AutomationRule::create([
-        'name' => 'Test Rule',
-        'trigger_type' => 'schedule',
-        'trigger_config' => [
-            'frequency' => 'daily',
-            'time' => '12:00',
-        ],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => false,
-    ]);
-
-    $response = $this->actingAs($this->owner)
-        ->patchJson("/api/automations/{$rule->id}", [
-            'condition_config' => [
-                ['field' => 'queue_id', 'operator' => 'eq', 'value' => 1],
-            ],
-        ]);
-
-    $response->assertStatus(422);
-    $response->assertJsonPath('errors.0', 'Los disparadores programados no admiten condiciones dinámicas');
-});
-
-test('receivable trigger uses receivables service list', function (): void {
-    $client = Client::factory()->create();
-    $user = User::factory()->create(['account_type' => 'client', 'client_id' => $client->id]);
-
-    $rule = AutomationRule::create([
-        'name' => 'Receivable Overdue',
-        'trigger_type' => 'receivable_overdue',
-        'trigger_config' => [
-            'min_days_overdue' => 1,
-        ],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => true,
-    ]);
-
-    // Mock the ReceivablesService to verify it's called with correct params
-    $service = app(ReceivablesService::class);
-
-    // We can't easily mock the service here, but we can verify the rule doesn't crash
-    $this->actingAs($this->owner)
-        ->postJson("/api/automations/validate-preview", [
-            'trigger_type' => 'receivable_overdue',
-            'trigger_config' => ['min_days_overdue' => 1],
-            'condition_config' => [],
-            'actions' => [
-                [
-                    'action_type' => 'internal_notification',
-                    'config' => [
-                        'user_ids' => [$this->owner->id],
-                        'title' => 'Test',
-                        'message' => 'Test',
-                    ],
-                    'position' => 0,
-                ],
-            ],
-        ])->assertStatus(200);
-});
-
-test('create_task uses a05 contract', function (): void {
-    Event::fake();
-
-    $rule = AutomationRule::create([
-        'name' => 'Create Task',
-        'trigger_type' => 'audit_action',
-        'trigger_config' => ['action_name' => 'client_created'],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => true,
-    ]);
-
-    AutomationAction::create([
-        'automation_rule_id' => $rule->id,
-        'position' => 0,
-        'action_type' => 'create_task',
-        'config' => [
-            'title' => 'Automated Task',
-            'description' => 'Auto created',
-            'assignee_user_id' => $this->assignee->id,
-            'priority' => 'normal',
-            'due_on' => now()->addDay()->toDateString(),
-        ],
-        'active' => true,
-    ]);
-
-    // Trigger the audit action by creating AuditEvent record
-    $client = Client::factory()->create();
-    AuditEvent::query()->create([
-        'action' => 'client_created',
-        'subject_type' => get_class($client),
-        'subject_id' => $client->id,
-        'causer_type' => get_class($this->owner),
-        'causer_id' => $this->owner->id,
-        'metadata' => [],
-    ]);
-
-    // Run the dispatch job
-    $job = new \App\Jobs\DispatchAutomations();
-    $job->handle();
-
-    // Verify task was created with A05 contract
-    $task = OperationalTask::where('title', 'Automated Task')->first();
-    expect($task)->not->toBeNull();
-    expect($task->assigned_to)->toBe($this->assignee->id);
-    expect($task->created_by)->toBe($this->owner->id);
-});
-
-test('inactive owner blocks execution', function (): void {
-    $inactiveOwner = User::factory()->create(['account_type' => 'staff', 'status' => \App\Domain\Users\UserStatus::Inactive]);
-    $inactiveOwner->assignRole('Super Admin');
-
-    $rule = AutomationRule::create([
-        'name' => 'Inactive Owner Rule',
-        'trigger_type' => 'audit_action',
-        'trigger_config' => ['action_name' => 'client_created'],
-        'condition_config' => [],
-        'owner_user_id' => $inactiveOwner->id,
-        'active' => true,
-    ]);
-
-    AutomationAction::create([
-        'automation_rule_id' => $rule->id,
-        'position' => 0,
-        'action_type' => 'internal_notification',
-        'config' => [
-            'user_ids' => [$this->owner->id],
-            'title' => 'Test',
-            'message' => 'Test',
-        ],
-        'active' => true,
-    ]);
-    
-    $client = Client::factory()->create();
-    AuditEvent::query()->create([
-        'action' => 'client_created',
-        'subject_type' => get_class($client),
-        'subject_id' => $client->id,
-        'causer_type' => get_class($this->owner),
-        'causer_id' => $this->owner->id,
-        'metadata' => [],
-    ]);
-
-    $job = new \App\Jobs\DispatchAutomations();
-    $job->handle();
-
-    // Run is created but ExecuteAutomationRun marks it as blocked
-    $run = AutomationRun::where('automation_rule_id', $rule->id)->first();
-    expect($run)->not->toBeNull();
-    
-    // Run the ExecuteAutomationRun job to apply the block
-    \App\Jobs\ExecuteAutomationRun::dispatch($run->id)->handle();
-    
-    $run->refresh();
-    expect($run->status)->toBe('blocked');
-    expect($run->error_code)->toBe('owner_permissions_lost');
-});
-
-test('permission revoked before execution blocks', function (): void {
-    // Create a user with NO roles, give permissions directly
-    $owner = User::factory()->create(['account_type' => 'staff']);
-    // Give automations.manage and tasks.manage directly (no roles)
-    $owner->givePermissionTo(['automations.manage', 'tasks.manage']);
-    $owner->forgetCachedPermissions();
-    $owner = $owner->fresh();
-
-    $assignee = User::factory()->create(['account_type' => 'staff']);
-    $assignee->assignRole('Support');
-
-    $rule = AutomationRule::create([
-        'name' => 'Permission Test',
-        'trigger_type' => 'audit_action',
-        'trigger_config' => ['action_name' => 'client_created'],
+        'name' => 'Rule '.$triggerType.' '.$actionType,
+        'trigger_type' => $triggerType,
+        'trigger_config' => $triggerConfig,
         'condition_config' => [],
         'owner_user_id' => $owner->id,
         'active' => true,
@@ -321,171 +73,398 @@ test('permission revoked before execution blocks', function (): void {
 
     AutomationAction::create([
         'automation_rule_id' => $rule->id,
-        'position' => 0,
-        'action_type' => 'create_task',
-        'config' => [
-            'title' => 'Task',
-            'assignee_user_id' => $assignee->id,
-            'due_on' => now()->addDay()->toDateString(),
+        'position' => $position,
+        'action_type' => $actionType,
+        'config' => $actionConfig,
+        'active' => true,
+    ]);
+
+    return $rule;
+}
+
+/**
+ * An audit event whose subject is the conversation itself.
+ *
+ * This is the shape a "something happened on this thread" event has, and it is
+ * what lets the support actions find the conversation they are supposed to act
+ * on. Pointing the event at some unrelated record instead is what let those
+ * actions pass their assertions while doing nothing.
+ */
+function conversationAuditEvent(SupportConversation $conversation, string $action = 'support_message_received'): AuditEvent
+{
+    return AuditEvent::query()->create([
+        'action' => $action,
+        'subject_type' => SupportConversation::class,
+        'subject_id' => $conversation->id,
+        'causer_type' => User::class,
+        'causer_id' => null,
+        'metadata' => ['conversation_id' => $conversation->id],
+    ]);
+}
+
+/**
+ * Run the dispatcher the way the scheduler does.
+ */
+function dispatchAutomations(): void
+{
+    (new DispatchAutomations)->handle();
+}
+
+/* -------------------------------------------------------------------------- */
+/* | | R4 — the schedule occurrence is the locked one                              | */
+/* -------------------------------------------------------------------------- */
+
+test('a due schedule produces one run for the occurrence and advances the rule', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-10-10 12:05:00'));
+
+    $rule = automationRule(
+        'schedule',
+        ['frequency' => 'daily', 'time' => '12:00'],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+        $this->owner,
+    );
+
+    // The rule was due at 12:00 and nobody ran it until 12:05.
+    $rule->update(['next_run_at' => Carbon::parse('2026-10-10 12:00:00')]);
+
+    dispatchAutomations();
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    expect($run->occurrence_key)->toBe("schedule:{$rule->id}:".Carbon::parse('2026-10-10 12:00:00')->toISOString());
+
+    // The snapshot records the occurrence, not the moment the scan happened.
+    expect($run->trigger_snapshot['scheduled_at'])->toBe(Carbon::parse('2026-10-10 12:00:00')->toISOString());
+
+    // The rule moved forward to the next 12:00, so tomorrow is a new occurrence.
+    expect($rule->fresh()->next_run_at->toDateTimeString())->toBe('2026-10-11 12:00:00');
+
+    Carbon::setTestNow();
+});
+
+test('rescanning the same occurrence does not produce a second run', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-10-10 12:05:00'));
+
+    $rule = automationRule(
+        'schedule',
+        ['frequency' => 'daily', 'time' => '12:00'],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+        $this->owner,
+    );
+
+    $rule->update(['next_run_at' => Carbon::parse('2026-10-10 12:00:00')]);
+
+    dispatchAutomations();
+    dispatchAutomations();
+    dispatchAutomations();
+
+    // Three scans of one occurrence, one run.
+    expect(AutomationRun::where('automation_rule_id', $rule->id)->count())->toBe(1);
+
+    // The rule kept advancing with each scan but never re-fired the occurrence.
+    expect($rule->fresh()->next_run_at->toDateTimeString())->toBe('2026-10-11 12:00:00');
+
+    Carbon::setTestNow();
+});
+
+test('a rule that is not due is left alone', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-10-10 11:00:00'));
+
+    $rule = automationRule(
+        'schedule',
+        ['frequency' => 'daily', 'time' => '12:00'],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+        $this->owner,
+    );
+
+    $rule->update(['next_run_at' => Carbon::parse('2026-10-10 12:00:00')]);
+
+    dispatchAutomations();
+
+    expect(AutomationRun::where('automation_rule_id', $rule->id)->count())->toBe(0);
+    expect($rule->fresh()->next_run_at->toDateTimeString())->toBe('2026-10-10 12:00:00');
+
+    Carbon::setTestNow();
+});
+
+test('a deactivated rule produces no run even when it is due', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-10-10 12:05:00'));
+
+    $rule = automationRule(
+        'schedule',
+        ['frequency' => 'daily', 'time' => '12:00'],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+        $this->owner,
+    );
+
+    $rule->update([
+        'next_run_at' => Carbon::parse('2026-10-10 12:00:00'),
+        'active' => false,
+    ]);
+
+    dispatchAutomations();
+
+    expect(AutomationRun::where('automation_rule_id', $rule->id)->count())->toBe(0);
+
+    Carbon::setTestNow();
+});
+
+test('a schedule rule carrying dynamic conditions is skipped, not executed', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-10-10 12:05:00'));
+
+    $rule = automationRule(
+        'schedule',
+        ['frequency' => 'daily', 'time' => '12:00'],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+        $this->owner,
+    );
+
+    // Force an invalid configuration past the API, which would normally refuse it.
+    $rule->update([
+        'next_run_at' => Carbon::parse('2026-10-10 12:00:00'),
+        'condition_config' => [['field' => 'queue_id', 'operator' => 'eq', 'value' => 1]],
+    ]);
+
+    Notification::fake();
+
+    dispatchAutomations();
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    expect($run->status)->toBe('skipped');
+    Notification::assertNothingSent();
+
+    Carbon::setTestNow();
+});
+
+/* -------------------------------------------------------------------------- */
+/* | | R4 — receivables: every page, not just the first                           | */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One client with an obligation due before the reference date and left unpaid.
+ */
+function overdueClient(string $name): Client
+{
+    $employer = a03_employer(client: Client::factory()->create(['first_names' => $name]));
+
+    $period = MonthlyPeriod::query()->firstOrCreate(
+        ['period_month' => MonthValue::fromKey('2026-08')->startsOn()],
+        ['status' => 'open', 'opened_at' => now()],
+    );
+
+    MonthlyObligation::factory()->forPeriod($period)->create([
+        'client_id' => $employer['client']->id,
+        'company_id' => $employer['company']->id,
+        'base_amount_cop' => 200000,
+        // Due 2026-09-10, so it is overdue against any reference date from now.
+        'due_on' => MonthValue::fromKey('2026-08')->startsOn()->copy()->addMonthNoOverflow()->day(10),
+    ]);
+
+    return $employer['client'];
+}
+
+test('the receivable trigger walks every page of overdue clients', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-10-10 09:00:00'));
+
+    // A batch size of one turns three clients into three pages, so the loop has
+    // to advance twice to see all of them.
+    $rule = automationRule(
+        'receivable_overdue',
+        ['min_days_overdue' => 1, 'per_page' => 1],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'Vencido', 'message' => 'Revisar'],
+        $this->owner,
+    );
+
+    overdueClient('Ana');
+    overdueClient('Beto');
+    overdueClient('Caro');
+
+    Notification::fake();
+
+    dispatchAutomations();
+
+    $runs = AutomationRun::where('automation_rule_id', $rule->id)->get();
+
+    // Three clients, three runs. Reading only the first page would have produced
+    // one and dropped the other two without any error.
+    expect($runs)->toHaveCount(3);
+
+    expect($runs->pluck('occurrence_key')->filter(fn ($k) => str_starts_with($k, 'receivable_overdue:')))->toHaveCount(3);
+
+    // The snapshot carries the client the run is about, so the action can address them.
+    $clientIds = $runs->map(fn ($r) => $r->trigger_snapshot['client_id'])->unique();
+    expect($clientIds)->toHaveCount(3);
+
+    Carbon::setTestNow();
+});
+
+test('the receivable trigger is idempotent across repeated scans', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-10-10 09:00:00'));
+
+    $rule = automationRule(
+        'receivable_overdue',
+        ['min_days_overdue' => 1, 'per_page' => 1],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'Vencido', 'message' => 'Revisar'],
+        $this->owner,
+    );
+
+    overdueClient('Ana');
+    overdueClient('Beto');
+
+    dispatchAutomations();
+    dispatchAutomations();
+
+    expect(AutomationRun::where('automation_rule_id', $rule->id)->count())->toBe(2);
+
+    Carbon::setTestNow();
+});
+
+/* -------------------------------------------------------------------------- */
+/* | | R4 — the actions move real business state                                   | */
+/* -------------------------------------------------------------------------- */
+
+test('the queue action moves the conversation to the configured queue', function (): void {
+    Notification::fake();
+
+    $queue = SupportQueue::factory()->create(['name' => 'Facturación', 'slug' => 'facturacion']);
+    $origin = SupportQueue::factory()->create(['name' => 'General', 'slug' => 'general']);
+    $conversation = SupportConversation::factory()->create([
+        'queue_id' => $origin->id,
+        'status' => 'waiting_staff',
+    ]);
+
+    expect($conversation->queue_id)->toBe($origin->id);
+
+    $rule = automationRule(
+        'audit_action',
+        ['action_name' => 'support_message_received'],
+        'assign_support_queue',
+        ['queue_id' => $queue->id],
+        $this->owner,
+    );
+
+    conversationAuditEvent($conversation);
+
+    dispatchAutomations();
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    expect($run->fresh()->status)->toBe('succeeded');
+
+    // The business state, not the action row.
+    expect($conversation->fresh()->queue_id)->toBe($queue->id);
+
+    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->sole();
+    expect($actionRun->status)->toBe('succeeded');
+});
+
+test('the assignee action moves the conversation to the configured user', function (): void {
+    Notification::fake();
+
+    $conversation = SupportConversation::factory()->create(['status' => 'waiting_staff']);
+    expect($conversation->assigned_to_user_id)->toBeNull();
+
+    $rule = automationRule(
+        'audit_action',
+        ['action_name' => 'support_message_received'],
+        'assign_support_user',
+        ['user_id' => $this->assignee->id],
+        $this->owner,
+    );
+
+    conversationAuditEvent($conversation);
+
+    dispatchAutomations();
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    expect($run->fresh()->status)->toBe('succeeded');
+    expect($conversation->fresh()->assigned_to_user_id)->toBe($this->assignee->id);
+});
+
+test('the priority action changes the priority of the conversation', function (): void {
+    Notification::fake();
+
+    $conversation = SupportConversation::factory()->create([
+        'priority' => SupportConversationPriority::Normal,
+        'status' => 'waiting_staff',
+    ]);
+
+    expect($conversation->priority)->toBe(SupportConversationPriority::Normal);
+
+    $rule = automationRule(
+        'audit_action',
+        ['action_name' => 'support_message_received'],
+        'set_support_priority',
+        ['priority' => 'high'],
+        $this->owner,
+    );
+
+    conversationAuditEvent($conversation);
+
+    dispatchAutomations();
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    expect($run->fresh()->status)->toBe('succeeded');
+    expect($conversation->fresh()->priority)->toBe(SupportConversationPriority::High);
+});
+
+test('the task action creates a real task owned by the rule owner', function (): void {
+    Notification::fake();
+
+    $rule = automationRule(
+        'audit_action',
+        ['action_name' => 'client_created'],
+        'create_task',
+        [
+            'title' => 'Revisar expediente',
+            'description' => 'Creado por la automatización',
+            'assignee_user_id' => $this->assignee->id,
             'priority' => 'normal',
+            'due_on' => now()->addDay()->toDateString(),
         ],
-        'active' => true,
-    ]);
-
-    // Revoke the directly-granted tasks.manage permission
-    $owner->revokePermissionTo('tasks.manage');
-    $owner->forgetCachedPermissions();
-    $owner = $owner->fresh();
+        $this->owner,
+    );
 
     $client = Client::factory()->create();
     AuditEvent::query()->create([
         'action' => 'client_created',
-        'subject_type' => get_class($client),
+        'subject_type' => Client::class,
         'subject_id' => $client->id,
-        'causer_type' => get_class($owner),
-        'causer_id' => $owner->id,
-        'metadata' => [],
-    ]);
-
-    $job = new \App\Jobs\DispatchAutomations();
-    $job->handle();
-
-    $run = AutomationRun::where('automation_rule_id', $rule->id)->first();
-    expect($run)->not->toBeNull();
-    
-    // Run ExecuteAutomationRun synchronously to apply the block
-    \App\Jobs\ExecuteAutomationRun::dispatch($run->id)->handle();
-    
-    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->first();
-    expect($actionRun->status)->toBe('blocked');
-    expect($actionRun->error_code)->toBe('action_permission_lost');
-});
-
-test('support queue action uses domain action', function (): void {
-    $queue = SupportQueue::factory()->create(['name' => 'Test Queue', 'slug' => 'test']);
-    $conversation = SupportConversation::factory()->create(['queue_id' => $queue->id]);
-
-    $rule = AutomationRule::create([
-        'name' => 'Assign Queue',
-        'trigger_type' => 'audit_action',
-        'trigger_config' => ['action_name' => 'client_created'],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => true,
-    ]);
-
-    AutomationAction::create([
-        'automation_rule_id' => $rule->id,
-        'position' => 0,
-        'action_type' => 'assign_support_queue',
-        'config' => [
-            'queue_id' => $queue->id,
-        ],
-        'active' => true,
-    ]);
-    
-    $client = Client::factory()->create();
-    AuditEvent::query()->create([
-        'action' => 'client_created',
-        'subject_type' => get_class($client),
-        'subject_id' => $client->id,
-        'causer_type' => get_class($this->owner),
+        'causer_type' => User::class,
         'causer_id' => $this->owner->id,
-        'metadata' => [],
+        'metadata' => ['client_id' => $client->id],
     ]);
 
-    $job = new \App\Jobs\DispatchAutomations();
-    $job->handle();
+    dispatchAutomations();
 
-    $run = AutomationRun::where('automation_rule_id', $rule->id)->first();
-    expect($run)->not->toBeNull();
-    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->first();
-    expect($actionRun->status)->toBe('succeeded');
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    expect($run->fresh()->status)->toBe('succeeded');
+
+    $task = OperationalTask::where('title', 'Revisar expediente')->sole();
+    expect($task->assigned_to)->toBe($this->assignee->id);
+    expect($task->created_by)->toBe($this->owner->id);
 });
 
-test('support assignee action uses domain action', function (): void {
-    $conversation = SupportConversation::factory()->create();
+/* -------------------------------------------------------------------------- */
+/* | | R4 — a retry after the cause is fixed actually completes                    | */
+/* -------------------------------------------------------------------------- */
 
-    $rule = AutomationRule::create([
-        'name' => 'Assign User',
-        'trigger_type' => 'audit_action',
-        'trigger_config' => ['action_name' => 'client_created'],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => true,
-    ]);
+test('a partial run completes on retry once the cause is corrected', function (): void {
+    Notification::fake();
 
-    AutomationAction::create([
-        'automation_rule_id' => $rule->id,
-        'position' => 0,
-        'action_type' => 'assign_support_user',
-        'config' => [
-            'user_id' => $this->assignee->id,
-        ],
-        'active' => true,
-    ]);
-    
-    $client = Client::factory()->create();
-    AuditEvent::query()->create([
-        'action' => 'client_created',
-        'subject_type' => get_class($client),
-        'subject_id' => $client->id,
-        'causer_type' => get_class($this->owner),
-        'causer_id' => $this->owner->id,
-        'metadata' => [],
-    ]);
-
-    $job = new \App\Jobs\DispatchAutomations();
-    $job->handle();
-
-    $run = AutomationRun::where('automation_rule_id', $rule->id)->first();
-    expect($run)->not->toBeNull();
-    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->first();
-    expect($actionRun->status)->toBe('succeeded');
-});
-
-test('priority action uses domain action', function (): void {
-    $conversation = SupportConversation::factory()->create(['priority' => \App\Domain\Support\SupportConversationPriority::Normal]);
-
-    $rule = AutomationRule::create([
-        'name' => 'Set Priority',
-        'trigger_type' => 'audit_action',
-        'trigger_config' => ['action_name' => 'client_created'],
-        'condition_config' => [],
-        'owner_user_id' => $this->owner->id,
-        'active' => true,
-    ]);
-
-    AutomationAction::create([
-        'automation_rule_id' => $rule->id,
-        'position' => 0,
-        'action_type' => 'set_support_priority',
-        'config' => [
-            'priority' => 'high',
-        ],
-        'active' => true,
-    ]);
-    
-    $client = Client::factory()->create();
-    AuditEvent::query()->create([
-        'action' => 'client_created',
-        'subject_type' => get_class($client),
-        'subject_id' => $client->id,
-        'causer_type' => get_class($this->owner),
-        'causer_id' => $this->owner->id,
-        'metadata' => [],
-    ]);
-
-    $job = new \App\Jobs\DispatchAutomations();
-    $job->handle();
-
-    $run = AutomationRun::where('automation_rule_id', $rule->id)->first();
-    expect($run)->not->toBeNull();
-    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->first();
-    expect($actionRun->status)->toBe('succeeded');
-});
-
-test('partial retry skips succeeded action', function (): void {
     $rule = AutomationRule::create([
         'name' => 'Partial Retry',
         'trigger_type' => 'audit_action',
@@ -495,79 +474,174 @@ test('partial retry skips succeeded action', function (): void {
         'active' => true,
     ]);
 
-    // Two actions: one will succeed, one will fail
-    $action1 = AutomationAction::create([
+    // Position 0 succeeds, position 1 cannot: the assignee does not exist yet.
+    $succeeding = AutomationAction::create([
         'automation_rule_id' => $rule->id,
         'position' => 0,
         'action_type' => 'internal_notification',
-        'config' => [
-            'user_ids' => [$this->owner->id],
-            'title' => 'Success',
-            'message' => 'OK',
-        ],
+        'config' => ['user_ids' => [$this->owner->id], 'title' => 'Aviso', 'message' => 'Corrijo algo'],
         'active' => true,
     ]);
 
-    $action2 = AutomationAction::create([
+    $failing = AutomationAction::create([
         'automation_rule_id' => $rule->id,
         'position' => 1,
         'action_type' => 'create_task',
         'config' => [
-            'title' => 'Task',
-            'assignee_user_id' => 99999, // Invalid user - will fail
+            'title' => 'Tareacorrecta',
+            'assignee_user_id' => 999999,
             'due_on' => now()->addDay()->toDateString(),
             'priority' => 'normal',
         ],
         'active' => true,
     ]);
-    
+
     $client = Client::factory()->create();
     AuditEvent::query()->create([
         'action' => 'client_created',
-        'subject_type' => get_class($client),
+        'subject_type' => Client::class,
         'subject_id' => $client->id,
-        'causer_type' => get_class($this->owner),
+        'causer_type' => User::class,
         'causer_id' => $this->owner->id,
+        'metadata' => ['client_id' => $client->id],
+    ]);
+
+    dispatchAutomations();
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    // First pass: one action landed, the other failed, so the run is partial.
+    expect($run->fresh()->status)->toBe('partial');
+
+    $notificationRun = AutomationActionRun::where('automation_run_id', $run->id)
+        ->where('automation_action_id', $succeeding->id)
+        ->sole();
+    expect($notificationRun->status)->toBe('succeeded');
+
+    $failedRun = AutomationActionRun::where('automation_run_id', $run->id)
+        ->where('automation_action_id', $failing->id)
+        ->sole();
+    expect($failedRun->status)->toBe('failed');
+
+    expect(OperationalTask::where('title', 'Tarea correcta')->exists())->toBeFalse();
+
+    // Fix the cause: point the action at a real, active staff member.
+    $failing->update(['config' => [
+        'title' => 'Tarea correcta',
+        'assignee_user_id' => $this->assignee->id,
+        'due_on' => now()->addDay()->toDateString(),
+        'priority' => 'normal',
+    ]]);
+    $failing->refresh();
+
+    // Retry the partial run as the scheduler would.
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    // Now everything succeeded, so the run is no longer partial.
+    expect($run->fresh()->status)->toBe('succeeded');
+
+    // The previously failed action produced the task it was asked for.
+    $failedRun->refresh();
+    expect($failedRun->status)->toBe('succeeded');
+
+    expect(OperationalTask::where('title', 'Tarea correcta')->sole()->assigned_to)->toBe($this->assignee->id);
+
+    // And the action that had already succeeded was not run a second time: it
+    // keeps its original finished_at, because a retry skips it outright.
+    $firstFinishedAt = $notificationRun->fresh()->finished_at;
+    (new ExecuteAutomationRun($run->id))->handle();
+    expect($notificationRun->fresh()->finished_at->toDateTimeString())->toBe($firstFinishedAt->toDateTimeString());
+})->group('R4');
+
+/* -------------------------------------------------------------------------- */
+/* | | R4 — authority: who may run this, and what an unknown action does          | */
+/* -------------------------------------------------------------------------- */
+
+test('an inactive owner blocks the run', function (): void {
+    Notification::fake();
+
+    $inactiveOwner = User::factory()->create(['account_type' => 'staff', 'status' => UserStatus::Inactive]);
+    $inactiveOwner->assignRole('Super Admin');
+
+    $rule = automationRule(
+        'audit_action',
+        ['action_name' => 'client_created'],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+        $inactiveOwner,
+    );
+
+    $client = Client::factory()->create();
+    AuditEvent::query()->create([
+        'action' => 'client_created',
+        'subject_type' => Client::class,
+        'subject_id' => $client->id,
+        'causer_type' => User::class,
+        'causer_id' => $inactiveOwner->id,
         'metadata' => [],
-]);
-    
-    $job = new \App\Jobs\DispatchAutomations();
-    $job->handle();
+    ]);
 
-    $run = AutomationRun::where('automation_rule_id', $rule->id)->first();
-    expect($run->status)->toBe('partial');
+    dispatchAutomations();
 
-    $actionRuns = AutomationActionRun::where('automation_run_id', $run->id)->get();
-    // Check by action ID since order is not guaranteed
-    $action1Run = $actionRuns->where('automation_action_id', $action1->id)->first();
-    $action2Run = $actionRuns->where('automation_action_id', $action2->id)->first();
-    expect($action1Run->status)->toBe('succeeded');
-    expect($action2Run->status)->toBe('failed');
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
 
-    // Now retry the run - should skip succeeded action
-    $run->update(['status' => 'failed']);
-    $action2Run = AutomationActionRun::where('automation_run_id', $run->id)
-        ->where('automation_action_id', $action2->id)
-        ->first();
-    $action2Run->update(['status' => 'failed']); // Reset to failed
+    expect($run->fresh()->status)->toBe('blocked');
+    expect($run->fresh()->error_code)->toBe('owner_permissions_lost');
 
-    // Re-dispatch
-    \App\Jobs\ExecuteAutomationRun::dispatch($run->id)->handle();
-
-    $run->refresh();
-    $actionRuns = AutomationActionRun::where('automation_run_id', $run->id)->get();
-
-    // First action should still be succeeded (not re-executed)
-    $action1Run = $actionRuns->where('automation_action_id', $action1->id)->first();
-    expect($action1Run->status)->toBe('succeeded');
-
-    // Second action should now be succeeded after retry
-    $action2Run = $actionRuns->where('automation_action_id', $action2->id)->first();
-    // The assignee is still invalid, so it will fail again
-    expect($action2Run->status)->toBe('failed');
+    // Nothing reached anybody.
+    Notification::assertNothingSent();
 });
 
-test('unknown action type rejected', function (): void {
+test('a permission revoked after the rule was created blocks the action', function (): void {
+    Notification::fake();
+
+    $owner = User::factory()->create(['account_type' => 'staff']);
+    $owner->givePermissionTo(['automations.manage', 'tasks.manage']);
+
+    $rule = automationRule(
+        'audit_action',
+        ['action_name' => 'client_created'],
+        'create_task',
+        [
+            'title' => 'Tarea',
+            'assignee_user_id' => $this->assignee->id,
+            'due_on' => now()->addDay()->toDateString(),
+            'priority' => 'normal',
+        ],
+        $owner,
+    );
+
+    // Take away exactly the permission this action needs.
+    $owner->revokePermissionTo('tasks.manage');
+
+    $client = Client::factory()->create();
+    AuditEvent::query()->create([
+        'action' => 'client_created',
+        'subject_type' => Client::class,
+        'subject_id' => $client->id,
+        'causer_type' => User::class,
+        'causer_id' => $owner->id,
+        'metadata' => [],
+    ]);
+
+    dispatchAutomations();
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->sole();
+    expect($actionRun->status)->toBe('blocked');
+    expect($actionRun->error_code)->toBe('action_permission_lost');
+
+    // Blocked means it never ran, so no task exists.
+    expect(OperationalTask::where('title', 'Tarea')->exists())->toBeFalse();
+});
+
+test('an unknown action type is blocked rather than silently ignored', function (): void {
+    Notification::fake();
+
     $rule = AutomationRule::create([
         'name' => 'Unknown Action',
         'trigger_type' => 'audit_action',
@@ -577,8 +651,7 @@ test('unknown action type rejected', function (): void {
         'active' => true,
     ]);
 
-    // Directly test the executeAction method with unknown type
-    $action = AutomationAction::create([
+    AutomationAction::create([
         'automation_rule_id' => $rule->id,
         'position' => 0,
         'action_type' => 'unknown_action_type',
@@ -588,19 +661,70 @@ test('unknown action type rejected', function (): void {
 
     $run = AutomationRun::create([
         'automation_rule_id' => $rule->id,
-        'occurrence_key' => 'test:1',
+        'occurrence_key' => 'test:unknown-action',
         'status' => 'pending',
         'trigger_snapshot' => [],
         'started_at' => now(),
     ]);
 
-    $job = new \App\Jobs\ExecuteAutomationRun($run->id);
-    $job->handle();
+    (new ExecuteAutomationRun($run->id))->handle();
 
-    $run->refresh();
-    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->first();
+    // Blocked, and the run is not reported as succeeded.
+    expect($run->fresh()->status)->toBe('partial');
 
-    // Unknown action types are rejected at permission check (blocked, not failed)
+    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->sole();
     expect($actionRun->status)->toBe('blocked');
     expect($actionRun->error_code)->toBe('action_permission_lost');
+});
+
+/* -------------------------------------------------------------------------- */
+/* | | R4 — configuration that the API refuses                                    | */
+/* -------------------------------------------------------------------------- */
+
+test('a schedule rule with dynamic conditions is refused', function (): void {
+    $response = $this->actingAs($this->owner)->postJson('/api/automations', [
+        'name' => 'Regla inválida',
+        'trigger_type' => 'schedule',
+        'trigger_config' => ['frequency' => 'daily', 'time' => '12:00'],
+        'condition_config' => [['field' => 'queue_id', 'operator' => 'eq', 'value' => 1]],
+        'actions' => [[
+            'action_type' => 'internal_notification',
+            'config' => ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+            'position' => 0,
+        ]],
+    ]);
+
+    $response->assertStatus(422);
+    $response->assertJsonPath('errors.0', 'Los disparadores programados no admiten condiciones dinámicas');
+
+    expect(AutomationRule::where('name', 'Regla inválida')->exists())->toBeFalse();
+});
+
+test('adding dynamic conditions to an existing schedule rule is refused', function (): void {
+    $rule = automationRule(
+        'schedule',
+        ['frequency' => 'daily', 'time' => '12:00'],
+        'internal_notification',
+        ['user_ids' => [$this->owner->id], 'title' => 'T', 'message' => 'M'],
+        $this->owner,
+    );
+
+    // An active rule refuses edits outright — that is the separate, deliberate
+    // guard, and it is checked before the payload is even validated.
+    $this->actingAs($this->owner)
+        ->patchJson("/api/automations/{$rule->id}", ['name' => 'Otro nombre'])
+        ->assertStatus(409);
+
+    // Deactivated, the edit is accepted and the condition is refused.
+    $rule->update(['active' => false]);
+
+    $response = $this->actingAs($this->owner)->patchJson("/api/automations/{$rule->id}", [
+        'condition_config' => [['field' => 'queue_id', 'operator' => 'eq', 'value' => 1]],
+    ]);
+
+    $response->assertStatus(422);
+    $response->assertJsonPath('errors.0', 'Los disparadores programados no admiten condiciones dinámicas');
+
+    // The stored rule is untouched.
+    expect($rule->fresh()->condition_config)->toBe([]);
 });

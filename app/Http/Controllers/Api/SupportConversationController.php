@@ -7,9 +7,9 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Support\Actions\AddInternalNote;
 use App\Domain\Support\Actions\AppendStaffReply;
 use App\Domain\Support\Actions\AssignConversation;
-use App\Domain\Support\Actions\CloseConversation;
 use App\Domain\Support\Actions\ChangeConversationPriority;
 use App\Domain\Support\Actions\ChangeConversationQueue;
+use App\Domain\Support\Actions\CloseConversation;
 use App\Domain\Support\Actions\MarkConversationRead;
 use App\Domain\Support\Actions\ReopenConversation;
 use App\Domain\Support\Actions\ResolveConversation;
@@ -17,16 +17,15 @@ use App\Domain\Support\SupportConversationPriority;
 use App\Http\Controllers\Controller;
 use App\Models\SupportConversation;
 use App\Models\SupportMessage;
+use App\Models\SupportMessageAttachment;
 use App\Models\SupportQueue;
 use App\Models\SupportQueueMember;
-use App\Models\SupportMessageAttachment;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 use Illuminate\Validation\Rule;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SupportConversationController extends Controller
 {
@@ -56,7 +55,7 @@ class SupportConversationController extends Controller
         $conversation->setRelation('messages', $messages->reverse()->values());
 
         $response = response()->json($conversation);
-        
+
         if ($hasMore) {
             $response->header('X-Has-More', 'true');
             $lastMessage = $messages->last();
@@ -122,7 +121,7 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'El mensaje no pertenece a esta conversación'], 422);
         }
 
-        if (!$message->isClientVisible() && $request->user()->account_type === 'client') {
+        if (! $message->isClientVisible() && $request->user()->account_type === 'client') {
             return response()->json(['message' => 'No puede marcar como leído un mensaje interno'], 422);
         }
 
@@ -156,7 +155,12 @@ class SupportConversationController extends Controller
         ]);
 
         $newQueue = SupportQueue::findOrFail($validated['queue_id']);
-        $newAssignee = $validated['assignee_user_id'] ? User::find($validated['assignee_user_id']) : null;
+        // Read with a default for the same reason as the queue: the rule is
+        // `sometimes|nullable`, so a request that only names a queue leaves the
+        // key out and reading it directly raised "Undefined array key".
+        $newAssignee = isset($validated['assignee_user_id']) && $validated['assignee_user_id'] !== null
+            ? User::find($validated['assignee_user_id'])
+            : null;
 
         $conversation = app(ChangeConversationQueue::class)->execute($conversation, $newQueue, $request->user(), $newAssignee);
 
@@ -256,7 +260,7 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'No puede descargar adjuntos de notas internas'], 403);
         }
 
-        if (!Storage::disk('local')->exists($attachment->stored_path)) {
+        if (! Storage::disk('local')->exists($attachment->stored_path)) {
             return response()->json(['message' => 'Archivo no encontrado'], 404);
         }
 
@@ -273,7 +277,7 @@ class SupportConversationController extends Controller
             ->where('user_id', $user->id)
             ->exists();
 
-        if (!$isMember && $conversation->assigned_to_user_id !== $user->id) {
+        if (! $isMember && $conversation->assigned_to_user_id !== $user->id) {
             abort(403, 'No tiene acceso a esta conversación');
         }
     }
