@@ -135,7 +135,8 @@ test('binds {rule} on update and writes the revision to that rule', function ():
     $response = $this->actingAs($staff)->patchJson("/api/automations/{$rule->id}", [
         'name' => 'Despues',
         'trigger_type' => 'schedule',
-        'trigger_config' => ['cron' => '0 9 * * 2'],
+        'trigger_config' => ['frequency' => 'weekly', 'time' => '09:00', 'day_of_week' => 1],
+        'condition_config' => [],
         'actions' => [[
             'action_type' => 'internal_notification',
             'config' => ['title' => 'Aviso'],

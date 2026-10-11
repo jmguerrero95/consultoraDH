@@ -18,6 +18,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 
 class DispatchAutomations implements ShouldQueue
 {
@@ -149,14 +150,25 @@ class DispatchAutomations implements ShouldQueue
 
     private function createScheduledRun(AutomationRule $rule, Carbon $now): void
     {
-        $occurrenceKey = "schedule:{$rule->id}:{$now->toISOString()}";
+        // Occurrence authority: the occurrence IS the locked next_run_at value.
+        // Re-read the rule to get the authoritative occurrence time.
+        $rule->refresh();
+        $occurrence = $rule->next_run_at;
+
+        if (! $occurrence || $occurrence->gt($now)) {
+            // Future or null: nothing to do for this scan.
+            return;
+        }
+
+        // Occurrence key uses the locked occurrence, NOT the current scan time.
+        $occurrenceKey = "schedule:{$rule->id}:{$occurrence->toISOString()}";
 
         $run = AutomationRun::firstOrCreate(
             ['automation_rule_id' => $rule->id, 'occurrence_key' => $occurrenceKey],
             [
                 'status' => 'pending',
                 'trigger_snapshot' => [
-                    'scheduled_at' => $now->toISOString(),
+                    'scheduled_at' => $occurrence->toISOString(),
                     'trigger_config' => $rule->trigger_config,
                 ],
                 'started_at' => $now,
@@ -171,8 +183,8 @@ class DispatchAutomations implements ShouldQueue
             }
         }
 
-        // Calculate next run
-        $nextRun = $this->calculateNextRun($rule, $now);
+        // Calculate next run FROM the occurrence that just fired.
+        $nextRun = $this->calculateNextRun($rule, $occurrence);
         if ($nextRun) {
             $rule->update(['next_run_at' => $nextRun]);
         }
@@ -214,12 +226,14 @@ class DispatchAutomations implements ShouldQueue
     private function evaluateScheduleConditions(AutomationRule $rule): bool
     {
         $conditions = $rule->condition_config;
-        if (empty($conditions)) {
-            return true;
+        
+        // Schedule triggers MUST NOT have dynamic conditions.
+        // Non-empty condition_config is a configuration error.
+        if (! empty($conditions)) {
+            // Silently become false (as per spec: reject/block)
+            return false;
         }
 
-        // Schedule triggers typically don't have dynamic conditions
-        // but we can evaluate static conditions here
         return true;
     }
 
@@ -316,10 +330,14 @@ class DispatchAutomations implements ShouldQueue
             $minDays = $rule->trigger_config['min_days_overdue'] ?? 1;
             $asOf = now()->subDays($minDays)->toDateString();
 
-            // Use ReceivablesService to find overdue clients
-            $overdueClients = ReceivablesService::getOverdueClients($asOf);
+            // Use ReceivablesService::list() with authoritative filters
+            $receivables = app(ReceivablesService::class)->list([
+                'overdue' => true,
+                'as_of' => $asOf,
+                'outstanding_only' => true,
+            ], 1, 500); // Batch up to 500
 
-            foreach ($overdueClients as $clientData) {
+            foreach ($receivables['items'] as $clientData) {
                 $run = $this->findOrCreateAutomationRun($rule, $clientData, "receivable_overdue:{$clientData['client_id']}:{$asOf}");
 
                 if ($run->wasRecentlyCreated) {

@@ -7,7 +7,7 @@ export const stamp = process.env.E2E_STAMP ?? String(Date.now()).slice(-8);
 const E2E_CLIENT_A_EMAIL = 'e2e-client-a@consultora-dh.test';
 const E2E_CLIENT_B_EMAIL = 'e2e-client-b@consultora-dh.test';
 const E2E_STAFF_EMAIL = 'e2e-staff@consultora-dh.test';
-const E2E_PASSWORD = 'password123';
+const E2E_PASSWORD = 'Password1234';
 
 export async function loginAsClientA(page: Page): Promise<void> {
     return signIn(page, E2E_CLIENT_A_EMAIL, '/portal/soporte');

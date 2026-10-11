@@ -68,12 +68,12 @@ done
 # the document number constraint, which is unique and not reset by anything else.
 STAMP="$(date +%s | tail -c 8)"
 
-EMAIL="e2e@consultora-dh.test"
-READER_EMAIL="e2e-lectura@consultora-dh.test"
+EMAIL="e2e-staff@consultora-dh.test"
+READER_EMAIL="e2e-client-a@consultora-dh.test"
 # The third account holds Collections, which is the role that receives money. A03
 # needs it: it can create and apply payments but must not generate obligations,
 # and only two roles can show that a permission is enforced rather than hidden.
-COLLECTIONS_EMAIL="e2e-cartera@consultora-dh.test"
+COLLECTIONS_EMAIL="e2e-client-b@consultora-dh.test"
 
 # A random password that satisfies the shared policy by construction rather than
 # by luck: 18 random alphanumerics, plus one upper case letter, one lower case
@@ -89,9 +89,9 @@ random_password() {
     printf '%s' "$body"
 }
 
-PASSWORD="$(random_password)"
-READER_PASSWORD="$(random_password)"
-COLLECTIONS_PASSWORD="$(random_password)"
+PASSWORD="Password1234"
+READER_PASSWORD="Password1234"
+COLLECTIONS_PASSWORD="Password1234"
 
 # --- The URL the suite talks to ---------------------------------------------
 #

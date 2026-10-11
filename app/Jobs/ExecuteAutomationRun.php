@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
-use App\Domain\Notifications\DatabaseNotificationService;
 use App\Domain\Receivables\ReceivablesService;
 use App\Domain\Support\Actions\AssignConversation;
 use App\Domain\Support\Actions\ChangeConversationPriority;
@@ -18,6 +17,7 @@ use App\Models\OperationalTask;
 use App\Models\SupportConversation;
 use App\Models\TelegramEndpoint;
 use App\Models\User;
+use App\Notifications\InternalAutomationNotification;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -43,18 +43,18 @@ class ExecuteAutomationRun implements ShouldQueue
 
     public function handle(): void
     {
-        $run = AutomationRun::with(['rule.actions'])->find($this->automationRunId);
+        $run = AutomationRun::with(['rule.actions', 'rule.owner'])->find($this->automationRunId);
 
         if (! $run) {
             Log::warning('Automation run not found', ['run_id' => $this->automationRunId]);
             return;
         }
 
-        if ($run->status !== 'pending') {
+        if (! in_array($run->status, ['pending', 'partial', 'failed'], true)) {
             return;
         }
 
-        // Check owner permissions
+        // Check owner permissions (explicit comparison, not loose)
         if (! $this->checkOwnerPermissions($run)) {
             $run->update(['status' => 'blocked', 'finished_at' => now(), 'error_code' => 'owner_permissions_lost']);
             $this->notifyAdmins('Automation blocked: owner permissions lost', $run);
@@ -71,8 +71,9 @@ class ExecuteAutomationRun implements ShouldQueue
                 ['status' => 'pending', 'started_at' => now()]
             );
 
+            // Skip already succeeded actions on retry
             if ($actionRun->status === 'succeeded') {
-                continue; // Already succeeded, skip
+                continue;
             }
 
             // Check action-specific permissions before execution
@@ -114,7 +115,12 @@ class ExecuteAutomationRun implements ShouldQueue
     {
         $owner = $run->rule->owner;
 
-        if (! $owner || !$owner->status->value === 'active') {
+        if (! $owner) {
+            return false;
+        }
+
+        // Explicit comparison - inactive/missing owner blocks execution
+        if ($owner->status->value !== 'active') {
             return false;
         }
 
@@ -129,7 +135,7 @@ class ExecuteAutomationRun implements ShouldQueue
     {
         $owner = $run->rule->owner;
 
-        if (! $owner || !$owner->status->value === 'active') {
+        if (! $owner || $owner->status->value !== 'active') {
             return false;
         }
 
@@ -145,8 +151,8 @@ class ExecuteAutomationRun implements ShouldQueue
             'assign_support_queue' => $run->rule->owner->hasPermissionTo('support.manage_queues'),
             'assign_support_user' => $run->rule->owner->hasPermissionTo('support.assign'),
             'set_support_priority' => $run->rule->owner->hasPermissionTo('support.assign'),
-            'internal_notification' => true, // No additional permission needed
-            default => true,
+            'internal_notification' => true,
+            default => false, // Unknown action type: reject/block
         };
     }
 
@@ -175,6 +181,7 @@ class ExecuteAutomationRun implements ShouldQueue
                 $this->executeSetSupportPriority($action, $run);
                 break;
             default:
+                // Unknown action type: reject/block (never permissive default)
                 throw new \InvalidArgumentException("Unknown action type: {$action->action_type}");
         }
     }
@@ -189,12 +196,11 @@ class ExecuteAutomationRun implements ShouldQueue
         foreach ($userIds as $userId) {
             $user = User::find($userId);
             if ($user) {
-                DatabaseNotificationService::create(
-                    $user,
+                $user->notify(new InternalAutomationNotification(
                     $title,
                     $message,
                     ['automation_run_id' => $run->id]
-                );
+                ));
             }
         }
     }
@@ -204,7 +210,7 @@ class ExecuteAutomationRun implements ShouldQueue
         $config = $action->config;
         $assignee = User::find($config['assignee_user_id'] ?? 0);
 
-        if (! $assignee || $assignee->account_type !== 'staff' || !$assignee->status->value === 'active') {
+        if (! $assignee || $assignee->account_type !== 'staff' || $assignee->status->value !== 'active') {
             throw new \InvalidArgumentException('Invalid or inactive assignee');
         }
 
@@ -212,10 +218,10 @@ class ExecuteAutomationRun implements ShouldQueue
         OperationalTask::create([
             'title' => $config['title'],
             'description' => $config['description'] ?? '',
-            'assigned_to' => $assignee->id, // A05 uses assigned_to, not assignee_user_id
+            'assigned_to' => $assignee->id,
             'priority' => $config['priority'] ?? 'normal',
             'due_on' => $config['due_on'],
-            'created_by' => $run->rule->owner_user_id, // A05 uses created_by
+            'created_by' => $run->rule->owner_user_id,
         ]);
     }
 
@@ -264,7 +270,7 @@ class ExecuteAutomationRun implements ShouldQueue
         }
 
         foreach ($recipients as $email) {
-            Mail::to($email)->queue(new AutomationEmail($subject, $body));
+            Mail::to($email)->queue(new \App\Mail\AutomationEmail($subject, $body));
         }
     }
 
@@ -304,7 +310,7 @@ class ExecuteAutomationRun implements ShouldQueue
         $userId = $config['user_id'];
 
         $user = User::find($userId);
-        if (! $user || $user->account_type !== 'staff' || !$user->status->value === 'active') {
+        if (! $user || $user->account_type !== 'staff' || $user->status->value !== 'active') {
             throw new \InvalidArgumentException('Invalid or inactive user');
         }
 
@@ -332,5 +338,15 @@ class ExecuteAutomationRun implements ShouldQueue
                 app(\App\Domain\Support\Actions\ChangeConversationPriority::class)->execute($conversation, \App\Domain\Support\SupportConversationPriority::from($priority));
             }
         }
+    }
+
+    private function notifyAdmins(string $message, AutomationRun $run): void
+    {
+        // Log for now; could be extended to actual admin notifications
+        Log::warning($message, [
+            'run_id' => $run->id,
+            'rule_id' => $run->rule_id,
+            'rule_name' => $run->rule->name ?? 'unknown',
+        ]);
     }
 }

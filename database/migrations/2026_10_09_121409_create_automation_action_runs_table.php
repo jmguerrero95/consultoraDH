@@ -20,6 +20,7 @@ return new class extends Migration
             $table->string('error_code')->nullable();
             $table->timestamp('started_at')->useCurrent();
             $table->timestamp('finished_at')->nullable();
+            $table->timestamps();
 
             $table->unique(['automation_run_id', 'automation_action_id']);
             $table->index(['automation_run_id', 'status']);

@@ -182,6 +182,14 @@ class AutomationController extends Controller
             'actions.*.position' => 'required|integer|min:0',
         ]);
 
+        // Validate schedule conditions early
+        if ($validated['trigger_type'] === 'schedule' && ! empty($validated['condition_config'] ?? [])) {
+            return response()->json([
+                'message' => 'Configuración de condiciones inválida',
+                'errors' => ['Los disparadores programados no admiten condiciones dinámicas'],
+            ], 422);
+        }
+
         return DB::transaction(function () use ($validated, $request) {
             $rule = AutomationRule::create([
                 'name' => $validated['name'],
@@ -239,6 +247,17 @@ class AutomationController extends Controller
             'actions.*.config' => 'required|array',
             'actions.*.position' => 'required|integer|min:0',
         ]);
+
+        // Validate schedule conditions
+        $triggerType = $validated['trigger_type'] ?? $rule->trigger_type;
+        $conditionConfig = $validated['condition_config'] ?? $rule->condition_config;
+
+        if ($triggerType === 'schedule' && ! empty($conditionConfig)) {
+            return response()->json([
+                'message' => 'Configuración de condiciones inválida',
+                'errors' => ['Los disparadores programados no admiten condiciones dinámicas'],
+            ], 422);
+        }
 
         return DB::transaction(function () use ($rule, $validated) {
             $rule->update([
@@ -388,8 +407,15 @@ class AutomationController extends Controller
 
     private function validateConditionConfig(string $type, array $config): array
     {
-        // Conditions are optional and validated based on trigger type
-        return [];
+        $errors = [];
+
+        // Schedule triggers MUST NOT have dynamic conditions.
+        // Non-empty condition_config is a configuration error.
+        if ($type === 'schedule' && ! empty($config)) {
+            $errors[] = 'Los disparadores programados no admiten condiciones dinámicas';
+        }
+
+        return $errors;
     }
 
     private function validateActionConfig(string $type, array $config): array
