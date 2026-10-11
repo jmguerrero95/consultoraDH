@@ -79,7 +79,7 @@ final class AiAssistantService
 
         $result = $this->resolver->complete($messages, $toolDefinitions);
 
-        return $this->processResult($result, $conversation, $user, $question);
+        return $this->processResult($result, $conversation, $user, $question, $messages);
     }
 
     /**
@@ -137,14 +137,8 @@ final class AiAssistantService
      * Process the LLM result: extract tool calls, execute read tools in a loop,
      * produce proposals for writes, and build the final reply.
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages): array
     {
-        $messages = [
-            $this->systemPrompt(),
-            ...$this->conversationHistory($conversation),
-            AiMessage::user($question),
-        ];
-
         $proposals = [];
         $toolResults = [];
         $maxRounds = 4;
@@ -160,99 +154,110 @@ final class AiAssistantService
             $proposalsThisRound = [];
             $toolResultsThisRound = [];
 
-            foreach ($toolCalls as $call) {
-                $toolName = $call->name;
-                $args = $call->arguments;
-                $toolCallId = $call->id;
-
-                if (! $this->registry->has($toolName)) {
-                    $messages[] = AiMessage::toolResult($toolName, ['error' => "Herramienta desconocida: {$toolName}"], $toolCallId);
-
-                    continue;
-                }
-
-                $tool = $this->registry->get($toolName);
-
-                // --- Write tools: produce a proposal, never execute directly ---
-                if ($tool->isWrite()) {
-                    $proposal = AiActionProposal::query()->create([
-                        'user_id' => $user->id,
-                        'ai_conversation_id' => $conversation->id,
-                        'tool' => $toolName,
-                        'arguments' => $args,
-                        'status' => AiActionProposal::PENDING,
-                        'expires_at' => now()->addMinutes(config('ai.proposal_ttl_minutes', 15)),
-                    ]);
-
-                    $proposalsThisRound[] = [
-                        'id' => $proposal->id,
-                        'tool' => $proposal->tool,
-                        'arguments' => $args,
-                        'expires_at' => $proposal->expires_at->toDateTimeString(),
-                        'pending' => true,
+            // If there are tool calls, add the assistant message with tool_calls to the message history
+            if (! empty($toolCalls)) {
+                $toolCallsForWire = array_map(function ($call): array {
+                    return [
+                        'id' => $call->id,
+                        'name' => $call->name,
+                        'arguments' => $call->arguments,
                     ];
+                }, $toolCalls);
 
-                    $proposals[] = $proposalsThisRound[count($proposalsThisRound) - 1];
+                $messages[] = AiMessage::assistant($content, $toolCallsForWire);
 
-                    // Tell the model a proposal was created
-                    $messages[] = AiMessage::toolResult($toolName, [
-                        'proposal_created' => true,
-                        'proposal_id' => $proposal->id,
-                        'tool' => $toolName,
-                        'arguments' => $args,
-                    ], $toolCallId);
+                foreach ($toolCalls as $call) {
+                    $toolName = $call->name;
+                    $args = $call->arguments;
+                    $toolCallId = $call->id;
 
-                    continue;
-                }
+                    if (! $this->registry->has($toolName)) {
+                        $messages[] = AiMessage::toolResult($toolName, ['error' => "Herramienta desconocida: {$toolName}"], $toolCallId);
 
-                // --- Read tools: execute immediately ---
-                try {
-                    $output = $this->registry->executeRead($toolName, $args, $user);
-
-                    $toolResultsThisRound[] = [
-                        'tool' => $toolName,
-                        'output' => $output,
-                    ];
-
-                    // Return tool result to model for synthesis
-                    $messages[] = AiMessage::toolResult($toolName, (array) $output, $toolCallId);
-
-                } catch (\Throwable $e) {
-                    $toolResultsThisRound[] = [
-                        'tool' => $toolName,
-                        'output' => 'Error: '.$e->getMessage(),
-                    ];
-                    $messages[] = AiMessage::toolResult($toolName, ['error' => $e->getMessage()], $toolCallId);
-                }
-            }
-
-            $toolResults = array_merge($toolResults, $toolResultsThisRound);
-
-            // If there were no tool calls, we're done
-            if (empty($toolCalls)) {
-                $reply = $content;
-                break;
-            }
-
-            // If there were proposals, we don't continue the loop for synthesis
-            // The model already knows proposals were created
-            if (! empty($proposalsThisRound)) {
-                $reply = $content;
-                if (! empty($toolResultsThisRound)) {
-                    $resultText = [];
-                    foreach ($toolResultsThisRound as $tr) {
-                        $resultText[] = "{$tr['tool']}: ".(is_string($tr['output']) ? $tr['output'] : json_encode($tr['output'], JSON_UNESCAPED_SLASHES));
+                        continue;
                     }
-                    $reply .= "\n\n".implode("\n", $resultText);
-                }
-                break;
-            }
 
-            // If only read tools were called, continue the loop for synthesis
-            try {
-                $currentResult = $this->resolver->complete($messages, $this->registry->definitions());
-            } catch (\Throwable $e) {
-                $reply = 'Error en la síntesis: '.$e->getMessage();
+                    $tool = $this->registry->get($toolName);
+
+                    // --- Write tools: produce a proposal, never execute directly ---
+                    if ($tool->isWrite()) {
+                        $proposal = AiActionProposal::query()->create([
+                            'user_id' => $user->id,
+                            'ai_conversation_id' => $conversation->id,
+                            'tool' => $toolName,
+                            'arguments' => $args,
+                            'status' => AiActionProposal::PENDING,
+                            'expires_at' => now()->addMinutes(config('ai.proposal_ttl_minutes', 15)),
+                        ]);
+
+                        $proposalsThisRound[] = [
+                            'id' => $proposal->id,
+                            'tool' => $proposal->tool,
+                            'arguments' => $args,
+                            'expires_at' => $proposal->expires_at->toDateTimeString(),
+                            'pending' => true,
+                        ];
+
+                        $proposals[] = $proposalsThisRound[count($proposalsThisRound) - 1];
+
+                        // Tell the model a proposal was created
+                        $messages[] = AiMessage::toolResult($toolName, [
+                            'proposal_created' => true,
+                            'proposal_id' => $proposal->id,
+                            'tool' => $toolName,
+                            'arguments' => $args,
+                        ], $toolCallId);
+
+                        continue;
+                    }
+
+                    // --- Read tools: execute immediately ---
+                    try {
+                        $output = $this->registry->executeRead($toolName, $args, $user);
+
+                        $toolResultsThisRound[] = [
+                            'tool' => $toolName,
+                            'output' => $output,
+                        ];
+
+                        // Return tool result to model for synthesis
+                        $messages[] = AiMessage::toolResult($toolName, (array) $output, $toolCallId);
+
+                    } catch (\Throwable $e) {
+                        $toolResultsThisRound[] = [
+                            'tool' => $toolName,
+                            'output' => 'Error: '.$e->getMessage(),
+                        ];
+                        $messages[] = AiMessage::toolResult($toolName, ['error' => $e->getMessage()], $toolCallId);
+                    }
+                }
+
+                $toolResults = array_merge($toolResults, $toolResultsThisRound);
+
+                // If there were proposals, we don't continue the loop for synthesis
+                // The model already knows proposals were created
+                if (! empty($proposalsThisRound)) {
+                    $reply = $content;
+                    if (! empty($toolResultsThisRound)) {
+                        $resultText = [];
+                        foreach ($toolResultsThisRound as $tr) {
+                            $resultText[] = "{$tr['tool']}: ".(is_string($tr['output']) ? $tr['output'] : json_encode($tr['output'], JSON_UNESCAPED_SLASHES));
+                        }
+                        $reply .= "\n\n".implode("\n", $resultText);
+                    }
+                    break;
+                }
+
+                // If only read tools were called, continue the loop for synthesis
+                try {
+                    $currentResult = $this->resolver->complete($messages, $this->registry->definitions());
+                } catch (\Throwable $e) {
+                    $reply = 'Error en la síntesis: '.$e->getMessage();
+                    break;
+                }
+            } else {
+                // No tool calls, we're done
+                $reply = $content;
                 break;
             }
         }

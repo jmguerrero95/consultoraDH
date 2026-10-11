@@ -12,7 +12,7 @@ namespace App\Domain\Ai;
  *
  *   system   instructions this application writes, once, before anything else
  *   user     what the person typed
- *   assistant what the model said
+ *   assistant what the model said (may include tool_calls)
  *   tool     the structured result of a call the server authorized
  *
  * A `tool` message is a quotation of a result, not an instruction. Business text
@@ -30,6 +30,9 @@ final readonly class AiMessage
 
     public const ROLE_TOOL = 'tool';
 
+    /**
+     * @param  array<string, mixed>|null  $toolCalls
+     */
     private function __construct(
         public string $role,
         public string $content,
@@ -37,6 +40,8 @@ final readonly class AiMessage
         public ?string $toolName = null,
         /** Set when this message answers a specific call. */
         public ?string $toolCallId = null,
+        /** Set when the assistant wants to call tools. */
+        public ?array $toolCalls = null,
     ) {}
 
     public static function system(string $content): self
@@ -49,9 +54,14 @@ final readonly class AiMessage
         return new self(self::ROLE_USER, $content);
     }
 
-    public static function assistant(string $content, ?string $toolCallId = null): self
+    /**
+     * Create an assistant message, optionally with tool calls.
+     *
+     * @param  array<string, mixed>|null  $toolCalls
+     */
+    public static function assistant(string $content, ?array $toolCalls = null, ?string $toolCallId = null): self
     {
-        return new self(self::ROLE_ASSISTANT, $content, null, $toolCallId);
+        return new self(self::ROLE_ASSISTANT, $content, null, $toolCallId, $toolCalls);
     }
 
     /**
@@ -80,6 +90,19 @@ final readonly class AiMessage
     public function toWire(): array
     {
         $wire = ['role' => $this->role, 'content' => $this->content];
+
+        if ($this->role === self::ROLE_ASSISTANT && $this->toolCalls !== null) {
+            $wire['tool_calls'] = array_map(function (array $call): array {
+                return [
+                    'id' => $call['id'] ?? '',
+                    'type' => 'function',
+                    'function' => [
+                        'name' => $call['name'],
+                        'arguments' => json_encode($call['arguments'] ?? [], JSON_UNESCAPED_SLASHES),
+                    ],
+                ];
+            }, $this->toolCalls);
+        }
 
         if ($this->role === self::ROLE_TOOL) {
             $wire['tool_call_id'] = $this->toolCallId;

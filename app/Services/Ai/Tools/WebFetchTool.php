@@ -132,11 +132,20 @@ final class WebFetchTool extends AbstractAiTool
         $finalUrl = $url;
 
         while ($redirectCount <= self::MAX_REDIRECTS) {
-            // Validate the current URL before requesting
-            $this->validateUrlForSsrf($currentUrl);
+            // Validate the current URL before requesting and get resolved IPs
+            $resolved = $this->validateUrlForSsrfAndResolve($currentUrl);
+            $resolvedIps = $resolved['ips'];
+            $parsedUrl = $resolved['parsed'];
+            $host = $parsedUrl['host'];
+            $port = $parsedUrl['port'] ?? ($parsedUrl['scheme'] === 'https' ? 443 : 80);
 
             try {
-                $response = $client->get($currentUrl);
+                $response = $client->withOptions([
+                    'curl' => [
+                        CURLOPT_CONNECT_TO => array_map(fn ($ip) => "{$host}:{$port}:{$ip}:{$port}", $resolvedIps),
+                        CURLOPT_RESOLVE => array_map(fn ($ip) => "{$host}:{$port}:{$ip}", $resolvedIps),
+                    ],
+                ])->get($currentUrl);
             } catch (\Throwable $e) {
                 throw new AiToolRejected('Error al fetchear URL: '.$e->getMessage());
             }
@@ -225,6 +234,16 @@ final class WebFetchTool extends AbstractAiTool
      */
     private function validateUrlForSsrf(string $url): void
     {
+        $this->validateUrlForSsrfAndResolve($url);
+    }
+
+    /**
+     * Validate a URL for SSRF protection and return resolved IPs and parsed URL.
+     *
+     * @return array{ips: array<string>, parsed: array}
+     */
+    private function validateUrlForSsrfAndResolve(string $url): array
+    {
         $parsed = parse_url($url);
         if (! $parsed || ! isset($parsed['host'])) {
             throw new AiToolRejected('URL inválida: no se pudo analizar el host.');
@@ -261,6 +280,11 @@ final class WebFetchTool extends AbstractAiTool
         foreach ($ips as $ip) {
             $this->validateIpAddress($ip, $host);
         }
+
+        return [
+            'ips' => $ips,
+            'parsed' => $parsed,
+        ];
     }
 
     /**
