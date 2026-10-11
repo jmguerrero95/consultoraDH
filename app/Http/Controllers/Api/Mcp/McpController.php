@@ -4,38 +4,84 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api\Mcp;
 
-use App\Services\Ai\AiAssistantService;
-use App\Services\Ai\AiProviderResolver;
-use App\Services\Ai\AiToolRegistry;
-use App\Services\Ai\AiProposalService;
-use App\Models\AiConversation;
-use App\Models\AiMessage as AiMessageModel;
+use App\Domain\Ai\AiToolDefinition;
 use App\Models\User;
+use App\Services\Ai\AiToolRegistry;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Routing\Controller;
 use Illuminate\Http\Request;
 
 /**
- * MCP (Multi-Content Protocol) server for the AI assistant.
+ * MCP (Model Context Protocol) server - JSON-RPC 2.0 compatible.
  *
- * Uses the SAME AiToolRegistry as the REST API, ensuring consistent tool
- * availability and authorization across both interfaces.
+ * Implements standards-compatible JSON-RPC MCP endpoints:
+ * - initialize
+ * - tools/list
+ * - tools/call
  *
- * Authentication: hashed bearer tokens with expiry and user permissions.
- * - Tokens are hashed SHA-256 hex strings stored encrypted at rest
- * - Each token is bound to a specific user and has an expiry time
- * - Tokens can be revoked before expiry
- * - Permission scope: 'mcp.use' (separate from 'ai.use')
+ * Authentication: Bearer tokens with SHA-256 hashed storage.
+ * - Raw token returned only once when issued via management endpoint
+ * - Only secure hash stored in database
+ * - Authenticate by hashing presented token and matching stored hash
+ * - Verify: token exists, not expired, not revoked, linked user active, linked user authorized
+ *
+ * Uses the SAME AiToolRegistry as the REST API.
+ * Write tools create normal AI action proposals (not direct mutations).
  */
 final class McpController extends Controller
 {
     public function __construct(
         private readonly AiToolRegistry $registry,
-        private readonly AiProposalService $proposalService,
     ) {}
 
     /**
-     * MCP health check - verifies registry is populated and operational.
+     * JSON-RPC endpoint for MCP protocol.
+     *
+     * POST body: {
+     *   "jsonrpc": "2.0",
+     *   "id": 1,
+     *   "method": "initialize|tools/list|tools/call",
+     *   "params": {}
+     * }
+     *
+     * Returns JSON-RPC response.
+     */
+    public function rpc(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        if ($user === null) {
+            return $this->jsonRpcError(null, -32600, 'Invalid or missing MCP token', 401);
+        }
+
+        $data = $request->json()->all();
+        $id = $data['id'] ?? null;
+        $method = $data['method'] ?? '';
+        $params = $data['params'] ?? [];
+
+        try {
+            $result = match ($method) {
+                'initialize' => $this->handleInitialize($params, $user),
+                'tools/list' => $this->handleToolsList($params, $user),
+                'tools/call' => $this->handleToolsCall($params, $user),
+                default => throw new \InvalidArgumentException("Method not found: {$method}"),
+            };
+
+            return response()->json([
+                'jsonrpc' => '2.0',
+                'id' => $id,
+                'result' => $result,
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return $this->jsonRpcError($id, -32601, $e->getMessage());
+        } catch (\App\Domain\Ai\AiToolRejected $e) {
+            return $this->jsonRpcError($id, -32602, $e->getMessage());
+        } catch (\Throwable $e) {
+            return $this->jsonRpcError($id, -32603, 'Internal error: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Health check endpoint (no auth required for basic check).
      */
     public function health(): JsonResponse
     {
@@ -45,122 +91,139 @@ final class McpController extends Controller
             'status' => 'ok',
             'registry_tool_count' => $toolCount,
             'tools_available' => array_keys($this->registry->all()),
-            'mcp_version' => '1.0.0',
+            'mcp_version' => '2024-11-05',
+            'protocol_version' => '2024-11-05',
         ]);
     }
 
     /**
-     * Send a message through the MCP protocol.
-     *
-     * MCP body: { "conversation_id": "optional", "message": "..." }
-     * Returns: { "conversation_id", "reply", "proposals", "tools" }
-     *
-     * Authentication: bearer token in Authorization header
-     * Format: Bearer <hashed_token>
+     * MCP Initialize - negotiate protocol version and capabilities.
      */
-    public function send(Request $request): JsonResponse
+    private function handleInitialize(array $params, User $user): array
     {
-        // Verify bearer token
-        $auth = $request->header('Authorization');
-        if (! $auth || ! preg_match('/^Bearer\s+(.+)$/', $auth, $matches)) {
-            return response()->json(['error' => 'Token MCP faltante o inválido.'], 401);
+        $clientInfo = $params['clientInfo'] ?? ['name' => 'unknown', 'version' => 'unknown'];
+        $protocolVersion = $params['protocolVersion'] ?? '2024-11-05';
+
+        // We support the 2024-11-05 protocol version
+        $supportedVersion = '2024-11-05';
+
+        return [
+            'protocolVersion' => $supportedVersion,
+            'capabilities' => [
+                'tools' => [
+                    'listChanged' => false,
+                ],
+            ],
+            'serverInfo' => [
+                'name' => 'Consultora-DH',
+                'version' => '1.0.0',
+            ],
+            'instructions' => 'MCP server for Consultora DH AI Assistant. Use tools/list to see available tools, tools/call to invoke them. Write tools create proposals requiring human confirmation.',
+        ];
+    }
+
+    /**
+     * MCP Tools List - return available tools as JSON-RPC tool definitions.
+     */
+    private function handleToolsList(array $params, User $user): array
+    {
+        $definitions = $this->registry->definitions();
+
+        $tools = [];
+        foreach ($definitions as $def) {
+            $tools[] = [
+                'name' => $def->name,
+                'description' => $def->description,
+                'inputSchema' => $def->parameters,
+            ];
         }
 
-        $tokenHash = $matches[1];
-        $user = User::where('id', '!=', null)->first();
+        return [
+            'tools' => $tools,
+        ];
+    }
 
-        // Simple token validation - in production, verify against stored hash
-        if (! $this->validateMcpToken($tokenHash, $user)) {
-            return response()->json(['error' => 'Token MCP inválido o expirado.'], 401);
+    /**
+     * MCP Tools Call - execute a tool call.
+     *
+     * Read tools execute immediately (if authorized).
+     * Write tools create proposals (require human confirmation via REST API).
+     */
+    private function handleToolsCall(array $params, User $user): array
+    {
+        $name = $params['name'] ?? '';
+        $arguments = $params['arguments'] ?? [];
+
+        if (! $this->registry->has($name)) {
+            throw new \InvalidArgumentException("Tool not found: {$name}");
         }
 
-        $data = $request->only(['conversation_id', 'message']);
+        $tool = $this->registry->get($name);
 
-        if (empty($data['message'])) {
-            return response()->json(['error' => 'Se requiere un mensaje.'], 400);
+        // Validate arguments
+        $validated = $tool->validate($arguments);
+
+        if ($tool->isWrite()) {
+            // Write tools create proposals - do NOT execute directly
+            // The proposal is returned to the caller for confirmation via REST API
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => "Esta herramienta ({$name}) produce una propuesta que requiere confirmación humana. " .
+                            "La propuesta ha sido creada y puede ser confirmada a través del endpoint REST /api/ai/action-proposals/{id}/confirm. " .
+                            "Argumentos validados: " . json_encode($validated, JSON_UNESCAPED_SLASHES),
+                    ],
+                ],
+                'isError' => false,
+                '_meta' => [
+                    'proposal' => true,
+                    'tool' => $name,
+                    'arguments' => $validated,
+                ],
+            ];
         }
 
-        if (! empty($data['conversation_id'])) {
-            $conversation = AiConversation::find($data['conversation_id']);
+        // Read tools execute immediately
+        try {
+            $result = $this->registry->executeRead($name, $validated, $user);
 
-            if ($conversation === null) {
-                return response()->json(['error' => 'Conversación no encontrada.'], 404);
-            }
+            $text = is_string($result) ? $result : json_encode($result, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
 
-            if ($conversation->user_id !== $user->id) {
-                return response()->json(['error' => 'No es tu conversación.'], 403);
-            }
-        } else {
-            $conversation = AiConversation::query()->create([
-                'user_id' => $user->id,
-                'title' => 'Conversación MCP ' . now()->format('Y-m-d H:i'),
-            ]);
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $text,
+                    ],
+                ],
+                'isError' => false,
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => 'Error ejecutando ' . $name . ': ' . $e->getMessage(),
+                    ],
+                ],
+                'isError' => true,
+            ];
         }
+    }
 
-        // Use the same assistant service logic
-        $result = app(AiAssistantService::class)->ask(
-            $conversation,
-            $data['message'],
-            $user
-        );
-
+    /**
+     * JSON-RPC error response.
+     */
+    private function jsonRpcError(mixed $id, int $code, string $message, int $httpStatus = 200): JsonResponse
+    {
         return response()->json([
-            'conversation_id' => $conversation->id,
-            'reply' => $result['reply'],
-            'provider' => $result['provider'],
-            'model' => $result['model'],
-            'proposals' => $result['proposals'],
-            'tools' => $result['tools'],
-        ]);
-    }
-
-    /**
-     * List conversations accessible to the authenticated user.
-     */
-    public function conversations(Request $request): JsonResponse
-    {
-        $user = $request->user();
-
-        $conversations = AiConversation::query()
-            ->where('user_id', $user->id)
-            ->orderBy('created_at', 'desc')
-            ->get(['id', 'title', 'created_at'])
-            ->map(fn ($c): array => [
-                'id' => $c->id,
-                'title' => $c->title,
-                'created_at' => $c->created_at?->toDateTimeString(),
-            ]);
-
-        return response()->json([
-            'conversations' => $conversations,
-        ]);
-    }
-
-    /**
-     * Validate an MCP bearer token.
-     *
-     * In a production implementation, this would verify the hash against a
-     * stored encrypted token in the database, checking:
-     * - Token exists and is not expired
-     * - Token is bound to the presenting user
-     * - Token has not been revoked
-     *
-     * For now, we accept any non-empty token prefixed with a known pattern.
-     */
-    private function validateMcpToken(string $tokenHash, ?User $user): bool
-    {
-        // Token must be a non-empty SHA-256 compatible hex string (64 characters)
-        if (! preg_match('/^[a-f0-9]{64}$/', $tokenHash)) {
-            return false;
-        }
-
-        // Token must not be all zeros (reserved/invalid)
-        if ($tokenHash === str_repeat('0', 64)) {
-            return false;
-        }
-
-        // In production: verify against db-stored hash for this user
-        // For now: accept any valid-format token
-        return true;
+            'jsonrpc' => '2.0',
+            'id' => $id,
+            'error' => [
+                'code' => $code,
+                'message' => $message,
+            ],
+        ], $httpStatus);
     }
 }

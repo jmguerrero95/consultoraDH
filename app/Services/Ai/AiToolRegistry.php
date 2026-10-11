@@ -72,7 +72,13 @@ class AiToolRegistry
             app(\App\Services\Ai\Tools\CreateReportTool::class),
             app(\App\Services\Ai\Tools\WebSearchTool::class),
             app(\App\Services\Ai\Tools\WebFetchTool::class),
-            app(\App\Services\Ai\Tools\ReportArtifactTool::class),
+            app(\App\Services\Ai\Tools\CreateArtifactTool::class),
+            app(\App\Services\Ai\Tools\DocumentSearchTool::class),
+            app(\App\Services\Ai\Tools\DocumentReadTool::class),
+            app(\App\Services\Ai\Tools\AutomationVocabularyTool::class),
+            app(\App\Services\Ai\Tools\CreateAutomationRuleTool::class),
+            app(\App\Services\Ai\Tools\ActivateAutomationRuleTool::class),
+            app(\App\Services\Ai\Tools\DeactivateAutomationRuleTool::class),
         ]);
     }
 

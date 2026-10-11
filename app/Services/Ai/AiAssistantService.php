@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Services\Ai;
 
 use App\Domain\Ai\AiMessage;
+use App\Domain\Ai\AiResponse;
 use App\Domain\Ai\AiTool;
+use App\Domain\Ai\AiToolDefinition;
 use App\Domain\Ai\AiToolRejected;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
@@ -62,6 +64,11 @@ final class AiAssistantService
     /** Maximum number of prior exchange pairs to include in history. */
     private const MAX_HISTORY_PAIRS = 6;
 
+    public function __construct(
+        private readonly AiToolRegistry $registry,
+        private readonly AiProviderResolver $resolver,
+    ) {}
+
     public function ask(AiConversation $conversation, string $question, User $user): array
     {
         // Build message history from prior exchanges (bounded)
@@ -73,16 +80,11 @@ final class AiAssistantService
             AiMessage::user($question),
         ];
 
-        $tools = $this->registry->availableTools($user);
+        $toolDefinitions = $this->registry->definitions();
 
-        $result = $this->model->chat(
-            model: config('ai.primary.model', 'gpt-4o-mini'),
-            messages: $messages,
-            tools: $tools ?: [],
-            temperature: config('ai.temperature', 0.2),
-        );
+        $result = $this->resolver->complete($messages, $toolDefinitions);
 
-        return $this->processResult($result, $conversation, $user);
+        return $this->processResult($result, $conversation, $user, $question);
     }
 
     /**
@@ -140,33 +142,28 @@ final class AiAssistantService
      * Process the LLM result: extract tool calls, produce proposals for writes,
      * and build the final reply.
      */
-    private function processResult(array $result, AiConversation $conversation, User $user): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question): array
     {
-        $content = $result['message']['content'] ?? '';
-        $toolCalls = $result['message']['tool_calls'] ?? [];
+        $content = $result->content;
+        $toolCalls = $result->toolCalls;
 
         $proposals = [];
         $toolResults = [];
         $reply = $content;
 
         foreach ($toolCalls as $call) {
-            $toolName = $call['function']['name'] ?? '';
-            $args = json_decode($call['function']['arguments'] ?? '{}', true) ?? [];
+            $toolName = $call->name;
+            $args = $call->arguments;
 
-            $tool = $this->registry->tool($toolName);
-
-            if (! $tool) {
+            if (! $this->registry->has($toolName)) {
                 $reply .= "\n\n[Herramienta desconocida: {$toolName}]";
                 continue;
             }
 
-            if (! $tool->canRead && ! $tool->canWrite) {
-                $reply .= "\n\nNo tengo permiso para usar la herramienta {$toolName}.";
-                continue;
-            }
+            $tool = $this->registry->get($toolName);
 
             // --- Write tools: produce a proposal, never execute directly ---
-            if ($tool->canWrite) {
+            if ($tool->isWrite()) {
                 $proposal = AiActionProposal::query()->create([
                     'user_id' => $user->id,
                     'conversation_id' => $conversation->id,
@@ -192,25 +189,23 @@ final class AiAssistantService
             }
 
             // --- Read tools: execute immediately ---
-            if ($tool->canRead) {
-                try {
-                    $output = $tool->execute($args, $user);
+            try {
+                $output = $this->registry->executeRead($toolName, $args, $user);
 
-                    $toolResults[] = [
-                        'tool' => $toolName,
-                        'output' => $output,
-                    ];
+                $toolResults[] = [
+                    'tool' => $toolName,
+                    'output' => $output,
+                ];
 
-                    $reply = is_string($output)
-                        ? "Resultado de {$toolName}: {$output}"
-                        : "Resultado de {$toolName}: " . json_encode($output, JSON_UNESCAPED_SLASHES);
-                } catch (\Throwable $e) {
-                    $toolResults[] = [
-                        'tool' => $toolName,
-                        'output' => 'Error: ' . $e->getMessage(),
-                    ];
-                    $reply .= "\n\n[Error ejecutando {$toolName}: " . $e->getMessage() . "]";
-                }
+                $reply = is_string($output)
+                    ? "Resultado de {$toolName}: {$output}"
+                    : "Resultado de {$toolName}: " . json_encode($output, JSON_UNESCAPED_SLASHES);
+            } catch (\Throwable $e) {
+                $toolResults[] = [
+                    'tool' => $toolName,
+                    'output' => 'Error: ' . $e->getMessage(),
+                ];
+                $reply .= "\n\n[Error ejecutando {$toolName}: " . $e->getMessage() . "]";
             }
         }
 
@@ -229,10 +224,27 @@ final class AiAssistantService
             $reply = $content;
         }
 
+        // Persist user message and assistant reply
+        AiMessageModel::query()->create([
+            'ai_conversation_id' => $conversation->id,
+            'role' => AiMessage::ROLE_USER,
+            'content' => $question,
+            'provider' => $result->provider,
+            'model' => $result->model,
+        ]);
+
+        AiMessageModel::query()->create([
+            'ai_conversation_id' => $conversation->id,
+            'role' => AiMessage::ROLE_ASSISTANT,
+            'content' => $reply,
+            'provider' => $result->provider,
+            'model' => $result->model,
+        ]);
+
         return [
             'reply' => $reply,
-            'provider' => $result['model'] ?? config('ai.primary.model', 'gpt-4o-mini'),
-            'model' => $result['model'] ?? config('ai.primary.model', 'gpt-4o-mini'),
+            'provider' => $result->provider,
+            'model' => $result->model,
             'proposals' => $proposals,
             'tools' => $toolResults,
         ];
@@ -256,7 +268,7 @@ final class AiAssistantService
             "- Puedo razonar por escrito sobre cualquier tema solicitado.",
             "- El idioma por defecto es el español, pero puedo responder en el idioma que el usuario prefiera.",
             "",
-            "HERRAMAMIENTAS EXTENDIDAS (cuando sean necesarias):",
+            "HERRAMIENTAS EXTENDIDAS (cuando sean necesarias):",
             "- Búsquedas web informativas con fuentes citadas.",
             "- Generación de artefactos (PDF, DOCX, XLSX, CSV, MD, TXT) para uso privado del usuario.",
             "- Vocabulario de automatizaciones A06 oficial.",
@@ -280,6 +292,6 @@ final class AiAssistantService
             "- Nunca exposes APIs keys, encabezados de autorización ni secretos en tus respuestas.",
         ];
 
-        return AiMessage::system(implode("\\n", $rules));
+        return AiMessage::system(implode("\n", $rules));
     }
 }

@@ -8,6 +8,24 @@ use App\Domain\Audit\AuditableEvent;
 use App\Domain\Audit\Listeners\RecordAuditEvent;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\Listeners\EscalateSupportSla;
+use App\Services\Ai\Tools\ActivateAutomationRuleTool;
+use App\Services\Ai\Tools\AutomationVocabularyTool;
+use App\Services\Ai\Tools\ClientAccountTool;
+use App\Services\Ai\Tools\ClientSearchTool;
+use App\Services\Ai\Tools\ClientSummaryTool;
+use App\Services\Ai\Tools\CreateArtifactTool;
+use App\Services\Ai\Tools\CreateAutomationRuleTool;
+use App\Services\Ai\Tools\CreateOperationalTaskTool;
+use App\Services\Ai\Tools\CreateReportTool;
+use App\Services\Ai\Tools\DeactivateAutomationRuleTool;
+use App\Services\Ai\Tools\DocumentReadTool;
+use App\Services\Ai\Tools\DocumentSearchTool;
+use App\Services\Ai\Tools\OperationalTasksTool;
+use App\Services\Ai\Tools\ReceivablesSummaryTool;
+use App\Services\Ai\Tools\ReportPreviewTool;
+use App\Services\Ai\Tools\SupportSummaryTool;
+use App\Services\Ai\Tools\WebFetchTool;
+use App\Services\Ai\Tools\WebSearchTool;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -20,7 +38,30 @@ final class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        //
+        // AI Tools - bind as singletons so AiToolRegistry::make() can resolve them
+        $this->app->singleton(ClientSearchTool::class);
+        $this->app->singleton(ClientSummaryTool::class);
+        $this->app->singleton(ReceivablesSummaryTool::class);
+        $this->app->singleton(ClientAccountTool::class);
+        $this->app->singleton(OperationalTasksTool::class);
+        $this->app->singleton(ReportPreviewTool::class);
+        $this->app->singleton(SupportSummaryTool::class);
+        $this->app->singleton(CreateOperationalTaskTool::class);
+        $this->app->singleton(CreateReportTool::class);
+        $this->app->singleton(WebSearchTool::class);
+        $this->app->singleton(WebFetchTool::class);
+        $this->app->singleton(CreateArtifactTool::class);
+        $this->app->singleton(DocumentSearchTool::class);
+        $this->app->singleton(DocumentReadTool::class);
+        $this->app->singleton(AutomationVocabularyTool::class);
+        $this->app->singleton(CreateAutomationRuleTool::class);
+        $this->app->singleton(ActivateAutomationRuleTool::class);
+        $this->app->singleton(DeactivateAutomationRuleTool::class);
+
+        // AiToolRegistry - singleton built with all tools
+        $this->app->singleton(\App\Services\Ai\AiToolRegistry::class, function ($app) {
+            return \App\Services\Ai\AiToolRegistry::make();
+        });
     }
 
     /**

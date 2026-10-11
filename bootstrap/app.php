@@ -117,6 +117,9 @@ return Application::configure(dirname(__DIR__))
             // mail cannot consume the budget the browser session shares and a
             // legitimate later delivery is not refused behind it.
             'throttle:support-inbound' => \Illuminate\Routing\Middleware\ThrottleRequests::class.':support-inbound',
+
+            // MCP Bearer token authentication (custom, not Sanctum)
+            'auth.mcp' => \App\Http\Middleware\AuthenticateMcpToken::class,
         ]);
 
         /*

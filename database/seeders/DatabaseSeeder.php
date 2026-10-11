@@ -175,15 +175,30 @@ final class DatabaseSeeder extends Seeder
         'automations.view',
         'automations.manage',
 
-        // A07: the cloud assistant. Two permissions, deliberately.
-        //
-        // `ai.use` is the whole feature: asking questions and confirming a
-        // proposed write. `ai.manage` is narrower and is not implied by it — it is
-        // the right to look at whether a provider is configured and which model it
-        // names, which is operational rather than productive. Neither of them can
-        // reveal a credential, because no endpoint returns one.
+        /*
+         | The A07 permissions.
+         |
+         | The cloud assistant. Two permissions, deliberately.
+         |
+         | `ai.use` is the whole feature: asking questions and confirming a
+         | proposed write. `ai.manage` is narrower and is not implied by it — it is
+         | the right to look at whether a provider is configured and which model it
+         | names, which is operational rather than productive. Neither of them can
+         | reveal a credential, because no endpoint returns one.
+         |
+         | `web_search` / `web_fetch` are separate so a role can use the assistant
+         | without web access.
+         |
+         | `artifacts.create` allows generating private artifacts (PDF, DOCX, XLSX, CSV, MD, TXT).
+         |
+         | `mcp.tokens.manage` is for issuing/revoking MCP tokens (separate from ai.manage).
+         */
         'ai.use',
         'ai.manage',
+        'web_search',
+        'web_fetch',
+        'artifacts.create',
+        'mcp.tokens.manage',
     ];
 
     /**
@@ -339,7 +354,7 @@ final class DatabaseSeeder extends Seeder
      * @var array<string, list<string>>
      */
     private const MATRIX_A07 = [
-        'Super Admin' => ['ai.use', 'ai.manage'],
+        'Super Admin' => ['ai.use', 'ai.manage', 'web_search', 'web_fetch', 'artifacts.create', 'mcp.tokens.manage'],
     ];
 
     /**

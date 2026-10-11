@@ -10,17 +10,16 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
 /**
- * Informative web search tool.
+ * Informative web search tool using a configurable SearXNG-compatible provider.
  *
- * Uses a trusted search API endpoint with SSRF protection:
- * - Only allows requests to approved search service hosts
- * - Enforces request size and timeout limits
- * - Returns source URLs so the model can cite them
- * - Never exposes search keys or tokens in assistant output
+ * Configuration through env/config:
+ * - AI_WEB_SEARCH_ENABLED: bool
+ * - AI_WEB_SEARCH_BASE_URL: SearXNG instance URL (e.g., https://searx.example.com)
+ * - AI_WEB_SEARCH_TIMEOUT_SECONDS: int
  *
- * The model may use this tool when the user asks a general knowledge question
- * that would benefit from recent or specific web information, or when the user
- * explicitly requests web search results.
+ * Does not hard-code one commercial vendor.
+ *
+ * Output: title, url, domain, snippet, published_at when available.
  */
 final class WebSearchTool extends AbstractAiTool
 {
@@ -31,7 +30,7 @@ final class WebSearchTool extends AbstractAiTool
 
     public function description(): string
     {
-        return 'Búsqueda web informativa con fuentes citadas. Devuelve resultados y URLs citables.';
+        return 'Búsqueda web informativa con fuentes citadas. Usa un proveedor SearXNG configurable. Devuelve título, URL, dominio, fragmento y fecha cuando está disponible.';
     }
 
     public function parameters(): array
@@ -84,83 +83,109 @@ final class WebSearchTool extends AbstractAiTool
     {
         $this->authorize($user, 'web_search');
 
+        if (! config('ai.web_search.enabled', false)) {
+            throw new AiToolRejected('La búsqueda web no está habilitada. Configure AI_WEB_SEARCH_ENABLED=true y AI_WEB_SEARCH_BASE_URL.');
+        }
+
         $query = $arguments['query'];
         $maxResults = $arguments['max_results'];
 
-        // SSRF-protected: only allow trusted search service hosts
-        $allowedHosts = config('services.search.trusted_hosts', ['duckduckgo.com', 'api.duckduckgo.com']);
+        $baseUrl = config('ai.web_search.base_url');
+        if (empty($baseUrl)) {
+            throw new AiToolRejected('No hay proveedor de búsqueda web configurado. Establezca AI_WEB_SEARCH_BASE_URL.');
+        }
 
-        $url = 'https://api.duckduckgo.com/' . http_build_query([
+        $timeout = config('ai.web_search.timeout_seconds', 10);
+
+        $url = rtrim($baseUrl, '/') . '/search';
+        $params = [
             'q' => $query,
             'format' => 'json',
-            'no_redirect' => 1,
-            'no_html' => 1,
-        ]);
+            'categories' => 'general',
+            'language' => 'es',
+            'safesearch' => 1,
+        ];
 
-        $response = Http::timeout(10)
-            ->get($url, [
-                'headers' => [
-                    'User-Agent' => 'Consultora-DH-Assistant/1.0',
-                ],
-            ]);
+        try {
+            $response = Http::timeout($timeout)
+                ->get($url, [
+                    'query' => $params,
+                    'headers' => [
+                        'User-Agent' => 'Consultora-DH-Assistant/1.0',
+                        'Accept' => 'application/json',
+                    ],
+                ]);
+        } catch (\Throwable $e) {
+            throw new AiToolRejected('Error de conexión con el proveedor de búsqueda: ' . $e->getMessage());
+        }
 
         if ($response->failed()) {
-            throw new AiToolRejected("Error en la búsqueda web: " . $response->status());
+            throw new AiToolRejected('Error en la búsqueda web: ' . $response->status() . ' ' . $response->body());
         }
 
         $data = $response->json();
 
-        $results = [];
-        if (isset($data['Abstract']) && $data['Abstract']) {
-            $results[] = [
-                'title' => $data['Abstract'],
-                'url' => $data['AbstractURL'] ?? '',
-                'snippet' => $data['Abstract'],
-            ];
+        if (! is_array($data) || ! isset($data['results'])) {
+            throw new AiToolRejected('Respuesta inválida del proveedor de búsqueda.');
         }
 
-        if (isset($data['RelatedTopics'])) {
-            foreach ($data['RelatedTopics'] as $topic) {
-                if (is_array($topic) && isset($topic['Text'])) {
-                    $text = $topic['Text'];
-                    // Strip leading markup like "!" or "* "
-                    $cleanText = preg_replace('/^["\*!\s]+/', '', $text);
-                    $resultUrl = null;
-                    if (isset($topic['FirstURL'])) {
-                        $resultUrl = $topic['FirstURL'];
-                    }
-                    // Only include results with valid URLs
-                    if ($resultUrl && preg_match('/^https?:\/\//i', $resultUrl)) {
-                        $results[] = [
-                            'title' => $cleanText,
-                            'url' => $resultUrl,
-                            'snippet' => $cleanText,
-                        ];
-                    }
+        $results = [];
+        foreach ($data['results'] as $result) {
+            if (! is_array($result)) {
+                continue;
+            }
+
+            $title = $result['title'] ?? '';
+            $url = $result['url'] ?? '';
+            $snippet = $result['content'] ?? $result['snippet'] ?? '';
+            $publishedAt = null;
+
+            // Extract domain from URL
+            $domain = '';
+            if ($url) {
+                $parsed = parse_url($url);
+                $domain = $parsed['host'] ?? '';
+                $domain = preg_replace('/^www\./', '', $domain);
+            }
+
+            // Parse published date if available
+            if (isset($result['publishedDate']) && is_string($result['publishedDate'])) {
+                try {
+                    $publishedAt = \Carbon\Carbon::parse($result['publishedDate'])->toIso8601String();
+                } catch (\Throwable) {
+                    // Ignore invalid dates
                 }
-                // Stop after collecting enough results
-                if (count($results) >= $maxResults) {
-                    break;
-                }
+            }
+
+            if ($title && $url) {
+                $results[] = [
+                    'title' => $title,
+                    'url' => $url,
+                    'domain' => $domain,
+                    'snippet' => $snippet,
+                    'published_at' => $publishedAt,
+                ];
+            }
+
+            if (count($results) >= $maxResults) {
+                break;
             }
         }
 
-        // Fallback if no results from API
         if (empty($results)) {
             $results[] = [
-                'title' => 'No se encontraron resultados directos.',
+                'title' => 'No se encontraron resultados.',
                 'url' => '#',
+                'domain' => '',
                 'snippet' => 'La búsqueda web no devolvió resultados para: ' . $query,
+                'published_at' => null,
             ];
         }
 
-        // Limit to max_results
-        $results = array_slice($results, 0, $maxResults);
-
         return [
             'query' => $query,
-            'results' => $results,
-            'source' => 'duckduckgo',
+            'results' => array_slice($results, 0, $maxResults),
+            'source' => 'searxng',
             'total_results' => count($results),
         ];
     }

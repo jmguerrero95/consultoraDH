@@ -244,7 +244,7 @@ de remediación.
 
 Detalle en [docs/TASKS/A04.md](TASKS/A04.md).
 
-### A05 — Operación integrada, portal y reportería — **entregada**
+### A05 — Operación integrada, portal y reportería — **APROBADA / CONGELADA**
 
 Alcance fusionado de los antiguos A05, A06, A07, A08 y A11. Entrega el ciclo
 operacional completo alrededor de un cliente existente: planilla mensual con
@@ -260,7 +260,7 @@ Entregado: 21 permisos nuevos (`planillas.*`, `novelties.*`, `tasks.*`,
 rol `Client` sin ningún permiso administrativo, 14 migraciones, un servicio
 `scheduler` en la misma imagen y un único paquete nuevo (`dompdf/dompdf`).
 
-**No está aprobada externamente.** Estado: entregada, auditoría externa pendiente.
+**Aprobada y congelada.** Base para A06 y A07.
 
 Detalle en [TASKS/A05.md](TASKS/A05.md) y contrato en
 [TASKS/A05-SPEC.md](TASKS/A05-SPEC.md).
@@ -316,41 +316,18 @@ La numeración antigua A05–A15 queda sustituida por tres macro hitos. La corre
 con el alcance anterior es:
 
 ```
-A05 + A06 + A07 + A08 + A11  ->  nuevo A05   (entregado)
-A09 + A10 + A12              ->  nuevo A06   (entregado)
-A13 + A14 + A15              ->  nuevo A07
+A05 + A06 + A07 + A08 + A11  ->  A05   (APROBADA / CONGELADA)
+A09 + A10 + A12              ->  A06   (APROBADA / CONGELADA)
+A13 + A14 + A15              ->  A07   (ENTREGADA / AUDITORÍA EXTERNA PENDIENTE)
 ```
 
 Ningún alcance se elimina: se reagrupa. El motivo es la velocidad de ejecución y la
-calidad de integración: las cinco áreas del nuevo A05 comparten clientes, empresas,
+calidad de integración: las cinco áreas del A05 comparten clientes, empresas,
 periodos, cartera, permisos, archivos e interfaz, así que implementarlas una vez como
 una capa operativa coherente es mejor que cinco proyectos pequeños con cinco rondas de
 auditoría sobre el mismo terreno.
 
-### A06 — Soporte, correo, Telegram y automatización general
-
-Alcance de los antiguos A09, A10 y A12: centro de soporte con conversación en tiempo
-real, correo entrante y responded, canal de avisos por Telegram, y motor general de
-automatizaciones por evento y por fecha.
-
-**Entregada.** Centro de soporte con colas, asignación, prioridad, ciclo de vida,
-notas internas, SLA, adjuntos, audio, tiempo real (Laravel Reverb), correo
-bidireccional (fallback + Reply-By-Email tokenizado), PWA/Web Push, Telegram
-admin y motor de automatizaciones por evento/fecha.
-
-Prepara: notificaciones internas y cola, que A05 ya dejó en pie.
-
-**Estado: ENTREGADA / AUDITORÍA EXTERNA PENDIENTE**
-
-### A07 — IA en la nube, MCP/OpenCode y endurecimiento final
-
-Alcance de los antiguos A13, A14 y A15: asistente de IA en la nube, integración por
-MCP y OpenCode, y el endurecimiento final que incluye auditoría de seguridad externa,
-pruebas de carga, backups y despliegue de producción.
-
-Prepara: el resto del sistema.
-
-**Bloqueada** hasta la auditoría externa de A06.
+No hay tareas pendientes. A01-A07 completadas. Próximo hito: auditoría externa independiente.
 
 ---
 

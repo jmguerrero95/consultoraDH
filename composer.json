@@ -18,6 +18,9 @@
         "laravel/tinker": "^3.0",
         "minishlink/web-push": "^11.0",
         "openspout/openspout": "^5.12",
+        "phpoffice/phpspreadsheet": "^5.10",
+        "phpoffice/phpword": "^1.4",
+        "smalot/pdfparser": "^2.12",
         "spatie/laravel-permission": "^8.3",
         "symfony/mime": "^8.1",
         "zbateson/mail-mime-parser": "^4.0"

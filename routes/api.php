@@ -156,11 +156,15 @@ Route::prefix('internal')->group(function (): void {
         ->name('api.internal.support-email.inbound');
 });
 
+// A07: MCP health check - accessible without auth
+Route::get('/mcp/health', [\App\Http\Controllers\Api\Mcp\McpController::class, 'health'])
+    ->name('api.mcp.health');
+
 // --- Authenticated ---------------------------------------------------------
 // The general API limiter is applied here, so a valid session cannot be used to
 // hammer the application, and `user.active` so a session opened while the
 // account was active stops working the moment it is suspended.
-    Route::middleware(["web"])->group(function (): void {
+Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->group(function (): void {
     Route::get('/auth/me', [AuthController::class, 'me'])->name('api.auth.me');
     Route::post('/auth/logout', [AuthController::class, 'logout'])->name('api.auth.logout');
 
@@ -631,7 +635,7 @@ Route::prefix('internal')->group(function (): void {
     // A05: client portal
     // =================================================================
 
-    Route::middleware(["web"])->group(function (): void {
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
         Route::get('/portal/home', [PortalProfileController::class, 'home'])->name('api.portal.home');
         Route::get('/portal/profile', [PortalProfileController::class, 'show'])->name('api.portal.profile');
         Route::post('/portal/profile/update-request', [PortalProfileController::class, 'submitUpdateRequest'])->name('api.portal.profile.update-request');
@@ -765,7 +769,7 @@ Route::prefix('internal')->group(function (): void {
     // A06: Client Portal Support
     // =================================================================
 
-    Route::middleware(["web"])->group(function (): void {
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
         Route::get('/portal/support/conversations', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'index'])
             ->name('api.portal.support.conversations.index');
         Route::post('/portal/support/conversations', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'store'])
@@ -786,7 +790,7 @@ Route::prefix('internal')->group(function (): void {
     // A06: Push Notifications
     // =================================================================
 
-    Route::middleware(["web"])->group(function (): void {
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
         Route::get('/push/vapid-public-key', [PushController::class, 'vapidPublicKey'])
             ->name('api.push.vapid-public-key');
         Route::post('/push/subscriptions', [PushController::class, 'store'])
@@ -839,7 +843,7 @@ Route::prefix('internal')->group(function (): void {
     });
 
     // A07-1: cloud assistant
-    Route::middleware(["web"])->group(function (): void {
+    Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api', 'can:ai.use'])->group(function (): void {
         Route::get('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'index'])
             ->name('api.ai.conversations.index');
         Route::post('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'store'])
@@ -856,25 +860,26 @@ Route::prefix('internal')->group(function (): void {
 
         Route::get('/ai/status', [\App\Http\Controllers\Api\AiAssistantController::class, 'status'])
             ->name('api.ai.status');
-Route::middleware("auth")->group(function (): void {
-    Route::prefix("mcp")->group(function (): void {
-        Route::get("/health", [\App\Http\Controllers\Api\Mcp\McpController::class, "health"])
-            ->name("api.mcp.health");
-        Route::post("/send", [\App\Http\Controllers\Api\Mcp\McpController::class, "send"])
-            ->name("api.mcp.send");
-        Route::get("/conversations", [\App\Http\Controllers\Api\Mcp\McpController::class, "conversations"])
-            ->name("api.mcp.conversations");
-    });
 });
 
     // Presence heartbeat (no permission, just auth)
-});
-
-    // Presence heartbeat (no permission, just auth)
-    Route::middleware(["web"])->group(function (): void {
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
         Route::post('/support/presence/heartbeat', [SupportPresenceController::class, 'heartbeat'])
             ->name('api.support.presence.heartbeat');
         Route::post('/portal/support/presence/heartbeat', [App\Http\Controllers\Api\Portal\SupportPresenceController::class, 'heartbeat'])
             ->name('api.portal.support.presence.heartbeat');
+    });
+
+    // A07: MCP token management - requires mcp.tokens.manage permission (session auth)
+    Route::middleware(['auth', 'auth.session', 'user.active', 'can:mcp.tokens.manage'])->group(function (): void {
+        Route::apiResource('mcp-tokens', \App\Http\Controllers\Api\Mcp\McpTokenController::class)
+            ->names('api.mcp.tokens');
+    });
 });
+
+// A07: MCP server - separate auth (Bearer token based, not session)
+// JSON-RPC endpoint for MCP protocol (requires auth.mcp middleware)
+Route::prefix('mcp')->middleware(['auth.mcp'])->group(function (): void {
+    Route::post('/rpc', [\App\Http\Controllers\Api\Mcp\McpController::class, 'rpc'])
+        ->name('api.mcp.rpc');
 });

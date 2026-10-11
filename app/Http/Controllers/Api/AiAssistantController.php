@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api;
 
 use App\Models\AiConversation;
+use App\Models\AiActionProposal;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiToolRegistry;
@@ -53,7 +54,7 @@ final class AiAssistantController extends Controller
     /**
      * List conversations for the current user.
      */
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         $conversations = AiConversation::query()
             ->where('user_id', $request->user()->id)
@@ -122,9 +123,9 @@ final class AiAssistantController extends Controller
     /**
      * Show message history for a conversation.
      */
-    public function show(AiConversation $conversation): JsonResponse
+    public function show(Request $request, AiConversation $conversation): JsonResponse
     {
-        if ($conversation->user_id !== request()->user()->id) {
+        if ($conversation->user_id !== $request->user()->id) {
             return response()->json(['error' => 'No es tu conversación.'], 403);
         }
 
@@ -151,7 +152,7 @@ final class AiAssistantController extends Controller
      */
     public function messages(Request $request, AiConversation $conversation): JsonResponse
     {
-        if ($conversation->user_id !== request()->user()->id) {
+        if ($conversation->user_id !== $request->user()->id) {
             return response()->json(['error' => 'No es tu conversación.'], 403);
         }
 
@@ -169,7 +170,7 @@ final class AiAssistantController extends Controller
         ]);
 
         // Immediately try to answer (same flow as store, but scoped to convo)
-        $result = $this->assistant->ask($conversation, $data['message'], request()->user());
+        $result = $this->assistant->ask($conversation, $data['message'], $request->user());
 
         return response()->json([
             'conversation_id' => $conversation->id,

@@ -412,6 +412,16 @@ const routes: RouteRecordRaw[] = [
                 },
             },
             {
+                path: 'asistente',
+                name: 'asistente',
+                component: () => import('@/pages/Asistente/Index.vue'),
+                meta: {
+                    title: 'Asistente IA',
+                    nav: { label: 'Asistente IA', icon: 'bi-robot', order: 70 },
+                    permission: 'ai.use',
+                },
+            },
+            {
                 path: 'forbidden',
                 name: 'forbidden',
                 component: () => import('@/pages/errors/ForbiddenPage.vue'),
