@@ -4,17 +4,18 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
-use App\Domain\Receivables\ReceivablesService;
 use App\Domain\Support\Actions\AssignConversation;
 use App\Domain\Support\Actions\ChangeConversationPriority;
 use App\Domain\Support\Actions\ChangeConversationQueue;
-use App\Jobs\SendTelegramMessage;
+use App\Domain\Support\SupportConversationPriority;
+use App\Mail\AutomationEmail;
 use App\Models\AutomationAction;
 use App\Models\AutomationActionRun;
 use App\Models\AutomationRun;
 use App\Models\Client;
 use App\Models\OperationalTask;
 use App\Models\SupportConversation;
+use App\Models\SupportQueue;
 use App\Models\TelegramEndpoint;
 use App\Models\User;
 use App\Notifications\InternalAutomationNotification;
@@ -23,7 +24,6 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
@@ -47,6 +47,7 @@ class ExecuteAutomationRun implements ShouldQueue
 
         if (! $run) {
             Log::warning('Automation run not found', ['run_id' => $this->automationRunId]);
+
             return;
         }
 
@@ -58,6 +59,7 @@ class ExecuteAutomationRun implements ShouldQueue
         if (! $this->checkOwnerPermissions($run)) {
             $run->update(['status' => 'blocked', 'finished_at' => now(), 'error_code' => 'owner_permissions_lost']);
             $this->notifyAdmins('Automation blocked: owner permissions lost', $run);
+
             return;
         }
 
@@ -84,6 +86,7 @@ class ExecuteAutomationRun implements ShouldQueue
                     'error_code' => 'action_permission_lost',
                 ]);
                 $allSucceeded = false;
+
                 continue;
             }
 
@@ -269,8 +272,20 @@ class ExecuteAutomationRun implements ShouldQueue
                 break;
         }
 
+        // The same silent success, in a different shape: an empty recipient list
+        // meant the `foreach` below did nothing and the action was recorded as
+        // sent. Every branch above can legitimately come back empty — a trigger
+        // with no client, an unassigned conversation, a queue with no fallback,
+        // a user id that no longer exists — and each of those is a configuration
+        // the rule cannot actually carry out.
+        if ($recipients === []) {
+            throw new \InvalidArgumentException(
+                "The rule did not resolve any recipient for the '{$recipientType}' recipient type"
+            );
+        }
+
         foreach ($recipients as $email) {
-            Mail::to($email)->queue(new \App\Mail\AutomationEmail($subject, $body));
+            Mail::to($email)->queue(new AutomationEmail($subject, $body));
         }
     }
 
@@ -281,27 +296,65 @@ class ExecuteAutomationRun implements ShouldQueue
         $message = $config['message'];
 
         $endpoint = TelegramEndpoint::find($endpointId);
-        if (! $endpoint || !$endpoint->enabled) {
+        if (! $endpoint || ! $endpoint->enabled) {
             throw new \InvalidArgumentException('Telegram endpoint not found or disabled');
         }
 
         SendTelegramMessage::dispatch($endpointId, $message);
     }
 
+    /**
+     * The conversation an action is meant to act on, or an exception.
+     *
+     * ## Why this throws instead of returning
+     *
+     * The vocabulary lets an administrator combine any trigger with any action,
+     * and an event-driven trigger does not always carry a conversation: a rule
+     * watching `client_created` can be given an action that moves a conversation
+     * between queues. There is then nothing to act on.
+     *
+     * That used to fall out of the `if` and return normally, and the action was
+     * then recorded as `succeeded` having changed nothing. The run reported work
+     * done that never happened, and nothing anywhere said the rule could not do
+     * what it was asked to do.
+     *
+     * Failing is the honest outcome. The action run becomes `failed`, the run
+     * becomes `partial`, and the reason names the missing context. The domain
+     * actions below are unchanged and still do the changing; this only decides
+     * whether they are called with something real.
+     */
+    private function requireTriggerConversation(AutomationRun $run): SupportConversation
+    {
+        $conversationId = $run->trigger_snapshot['conversation_id'] ?? null;
+
+        if ($conversationId === null) {
+            throw new \InvalidArgumentException(
+                'The trigger for this rule did not provide a conversation to act on'
+            );
+        }
+
+        $conversation = SupportConversation::find($conversationId);
+
+        if ($conversation === null) {
+            throw new \InvalidArgumentException(
+                'The conversation named by the trigger no longer exists'
+            );
+        }
+
+        return $conversation;
+    }
+
     private function executeAssignSupportQueue(AutomationAction $action, AutomationRun $run): void
     {
-        // Use the domain action to ensure consistent behavior
-        if ($run->trigger_snapshot['conversation_id'] ?? null) {
-            $conversation = SupportConversation::find($run->trigger_snapshot['conversation_id']);
-            if ($conversation) {
-                app(\App\Domain\Support\Actions\ChangeConversationQueue::class)->execute(
-                    $conversation,
-                    \App\Models\SupportQueue::findOrFail($action->config['queue_id']),
-                    \App\Models\User::find($run->rule->owner_user_id),
-                    null
-                );
-            }
-        }
+        $conversation = $this->requireTriggerConversation($run);
+
+        // The domain action does the changing; it is unchanged.
+        app(ChangeConversationQueue::class)->execute(
+            $conversation,
+            SupportQueue::findOrFail($action->config['queue_id']),
+            User::find($run->rule->owner_user_id),
+            null
+        );
     }
 
     private function executeAssignSupportUser(AutomationAction $action, AutomationRun $run): void
@@ -314,13 +367,10 @@ class ExecuteAutomationRun implements ShouldQueue
             throw new \InvalidArgumentException('Invalid or inactive user');
         }
 
-        if ($run->trigger_snapshot['conversation_id'] ?? null) {
-            $conversation = SupportConversation::find($run->trigger_snapshot['conversation_id']);
-            if ($conversation) {
-                // Use the domain action for proper validation
-                app(AssignConversation::class)->execute($conversation, \App\Models\User::find($userId), \App\Models\User::find($run->rule->owner_user_id));
-            }
-        }
+        $conversation = $this->requireTriggerConversation($run);
+
+        // The domain action does the assigning; it is unchanged.
+        app(AssignConversation::class)->execute($conversation, User::find($userId), User::find($run->rule->owner_user_id));
     }
 
     private function executeSetSupportPriority(AutomationAction $action, AutomationRun $run): void
@@ -332,12 +382,10 @@ class ExecuteAutomationRun implements ShouldQueue
             throw new \InvalidArgumentException('Invalid priority');
         }
 
-        if ($run->trigger_snapshot['conversation_id'] ?? null) {
-            $conversation = SupportConversation::find($run->trigger_snapshot['conversation_id']);
-            if ($conversation) {
-                app(\App\Domain\Support\Actions\ChangeConversationPriority::class)->execute($conversation, \App\Domain\Support\SupportConversationPriority::from($priority));
-            }
-        }
+        $conversation = $this->requireTriggerConversation($run);
+
+        // The domain action does the changing; it is unchanged.
+        app(ChangeConversationPriority::class)->execute($conversation, SupportConversationPriority::from($priority));
     }
 
     private function notifyAdmins(string $message, AutomationRun $run): void

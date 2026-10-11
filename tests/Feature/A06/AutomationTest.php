@@ -39,6 +39,7 @@ use App\Models\SupportQueue;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Notification;
 
 uses()->group('A06');
@@ -727,4 +728,147 @@ test('adding dynamic conditions to an existing schedule rule is refused', functi
 
     // The stored rule is untouched.
     expect($rule->fresh()->condition_config)->toBe([]);
+});
+
+/* -------------------------------------------------------------------------- */
+/* | | R5 — an action with nothing to act on must fail, not succeed               | */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A rule whose trigger carries no conversation, driven end to end.
+ *
+ * `client_created` is the realistic case: the event is about a client, so the
+ * snapshot has no `conversation_id` for a support action to address. The rule is
+ * therefore perfectly creatable from the vocabulary, and it can only ever fail.
+ */
+function ruleWithoutConversationContext(
+    string $actionType,
+    array $actionConfig,
+    User $owner,
+    array $metadata = [],
+): AutomationRule {
+    $rule = automationRule(
+        'audit_action',
+        ['action_name' => 'client_created'],
+        $actionType,
+        $actionConfig,
+        $owner,
+    );
+
+    $client = Client::factory()->create();
+
+    AuditEvent::query()->create([
+        'action' => 'client_created',
+        'subject_type' => Client::class,
+        'subject_id' => $client->id,
+        'causer_type' => User::class,
+        'causer_id' => $owner->id,
+        'metadata' => $metadata,
+    ]);
+
+    dispatchAutomations();
+
+    return $rule;
+}
+
+test('the queue action fails when the trigger names no conversation', function (): void {
+    Notification::fake();
+
+    $target = SupportQueue::factory()->create(['name' => 'Destino', 'slug' => 'destino']);
+    $origin = SupportQueue::factory()->create(['name' => 'Origen', 'slug' => 'origen']);
+
+    // A conversation that exists and must be left exactly as it is.
+    $untouched = SupportConversation::factory()->create([
+        'queue_id' => $origin->id,
+        'status' => 'waiting_staff',
+    ]);
+
+    $rule = ruleWithoutConversationContext('assign_support_queue', ['queue_id' => $target->id], $this->owner);
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    // Failed, not quietly done.
+    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->sole();
+    expect($actionRun->status)->toBe('failed');
+    expect($run->fresh()->status)->toBe('partial');
+
+    // And nothing moved.
+    expect($untouched->fresh()->queue_id)->toBe($origin->id);
+    expect(SupportConversation::where('queue_id', $target->id)->count())->toBe(0);
+});
+
+test('the assignee action fails when the trigger names a conversation that does not exist', function (): void {
+    Notification::fake();
+
+    // The id is present and plausible, so this is the case that slips through a
+    // null check: the snapshot is not empty, it points at nothing.
+    $rule = ruleWithoutConversationContext(
+        'assign_support_user',
+        ['user_id' => $this->assignee->id],
+        $this->owner,
+        ['conversation_id' => 987654],
+    );
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    expect($run->trigger_snapshot['conversation_id'])->toBe(987654);
+
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->sole();
+    expect($actionRun->status)->toBe('failed');
+    expect($run->fresh()->status)->toBe('partial');
+
+    // Nobody was assigned anything.
+    expect(SupportConversation::whereNotNull('assigned_to_user_id')->count())->toBe(0);
+});
+
+test('the priority action fails when the trigger names no conversation', function (): void {
+    Notification::fake();
+
+    $untouched = SupportConversation::factory()->create([
+        'priority' => SupportConversationPriority::Normal,
+        'status' => 'waiting_staff',
+    ]);
+
+    $rule = ruleWithoutConversationContext('set_support_priority', ['priority' => 'high'], $this->owner);
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->sole();
+    expect($actionRun->status)->toBe('failed');
+    expect($run->fresh()->status)->toBe('partial');
+
+    // No priority was raised anywhere.
+    expect($untouched->fresh()->priority)->toBe(SupportConversationPriority::Normal);
+    expect(SupportConversation::where('priority', 'high')->count())->toBe(0);
+});
+
+test('the email action fails when a context recipient resolves to nobody', function (): void {
+    Notification::fake();
+    Mail::fake();
+
+    // `assigned_staff` is context-dependent: the recipient is the conversation's
+    // assignee. With no conversation there is nothing to name, so previously the
+    // empty `foreach` did nothing and the action reported a sent message.
+    $rule = ruleWithoutConversationContext(
+        'send_email',
+        [
+            'recipient_type' => 'assigned_staff',
+            'subject' => 'Aviso',
+            'body' => 'Contenido',
+        ],
+        $this->owner,
+    );
+
+    $run = AutomationRun::where('automation_rule_id', $rule->id)->sole();
+    (new ExecuteAutomationRun($run->id))->handle();
+
+    $actionRun = AutomationActionRun::where('automation_run_id', $run->id)->sole();
+    expect($actionRun->status)->toBe('failed');
+    expect($run->fresh()->status)->toBe('partial');
+
+    // No message left the building.
+    Mail::assertNothingSent();
 });
