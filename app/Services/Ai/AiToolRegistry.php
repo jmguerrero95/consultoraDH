@@ -70,6 +70,9 @@ class AiToolRegistry
             app(\App\Services\Ai\Tools\SupportSummaryTool::class),
             app(\App\Services\Ai\Tools\CreateOperationalTaskTool::class),
             app(\App\Services\Ai\Tools\CreateReportTool::class),
+            app(\App\Services\Ai\Tools\WebSearchTool::class),
+            app(\App\Services\Ai\Tools\WebFetchTool::class),
+            app(\App\Services\Ai\Tools\ReportArtifactTool::class),
         ]);
     }
 

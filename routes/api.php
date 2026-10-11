@@ -856,6 +856,18 @@ Route::prefix('internal')->group(function (): void {
 
         Route::get('/ai/status', [\App\Http\Controllers\Api\AiAssistantController::class, 'status'])
             ->name('api.ai.status');
+Route::middleware("auth")->group(function (): void {
+    Route::prefix("mcp")->group(function (): void {
+        Route::get("/health", [\App\Http\Controllers\Api\Mcp\McpController::class, "health"])
+            ->name("api.mcp.health");
+        Route::post("/send", [\App\Http\Controllers\Api\Mcp\McpController::class, "send"])
+            ->name("api.mcp.send");
+        Route::get("/conversations", [\App\Http\Controllers\Api\Mcp\McpController::class, "conversations"])
+            ->name("api.mcp.conversations");
+    });
+});
+
+    // Presence heartbeat (no permission, just auth)
 });
 
     // Presence heartbeat (no permission, just auth)

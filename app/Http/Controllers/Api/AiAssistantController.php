@@ -10,6 +10,7 @@ use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiToolRegistry;
 use App\Services\Ai\AiProposalService;
 use App\Domain\Ai\AiMessage as AiMessageModel;
+use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Routing\Controller;
 use Illuminate\Http\Request;
@@ -34,6 +35,42 @@ final class AiAssistantController extends Controller
     ) {}
 
     /**
+     * Check if user has ai.use permission.
+     */
+    private function verifyAiUse(Request $request): ?JsonResponse
+    {
+        $user = $request->user();
+        if (! $user) {
+            // No authenticated user; let the route's auth middleware return 401
+            return null;
+        }
+        if (! $user->can('ai.use')) {
+            return response()->json(['error' => 'AI assistant access denied.'], 403);
+        }
+        return null;
+    }
+
+    /**
+     * List conversations for the current user.
+     */
+    public function index(): JsonResponse
+    {
+        $conversations = AiConversation::query()
+            ->where('user_id', $request->user()->id)
+            ->orderBy('created_at', 'desc')
+            ->get(['id', 'title', 'created_at'])
+            ->map(fn ($c): array => [
+                'id' => $c->id,
+                'title' => $c->title,
+                'created_at' => $c->created_at?->toDateTimeString(),
+            ]);
+
+        return response()->json([
+            'conversations' => $conversations,
+        ]);
+    }
+
+    /**
      * Answer a question, running read tools and proposing writes.
      *
      * POST body: { "conversation_id": 123, "question": "..." }
@@ -41,6 +78,12 @@ final class AiAssistantController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        // Check ai.use permission
+        $deny = $this->verifyAiUse($request);
+        if ($deny) {
+            return $deny;
+        }
+
         $data = $request->only(['conversation_id', 'question']);
 
         if (empty($data['question'])) {
@@ -118,6 +161,7 @@ final class AiAssistantController extends Controller
             return response()->json(['error' => 'Se requiere un mensaje.'], 400);
         }
 
+        // Store user message - this is the ONE persistence point
         AiMessageModel::query()->create([
             'ai_conversation_id' => $conversation->id,
             'role' => AiMessageModel::ROLE_USER,
@@ -138,9 +182,6 @@ final class AiAssistantController extends Controller
 
     /**
      * Confirm a write proposal.
-     *
-     * Body may be empty or { }. The work that runs is the work stored on the
-     * proposal when it was made, not whatever the browser sends back.
      */
     public function confirm(Request $request, $proposalId): JsonResponse
     {
@@ -205,6 +246,17 @@ final class AiAssistantController extends Controller
      */
     public function status(): JsonResponse
     {
+        // Check ai.use permission
+        $deny = $this->verifyAiUse(request());
+        if ($deny) {
+            return $deny;
+        }
+
+        $user = request()->user();
+        if (! $user) {
+            return response()->json(['error' => 'AI assistant access denied.'], 401);
+        }
+
         $primaryConfigured = ! empty(config('ai.primary.base_url'))
             && ! empty(config('ai.primary.model'));
 
