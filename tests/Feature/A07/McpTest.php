@@ -62,7 +62,7 @@ final class McpTest extends TestCase
 
         // Test with valid token but invalid method
         $response = $this->withHeaders([
-            'Authorization' => 'Bearer ' . $generated['raw'],
+            'Authorization' => 'Bearer '.$generated['raw'],
         ])->postJson('/api/mcp/rpc', [
             'jsonrpc' => '2.0',
             'id' => 1,

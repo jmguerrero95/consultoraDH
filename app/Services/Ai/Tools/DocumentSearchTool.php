@@ -115,6 +115,7 @@ final class DocumentSearchTool extends AbstractAiTool
             $parts[] = "cliente: {$arguments['client_id']}";
         }
         $parts[] = "máx. {$arguments['limit']} resultados";
+
         return implode(', ', $parts);
     }
 
@@ -130,15 +131,15 @@ final class DocumentSearchTool extends AbstractAiTool
         // Portal clients can only see their own documents with client visibility
         if ($user->account_type === 'client') {
             $query->where('client_id', $user->client_id ?? 0)
-                  ->where('visibility', 'client');
+                ->where('visibility', 'client');
         }
 
         if (! empty($arguments['query'])) {
             $search = $arguments['query'];
             $query->where(function (Builder $q) use ($search) {
                 $q->where('title', 'ILIKE', "%{$search}%")
-                  ->orWhere('description', 'ILIKE', "%{$search}%")
-                  ->orWhere('original_name', 'ILIKE', "%{$search}%");
+                    ->orWhere('description', 'ILIKE', "%{$search}%")
+                    ->orWhere('original_name', 'ILIKE', "%{$search}%");
             });
         }
 

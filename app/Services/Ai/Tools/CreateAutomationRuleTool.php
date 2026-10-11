@@ -8,7 +8,6 @@ use App\Domain\Ai\AiToolRejected;
 use App\Models\AutomationAction;
 use App\Models\AutomationRule;
 use App\Models\User;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -76,7 +75,7 @@ final class CreateAutomationRuleTool extends AbstractAiTool
         $name = $this->requireString($arguments, 'name', 255);
         $description = $this->optionalString($arguments, 'description', 1000);
         $triggerType = $this->requireOneOf($arguments, 'trigger_type', [
-            'audit_action', 'schedule', 'task_due', 'document_request_due', 'receivable_overdue', 'support_sla_breach'
+            'audit_action', 'schedule', 'task_due', 'document_request_due', 'receivable_overdue', 'support_sla_breach',
         ]);
         $triggerConfig = $arguments['trigger_config'] ?? [];
         $conditionConfig = $arguments['condition_config'] ?? [];
@@ -101,7 +100,7 @@ final class CreateAutomationRuleTool extends AbstractAiTool
             $actionType = $action['action_type'] ?? null;
             if (! in_array($actionType, [
                 'internal_notification', 'create_task', 'send_email', 'send_telegram',
-                'assign_support_queue', 'assign_support_user', 'set_support_priority'
+                'assign_support_queue', 'assign_support_user', 'set_support_priority',
             ], true)) {
                 throw new AiToolRejected("Acción {$index}: tipo de acción inválido.");
             }

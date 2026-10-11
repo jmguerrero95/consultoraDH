@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\Api\AiArtifactController;
+use App\Http\Controllers\Api\AiAssistantController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutomationController;
 use App\Http\Controllers\Api\BillingConfigurationController;
@@ -13,6 +15,8 @@ use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DocumentController;
 use App\Http\Controllers\Api\ImportController;
 use App\Http\Controllers\Api\Internal\SupportEmailIngressController;
+use App\Http\Controllers\Api\Mcp\McpController;
+use App\Http\Controllers\Api\Mcp\McpTokenController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\NoveltyController;
 use App\Http\Controllers\Api\PaymentController;
@@ -157,7 +161,7 @@ Route::prefix('internal')->group(function (): void {
 });
 
 // A07: MCP health check - accessible without auth
-Route::get('/mcp/health', [\App\Http\Controllers\Api\Mcp\McpController::class, 'health'])
+Route::get('/mcp/health', [McpController::class, 'health'])
     ->name('api.mcp.health');
 
 // --- Authenticated ---------------------------------------------------------
@@ -189,7 +193,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::get('/clients', [ClientController::class, 'index'])->name('api.clients.index');
         Route::get('/clients/{client}', [ClientController::class, 'show'])->name('api.clients.show');
 
-});
+    });
 
     // The nested read endpoints need the parent's permission **and** the section's.
     //
@@ -646,7 +650,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::get('/portal/documents/{document}/download', [PortalDocumentController::class, 'download'])->name('api.portal.documents.download');
         Route::get('/portal/document-requests', [PortalDocumentController::class, 'indexRequests'])->name('api.portal.document-requests');
         Route::post('/portal/document-requests/{documentRequest}/upload', [PortalDocumentController::class, 'uploadResponse'])->name('api.portal.document-requests.upload');
-});
+    });
 
     // =================================================================
     // A05: portal account management (staff)
@@ -784,7 +788,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.portal.support.conversations.attachments.download');
         Route::post('/portal/support/conversations/{conversation}/read', [App\Http\Controllers\Api\Portal\SupportConversationController::class, 'markRead'])
             ->name('api.portal.support.conversations.read');
-});
+    });
 
     // =================================================================
     // A06: Push Notifications
@@ -797,7 +801,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.push.subscriptions.store');
         Route::delete('/push/subscriptions/{subscription}', [PushController::class, 'destroy'])
             ->name('api.push.subscriptions.destroy');
-});
+    });
 
     // =================================================================
     // A06: Telegram Admin
@@ -844,23 +848,27 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 
     // A07-1: cloud assistant
     Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api', 'can:ai.use'])->group(function (): void {
-        Route::get('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'index'])
+        Route::get('/ai/conversations', [AiAssistantController::class, 'index'])
             ->name('api.ai.conversations.index');
-        Route::post('/ai/conversations', [\App\Http\Controllers\Api\AiAssistantController::class, 'store'])
+        Route::post('/ai/conversations', [AiAssistantController::class, 'store'])
             ->name('api.ai.conversations.store');
-        Route::get('/ai/conversations/{conversation}', [\App\Http\Controllers\Api\AiAssistantController::class, 'show'])
+        Route::get('/ai/conversations/{conversation}', [AiAssistantController::class, 'show'])
             ->name('api.ai.conversations.show');
-        Route::post('/ai/conversations/{conversation}/messages', [\App\Http\Controllers\Api\AiAssistantController::class, 'messages'])
+        Route::post('/ai/conversations/{conversation}/messages', [AiAssistantController::class, 'messages'])
             ->name('api.ai.conversations.messages');
 
-        Route::post('/ai/action-proposals/{proposal}/confirm', [\App\Http\Controllers\Api\AiAssistantController::class, 'confirm'])
+        Route::post('/ai/action-proposals/{proposal}/confirm', [AiAssistantController::class, 'confirm'])
             ->name('api.ai.action-proposals.confirm');
-        Route::post('/ai/action-proposals/{proposal}/reject', [\App\Http\Controllers\Api\AiAssistantController::class, 'reject'])
+        Route::post('/ai/action-proposals/{proposal}/reject', [AiAssistantController::class, 'reject'])
             ->name('api.ai.action-proposals.reject');
 
-        Route::get('/ai/status', [\App\Http\Controllers\Api\AiAssistantController::class, 'status'])
+        Route::get('/ai/status', [AiAssistantController::class, 'status'])
             ->name('api.ai.status');
-});
+
+        // Artifact download
+        Route::get('/ai/artifacts/{artifact}/download', [AiArtifactController::class, 'download'])
+            ->name('api.ai.artifacts.download');
+    });
 
     // Presence heartbeat (no permission, just auth)
     Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
@@ -872,7 +880,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 
     // A07: MCP token management - requires mcp.tokens.manage permission (session auth)
     Route::middleware(['auth', 'auth.session', 'user.active', 'can:mcp.tokens.manage'])->group(function (): void {
-        Route::apiResource('mcp-tokens', \App\Http\Controllers\Api\Mcp\McpTokenController::class)
+        Route::apiResource('mcp-tokens', McpTokenController::class)
             ->names('api.mcp.tokens');
     });
 });
@@ -880,6 +888,6 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 // A07: MCP server - separate auth (Bearer token based, not session)
 // JSON-RPC endpoint for MCP protocol (requires auth.mcp middleware)
 Route::prefix('mcp')->middleware(['auth.mcp'])->group(function (): void {
-    Route::post('/rpc', [\App\Http\Controllers\Api\Mcp\McpController::class, 'rpc'])
+    Route::post('/rpc', [McpController::class, 'rpc'])
         ->name('api.mcp.rpc');
 });

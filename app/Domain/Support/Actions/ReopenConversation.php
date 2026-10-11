@@ -22,7 +22,7 @@ class ReopenConversation
                 ->lockForUpdate()
                 ->firstOrFail();
 
-            if (!$conversation->isResolved() && !$conversation->isClosed()) {
+            if (! $conversation->isResolved() && ! $conversation->isClosed()) {
                 throw new \DomainException('Only resolved or closed conversations can be reopened');
             }
 

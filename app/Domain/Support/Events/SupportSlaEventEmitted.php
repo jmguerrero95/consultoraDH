@@ -52,10 +52,10 @@ class SupportSlaEventEmitted implements AuditableEvent, SubjectAware
     public function auditMetadata(): array
     {
         return [
-                'conversation_id' => $this->slaEvent->conversation_id,
-                'metric' => $this->slaEvent->metric,
-                'level' => $this->slaEvent->level,
-                'due_at' => $this->slaEvent->due_at?->toIso8601String(),
-            ];
+            'conversation_id' => $this->slaEvent->conversation_id,
+            'metric' => $this->slaEvent->metric,
+            'level' => $this->slaEvent->level,
+            'due_at' => $this->slaEvent->due_at?->toIso8601String(),
+        ];
     }
 }

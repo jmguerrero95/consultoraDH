@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-use App\Models\SupportInboundEmail;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;

@@ -8,6 +8,7 @@ use App\Domain\Audit\AuditableEvent;
 use App\Domain\Audit\Listeners\RecordAuditEvent;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\Listeners\EscalateSupportSla;
+use App\Services\Ai\AiToolRegistry;
 use App\Services\Ai\Tools\ActivateAutomationRuleTool;
 use App\Services\Ai\Tools\AutomationVocabularyTool;
 use App\Services\Ai\Tools\ClientAccountTool;
@@ -59,8 +60,8 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->singleton(DeactivateAutomationRuleTool::class);
 
         // AiToolRegistry - singleton built with all tools
-        $this->app->singleton(\App\Services\Ai\AiToolRegistry::class, function ($app) {
-            return \App\Services\Ai\AiToolRegistry::make();
+        $this->app->singleton(AiToolRegistry::class, function ($app) {
+            return AiToolRegistry::make();
         });
     }
 
@@ -258,7 +259,7 @@ final class AppServiceProvider extends ServiceProvider
     private function registerAuditListener(): void
     {
         Event::listen(AuditableEvent::class, RecordAuditEvent::class);
-        Event::listen(\App\Domain\Support\Events\SupportSlaEventEmitted::class, \App\Domain\Support\Listeners\EscalateSupportSla::class);
+        Event::listen(SupportSlaEventEmitted::class, EscalateSupportSla::class);
     }
 
     /**

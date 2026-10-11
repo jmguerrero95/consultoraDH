@@ -16,7 +16,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class SupportMessageCreated implements AuditableEvent, SubjectAware, ShouldBroadcast
+class SupportMessageCreated implements AuditableEvent, ShouldBroadcast, SubjectAware
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
@@ -95,10 +95,10 @@ class SupportMessageCreated implements AuditableEvent, SubjectAware, ShouldBroad
     public function auditMetadata(): array
     {
         return [
-                'conversation_id' => $this->message->conversation_id,
-                'sender_kind' => $this->message->sender_kind->value,
-                'message_kind' => $this->message->message_kind->value,
-                'has_attachments' => $this->message->attachments->isNotEmpty(),
-            ];
+            'conversation_id' => $this->message->conversation_id,
+            'sender_kind' => $this->message->sender_kind->value,
+            'message_kind' => $this->message->message_kind->value,
+            'has_attachments' => $this->message->attachments->isNotEmpty(),
+        ];
     }
 }

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services\Ai\Tools;
 
-use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
 
 /**

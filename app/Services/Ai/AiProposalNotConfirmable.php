@@ -12,6 +12,4 @@ use RuntimeException;
  * Not somebody else's, already spent, or expired. It is raised before anything is
  * executed, so catching it means nothing happened.
  */
-final class AiProposalNotConfirmable extends RuntimeException
-{
-}
+final class AiProposalNotConfirmable extends RuntimeException {}

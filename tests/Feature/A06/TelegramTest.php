@@ -50,7 +50,7 @@ function telegramEndpoint(User $creator, array $overrides = []): TelegramEndpoin
 }
 
 /* -------------------------------------------------------------------------- */
-/* R2-17 — schema and binding                                                  */
+/* R2-17 — schema and binding */
 /* -------------------------------------------------------------------------- */
 
 test('an endpoint carries an optional conversation scope', function (): void {
@@ -139,7 +139,7 @@ test('deleting a conversation removes the endpoints scoped to it', function (): 
 })->group('R2-17');
 
 /* -------------------------------------------------------------------------- */
-/* R2-18 — delivery idempotency                                                */
+/* R2-18 — delivery idempotency */
 /* -------------------------------------------------------------------------- */
 
 test('a delivery is recorded once when the same job runs twice', function (): void {

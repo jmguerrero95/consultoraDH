@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Ai\Tools;
 
+use App\Domain\Ai\AiToolRejected;
 use App\Domain\Operations\TaskStatus;
 use App\Models\OperationalTask;
 use App\Models\User;
@@ -55,7 +56,7 @@ final class OperationalTasksTool extends AbstractAiTool
         $limit = $arguments['limit'] ?? 10;
 
         if (! is_int($limit) && ! (is_string($limit) && ctype_digit($limit))) {
-            throw new \App\Domain\Ai\AiToolRejected("El argumento 'limit' debe ser un numero.");
+            throw new AiToolRejected("El argumento 'limit' debe ser un numero.");
         }
 
         return [

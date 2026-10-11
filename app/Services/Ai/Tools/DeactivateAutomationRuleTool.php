@@ -44,6 +44,7 @@ final class DeactivateAutomationRuleTool extends AbstractAiTool
     public function validate(array $arguments): array
     {
         $ruleId = $this->requireId($arguments, 'rule_id');
+
         return ['rule_id' => $ruleId];
     }
 

@@ -8,7 +8,6 @@ use App\Domain\Support\Events\SupportConversationResolved;
 use App\Domain\Support\Events\SupportReadStateUpdated;
 use App\Domain\Support\SupportConversationStatus;
 use App\Models\SupportConversation;
-use App\Models\SupportMessage;
 use App\Models\SupportReadState;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -47,7 +46,7 @@ class ResolveConversation
             }
 
             // Dispatch broadcast after commit
-            DB::afterCommit(function () use ($conversation, $resolver, $readState, $lastMessage) {
+            DB::afterCommit(function () use ($conversation, $resolver, $lastMessage) {
                 event(new SupportConversationResolved($conversation->fresh(['queue', 'resolver']), $resolver));
                 if ($lastMessage = $conversation->lastMessage) {
                     event(new SupportReadStateUpdated($conversation, $resolver, $lastMessage->id));

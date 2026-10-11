@@ -17,7 +17,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class SupportReadStateUpdated implements AuditableEvent, SubjectAware, ShouldBroadcast
+class SupportReadStateUpdated implements AuditableEvent, ShouldBroadcast, SubjectAware
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
@@ -76,8 +76,8 @@ class SupportReadStateUpdated implements AuditableEvent, SubjectAware, ShouldBro
     public function auditMetadata(): array
     {
         return [
-                'queue_id' => $this->conversation->queue_id,
-                'last_read_message_id' => $this->lastReadMessageId,
-            ];
+            'queue_id' => $this->conversation->queue_id,
+            'last_read_message_id' => $this->lastReadMessageId,
+        ];
     }
 }

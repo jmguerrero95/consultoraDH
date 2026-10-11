@@ -4,16 +4,13 @@ declare(strict_types=1);
 
 namespace App\Domain\Support\Listeners;
 
+use App\Domain\Notifications\DatabaseNotificationService;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
-use App\Jobs\SendSupportFallbackEmail;
 use App\Jobs\SendTelegramMessage;
-use App\Models\Client;
 use App\Models\SupportConversation;
-use App\Models\SupportQueue;
+use App\Models\SupportSlaEvent;
 use App\Models\TelegramEndpoint;
 use App\Models\User;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 
 class EscalateSupportSla
 {
@@ -22,7 +19,7 @@ class EscalateSupportSla
         $slaEvent = $event->slaEvent;
         $conversation = $slaEvent->conversation;
 
-        if (!$conversation) {
+        if (! $conversation) {
             return;
         }
 
@@ -34,7 +31,7 @@ class EscalateSupportSla
         }
     }
 
-    private function escalateBreach(\App\Models\SupportSlaEvent $slaEvent, SupportConversation $conversation): void
+    private function escalateBreach(SupportSlaEvent $slaEvent, SupportConversation $conversation): void
     {
         $queue = $conversation->queue;
 
@@ -48,7 +45,7 @@ class EscalateSupportSla
 
         // 1. Internal notification to escalation staff
         if ($escalationUser && $escalationUser->status->value === 'active') {
-            \App\Domain\Notifications\DatabaseNotificationService::create(
+            DatabaseNotificationService::create(
                 $escalationUser,
                 'Incumplimiento SLA',
                 $this->buildBreachMessage($slaEvent, $conversation),
@@ -76,13 +73,13 @@ class EscalateSupportSla
         }
     }
 
-    private function escalateWarning(\App\Models\SupportSlaEvent $slaEvent, \App\Models\SupportConversation $conversation): void
+    private function escalateWarning(SupportSlaEvent $slaEvent, SupportConversation $conversation): void
     {
         // For warnings, only send internal notification to assigned staff
         if ($conversation->assigned_to_user_id) {
-            $assignee = \App\Models\User::find($conversation->assigned_to_user_id);
+            $assignee = User::find($conversation->assigned_to_user_id);
             if ($assignee && $assignee->status->value === 'active') {
-                \App\Domain\Notifications\DatabaseNotificationService::create(
+                DatabaseNotificationService::create(
                     $assignee,
                     'Advertencia SLA',
                     $this->buildWarningMessage($slaEvent, $conversation),
@@ -97,7 +94,7 @@ class EscalateSupportSla
         }
     }
 
-    private function buildBreachMessage(\App\Models\SupportSlaEvent $slaEvent, \App\Models\SupportConversation $conversation): string
+    private function buildBreachMessage(SupportSlaEvent $slaEvent, SupportConversation $conversation): string
     {
         $metricLabels = [
             'first_response' => 'Primera respuesta',
@@ -111,7 +108,7 @@ class EscalateSupportSla
         return "Incumplimiento de SLA: {$metricLabel} vencida el {$dueAt}.\nConversación: {$conversation->subject} (#{$conversation->id})";
     }
 
-    private function buildWarningMessage(\App\Models\SupportSlaEvent $slaEvent, \App\Models\SupportConversation $conversation): string
+    private function buildWarningMessage(SupportSlaEvent $slaEvent, SupportConversation $conversation): string
     {
         $metricLabels = [
             'first_response' => 'Primera respuesta',
@@ -125,7 +122,7 @@ class EscalateSupportSla
         return "Advertencia SLA: {$metricLabel} por vencer el {$dueAt}.\nConversación: {$conversation->subject} (#{$conversation->id})";
     }
 
-    private function sendTelegramEscalation(\App\Models\SupportSlaEvent $slaEvent, \App\Models\SupportConversation $conversation): void
+    private function sendTelegramEscalation(SupportSlaEvent $slaEvent, SupportConversation $conversation): void
     {
         // An endpoint scoped to this conversation, plus every admin-wide one.
         // Fetching all endpoints regardless of scope would route a private
@@ -139,11 +136,11 @@ class EscalateSupportSla
             ->get();
 
         foreach ($endpoints as $endpoint) {
-            $message = "🚨 *Incumplimiento SLA*\n\n" .
-                $this->buildBreachMessage($slaEvent, $conversation) .
-                "\n\n<a href='" . config('app.url') . "/soporte/{$conversation->id}\">Ver conversación</a>";
+            $message = "🚨 *Incumplimiento SLA*\n\n".
+                $this->buildBreachMessage($slaEvent, $conversation).
+                "\n\n<a href='".config('app.url')."/soporte/{$conversation->id}\">Ver conversación</a>";
 
-            \App\Jobs\SendTelegramMessage::dispatch($endpoint->id, $message);
+            SendTelegramMessage::dispatch($endpoint->id, $message);
         }
     }
 }

@@ -7,8 +7,13 @@ namespace App\Services\Ai\Tools;
 use App\Domain\Ai\AiToolRejected;
 use App\Models\AiArtifact;
 use App\Models\User;
+use Dompdf\Dompdf;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use PhpOffice\PhpWord\IOFactory;
+use PhpOffice\PhpWord\PhpWord;
 
 /**
  * Creates private artifacts (PDF, DOCX, XLSX, CSV, MD, TXT) for the user.
@@ -112,9 +117,9 @@ final class CreateArtifactTool extends AbstractAiTool
         // Generate the artifact content
         $fileContent = $this->generateContent($format, $content, $title);
 
-        // Store in private storage
-        $path = 'ai-artifacts/' . $user->id . '/' . Str::uuid() . '.' . $format;
-        Storage::disk('private')->put($path, $fileContent);
+        // Store in private storage (local disk with root at storage/app/private)
+        $path = 'ai-artifacts/'.$user->id.'/'.Str::uuid().'.'.$format;
+        Storage::disk('local')->put($path, $fileContent);
 
         $size = strlen($fileContent);
 
@@ -122,7 +127,7 @@ final class CreateArtifactTool extends AbstractAiTool
         $artifact = AiArtifact::query()->create([
             'user_id' => $user->id,
             'conversation_id' => null, // Can be linked later if needed
-            'display_filename' => $filename . '.' . $format,
+            'display_filename' => $filename.'.'.$format,
             'mime_type' => $mime,
             'format' => $format,
             'storage_path' => $path,
@@ -156,13 +161,13 @@ final class CreateArtifactTool extends AbstractAiTool
 
     private function generatePdf(string $content, string $title): string
     {
-        $dompdf = new \Dompdf\Dompdf();
+        $dompdf = new Dompdf;
         $html = '
             <!DOCTYPE html>
             <html>
             <head>
                 <meta charset="UTF-8">
-                <title>' . htmlspecialchars($title) . '</title>
+                <title>'.htmlspecialchars($title).'</title>
                 <style>
                     body { font-family: DejaVu Sans, sans-serif; margin: 40px; line-height: 1.6; }
                     h1 { color: #333; border-bottom: 1px solid #eee; padding-bottom: 10px; }
@@ -173,39 +178,41 @@ final class CreateArtifactTool extends AbstractAiTool
                 </style>
             </head>
             <body>
-                <h1>' . htmlspecialchars($title) . '</h1>
-                <div>' . nl2br(htmlspecialchars($content)) . '</div>
+                <h1>'.htmlspecialchars($title).'</h1>
+                <div>'.nl2br(htmlspecialchars($content)).'</div>
             </body>
             </html>
         ';
         $dompdf->loadHtml($html);
         $dompdf->setPaper('A4', 'portrait');
         $dompdf->render();
+
         return $dompdf->output();
     }
 
     private function generateDocx(string $content, string $title): string
     {
-        $phpWord = new \PhpOffice\PhpWord\PhpWord();
+        $phpWord = new PhpWord;
         $section = $phpWord->addSection();
         $section->addTitle(htmlspecialchars($title), 1);
         $section->addText(htmlspecialchars($content));
-        $objWriter = \PhpOffice\PhpWord\IOFactory::createWriter($phpWord, 'Word2007');
+        $objWriter = IOFactory::createWriter($phpWord, 'Word2007');
         $tempFile = tempnam(sys_get_temp_dir(), 'docx_');
         $objWriter->save($tempFile);
         $fileContent = file_get_contents($tempFile);
         unlink($tempFile);
+
         return $fileContent;
     }
 
     private function generateXlsx(string $content): string
     {
         $data = json_decode($content, true);
-        if (!is_array($data)) {
+        if (! is_array($data)) {
             throw new AiToolRejected('El contenido para XLSX debe ser un array JSON de filas.');
         }
 
-        $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+        $spreadsheet = new Spreadsheet;
         $sheet = $spreadsheet->getActiveSheet();
 
         foreach ($data as $rowIndex => $row) {
@@ -214,18 +221,19 @@ final class CreateArtifactTool extends AbstractAiTool
             }
         }
 
-        $writer = new \PhpOffice\PhpSpreadsheet\Writer\Xlsx($spreadsheet);
+        $writer = new Xlsx($spreadsheet);
         $tempFile = tempnam(sys_get_temp_dir(), 'xlsx_');
         $writer->save($tempFile);
         $fileContent = file_get_contents($tempFile);
         unlink($tempFile);
+
         return $fileContent;
     }
 
     private function generateCsv(string $content): string
     {
         $data = json_decode($content, true);
-        if (!is_array($data)) {
+        if (! is_array($data)) {
             throw new AiToolRejected('El contenido para CSV debe ser un array JSON de filas.');
         }
 
@@ -236,6 +244,7 @@ final class CreateArtifactTool extends AbstractAiTool
         rewind($output);
         $csvContent = stream_get_contents($output);
         fclose($output);
+
         return $csvContent;
     }
 }

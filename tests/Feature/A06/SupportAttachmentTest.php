@@ -72,7 +72,7 @@ function uploadFor($test, User $user, SupportConversation $conversation, Uploade
 }
 
 /* -------------------------------------------------------------------------- */
-/* | | Ownership                                                                   *  */
+/* | | Ownership                                                                   * */
 /* -------------------------------------------------------------------------- */
 
 test('an uploaded attachment records its owning conversation', function (): void {
@@ -128,7 +128,7 @@ test('an attachment of a different client is not served', function (): void {
 })->group('R2-10');
 
 /* -------------------------------------------------------------------------- */
-/* | | Stored paths                                                                *  */
+/* | | Stored paths                                                                * */
 /* -------------------------------------------------------------------------- */
 
 test('the stored extension comes from the accepted type, not the filename', function (): void {
@@ -194,7 +194,7 @@ test('a type outside the accepted list is refused', function (): void {
 })->group('R2-11');
 
 /* -------------------------------------------------------------------------- */
-/* | | Atomicity                                                                   *  */
+/* | | Atomicity                                                                   * */
 /* -------------------------------------------------------------------------- */
 
 test('the bytes are written and the row is created together', function (): void {
@@ -259,7 +259,7 @@ test('a failed write produces no metadata row', function (): void {
 })->group('R2-09');
 
 /* -------------------------------------------------------------------------- */
-/* | | Download contract                                                           *  */
+/* | | Download contract                                                           * */
 /* -------------------------------------------------------------------------- */
 
 test('an attachment belonging to a visible message can be downloaded', function (): void {

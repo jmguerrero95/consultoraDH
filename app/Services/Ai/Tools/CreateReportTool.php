@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Ai\Tools;
 
+use App\Domain\Ai\AiToolRejected;
 use App\Domain\Reports\ReportFilter;
 use App\Domain\Reports\ReportFormat;
 use App\Domain\Reports\ReportGenerator;
@@ -72,7 +73,7 @@ final class CreateReportTool extends AbstractAiTool
         $filters = $arguments['filters'] ?? [];
 
         if (! is_array($filters)) {
-            throw new \App\Domain\Ai\AiToolRejected("El argumento 'filters' debe ser un objeto.");
+            throw new AiToolRejected("El argumento 'filters' debe ser un objeto.");
         }
 
         return [

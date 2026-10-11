@@ -78,7 +78,7 @@ interface AiTool
      * Do the work, as this user.
      *
      * @param  array<string, mixed>  $arguments  already validated
-     * @return array<string, mixed>  a result to hand back to the model as data
+     * @return array<string, mixed> a result to hand back to the model as data
      */
     public function execute(array $arguments, User $user): array;
 }

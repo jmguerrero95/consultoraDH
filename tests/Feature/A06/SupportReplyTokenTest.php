@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Domain\Support\SupportInboundEmailStatus;
+use App\Mail\SupportFallbackEmail;
 use App\Models\Client;
 use App\Models\SupportConversation;
 use App\Models\SupportInboundEmail;
@@ -11,6 +12,7 @@ use App\Models\SupportQueue;
 use App\Models\SupportReplyToken;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Testing\TestResponse;
 
 /**
  * R2-05 and R2-06 — the reply token and the correlation it authorises.
@@ -58,7 +60,7 @@ function supportContext(): array
 }
 
 /* -------------------------------------------------------------------------- */
-/* | | R2-05 — the token itself                                                    *  */
+/* | | R2-05 — the token itself                                                    * */
 /* -------------------------------------------------------------------------- */
 
 test('issuance returns a raw token and stores only its hash', function (): void {
@@ -160,7 +162,7 @@ test('the token is scoped to the conversation it was issued for', function (): v
 })->group('R2-05');
 
 /* -------------------------------------------------------------------------- */
-/* | | R2-05 — the fallback mail that issues it                                    *  */
+/* | | R2-05 — the fallback mail that issues it                                    * */
 /* -------------------------------------------------------------------------- */
 
 test('the fallback email issues a token and puts it in the reply-to address', function (): void {
@@ -177,7 +179,7 @@ test('the fallback email issues a token and puts it in the reply-to address', fu
         'body_text' => 'Le adjunto el estado de su caso.',
     ]);
 
-    $mailable = new \App\Mail\SupportFallbackEmail($message, $conversation);
+    $mailable = new SupportFallbackEmail($message, $conversation);
     // Laravel normalises reply-to into an Address value object.
     $address = $mailable->envelope()->replyTo[0]->address;
 
@@ -207,7 +209,7 @@ test('one send issues exactly one token', function (): void {
         'body_text' => 'Respuesta.',
     ]);
 
-    $mailable = new \App\Mail\SupportFallbackEmail($message, $conversation);
+    $mailable = new SupportFallbackEmail($message, $conversation);
 
     // The mailer asks for the envelope more than once while it builds and
     // retries a message. Each call must not issue, and supersede, a token.
@@ -222,7 +224,7 @@ test('one send issues exactly one token', function (): void {
 })->group('R2-05');
 
 /* -------------------------------------------------------------------------- */
-/* R2-06 — the direction of the correlation                                    */
+/* R2-06 — the direction of the correlation */
 /* -------------------------------------------------------------------------- */
 
 /**
@@ -241,7 +243,7 @@ test('one send issues exactly one token', function (): void {
  * thing. The body is therefore assembled as an actual message, and the signature
  * is computed over those exact bytes.
  */
-function ingestWithReplyToken($test, array $fields): Illuminate\Testing\TestResponse
+function ingestWithReplyToken($test, array $fields): TestResponse
 {
     $raw = implode("\r\n", [
         'Message-ID: <'.Str::random(20).'@mail.example.test>',

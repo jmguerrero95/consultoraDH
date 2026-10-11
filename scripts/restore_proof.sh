@@ -17,6 +17,14 @@ TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
 DISPOSABLE_DB="consultora_dh_restore_${TIMESTAMP}"
 DISPOSABLE_DIR="/tmp/restore_${TIMESTAMP}"
 
+# Trap para limpieza garantizada incluso en caso de error
+cleanup() {
+  echo "[${TIMESTAMP}] Limpiando recursos disposable..."
+  dropdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}" 2>/dev/null || true
+  rm -rf "${DISPOSABLE_DIR}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 echo "[${TIMESTAMP}] Iniciando restore proof desde: ${BACKUP_PATH}"
 
 # 1. Verificar manifest
@@ -38,14 +46,12 @@ pg_restore \
   --port="${PG_PORT:-5432}" \
   --username="${PG_USER:-postgres}" \
   --dbname="${DISPOSABLE_DB}" \
-  --jobs=4 \
   --no-owner \
   --no-privileges \
   "${BACKUP_PATH}/postgres.dump"
 
 if [[ $? -ne 0 ]]; then
   echo "[ERROR] pg_restore falló" >&2
-  dropdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}"
   exit 1
 fi
 
@@ -74,27 +80,37 @@ echo "[${TIMESTAMP}] Verificando almacenamiento privado..."
 mkdir -p "${DISPOSABLE_DIR}"
 tar -xzf "${BACKUP_PATH}/private_storage.tar.gz" -C "${DISPOSABLE_DIR}"
 
-# Verificar archivos esperados
-EXPECTED_DIRS=("ai-artifacts" "clients" "imports")
-for dir in "${EXPECTED_DIRS[@]}"; do
-  if [[ -d "${DISPOSABLE_DIR}/${dir}" ]]; then
-    FILE_COUNT=$(find "${DISPOSABLE_DIR}/${dir}" -type f | wc -l)
+# Verificar la ruta real extraída (el archivo puede tener el directorio como entrada de nivel superior)
+EXTRACTED_STORAGE="${DISPOSABLE_DIR}/private"
+if [[ ! -d "${EXTRACTED_STORAGE}" ]]; then
+  # Buscar el directorio real extraído
+  EXTRACTED_STORAGE=$(find "${DISPOSABLE_DIR}" -mindepth 1 -maxdepth 1 -type d -name "private" | head -1)
+fi
+
+if [[ -z "${EXTRACTED_STORAGE}" || ! -d "${EXTRACTED_STORAGE}" ]]; then
+  echo "[ERROR] Estructura de almacenamiento privado no encontrada en el backup" >&2
+  exit 1
+fi
+
+echo "[${TIMESTAMP}] Almacenamiento extraído en: ${EXTRACTED_STORAGE}"
+
+# Verificar archivos esperados (directorios obligatorios)
+MANDATORY_DIRS=("ai-artifacts" "clients" "imports")
+for dir in "${MANDATORY_DIRS[@]}"; do
+  if [[ -d "${EXTRACTED_STORAGE}/${dir}" ]]; then
+    FILE_COUNT=$(find "${EXTRACTED_STORAGE}/${dir}" -type f | wc -l)
     echo "  ${dir}: ${FILE_COUNT} files"
   else
-    echo "  ${dir}: NO ENCONTRADO (puede estar vacío)"
+    echo "[ERROR] Directorio obligatorio no encontrado: ${dir}" >&2
+    exit 1
   fi
 done
 
 # 7. Verificar checksums de archivos críticos (ej. ai_artifacts)
 echo "[${TIMESTAMP}] Verificando integridad archivos..."
-if [[ -d "${DISPOSABLE_DIR}/ai-artifacts" ]]; then
-  find "${DISPOSABLE_DIR}/ai-artifacts" -type f -name "*.pdf" -exec sha256sum {} \; | head -5
+if [[ -d "${EXTRACTED_STORAGE}/ai-artifacts" ]]; then
+  find "${EXTRACTED_STORAGE}/ai-artifacts" -type f -name "*.pdf" -exec sha256sum {} \; | head -5
 fi
-
-# 8. Limpieza
-echo "[${TIMESTAMP}] Limpiando recursos disposable..."
-dropdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}"
-rm -rf "${DISPOSABLE_DIR}"
 
 echo "[${TIMESTAMP}] ✅ RESTORE PROOF EXITOSO"
 echo "  Backup verificado: ${BACKUP_PATH}"

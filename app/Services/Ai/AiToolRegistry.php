@@ -8,6 +8,24 @@ use App\Domain\Ai\AiTool;
 use App\Domain\Ai\AiToolDefinition;
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use App\Services\Ai\Tools\ActivateAutomationRuleTool;
+use App\Services\Ai\Tools\AutomationVocabularyTool;
+use App\Services\Ai\Tools\ClientAccountTool;
+use App\Services\Ai\Tools\ClientSearchTool;
+use App\Services\Ai\Tools\ClientSummaryTool;
+use App\Services\Ai\Tools\CreateArtifactTool;
+use App\Services\Ai\Tools\CreateAutomationRuleTool;
+use App\Services\Ai\Tools\CreateOperationalTaskTool;
+use App\Services\Ai\Tools\CreateReportTool;
+use App\Services\Ai\Tools\DeactivateAutomationRuleTool;
+use App\Services\Ai\Tools\DocumentReadTool;
+use App\Services\Ai\Tools\DocumentSearchTool;
+use App\Services\Ai\Tools\OperationalTasksTool;
+use App\Services\Ai\Tools\ReceivablesSummaryTool;
+use App\Services\Ai\Tools\ReportPreviewTool;
+use App\Services\Ai\Tools\SupportSummaryTool;
+use App\Services\Ai\Tools\WebFetchTool;
+use App\Services\Ai\Tools\WebSearchTool;
 
 /**
  * The closed set of things the assistant may do.
@@ -61,24 +79,24 @@ class AiToolRegistry
     public static function make(): self
     {
         return new self([
-            app(\App\Services\Ai\Tools\ClientSearchTool::class),
-            app(\App\Services\Ai\Tools\ClientSummaryTool::class),
-            app(\App\Services\Ai\Tools\ReceivablesSummaryTool::class),
-            app(\App\Services\Ai\Tools\ClientAccountTool::class),
-            app(\App\Services\Ai\Tools\OperationalTasksTool::class),
-            app(\App\Services\Ai\Tools\ReportPreviewTool::class),
-            app(\App\Services\Ai\Tools\SupportSummaryTool::class),
-            app(\App\Services\Ai\Tools\CreateOperationalTaskTool::class),
-            app(\App\Services\Ai\Tools\CreateReportTool::class),
-            app(\App\Services\Ai\Tools\WebSearchTool::class),
-            app(\App\Services\Ai\Tools\WebFetchTool::class),
-            app(\App\Services\Ai\Tools\CreateArtifactTool::class),
-            app(\App\Services\Ai\Tools\DocumentSearchTool::class),
-            app(\App\Services\Ai\Tools\DocumentReadTool::class),
-            app(\App\Services\Ai\Tools\AutomationVocabularyTool::class),
-            app(\App\Services\Ai\Tools\CreateAutomationRuleTool::class),
-            app(\App\Services\Ai\Tools\ActivateAutomationRuleTool::class),
-            app(\App\Services\Ai\Tools\DeactivateAutomationRuleTool::class),
+            app(ClientSearchTool::class),
+            app(ClientSummaryTool::class),
+            app(ReceivablesSummaryTool::class),
+            app(ClientAccountTool::class),
+            app(OperationalTasksTool::class),
+            app(ReportPreviewTool::class),
+            app(SupportSummaryTool::class),
+            app(CreateOperationalTaskTool::class),
+            app(CreateReportTool::class),
+            app(WebSearchTool::class),
+            app(WebFetchTool::class),
+            app(CreateArtifactTool::class),
+            app(DocumentSearchTool::class),
+            app(DocumentReadTool::class),
+            app(AutomationVocabularyTool::class),
+            app(CreateAutomationRuleTool::class),
+            app(ActivateAutomationRuleTool::class),
+            app(DeactivateAutomationRuleTool::class),
         ]);
     }
 

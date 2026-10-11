@@ -20,6 +20,7 @@ class SupportSlaEvent extends Model
      * no bookkeeping timestamps.
      */
     public const UPDATED_AT = null;
+
     public const CREATED_AT = null;
 
     protected $fillable = [

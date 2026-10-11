@@ -6,8 +6,8 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 
 /**
  * Informative web search tool using a configurable SearXNG-compatible provider.
@@ -97,7 +97,7 @@ final class WebSearchTool extends AbstractAiTool
 
         $timeout = config('ai.web_search.timeout_seconds', 10);
 
-        $url = rtrim($baseUrl, '/') . '/search';
+        $url = rtrim($baseUrl, '/').'/search';
         $params = [
             'q' => $query,
             'format' => 'json',
@@ -116,11 +116,11 @@ final class WebSearchTool extends AbstractAiTool
                     ],
                 ]);
         } catch (\Throwable $e) {
-            throw new AiToolRejected('Error de conexión con el proveedor de búsqueda: ' . $e->getMessage());
+            throw new AiToolRejected('Error de conexión con el proveedor de búsqueda: '.$e->getMessage());
         }
 
         if ($response->failed()) {
-            throw new AiToolRejected('Error en la búsqueda web: ' . $response->status() . ' ' . $response->body());
+            throw new AiToolRejected('Error en la búsqueda web: '.$response->status().' '.$response->body());
         }
 
         $data = $response->json();
@@ -151,7 +151,7 @@ final class WebSearchTool extends AbstractAiTool
             // Parse published date if available
             if (isset($result['publishedDate']) && is_string($result['publishedDate'])) {
                 try {
-                    $publishedAt = \Carbon\Carbon::parse($result['publishedDate'])->toIso8601String();
+                    $publishedAt = Carbon::parse($result['publishedDate'])->toIso8601String();
                 } catch (\Throwable) {
                     // Ignore invalid dates
                 }
@@ -177,7 +177,7 @@ final class WebSearchTool extends AbstractAiTool
                 'title' => 'No se encontraron resultados.',
                 'url' => '#',
                 'domain' => '',
-                'snippet' => 'La búsqueda web no devolvió resultados para: ' . $query,
+                'snippet' => 'La búsqueda web no devolvió resultados para: '.$query,
                 'published_at' => null,
             ];
         }

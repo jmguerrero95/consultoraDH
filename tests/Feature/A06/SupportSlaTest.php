@@ -2,6 +2,11 @@
 
 declare(strict_types=1);
 
+use App\Domain\Support\Actions\AddInternalNote;
+use App\Domain\Support\Actions\AppendClientMessage;
+use App\Domain\Support\Actions\AppendStaffReply;
+use App\Domain\Support\Actions\ReopenConversation;
+use App\Domain\Support\Actions\ResolveConversation;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\SupportConversationStatus;
 use App\Jobs\ScanSupportSla;
@@ -11,8 +16,9 @@ use App\Models\SupportQueue;
 use App\Models\SupportQueueMember;
 use App\Models\SupportSlaEvent;
 use App\Models\User;
-use Spatie\Permission\Models\Permission;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Event;
+use Spatie\Permission\Models\Permission;
 
 /**
  * R2-15 and R2-16 — the SLA lifecycle.
@@ -69,7 +75,7 @@ function staffMember(SupportQueue $queue): User
 }
 
 /* -------------------------------------------------------------------------- */
-/* | | R2-15 — the clocks                                                          *  */
+/* | | R2-15 — the clocks                                                          * */
 /* -------------------------------------------------------------------------- */
 
 test('a client message starts a first response clock', function (): void {
@@ -88,7 +94,7 @@ test('a client message starts a first response clock', function (): void {
         'client_id' => $conversation->client_id,
     ]);
 
-    app(App\Domain\Support\Actions\AppendClientMessage::class)->execute(
+    app(AppendClientMessage::class)->execute(
         $conversation,
         'Necesito ayuda con mi factura.',
         $clientUser,
@@ -104,7 +110,7 @@ test('a visible staff reply satisfies the first clock and starts the next one', 
 
     $conversation = slaConversation($queue, ['client_id' => $client->id]);
 
-    app(App\Domain\Support\Actions\AppendStaffReply::class)->execute(
+    app(AppendStaffReply::class)->execute(
         $conversation,
         'Ya le estamos mirando.',
         $staff,
@@ -123,7 +129,7 @@ test('an internal note does not satisfy the first response clock', function (): 
 
     $conversation = slaConversation($queue, ['first_response_due_at' => now()->addMinutes(60)]);
 
-    app(App\Domain\Support\Actions\AddInternalNote::class)->execute(
+    app(AddInternalNote::class)->execute(
         $conversation,
         'Nota interna, el cliente no ve esto.',
         $staff,
@@ -147,7 +153,7 @@ test('resolving stops the clocks', function (): void {
         'status' => 'waiting_staff',
     ]);
 
-    app(App\Domain\Support\Actions\ResolveConversation::class)->execute($conversation, $staff);
+    app(ResolveConversation::class)->execute($conversation, $staff);
 
     $fresh = $conversation->fresh();
 
@@ -193,7 +199,7 @@ test('reopening starts the clocks again', function (): void {
         'resolution_due_at' => null,
     ]);
 
-    app(App\Domain\Support\Actions\ReopenConversation::class)->execute($conversation, $staff);
+    app(ReopenConversation::class)->execute($conversation, $staff);
 
     $fresh = $conversation->fresh();
 
@@ -206,7 +212,7 @@ test('reopening starts the clocks again', function (): void {
 })->group('R2-15');
 
 /* -------------------------------------------------------------------------- */
-/* R2-16 — the scanner                                                         */
+/* R2-16 — the scanner */
 /* -------------------------------------------------------------------------- */
 
 test('a breached first response is recorded once', function (): void {
@@ -305,7 +311,7 @@ test('a breach carries the due date it was measured against', function (): void 
 })->group('R2-16');
 
 test('a breach emits an event for the escalation listener', function (): void {
-    Illuminate\Support\Facades\Event::fake([SupportSlaEventEmitted::class]);
+    Event::fake([SupportSlaEventEmitted::class]);
 
     $queue = slaQueue();
     $conversation = slaConversation($queue, [
@@ -315,7 +321,7 @@ test('a breach emits an event for the escalation listener', function (): void {
 
     (new ScanSupportSla)->handle();
 
-    Illuminate\Support\Facades\Event::assertDispatched(
+    Event::assertDispatched(
         SupportSlaEventEmitted::class,
         fn (SupportSlaEventEmitted $event): bool => $event->slaEvent->conversation_id === $conversation->id,
     );

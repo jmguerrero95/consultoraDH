@@ -24,7 +24,7 @@ mkdir -p "${WORK_DIR}"
 
 echo "[${TIMESTAMP}] Iniciando backup: ${BACKUP_NAME}"
 
-# 1. PostgreSQL — dump custom format (comprimido, paralelo)
+# 1. PostgreSQL — dump custom format (comprimido)
 echo "[${TIMESTAMP}] Dumping PostgreSQL..."
 pg_dump \
   --host="${PG_HOST}" \
@@ -33,7 +33,6 @@ pg_dump \
   --dbname="${PG_DB}" \
   --format=custom \
   --compress=9 \
-  --jobs=4 \
   --no-owner \
   --no-privileges \
   --file="${WORK_DIR}/postgres.dump"

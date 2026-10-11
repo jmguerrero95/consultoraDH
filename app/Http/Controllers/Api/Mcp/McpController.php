@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api\Mcp;
 
-use App\Domain\Ai\AiToolDefinition;
+use App\Domain\Ai\AiToolRejected;
+use App\Models\AiActionProposal;
+use App\Models\AiConversation;
 use App\Models\User;
 use App\Services\Ai\AiToolRegistry;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Routing\Controller;
 use Illuminate\Http\Request;
+use Illuminate\Routing\Controller;
 
 /**
  * MCP (Model Context Protocol) server - JSON-RPC 2.0 compatible.
@@ -73,10 +75,10 @@ final class McpController extends Controller
             ]);
         } catch (\InvalidArgumentException $e) {
             return $this->jsonRpcError($id, -32601, $e->getMessage());
-        } catch (\App\Domain\Ai\AiToolRejected $e) {
+        } catch (AiToolRejected $e) {
             return $this->jsonRpcError($id, -32602, $e->getMessage());
         } catch (\Throwable $e) {
-            return $this->jsonRpcError($id, -32603, 'Internal error: ' . $e->getMessage());
+            return $this->jsonRpcError($id, -32603, 'Internal error: '.$e->getMessage());
         }
     }
 
@@ -165,19 +167,36 @@ final class McpController extends Controller
 
         if ($tool->isWrite()) {
             // Write tools create proposals - do NOT execute directly
+            // Create a real AiActionProposal for the user
+            $conversation = AiConversation::query()->create([
+                'user_id' => $user->id,
+                'title' => 'Conversación MCP '.now()->format('Y-m-d H:i'),
+            ]);
+
+            $proposal = AiActionProposal::query()->create([
+                'user_id' => $user->id,
+                'ai_conversation_id' => $conversation->id,
+                'tool' => $name,
+                'arguments' => $validated,
+                'status' => AiActionProposal::PENDING,
+                'expires_at' => now()->addMinutes(config('ai.proposal_ttl_minutes', 15)),
+            ]);
+
+            // Write tools create proposals - do NOT execute directly
             // The proposal is returned to the caller for confirmation via REST API
             return [
                 'content' => [
                     [
                         'type' => 'text',
-                        'text' => "Esta herramienta ({$name}) produce una propuesta que requiere confirmación humana. " .
-                            "La propuesta ha sido creada y puede ser confirmada a través del endpoint REST /api/ai/action-proposals/{id}/confirm. " .
-                            "Argumentos validados: " . json_encode($validated, JSON_UNESCAPED_SLASHES),
+                        'text' => "Esta herramienta ({$name}) produce una propuesta que requiere confirmación humana. ".
+                            "La propuesta ha sido creada (ID: {$proposal->id}) y puede ser confirmada a través del endpoint REST /api/ai/action-proposals/{$proposal->id}/confirm. ".
+                            'Argumentos validados: '.json_encode($validated, JSON_UNESCAPED_SLASHES),
                     ],
                 ],
                 'isError' => false,
                 '_meta' => [
                     'proposal' => true,
+                    'proposal_id' => $proposal->id,
                     'tool' => $name,
                     'arguments' => $validated,
                 ],
@@ -204,7 +223,7 @@ final class McpController extends Controller
                 'content' => [
                     [
                         'type' => 'text',
-                        'text' => 'Error ejecutando ' . $name . ': ' . $e->getMessage(),
+                        'text' => 'Error ejecutando '.$name.': '.$e->getMessage(),
                     ],
                 ],
                 'isError' => true,

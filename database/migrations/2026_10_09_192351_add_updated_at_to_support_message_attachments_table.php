@@ -12,7 +12,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('support_message_attachments', function (Blueprint $table) {
-            if (!Schema::hasColumn('support_message_attachments', 'updated_at')) {
+            if (! Schema::hasColumn('support_message_attachments', 'updated_at')) {
                 $table->timestamp('updated_at')->nullable()->after('created_at');
             }
         });

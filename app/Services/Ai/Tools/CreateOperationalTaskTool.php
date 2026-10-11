@@ -8,6 +8,7 @@ use App\Domain\Ai\AiToolRejected;
 use App\Domain\Operations\OperationNotApplicable;
 use App\Domain\Operations\TaskAssignee;
 use App\Domain\Operations\TaskPriority;
+use App\Domain\Operations\TaskStatus;
 use App\Models\OperationalTask;
 use App\Models\User;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
@@ -121,7 +122,7 @@ final class CreateOperationalTaskTool extends AbstractAiTool
             'description' => $arguments['description'] ?? '',
             'assigned_to' => $assignee->id,
             'priority' => $arguments['priority'],
-            'status' => \App\Domain\Operations\TaskStatus::Pending->value,
+            'status' => TaskStatus::Pending->value,
             'due_on' => $arguments['due_on'],
             'client_id' => $arguments['client_id'],
             'created_by' => $user->id,

@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace App\Services\Ai\Tools;
 
+use App\Domain\Ai\AiTool;
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
-use Illuminate\Support\Facades\Gate;
 
 /**
  * Shared behaviour for every assistant tool.
@@ -26,7 +26,7 @@ use Illuminate\Support\Facades\Gate;
  * object with a `sql` or a `url` key has nowhere to go — the tool reads the keys
  * it declared and ignores everything else.
  */
-abstract class AbstractAiTool implements \App\Domain\Ai\AiTool
+abstract class AbstractAiTool implements AiTool
 {
     /**
      * Refuse the call unless this user holds the permission the equivalent screen

@@ -7,7 +7,11 @@ namespace App\Services\Ai\Tools;
 use App\Domain\Ai\AiToolRejected;
 use App\Models\ClientDocument;
 use App\Models\User;
+use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use PhpOffice\PhpWord\IOFactory;
+use Smalot\PdfParser\Parser;
 
 /**
  * Reads a specific document the user is authorized to access.
@@ -123,12 +127,12 @@ final class DocumentReadTool extends AbstractAiTool
         ];
     }
 
-    private function extractText(\Illuminate\Contracts\Filesystem\Filesystem $disk, string $path, string $mimeType): string
+    private function extractText(Filesystem $disk, string $path, string $mimeType): string
     {
         $tempPath = $disk->path($path);
         if (! file_exists($tempPath)) {
             // For remote disks, download to temp
-            $tempPath = sys_get_temp_dir() . '/' . basename($path);
+            $tempPath = sys_get_temp_dir().'/'.basename($path);
             file_put_contents($tempPath, $disk->get($path));
         }
 
@@ -145,8 +149,9 @@ final class DocumentReadTool extends AbstractAiTool
     private function extractPdfText(string $path): string
     {
         try {
-            $parser = new \Smalot\PdfParser\Parser();
+            $parser = new Parser;
             $pdf = $parser->parseFile($path);
+
             return $pdf->getText() ?: '';
         } catch (\Throwable) {
             return '';
@@ -156,15 +161,16 @@ final class DocumentReadTool extends AbstractAiTool
     private function extractDocxText(string $path): string
     {
         try {
-            $phpWord = \PhpOffice\PhpWord\IOFactory::load($path);
+            $phpWord = IOFactory::load($path);
             $text = '';
             foreach ($phpWord->getSections() as $section) {
                 foreach ($section->getElements() as $element) {
                     if (method_exists($element, 'getText')) {
-                        $text .= $element->getText() . "\n";
+                        $text .= $element->getText()."\n";
                     }
                 }
             }
+
             return $text;
         } catch (\Throwable) {
             return '';
@@ -184,9 +190,10 @@ final class DocumentReadTool extends AbstractAiTool
                     foreach ($cellIterator as $cell) {
                         $rowText[] = $cell->getValue();
                     }
-                    $text .= implode("\t", $rowText) . "\n";
+                    $text .= implode("\t", $rowText)."\n";
                 }
             }
+
             return $text;
         } catch (\Throwable) {
             return '';

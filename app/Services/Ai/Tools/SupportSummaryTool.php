@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Ai\Tools;
 
+use App\Domain\Ai\AiToolRejected;
 use App\Models\SupportConversation;
 use App\Models\SupportQueueMember;
 use App\Models\User;
@@ -57,7 +58,7 @@ final class SupportSummaryTool extends AbstractAiTool
         $limit = $arguments['limit'] ?? 20;
 
         if (! is_int($limit) && ! (is_string($limit) && ctype_digit($limit))) {
-            throw new \App\Domain\Ai\AiToolRejected("El argumento 'limit' debe ser un numero.");
+            throw new AiToolRejected("El argumento 'limit' debe ser un numero.");
         }
 
         return [
@@ -83,7 +84,7 @@ final class SupportSummaryTool extends AbstractAiTool
         }
 
         if (! $this->mayRead($user, $conversation)) {
-            throw new \App\Domain\Ai\AiToolRejected('No tiene acceso a esta conversacion.');
+            throw new AiToolRejected('No tiene acceso a esta conversacion.');
         }
 
         // `client_visible` only: an internal note never crosses this boundary.

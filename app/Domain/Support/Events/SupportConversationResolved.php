@@ -17,7 +17,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class SupportConversationResolved implements AuditableEvent, SubjectAware, ShouldBroadcast
+class SupportConversationResolved implements AuditableEvent, ShouldBroadcast, SubjectAware
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
@@ -73,9 +73,9 @@ class SupportConversationResolved implements AuditableEvent, SubjectAware, Shoul
     public function auditMetadata(): array
     {
         return [
-                'queue_id' => $this->conversation->queue_id,
-                'resolution' => $this->conversation->resolution,
-                'resolved_by' => $this->resolver->id,
-            ];
+            'queue_id' => $this->conversation->queue_id,
+            'resolution' => $this->conversation->resolution,
+            'resolved_by' => $this->resolver->id,
+        ];
     }
 }

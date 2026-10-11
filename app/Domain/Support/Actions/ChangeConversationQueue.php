@@ -31,12 +31,12 @@ class ChangeConversationQueue
             $assigneeId = $newAssignee?->id;
 
             // If no new assignee provided, check if current assignee is member of new queue
-            if (!$assigneeId && $currentAssignee) {
+            if (! $assigneeId && $currentAssignee) {
                 $isMember = SupportQueueMember::where('queue_id', $newQueue->id)
                     ->where('user_id', $currentAssignee->id)
                     ->exists();
 
-                if (!$isMember && !$actor->hasPermissionTo('support.view_all')) {
+                if (! $isMember && ! $actor->hasPermissionTo('support.view_all')) {
                     throw new \DomainException(
                         'Current assignee is not a member of the new queue. '.
                         'Provide a new valid assignee or ensure current assignee is a member.'
@@ -47,7 +47,7 @@ class ChangeConversationQueue
 
             // If new assignee provided, validate
             if ($assigneeId && $newAssignee) {
-                if ($newAssignee->account_type !== 'staff' || !$newAssignee->status->value === 'active') {
+                if ($newAssignee->account_type !== 'staff' || ! $newAssignee->status->value === 'active') {
                     throw new \InvalidArgumentException('Assignee must be an active staff user');
                 }
 
@@ -55,7 +55,7 @@ class ChangeConversationQueue
                     ->where('user_id', $newAssignee->id)
                     ->exists();
 
-                if (!$isMember && !$actor->hasPermissionTo('support.view_all')) {
+                if (! $isMember && ! $actor->hasPermissionTo('support.view_all')) {
                     throw new \DomainException('Assignee is not a member of the new queue');
                 }
             }

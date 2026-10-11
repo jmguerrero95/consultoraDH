@@ -6,6 +6,7 @@ namespace App\Services\Ai;
 
 use App\Domain\Ai\AiMessage;
 use App\Domain\Ai\AiResponse;
+use App\Domain\Ai\AiToolCall;
 use App\Domain\Ai\AiToolDefinition;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
@@ -184,7 +185,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
                 continue;
             }
 
-            $calls[] = new \App\Domain\Ai\AiToolCall(
+            $calls[] = new AiToolCall(
                 $function['name'],
                 $this->decodeArguments($function['arguments'] ?? null),
                 is_string($call['id'] ?? null) ? $call['id'] : null,

@@ -14,6 +14,4 @@ use RuntimeException;
  * is not allowed to do this. Neither is retried and neither is passed on to the
  * model as though it had been attempted.
  */
-final class AiToolRejected extends RuntimeException
-{
-}
+final class AiToolRejected extends RuntimeException {}

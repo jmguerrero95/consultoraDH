@@ -32,7 +32,9 @@ use Illuminate\Support\Str;
 final class WebFetchTool extends AbstractAiTool
 {
     private const MAX_REDIRECTS = 5;
+
     private const MAX_DOWNLOAD_BYTES = 500_000; // 500KB
+
     private const ALLOWED_CONTENT_TYPES = [
         'text/html',
         'text/plain',
@@ -78,7 +80,7 @@ final class WebFetchTool extends AbstractAiTool
 
         // Basic URL validation - must be http or https
         if (! filter_var($url, FILTER_VALIDATE_URL) || ! in_array(parse_url($url, PHP_URL_SCHEME), ['http', 'https'], true)) {
-            throw new AiToolRejected("URL inválida: debe ser una URL http o https.");
+            throw new AiToolRejected('URL inválida: debe ser una URL http o https.');
         }
 
         // Reject URLs with credentials
@@ -115,10 +117,13 @@ final class WebFetchTool extends AbstractAiTool
         $url = $arguments['url'];
         $maxChars = $arguments['max_chars'];
 
+        // Disable automatic redirects to handle them manually with SSRF validation
         $client = Http::withHeaders([
             'User-Agent' => 'Consultora-DH-Assistant/1.0',
             'Accept' => 'text/html,application/xhtml+xml,application/xml',
-        ])->timeout(15);
+        ])->timeout(15)->withOptions([
+            'allow_redirects' => false,
+        ]);
 
         // Track redirects manually to validate each target
         $currentUrl = $url;
@@ -133,11 +138,11 @@ final class WebFetchTool extends AbstractAiTool
             try {
                 $response = $client->get($currentUrl);
             } catch (\Throwable $e) {
-                throw new AiToolRejected("Error al fetchear URL: " . $e->getMessage());
+                throw new AiToolRejected('Error al fetchear URL: '.$e->getMessage());
             }
 
             if ($response->failed()) {
-                throw new AiToolRejected("Error fetching URL: " . $response->status() . ' ' . $response->statusText());
+                throw new AiToolRejected('Error fetching URL: '.$response->status().' '.$response->statusText());
             }
 
             $contentType = $response->header('Content-Type') ?? '';
@@ -163,12 +168,13 @@ final class WebFetchTool extends AbstractAiTool
 
                 $redirectCount++;
                 if ($redirectCount > self::MAX_REDIRECTS) {
-                    throw new AiToolRejected('Demasiadas redirecciones (máx. ' . self::MAX_REDIRECTS . ').');
+                    throw new AiToolRejected('Demasiadas redirecciones (máx. '.self::MAX_REDIRECTS.').');
                 }
 
                 // Resolve relative redirects
                 $currentUrl = $this->resolveRedirect($currentUrl, $location);
                 $finalUrl = $currentUrl;
+
                 continue;
             }
 
@@ -195,13 +201,13 @@ final class WebFetchTool extends AbstractAiTool
         if (preg_match('/<title>(.*?)<\/title>/is', $content, $matches)) {
             $title = strip_tags($matches[1]);
             if (mb_strlen($title) > 200) {
-                $title = mb_substr($title, 0, 200) . '...';
+                $title = mb_substr($title, 0, 200).'...';
             }
         }
 
         // Truncate to max_chars
         if (mb_strlen($textContent) > $maxChars) {
-            $textContent = mb_substr($textContent, 0, $maxChars) . '... [truncado]';
+            $textContent = mb_substr($textContent, 0, $maxChars).'... [truncado]';
         }
 
         return [
@@ -390,19 +396,19 @@ final class WebFetchTool extends AbstractAiTool
         }
 
         // Relative URL
-        $base = ($parsedCurrent['scheme'] ?? 'https') . '://' . ($parsedCurrent['host'] ?? '');
+        $base = ($parsedCurrent['scheme'] ?? 'https').'://'.($parsedCurrent['host'] ?? '');
         if (isset($parsedCurrent['port'])) {
-            $base .= ':' . $parsedCurrent['port'];
+            $base .= ':'.$parsedCurrent['port'];
         }
 
         $path = $parsedCurrent['path'] ?? '/';
         $dir = rtrim(dirname($path), '/');
 
         if (Str::startsWith($location, '/')) {
-            return $base . $location;
+            return $base.$location;
         }
 
-        return $base . '/' . $dir . '/' . $location;
+        return $base.'/'.$dir.'/'.$location;
     }
 
     /**
@@ -419,7 +425,7 @@ final class WebFetchTool extends AbstractAiTool
         // Convert common block elements to newlines
         $blockTags = ['div', 'p', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'tr', 'td', 'th', 'section', 'article', 'header', 'footer', 'nav', 'main', 'aside'];
         foreach ($blockTags as $tag) {
-            $html = preg_replace('/<\/?' . $tag . '\b[^>]*>/i', "\n", $html);
+            $html = preg_replace('/<\/?'.$tag.'\b[^>]*>/i', "\n", $html);
         }
 
         // Strip remaining tags

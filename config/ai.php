@@ -77,4 +77,32 @@ return [
         'api_key' => env('AI_FALLBACK_API_KEY'),
         'model' => env('AI_FALLBACK_MODEL'),
     ],
+
+    /*
+     * Web search configuration (SearXNG-compatible).
+     *
+     * AI_WEB_SEARCH_ENABLED
+     * AI_WEB_SEARCH_BASE_URL
+     * AI_WEB_SEARCH_TIMEOUT_SECONDS
+     */
+    'web_search' => [
+        'enabled' => (bool) env('AI_WEB_SEARCH_ENABLED', false),
+        'base_url' => env('AI_WEB_SEARCH_BASE_URL'),
+        'timeout_seconds' => (int) env('AI_WEB_SEARCH_TIMEOUT_SECONDS', 10),
+    ],
+
+    /*
+     * Artifact configuration.
+     *
+     * AI_ARTIFACT_TTL_DAYS
+     */
+    'artifact_ttl_days' => (int) env('AI_ARTIFACT_TTL_DAYS', 30),
+
+    /*
+     * Temperature for model responses.
+     *
+     * AI_TEMPERATURE
+     */
+    'temperature' => (float) env('AI_TEMPERATURE', 0.2),
+
 ];

@@ -3,11 +3,15 @@
 declare(strict_types=1);
 
 use App\Domain\Support\SupportInboundEmailStatus;
+use App\Http\Controllers\Api\AutomationController;
+use App\Http\Controllers\Api\SupportConversationController;
+use App\Http\Controllers\Api\SupportInboundEmailController;
+use App\Http\Controllers\Api\SupportQueueController;
+use App\Http\Controllers\Api\TelegramController;
 use App\Jobs\SendTelegramMessage;
 use App\Models\AutomationRule;
 use App\Models\AutomationRun;
 use App\Models\Client;
-use App\Models\SupportConversation;
 use App\Models\SupportInboundEmail;
 use App\Models\SupportMessage;
 use App\Models\SupportQueue;
@@ -58,7 +62,7 @@ function inactiveRule(User $owner, array $overrides = []): AutomationRule
         'condition_config' => ['all' => []],
     ], $overrides));
 }
-/*                               | /| Telegram                                */
+/*                               | /| Telegram */
 test('binds {endpoint} and persists the update on the addressed row', function (): void {
     $staff = userWithPermissions(['notification_channels.manage']);
     $endpoint = TelegramEndpoint::factory()->createdBy($staff)->create([
@@ -112,7 +116,7 @@ test('binds {endpoint} only for the endpoint in the URL', function (): void {
 
     expect($untouched->fresh()->label)->toBe('Otro');
 });
-/*                              | /| Automations                              */
+/*                              | /| Automations */
 test('binds {rule} on show and returns that rule', function (): void {
     $staff = userWithPermissions(['automations.view']);
     $rule = inactiveRule($staff, ['name' => 'Regla visible']);
@@ -215,7 +219,7 @@ test('binds {rule} on runs and scopes the page to that rule', function (): void 
 
     expect($response->json('data'))->toHaveCount(1);
 });
-/*                        | /| Unlinked inbound email                         */
+/*                        | /| Unlinked inbound email */
 test('binds {email} on link and opens a conversation from that message', function (): void {
     seedPortfolioRoles();
 
@@ -267,9 +271,7 @@ test('binds {email} on discard and marks only that message', function (): void {
     expect($kept->fresh()->status)->toBe(SupportInboundEmailStatus::Quarantined);
 });
 
-
-/* Unknown ids                                                                 */
-
+/* Unknown ids */
 
 test('an unknown numeric id is 404 on every bound endpoint', function (): void {
     $staff = userWithPermissions([
@@ -332,7 +334,7 @@ test('a non numeric id is refused by the pattern constraint', function (): void 
             ->assertNotFound();
     }
 });
-/*                      | /| The original defect, named                       */
+/*                      | /| The original defect, named */
 /**
  * The route parameter and the controller argument must agree.
  *
@@ -345,11 +347,11 @@ test('a non numeric id is refused by the pattern constraint', function (): void 
 test('every bound route parameter matches its controller argument name', function (): void {
     $routes = app('router')->getRoutes();
     $reflections = collect([
-        \App\Http\Controllers\Api\AutomationController::class,
-        \App\Http\Controllers\Api\SupportInboundEmailController::class,
-        \App\Http\Controllers\Api\SupportConversationController::class,
-        \App\Http\Controllers\Api\SupportQueueController::class,
-        \App\Http\Controllers\Api\TelegramController::class,
+        AutomationController::class,
+        SupportInboundEmailController::class,
+        SupportConversationController::class,
+        SupportQueueController::class,
+        TelegramController::class,
     ])->keyBy(fn (string $class): string => $class);
 
     $mismatches = [];

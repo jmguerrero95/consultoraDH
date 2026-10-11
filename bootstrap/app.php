@@ -12,10 +12,12 @@ use App\Domain\Operations\OperationNotApplicable;
 use App\Domain\Planillas\SheetNotApplicable;
 use App\Domain\Reports\Exceptions\UnknownReportFormat;
 use App\Domain\Reports\Exceptions\UnknownReportType;
+use App\Http\Middleware\AuthenticateMcpToken;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\RequireAnyAbility;
 use App\Http\Middleware\SecurityHeaders;
 use App\Http\Middleware\TrustHosts;
+use App\Http\Middleware\VerifySupportEmailHmac;
 use App\Support\Security\TrustedHostsNotConfigured;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
@@ -23,11 +25,11 @@ use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
+use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Session\Middleware\AuthenticateSession;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
-use Dotenv\Dotenv;
 
 /*
 |--------------------------------------------------------------------------
@@ -111,15 +113,15 @@ return Application::configure(dirname(__DIR__))
             'anyAbility' => RequireAnyAbility::class,
 
             // HMAC verification for support inbound email ingestion
-            'support.email.hmac' => \App\Http\Middleware\VerifySupportEmailHmac::class,
+            'support.email.hmac' => VerifySupportEmailHmac::class,
 
             // A dedicated limiter for the inbound webhook, so a flood of signed
             // mail cannot consume the budget the browser session shares and a
             // legitimate later delivery is not refused behind it.
-            'throttle:support-inbound' => \Illuminate\Routing\Middleware\ThrottleRequests::class.':support-inbound',
+            'throttle:support-inbound' => ThrottleRequests::class.':support-inbound',
 
             // MCP Bearer token authentication (custom, not Sanctum)
-            'auth.mcp' => \App\Http\Middleware\AuthenticateMcpToken::class,
+            'auth.mcp' => AuthenticateMcpToken::class,
         ]);
 
         /*

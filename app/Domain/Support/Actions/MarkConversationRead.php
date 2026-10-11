@@ -20,7 +20,7 @@ class MarkConversationRead
             throw new \InvalidArgumentException('Message does not belong to this conversation');
         }
 
-        if (!$upToMessage->isClientVisible() && $user->account_type === 'client') {
+        if (! $upToMessage->isClientVisible() && $user->account_type === 'client') {
             throw new \DomainException('Cannot mark internal note as read');
         }
 
@@ -32,7 +32,7 @@ class MarkConversationRead
                 ->lockForUpdate()
                 ->first();
 
-            if (!$readState) {
+            if (! $readState) {
                 $readState = SupportReadState::create([
                     'conversation_id' => $conversation->id,
                     'user_id' => $user->id,
@@ -84,7 +84,7 @@ class MarkConversationRead
     private function calculateGlobalUnread(User $user): int
     {
         if ($user->account_type === 'client') {
-            if (!$user->client_id) {
+            if (! $user->client_id) {
                 return 0;
             }
 
@@ -110,7 +110,7 @@ class MarkConversationRead
 
         $query = SupportConversation::query()
             ->whereHas('queue', function ($q) use ($user) {
-                if (!$user->hasPermissionTo('support.view_all')) {
+                if (! $user->hasPermissionTo('support.view_all')) {
                     $q->whereHas('members', function ($mq) use ($user) {
                         $mq->where('user_id', $user->id);
                     });

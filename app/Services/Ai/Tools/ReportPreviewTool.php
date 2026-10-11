@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Ai\Tools;
 
+use App\Domain\Ai\AiToolRejected;
 use App\Domain\Reports\ReportFactory;
 use App\Domain\Reports\ReportFilter;
 use App\Domain\Reports\ReportType;
@@ -61,13 +62,13 @@ final class ReportPreviewTool extends AbstractAiTool
         $limit = $arguments['limit'] ?? 10;
 
         if (! is_int($limit) && ! (is_string($limit) && ctype_digit($limit))) {
-            throw new \App\Domain\Ai\AiToolRejected("El argumento 'limit' debe ser un numero.");
+            throw new AiToolRejected("El argumento 'limit' debe ser un numero.");
         }
 
         $filters = $arguments['filters'] ?? [];
 
         if (! is_array($filters)) {
-            throw new \App\Domain\Ai\AiToolRejected("El argumento 'filters' debe ser un objeto.");
+            throw new AiToolRejected("El argumento 'filters' debe ser un objeto.");
         }
 
         return [

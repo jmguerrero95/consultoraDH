@@ -14,7 +14,7 @@ class SupportQueueFactory extends Factory
     public function definition(): array
     {
         return [
-            'name' => fake()->company() . ' Queue',
+            'name' => fake()->company().' Queue',
             'slug' => fake()->unique()->slug(2),
             'active' => true,
             'fallback_user_id' => null,

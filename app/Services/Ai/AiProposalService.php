@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services\Ai;
 
-use App\Domain\Ai\AiToolRejected;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Models\AiActionProposal;

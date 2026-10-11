@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Ai\Tools;
 
+use App\Domain\Ai\AiToolRejected;
 use App\Domain\Receivables\ReceivablesService;
 use App\Models\Client;
 use App\Models\User;
@@ -69,7 +70,7 @@ final class ClientAccountTool extends AbstractAiTool
         // it is ownership, not a capability.
         if ($user->account_type === 'client') {
             if ((int) $user->client_id !== $clientId) {
-                throw new \App\Domain\Ai\AiToolRejected('Solo puede consultar su propia cuenta.');
+                throw new AiToolRejected('Solo puede consultar su propia cuenta.');
             }
         } else {
             $this->authorize($user, 'receivables.view');

@@ -13,7 +13,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -83,10 +82,10 @@ final class AuthenticateUser
         }
 
         \Log::info('AuthenticateUser password check', [
-            'password_check' => \Illuminate\Support\Facades\Hash::check($password, $user->password),
+            'password_check' => Hash::check($password, $user->password),
         ]);
 
-        if (! \Illuminate\Support\Facades\Hash::check($password, $user->password)) {
+        if (! Hash::check($password, $user->password)) {
             $this->reject($request, $email, $user);
         }
 

@@ -15,7 +15,7 @@ class AssignConversation
 {
     public function execute(SupportConversation $conversation, User $assignee, User $actor): SupportConversation
     {
-        if ($assignee->account_type !== 'staff' || !$assignee->status->value === 'active') {
+        if ($assignee->account_type !== 'staff' || ! $assignee->status->value === 'active') {
             throw new \InvalidArgumentException('Assignee must be an active staff user');
         }
 
@@ -31,12 +31,12 @@ class AssignConversation
             }
 
             // Check queue membership unless actor has support.view_all
-            if (!$actor->hasPermissionTo('support.view_all')) {
+            if (! $actor->hasPermissionTo('support.view_all')) {
                 $isMember = SupportQueueMember::where('queue_id', $conversation->queue_id)
                     ->where('user_id', $assignee->id)
                     ->exists();
 
-                if (!$isMember) {
+                if (! $isMember) {
                     throw new \DomainException('Assignee is not a member of the conversation queue');
                 }
             }

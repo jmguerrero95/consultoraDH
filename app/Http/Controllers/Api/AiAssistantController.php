@@ -4,17 +4,18 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
-use App\Models\AiConversation;
 use App\Models\AiActionProposal;
+use App\Models\AiConversation;
+use App\Models\AiMessage;
+use App\Models\User;
 use App\Services\Ai\AiAssistantService;
+use App\Services\Ai\AiProposalNotConfirmable;
+use App\Services\Ai\AiProposalService;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiToolRegistry;
-use App\Services\Ai\AiProposalService;
-use App\Domain\Ai\AiMessage as AiMessageModel;
-use App\Models\User;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Routing\Controller;
 use Illuminate\Http\Request;
+use Illuminate\Routing\Controller;
 
 /**
  * Handles one turn of an AI conversation: question → tool calls → answer/proposal.
@@ -48,6 +49,7 @@ final class AiAssistantController extends Controller
         if (! $user->can('ai.use')) {
             return response()->json(['error' => 'AI assistant access denied.'], 403);
         }
+
         return null;
     }
 
@@ -104,7 +106,7 @@ final class AiAssistantController extends Controller
         } else {
             $conversation = AiConversation::query()->create([
                 'user_id' => $request->user()->id,
-                'title' => 'Conversación ' . now()->format('Y-m-d H:i'),
+                'title' => 'Conversación '.now()->format('Y-m-d H:i'),
             ]);
         }
 
@@ -129,7 +131,7 @@ final class AiAssistantController extends Controller
             return response()->json(['error' => 'No es tu conversación.'], 403);
         }
 
-        $messages = AiMessageModel::query()
+        $messages = AiMessage::query()
             ->where('ai_conversation_id', $conversation->id)
             ->orderBy('id')
             ->get(['role', 'content', 'provider', 'model', 'created_at'])
@@ -162,14 +164,7 @@ final class AiAssistantController extends Controller
             return response()->json(['error' => 'Se requiere un mensaje.'], 400);
         }
 
-        // Store user message - this is the ONE persistence point
-        AiMessageModel::query()->create([
-            'ai_conversation_id' => $conversation->id,
-            'role' => AiMessageModel::ROLE_USER,
-            'content' => $data['message'],
-        ]);
-
-        // Immediately try to answer (same flow as store, but scoped to convo)
+        // Service handles all persistence: user message + assistant reply
         $result = $this->assistant->ask($conversation, $data['message'], $request->user());
 
         return response()->json([
@@ -192,7 +187,7 @@ final class AiAssistantController extends Controller
             return response()->json(['error' => 'No es tu propuesta.'], 403);
         }
 
-        if ($proposal->status !== \App\Models\AiActionProposal::PENDING) {
+        if ($proposal->status !== AiActionProposal::PENDING) {
             return response()->json(['error' => 'Esa propuesta ya no está disponible.'], 400);
         }
 
@@ -209,7 +204,7 @@ final class AiAssistantController extends Controller
                 'tool' => $proposal->tool,
                 'result' => $result,
             ]);
-        } catch (\App\Services\Ai\AiProposalNotConfirmable $e) {
+        } catch (AiProposalNotConfirmable $e) {
             return response()->json(['error' => $e->getMessage()], 400);
         } catch (\Throwable $e) {
             return response()->json(['error' => $e->getMessage()], 500);

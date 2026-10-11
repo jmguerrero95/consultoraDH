@@ -5,11 +5,10 @@ declare(strict_types=1);
 namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
+use App\Models\AuditEvent;
 use App\Models\AutomationRule;
 use App\Models\AutomationRuleCursor;
-use App\Models\AuditEvent;
 use App\Models\User;
-use Illuminate\Support\Facades\DB;
 
 /**
  * Activates an automation rule.
@@ -47,6 +46,7 @@ final class ActivateAutomationRuleTool extends AbstractAiTool
     public function validate(array $arguments): array
     {
         $ruleId = $this->requireId($arguments, 'rule_id');
+
         return ['rule_id' => $ruleId];
     }
 

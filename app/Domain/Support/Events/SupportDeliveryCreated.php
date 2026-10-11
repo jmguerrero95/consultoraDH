@@ -52,10 +52,10 @@ class SupportDeliveryCreated implements AuditableEvent, SubjectAware
     public function auditMetadata(): array
     {
         return [
-                'conversation_id' => $this->conversation->id,
-                'message_id' => $this->message->id,
-                'recipient_user_id' => $this->recipientUserId,
-                'status' => $this->status,
-            ];
+            'conversation_id' => $this->conversation->id,
+            'message_id' => $this->message->id,
+            'recipient_user_id' => $this->recipientUserId,
+            'status' => $this->status,
+        ];
     }
 }

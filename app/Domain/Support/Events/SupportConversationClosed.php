@@ -25,7 +25,7 @@ use Illuminate\Queue\SerializesModels;
  * difference between a resolved and a closed conversation was invisible to
  * both the scanner and the record.
  */
-class SupportConversationClosed implements AuditableEvent, SubjectAware, ShouldBroadcast
+class SupportConversationClosed implements AuditableEvent, ShouldBroadcast, SubjectAware
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
