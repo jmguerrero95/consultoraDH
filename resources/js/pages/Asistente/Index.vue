@@ -4,6 +4,9 @@ import { computed, onMounted, ref } from 'vue';
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
+import MicButton from '@/components/assistant/MicButton.vue';
+import SpeakButton from '@/components/assistant/SpeakButton.vue';
+import { useVoice } from '@/composables/useVoice';
 import { ai } from '@/services/ai';
 
 import type { AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
@@ -31,6 +34,10 @@ const sending = ref(false);
 const loading = ref(true);
 const status = ref<AiStatusPayload | null>(null);
 const error = ref<string | null>(null);
+
+// Voice is optional everywhere: neither control appears where the browser
+// cannot provide it, and the composer works exactly the same without them.
+const { dictation, playback } = useVoice();
 
 const enabled = computed(() => status.value?.ai_enabled === true);
 const model = computed(() => status.value?.primary?.model ?? status.value?.fallback?.model ?? '—');
@@ -212,6 +219,28 @@ function readError(e: unknown, fallback: string): string {
     return message !== undefined && message !== '' ? message : fallback;
 }
 
+/**
+ * Append dictated speech to the draft.
+ *
+ * The transcript goes into the composer rather than being submitted: speech
+ * recognition mishears names, numbers and accents, and sending an unedited
+ * guess would put a wrong figure into a conversation about money.
+ */
+function appendDictation(text: string): void {
+    const spoken = text.trim();
+
+    if (spoken === '') {
+        return;
+    }
+
+    draft.value = draft.value === '' ? spoken : `${draft.value} ${spoken}`;
+}
+
+/** Read one reply aloud. */
+function readAloud(content: string): void {
+    playback.speak(content);
+}
+
 function formatDate(value: string | null): string {
     if (!value) {
         return '';
@@ -274,7 +303,17 @@ function formatDate(value: string | null): string {
                         :class="message.role === 'user' ? 'cdh-ai__message--user' : 'cdh-ai__message--assistant'"
                     >
                         <p class="cdh-ai__message-body">{{ message.content }}</p>
-                        <p v-if="message.created_at" class="cdh-ai__message-meta">{{ formatDate(message.created_at) }}</p>
+
+                        <div class="cdh-ai__message-tools">
+                            <SpeakButton
+                                v-if="message.role === 'assistant'"
+                                :playback="playback"
+                                @speak="readAloud(message.content)"
+                            />
+                            <p v-if="message.created_at" class="cdh-ai__message-meta">
+                                {{ formatDate(message.created_at) }}
+                            </p>
+                        </div>
                     </div>
 
                     <p v-if="sending" class="cdh-ai__pending">Consultando…</p>
@@ -314,6 +353,8 @@ function formatDate(value: string | null): string {
                         placeholder="Escribe tu consulta…"
                         :disabled="sending || loading"
                     />
+                    <MicButton :dictation="dictation" @send="appendDictation" />
+
                     <AppButton type="submit" :busy="sending" :disabled="draft.trim() === ''">Enviar</AppButton>
                 </form>
             </section>
@@ -505,7 +546,19 @@ function formatDate(value: string | null): string {
 .cdh-ai__composer {
     display: flex;
     gap: var(--cdh-space-2);
-    align-items: flex-end;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+.cdh-ai__message-tools {
+    display: flex;
+    align-items: center;
+    gap: var(--cdh-space-2);
+    margin-top: var(--cdh-space-1);
+}
+
+.cdh-ai__message-tools .cdh-ai__message-meta {
+    margin: 0;
 }
 
 .cdh-ai__input {
