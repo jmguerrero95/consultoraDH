@@ -101,6 +101,11 @@ services:
       # filesystem. Reading them through the host bind mount is dramatically
       # slower (WSL 9p / Docker Desktop gRPC-FUSE).
       - vendor:/var/www/html/vendor
+      # The exchange directory with the document converter. Mounted
+      # unconditionally so a plain `docker compose up` behaves exactly as it
+      # did before; the converter only exists under the `documents` profile, and
+      # nothing references this path until it does.
+      - document-work:/var/www/html/storage/app/document-work
     depends_on:
       postgres:
         condition: service_healthy
@@ -140,6 +145,9 @@ services:
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor
+      # Conversion runs on the queue as well as in a request, so the worker
+      # needs the same exchange directory the converter reads.
+      - document-work:/var/www/html/storage/app/document-work
     depends_on:
       app:
         condition: service_healthy
@@ -286,6 +294,42 @@ services:
     networks:
       - consultora-dh
 
+  # ------------------------------------------------- document conversion
+  #
+  # Converts Office documents to PDF using LibreOffice headless.
+  #
+  # It is a separate service for two reasons. LibreOffice is a large office
+  # suite and would weigh down every application and queue worker to serve one
+  # capability. More to the point, it is a parser for untrusted input, and
+  # confining it here means a fault in it cannot reach the database, the
+  # credentials or the application process.
+  #
+  # It shares one directory with the application and publishes no port: the
+  # only way to reach it is from inside this network. It runs as an
+  # unprivileged user, disables macros and external resource retrieval, and
+  # builds a throwaway profile per conversion so one document's state cannot
+  # influence the next. See docker/converter/Dockerfile for the full argument.
+  converter:
+    build:
+      context: .
+      dockerfile: docker/converter/Dockerfile
+    image: consultora-dh/converter:local
+    container_name: consultora-dh-converter
+    restart: unless-stopped
+    profiles: ["documents"]
+    volumes:
+      # The one thing it shares with the application: a directory the
+      # application writes into and the converter reads, and vice versa.
+      - document-work:/work
+    # Bounded because it is the only part of the system that expands whatever
+    # a document asks it to. A runaway conversion should die here rather than
+    # take the host's memory with it.
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
+    networks:
+      - consultora-dh
+
 networks:
   consultora-dh:
     name: consultora-dh
@@ -302,3 +346,5 @@ volumes:
     name: consultora-dh-node-modules
   playwright-browsers:
     name: consultora-dh-playwright-browsers
+  document-work:
+    name: consultora-dh-document-work
