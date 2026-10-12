@@ -6,6 +6,8 @@ import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import MicButton from '@/components/assistant/MicButton.vue';
 import SpeakButton from '@/components/assistant/SpeakButton.vue';
+import SuggestionHint from '@/components/assistant/SuggestionHint.vue';
+import { useSuggestion } from '@/composables/useSuggestion';
 import { useVoice } from '@/composables/useVoice';
 import { ai } from '@/services/ai';
 
@@ -39,6 +41,10 @@ const error = ref<string | null>(null);
 // cannot provide it, and the composer works exactly the same without them.
 const { dictation, playback } = useVoice();
 
+// The proactive side. Fetched once when the screen opens rather than on a
+// timer: the cost and the interruption both belong to a person who is here.
+const hint = useSuggestion();
+
 const enabled = computed(() => status.value?.ai_enabled === true);
 const model = computed(() => status.value?.primary?.model ?? status.value?.fallback?.model ?? '—');
 
@@ -62,7 +68,34 @@ const availability = computed(() => {
 onMounted(async () => {
     await Promise.all([loadStatus(), loadConversations()]);
     loading.value = false;
+
+    // After the page has settled, and independently of it: a suggestion that
+    // failed to load must never keep the screen from opening.
+    await hint.refresh('receivables', 'client_account');
 });
+
+/**
+ * Take up a suggestion.
+ *
+ * Accepting does not open anything by itself - the server has recorded that the
+ * person chose to talk about this. What follows is an ordinary first turn, so
+ * the transcript, the proposals and the confirm flow all behave exactly as they
+ * would if the person had typed the question themselves.
+ */
+async function acceptHint(id: number): Promise<void> {
+    const context = hint.suggestion.value;
+
+    await hint.accept(id);
+
+    if (context !== null) {
+        draft.value = context.suggested_action;
+        await send();
+    }
+}
+
+async function dismissHint(id: number): Promise<void> {
+    await hint.dismiss(id);
+}
 
 async function loadStatus(): Promise<void> {
     try {
@@ -87,6 +120,11 @@ async function selectConversation(id: number): Promise<void> {
     sources.value = [];
     error.value = null;
 
+    // Dictation belongs to the turn being abandoned, not to the page. Recording
+    // continues in the background otherwise, and the next thing captured is
+    // typed into a conversation the person never chose.
+    dictation.abandon();
+
     try {
         const payload = await ai.history(id);
         messages.value = payload.messages;
@@ -102,6 +140,8 @@ function startNewConversation(): void {
     proposals.value = [];
     sources.value = [];
     error.value = null;
+
+    dictation.abandon();
 }
 
 /**
@@ -261,6 +301,19 @@ function formatDate(value: string | null): string {
         </header>
 
         <AppAlert v-if="error" variant="danger" :title="error" class="mb-3" />
+
+        <!--
+            Above the transcript and below the error, so it is the first thing
+            read after the page opens and never covers work already on screen.
+        -->
+        <SuggestionHint
+            v-if="hint.hasSuggestion.value && hint.suggestion.value"
+            class="mb-3"
+            :suggestion="hint.suggestion.value"
+            :busy="hint.busy.value"
+            @accept="acceptHint"
+            @dismiss="dismissHint"
+        />
 
         <div class="cdh-ai__body">
             <aside class="cdh-ai__sidebar" aria-label="Conversaciones">

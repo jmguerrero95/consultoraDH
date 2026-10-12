@@ -68,9 +68,64 @@ export interface AiStatusPayload {
     proposal_ttl_minutes: number;
 }
 
+/**
+ * One proactive suggestion, already written out.
+ *
+ * `explanation` is generated server-side from the stored evidence rather than
+ * assembled in the browser, so the sentence and the numbers behind it cannot
+ * drift apart. `evidence` travels with it so the UI can show what it is
+ * reasoning from instead of asking anyone to trust a claim.
+ */
+export interface AiSuggestionPayload {
+    id: number;
+    explanation: string;
+    suggested_action: string;
+    category: string;
+    module: string;
+    operation: string;
+    evidence: Record<string, unknown>;
+    relevance: number;
+    expires_at: string;
+}
+
+/**
+ * The envelope the suggestion endpoint answers with.
+ *
+ * `suggestion` is null on almost every call and that is the feature working,
+ * not an error - see `SuggestionController`.
+ */
+export interface AiSuggestionEnvelope {
+    suggestion: AiSuggestionPayload | null;
+}
+
 export const ai = {
     status(): Promise<AiStatusPayload> {
         return request<AiStatusPayload>('GET', '/api/ai/status');
+    },
+
+    /**
+     * The one suggestion worth showing, if there is one.
+     *
+     * `module` and `operation` say where the person is, so a signal can be
+     * relevant to the screen they are actually looking at.
+     */
+    suggestion(module?: string, operation?: string): Promise<AiSuggestionEnvelope> {
+        const query = new URLSearchParams();
+        if (module) query.set('module', module);
+        if (operation) query.set('operation', operation);
+
+        const suffix = query.toString() ? `?${query.toString()}` : '';
+        return request<AiSuggestionEnvelope>('GET', `/api/ai/suggestion${suffix}`);
+    },
+
+    /** "Yes, tell me about that." Records the answer; changes nothing else. */
+    acceptSuggestion(id: number): Promise<{ accepted: boolean; suggestion_id: number }> {
+        return request<{ accepted: boolean; suggestion_id: number }>('POST', `/api/ai/suggestions/${id}/accept`);
+    },
+
+    /** "Not this one." Remembered, so it is not raised again. */
+    dismissSuggestion(id: number): Promise<{ dismissed: boolean; suggestion_id: number }> {
+        return request<{ dismissed: boolean; suggestion_id: number }>('POST', `/api/ai/suggestions/${id}/dismiss`);
     },
 
     conversations(): Promise<{ conversations: AiConversationSummary[] }> {

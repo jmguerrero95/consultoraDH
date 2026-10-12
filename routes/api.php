@@ -31,6 +31,7 @@ use App\Http\Controllers\Api\ReceivableController;
 use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\SocialSecurityEntityController;
+use App\Http\Controllers\Api\SuggestionController;
 use App\Http\Controllers\Api\SupportConversationController;
 use App\Http\Controllers\Api\SupportInboundEmailController;
 use App\Http\Controllers\Api\SupportInboxController;
@@ -864,6 +865,15 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 
         Route::get('/ai/status', [AiAssistantController::class, 'status'])
             ->name('api.ai.status');
+
+        // Proactive assistance. Deliberately a single suggestion and not a list:
+        // see SuggestionController for why silence is a 200 here.
+        Route::get('/ai/suggestion', [SuggestionController::class, 'show'])
+            ->name('api.ai.suggestion.show');
+        Route::post('/ai/suggestions/{suggestion}/accept', [SuggestionController::class, 'accept'])
+            ->name('api.ai.suggestions.accept');
+        Route::post('/ai/suggestions/{suggestion}/dismiss', [SuggestionController::class, 'dismiss'])
+            ->name('api.ai.suggestions.dismiss');
 
         // Artifact download
         Route::get('/ai/artifacts/{artifact}/download', [AiArtifactController::class, 'download'])
