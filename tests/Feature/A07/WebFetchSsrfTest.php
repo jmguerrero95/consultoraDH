@@ -6,7 +6,7 @@ namespace Tests\Feature\A07;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
-use App\Services\Ai\Net\BoundedBody;
+use App\Services\Ai\Net\BoundedStream;
 use App\Services\Ai\Net\DnsResolver;
 use App\Services\Ai\Net\DownloadTooLarge;
 use App\Services\Ai\Net\PinnedTransport;
@@ -263,21 +263,22 @@ final class WebFetchSsrfTest extends TestCase
     {
         // The header may be absent or dishonest, so the body is bounded as it
         // arrives. Asserted on the writer the transfer is given, because a fake
-        // HTTP handler never streams and therefore cannot exercise it.
-        $body = new BoundedBody(1_000);
+        // HTTP handler never streams and therefore cannot exercise it; the real
+        // transfer counterpart is WebFetchHttpIntegrationTest.
+        $body = new BoundedStream(1_000);
 
-        $body->append(str_repeat('a', 600));
+        $body->write(str_repeat('a', 600));
 
         try {
-            $body->append(str_repeat('b', 500));
+            $body->write(str_repeat('b', 500));
             $this->fail('A chunk crossing the cap must abort the transfer.');
         } catch (DownloadTooLarge) {
             $this->assertSame(600, $body->size(), 'What arrived before the cap is kept.');
         }
 
         // A response exactly at the cap is accepted, so the boundary is inclusive.
-        $exact = new BoundedBody(10);
-        $exact->append(str_repeat('c', 10));
+        $exact = new BoundedStream(10);
+        $exact->write(str_repeat('c', 10));
         $this->assertSame(10, $exact->size());
     }
 

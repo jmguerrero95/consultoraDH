@@ -6,7 +6,7 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
-use App\Services\Ai\Net\BoundedBody;
+use App\Services\Ai\Net\BoundedStream;
 use App\Services\Ai\Net\DownloadTooLarge;
 use App\Services\Ai\Net\PinnedTransport;
 use Illuminate\Support\Facades\Http;
@@ -161,17 +161,20 @@ final class WebFetchTool extends AbstractAiTool
             $resolvedIps = $this->transport->validatedAddresses($host);
 
             // Reset per hop so each response is bounded on its own.
-            $body = new BoundedBody(self::MAX_DOWNLOAD_BYTES);
+            //
+            // The sink is a PSR-7 stream rather than a callable because that is
+            // what Guzzle accepts: `streamFor()` wraps a callable in a
+            // PumpStream, which is read-only, so its `write()` — the callback
+            // cURL hands every chunk to — throws on the first byte of every
+            // real response. The stream also carries the cap, so it is the
+            // transport's own writer that stops the transfer rather than
+            // something that shortens an already-downloaded body.
+            $body = new BoundedStream(self::MAX_DOWNLOAD_BYTES);
 
             try {
                 $response = $client->withOptions([
                     'curl' => $this->transport->pinOptions($host, $port, $resolvedIps),
-                    // The size cap has to stop the transfer, not shorten the
-                    // result afterwards. Writing through a sink that throws as
-                    // soon as the limit is passed means the remaining bytes are
-                    // never read off the socket at all, where truncating a
-                    // buffered body means they were already downloaded.
-                    'sink' => $body->append(...),
+                    'sink' => $body,
                 ])->get($currentUrl);
             } catch (DownloadTooLarge) {
                 throw new AiToolRejected(
