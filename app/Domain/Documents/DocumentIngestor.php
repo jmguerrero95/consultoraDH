@@ -6,6 +6,7 @@ namespace App\Domain\Documents;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\AiAttachment;
+use App\Models\AiAttachmentChunk;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -13,7 +14,6 @@ use Illuminate\Support\Str;
 use PhpOffice\PhpSpreadsheet\Reader\Xlsx as XlsxReader;
 use PhpOffice\PhpWord\IOFactory as PhpWordFactory;
 use Smalot\PdfParser\Parser as PdfParser;
-use Symfony\Component\Mime\MimeTypes;
 
 /**
  * Reads an uploaded file, keeps the bytes, and extracts what can be searched.
@@ -101,7 +101,7 @@ final class DocumentIngestor
      * Store an upload, extract it, and index it.
      *
      * @throws AiToolRejected when the file is not acceptable, with a reason
-     *                         the person can act on
+     *                        the person can act on
      */
     public function ingest(UploadedFile $file, User $user, ?int $conversationId = null): AiAttachment
     {
@@ -506,7 +506,7 @@ final class DocumentIngestor
         // Inserted in one statement: a document with hundreds of chunks would
         // otherwise be hundreds of round trips inside one request.
         if ($rows !== []) {
-            \App\Models\AiAttachmentChunk::query()->insert($rows);
+            AiAttachmentChunk::query()->insert($rows);
         }
     }
 }

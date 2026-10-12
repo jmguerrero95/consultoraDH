@@ -73,8 +73,8 @@ class AiAttachment extends Model
      * Whether this person may read this file, optionally in this conversation.
      *
      * @param  int|null  $conversationId  the conversation the read is for;
-     *                                   a file scoped to another conversation is
-     *                                   not readable even by its own owner
+     *                                    a file scoped to another conversation is
+     *                                    not readable even by its own owner
      */
     public function isAccessibleBy(User $user, ?int $conversationId = null): bool
     {

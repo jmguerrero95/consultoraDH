@@ -82,7 +82,6 @@ final class DocumentConverter
 
         $produced = (string) ($response['name'] ?? '');
 
-
         if ($produced === '' || ! is_file($producedAbsolute = $this->exchangePathFor($produced))) {
             throw new AiToolRejected('La conversión no produjo ningún archivo.');
         }

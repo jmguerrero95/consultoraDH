@@ -104,27 +104,27 @@ class User extends Authenticatable
         return $this->hasMany(AuditEvent::class);
     }
 
-/**
- * The files this person attached to the assistant.
- *
- * Scoped by owner at the relation rather than at each call site, so a query
- * that forgets the owner is visibly missing a filter rather than quietly
- * returning everyone's documents.
- *
- * @return HasMany<AiAttachment, $this>
- */
-public function attachments(): HasMany
-{
-    return $this->hasMany(AiAttachment::class);
-}
+    /**
+     * The files this person attached to the assistant.
+     *
+     * Scoped by owner at the relation rather than at each call site, so a query
+     * that forgets the owner is visibly missing a filter rather than quietly
+     * returning everyone's documents.
+     *
+     * @return HasMany<AiAttachment, $this>
+     */
+    public function attachments(): HasMany
+    {
+        return $this->hasMany(AiAttachment::class);
+    }
 
-/**
- * @param  Builder<self>  $query
- * @return Builder<self>
- */
-#[Scope]
-protected function active(Builder $query): void
-{
-    $query->where('status', UserStatus::Active);
-}
+    /**
+     * @param  Builder<self>  $query
+     * @return Builder<self>
+     */
+    #[Scope]
+    protected function active(Builder $query): void
+    {
+        $query->where('status', UserStatus::Active);
+    }
 }

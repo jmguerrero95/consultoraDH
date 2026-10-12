@@ -121,29 +121,54 @@ return new class extends Migration
             $table->index(['ai_attachment_id']);
         });
 
-/*
-         | A search configuration is created before anything that uses it.
+        /*
+                 | A search configuration is created before anything that uses it.
+                 |
+                 | PostgreSQL ships `spanish`, and it stems correctly — `planilla` and
+                 | `planillas` both reduce to `planill` — but it does not strip accents,
+                 | so a chunk containing "Álvaro" is not found by searching "alvaro".
+                 | That is the same defect this project already fixed once for names
+                 | (see the `unaccent` migration), and a document corpus has the same
+                 | problem and worse: Spanish documents are almost entirely accented.
+                 |
+                 | `spanish:unaccent` is not built in. A configuration name with a colon
+                 | resolves to a *file*, and PostgreSQL only reads configuration files
+                 | from directories the server was told to trust. Rather than change a
+                 | server setting this migration does not own, the configuration is
+                 | created as a copy of the built-in `spanish` whose dictionaries are
+                 | remapped onto `unaccent`. That requires nothing beyond the extension
+                 | A03 already enables.
+                 |
+                 | The name is namespaced (`consultora_es`) so it cannot collide with a
+                 | real configuration.
+                 */
+        /*
+         | Created only when absent, and the ALTER is idempotent by nature.
          |
-         | PostgreSQL ships `spanish`, and it stems correctly — `planilla` and
-         | `planillas` both reduce to `planill` — but it does not strip accents,
-         | so a chunk containing "Álvaro" is not found by searching "alvaro".
-         | That is the same defect this project already fixed once for names
-         | (see the `unaccent` migration), and a document corpus has the same
-         | problem and worse: Spanish documents are almost entirely accented.
+         | A text search configuration is a *database* object, not a table one.
+         | `RefreshDatabase` drops and recreates tables but leaves the database
+         | standing, so a configuration created by an earlier run survives it. A
+         | bare `CREATE` then fails with a unique violation on the second run and
+         | takes every test that migrates with it - which is exactly what
+         | happened before this was guarded.
          |
-         | `spanish:unaccent` is not built in. A configuration name with a colon
-         | resolves to a *file*, and PostgreSQL only reads configuration files
-         | from directories the server was told to trust. Rather than change a
-         | server setting this migration does not own, the configuration is
-         | created as a copy of the built-in `spanish` whose dictionaries are
-         | remapped onto `unaccent`. That requires nothing beyond the extension
-         | A03 already enables.
-         |
-         | The name is namespaced (`consultora_es`) so it cannot collide with a
-         | real configuration.
+         | The same applies outside the tests: re-running migrations against a
+         | database that already has the configuration is an ordinary thing to do
+         | when restoring or re-seeding. It must not fail.
          */
-        DB::statement('CREATE TEXT SEARCH CONFIGURATION consultora_es (COPY = spanish)');
+        DB::statement(<<<'SQL'
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'consultora_es') THEN
+                    CREATE TEXT SEARCH CONFIGURATION consultora_es (COPY = spanish);
+                END IF;
+            END
+            $$;
+        SQL);
 
+        // Remapping the dictionaries is safe to repeat: it replaces the mapping
+        // rather than adding to it, so the result does not depend on how many
+        // times this has run.
         DB::statement(<<<'SQL'
             ALTER TEXT SEARCH CONFIGURATION consultora_es
             ALTER MAPPING FOR hword, hword_part, word WITH unaccent, spanish_stem
@@ -181,5 +206,24 @@ return new class extends Migration
     {
         Schema::dropIfExists('ai_attachment_chunks');
         Schema::dropIfExists('ai_attachments');
+
+        /*
+         | The search configuration is dropped with the tables.
+         |
+         | It is a database-level object, so leaving it behind would outlive the
+         | tables that depend on it: a later `migrate` would find the
+         | configuration present, skip creating it, and then fail when no `user`
+         | was left to map it onto. Dropping it keeps the rollback honest, and
+         | the guard keeps it safe to roll back twice.
+         */
+        DB::statement(<<<'SQL'
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'consultora_es') THEN
+                    DROP TEXT SEARCH CONFIGURATION consultora_es;
+                END IF;
+            END
+            $$;
+        SQL);
     }
 };

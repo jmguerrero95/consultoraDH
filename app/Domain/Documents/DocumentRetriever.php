@@ -7,6 +7,7 @@ namespace App\Domain\Documents;
 use App\Models\AiAttachment;
 use App\Models\AiAttachmentChunk;
 use App\Models\User;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -92,8 +93,24 @@ final class DocumentRetriever
     /**
      * One ranking pass.
      *
-     * Uses the query builder with explicit parameter binding to avoid
-     * PDO positional parameter confusion.
+     * ## Why selectRaw()/whereRaw() and not DB::raw()
+     *
+     * This used to call `DB::raw($expression, [$term])`. That second argument is
+     * accepted and then silently thrown away: `DB::raw()` builds an `Expression`
+     * object and does not register its bindings with the query, while the `?` it
+     * contains is still compiled into the statement. The result carried one more
+     * placeholder than the binding list, and PostgreSQL refused it with
+     * `bind message supplies N parameters, but prepared statement requires N+1`.
+     *
+     * It could only ever fail rather than answer wrongly, and only on a query with
+     * more than one parameter, so a test using a single placeholder would have
+     * passed and hidden it. `selectRaw()` and `whereRaw()` do register their
+     * bindings in the order their placeholders appear, which is what this query
+     * needs: the phrase is bound once for the projection and once for the
+     * predicate.
+     *
+     * Nothing is interpolated. The identifiers come from the database and the
+     * phrase is always a bound parameter.
      */
     private function ranked(array $ids, string $matcher, string $term, int $userId, ?int $conversationId): array
     {
@@ -130,11 +147,11 @@ final class DocumentRetriever
                 static fn ($w): string => "'".$w."'",
                 explode(' ', $term),
             ));
-            $query->addSelect(DB::raw("ts_rank(c.search_vector, to_tsquery('consultora_es', ?)) as rank", [$tsquery]))
-                  ->whereRaw("c.search_vector @@ to_tsquery('consultora_es', ?)", [$tsquery]);
+            $query->selectRaw("ts_rank(c.search_vector, to_tsquery('consultora_es', ?)) as rank", [$tsquery])
+                ->whereRaw("c.search_vector @@ to_tsquery('consultora_es', ?)", [$tsquery]);
         } else {
-            $query->addSelect(DB::raw("ts_rank(c.search_vector, websearch_to_tsquery('consultora_es', ?)) as rank", [$term]))
-                  ->whereRaw("c.search_vector @@ websearch_to_tsquery('consultora_es', ?)", [$term]);
+            $query->selectRaw("ts_rank(c.search_vector, websearch_to_tsquery('consultora_es', ?)) as rank", [$term])
+                ->whereRaw("c.search_vector @@ websearch_to_tsquery('consultora_es', ?)", [$term]);
         }
 
         return $query->get()->all();
@@ -187,7 +204,7 @@ final class DocumentRetriever
      * return nothing anyway, and including it would report an empty result as
      * "the documents do not mention it" rather than "this file could not be read".
      *
-     * @return \Illuminate\Support\Collection<int, AiAttachment>
+     * @return Collection<int, AiAttachment>
      */
     private function scopedAttachmentsQuery(User $user, ?int $conversationId, ?int $attachmentId)
     {
