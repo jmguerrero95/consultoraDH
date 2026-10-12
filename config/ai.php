@@ -105,4 +105,26 @@ return [
      */
     'temperature' => (float) env('AI_TEMPERATURE', 0.2),
 
+    /*
+     | Proactive suggestions.
+     |
+     | `reasoning.enabled` turns on the one place a model is consulted while
+     | suggesting. It is off by default here rather than on, because a
+     | deployment that has not thought about its free-tier quota should get the
+     | deterministic suggestions - which are always correct - and not the
+     | considered ones.
+     |
+     | The gates themselves (relevance, evidence substance, per-problem window
+     | and daily ceiling) live in `SuggestionReasoner` as constants: they are
+     | rules about when interrupting someone is acceptable, not deployment
+     | settings, and a deployment should not be able to raise them.
+     |
+     | AI_SUGGESTION_REASONING
+     */
+    'suggestions' => [
+        'reasoning' => [
+            'enabled' => (bool) env('AI_SUGGESTION_REASONING', false),
+        ],
+    ],
+
 ];

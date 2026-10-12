@@ -52,6 +52,11 @@ class AiSuggestion extends Model
         'expires_at',
         'resolved_at',
         'last_offered_at',
+        'reasoned_explanation',
+        'reasoned_action',
+        'reasoned_model',
+        'reasoned_at',
+        'reasoned_evidence_fingerprint',
     ];
 
     protected $casts = [
@@ -60,6 +65,7 @@ class AiSuggestion extends Model
         'expires_at' => 'datetime',
         'resolved_at' => 'datetime',
         'last_offered_at' => 'datetime',
+        'reasoned_at' => 'datetime',
     ];
 
     public function user(): BelongsTo

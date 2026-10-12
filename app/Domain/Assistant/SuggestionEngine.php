@@ -58,6 +58,7 @@ final class SuggestionEngine
 
     public function __construct(
         private readonly SuggestionSignalDetector $detector,
+        private readonly SuggestionReasoner $reasoner,
     ) {}
 
     /**
@@ -479,7 +480,107 @@ final class SuggestionEngine
         // not a second interruption.
         $this->recordOffer($user, $suggestion);
 
+        // Reasoned *after* the offer exists and only on this path, so a model
+        // call can never be triggered by re-reading a card or by a failed
+        // attempt. The deterministic sentence is already stored and already
+        // correct; this may replace it with something better, or change nothing.
+        $this->reasonOnce($user, $suggestion);
+
         return $suggestion;
+    }
+
+    /**
+     * Evidence the model may be shown, per category.
+     *
+     * An allowlist, never the whole evidence blob. The stored evidence is
+     * everything the detector measured, and some of it is not the person's
+     * business to read in a prompt - thresholds, internal counts - so the
+     * decision of what a model sees is made here, in code, and not by whatever
+     * the detector happened to collect.
+     *
+     * @var array<string, list<string>>
+     */
+    private const REASONABLE_EVIDENCE = [
+        'overdue_concentration' => [
+            'client_name', 'document_number', 'outstanding_cop', 'overdue_cop',
+            'overdue_share', 'overdue_obligations', 'open_obligations',
+        ],
+        'import_blocked' => ['file_name', 'blocking_issues', 'status'],
+        'import_inconsistency' => ['code', 'occurrences', 'distinct_imports'],
+    ];
+
+    /**
+     * Give this problem one considered answer, if it is worth asking.
+     *
+     * Deliberately best-effort. A provider that is slow, down, or rate limited
+     * leaves the deterministic sentence exactly as it was, and the caller never
+     * learns anything went wrong - because from the person's point of view,
+     * nothing did.
+     */
+    private function reasonOnce(User $user, AiSuggestion $suggestion): void
+    {
+        $category = $suggestion->trigger_category;
+
+        if (! array_key_exists($category, self::REASONABLE_EVIDENCE)) {
+            return;
+        }
+
+        $request = new SuggestionReasoningRequest(
+            category: $category,
+            evidence: $suggestion->evidence ?? [],
+            relevance: (float) $suggestion->relevance_score,
+            visibleKeys: self::REASONABLE_EVIDENCE[$category],
+            // The permission that made this showable is also what makes it
+            // discussable. Reasoning about a figure the person may not act on
+            // would put that figure in a model's prompt for no reason.
+            mayReason: $this->userMayAct($user, [
+                'category' => $category,
+            ]),
+            lastReasonedAt: $suggestion->reasoned_at,
+            reasonedToday: $this->reasonedToday($user),
+        );
+
+        $reasoned = $this->reasoner->reason($request);
+
+        if ($reasoned === null) {
+            return;
+        }
+
+        $suggestion->forceFill([
+            'reasoned_explanation' => $reasoned['headline'].' '.$reasoned['rationale'],
+            'reasoned_action' => $reasoned['action'],
+            'reasoned_model' => $reasoned['model'],
+            'reasoned_at' => now(),
+            'reasoned_evidence_fingerprint' => $this->fingerprint($request->toPromptEvidence()),
+        ])->save();
+    }
+
+    /**
+     * How many reasoned suggestions this person has had today.
+     */
+    private function reasonedToday(User $user): int
+    {
+        return AiSuggestion::query()
+            ->where('user_id', $user->id)
+            ->whereNotNull('reasoned_at')
+            ->where('reasoned_at', '>', now()->subDay())
+            ->count();
+    }
+
+    /**
+     * Identity of the evidence a piece of reasoning was written from.
+     *
+     * Reused only while this matches: a payment lands, the balance changes, and
+     * a sentence about the old figures is a sentence about numbers that no
+     * longer exist.
+     *
+     * @param  array<string, mixed>  $evidence
+     */
+    private function fingerprint(array $evidence): string
+    {
+        ksort($evidence);
+
+        return hash('sha256', json_encode($evidence) ?: '');
     }
 
     /**
@@ -503,17 +604,75 @@ final class SuggestionEngine
             return null;
         }
 
+        $action = $suggestion->suggested_action;
+        $reasoned = false;
+
+        // A reasoned sentence replaces the generated one only while it still
+        // describes the same evidence. Between the offer and this render a
+        // payment may have landed; the figures changed and the old sentence is
+        // now about numbers that do not exist, so the generated one - which is
+        // derived from the current evidence - is used instead.
+        if ($this->reasoningIsCurrent($suggestion, $evidence)) {
+            $explanation = $suggestion->reasoned_explanation;
+            $action = $suggestion->reasoned_action ?: $action;
+            $reasoned = true;
+        }
+
         return [
             'id' => $suggestion->id,
             'explanation' => $explanation,
-            'suggested_action' => $suggestion->suggested_action,
+            'suggested_action' => $action,
             'category' => $suggestion->trigger_category,
             'module' => $suggestion->source_module,
             'operation' => $suggestion->source_operation,
             'evidence' => $evidence,
             'relevance' => round((float) $suggestion->relevance_score, 2),
             'expires_at' => $suggestion->expires_at?->toDateTimeString(),
+            // Stated so the interface and the audit trail can tell a considered
+            // sentence from a generated one.
+            'reasoned' => $reasoned,
         ];
+    }
+
+    /**
+     * Whether stored reasoning still describes the evidence as it stands.
+     *
+     * @param  array<string, mixed>  $evidence
+     */
+    private function reasoningIsCurrent(AiSuggestion $suggestion, array $evidence): bool
+    {
+        if ($suggestion->reasoned_explanation === null || $suggestion->reasoned_explanation === '') {
+            return false;
+        }
+
+        $keys = self::REASONABLE_EVIDENCE[$suggestion->trigger_category] ?? [];
+
+        if ($keys === []) {
+            return false;
+        }
+
+        // The same filter the request applied when the reasoning was written.
+        // It has to be identical: if this side included a key the other side
+        // dropped, the fingerprints would never match and every reasoned
+        // sentence would be silently discarded as stale.
+        $visible = [];
+
+        foreach ($keys as $key) {
+            $value = $evidence[$key] ?? null;
+
+            if (is_string($value)) {
+                $value = trim($value);
+            }
+
+            if ($value === null || $value === '' || (! is_string($value) && ! is_numeric($value))) {
+                continue;
+            }
+
+            $visible[$key] = $value;
+        }
+
+        return $suggestion->reasoned_explanation !== null
+            && $suggestion->reasoned_evidence_fingerprint === $this->fingerprint($visible);
     }
 
     /**
