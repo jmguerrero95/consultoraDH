@@ -146,6 +146,12 @@ final class CreateAutomationRuleTool extends AbstractAiTool
         );
     }
 
+    public function authorizeProposal(User $user, array $arguments): void
+    {
+        $this->denyPortalAccounts($user);
+        $this->authorize($user, 'automations.manage');
+    }
+
     public function execute(array $arguments, User $user): array
     {
         $this->denyPortalAccounts($user);

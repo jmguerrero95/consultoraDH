@@ -162,12 +162,15 @@ final class McpController extends Controller
 
         $tool = $this->registry->get($name);
 
-        // Validate arguments
-        $validated = $tool->validate($arguments);
-
         if ($tool->isWrite()) {
-            // Write tools create proposals - do NOT execute directly
-            // Create a real AiActionProposal for the user
+            // Same authority as the assistant turn: the registry validates and
+            // normalizes, then applies the token owner's permissions, and only
+            // what it returns is stored. A refusal creates no conversation and no
+            // pending row, so there is nothing left to confirm later.
+            $validated = $this->registry->proposeWrite($name, $arguments, $user);
+
+            // Only now is a conversation worth creating, because only now is
+            // there a proposal that will exist to hang from it.
             $conversation = AiConversation::query()->create([
                 'user_id' => $user->id,
                 'title' => 'Conversación MCP '.now()->format('Y-m-d H:i'),
@@ -204,6 +207,8 @@ final class McpController extends Controller
         }
 
         // Read tools execute immediately
+        $validated = $tool->validate($arguments);
+
         try {
             $result = $this->registry->executeRead($name, $validated, $user);
 

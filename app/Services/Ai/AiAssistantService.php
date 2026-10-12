@@ -143,6 +143,7 @@ final class AiAssistantService
         $toolResults = [];
         $maxRounds = 4;
         $round = 0;
+        $reply = null;
 
         $currentResult = $result;
 
@@ -179,13 +180,36 @@ final class AiAssistantService
 
                     $tool = $this->registry->get($toolName);
 
-                    // --- Write tools: produce a proposal, never execute directly ---
+                    // --- Write tools: propose only, never execute from the model ---
                     if ($tool->isWrite()) {
+                        try {
+                            // The registry is the single authority: it normalizes the
+                            // model's arguments with the tool's own validator and then
+                            // applies this user's permissions. A rejected call
+                            // therefore stores nothing at all, so there is no pending
+                            // row to confirm later from a permission that has since
+                            // been granted, and no id to hand back.
+                            $normalized = $this->registry->proposeWrite($toolName, $args, $user);
+                        } catch (\Throwable $e) {
+                            // Reported back to the model as a tool error so one
+                            // unusable call does not end the conversation, and so
+                            // the reason travels as data rather than as an answer.
+                            $toolResultsThisRound[] = [
+                                'tool' => $toolName,
+                                'output' => 'Error: '.$e->getMessage(),
+                            ];
+                            $messages[] = AiMessage::toolResult($toolName, ['error' => $e->getMessage()], $toolCallId);
+
+                            continue;
+                        }
+
                         $proposal = AiActionProposal::query()->create([
                             'user_id' => $user->id,
                             'ai_conversation_id' => $conversation->id,
                             'tool' => $toolName,
-                            'arguments' => $args,
+                            // Only what the validator returned, never the raw
+                            // model-emitted arguments.
+                            'arguments' => $normalized,
                             'status' => AiActionProposal::PENDING,
                             'expires_at' => now()->addMinutes(config('ai.proposal_ttl_minutes', 15)),
                         ]);
@@ -193,7 +217,7 @@ final class AiAssistantService
                         $proposalsThisRound[] = [
                             'id' => $proposal->id,
                             'tool' => $proposal->tool,
-                            'arguments' => $args,
+                            'arguments' => $normalized,
                             'expires_at' => $proposal->expires_at->toDateTimeString(),
                             'pending' => true,
                         ];
@@ -205,7 +229,7 @@ final class AiAssistantService
                             'proposal_created' => true,
                             'proposal_id' => $proposal->id,
                             'tool' => $toolName,
-                            'arguments' => $args,
+                            'arguments' => $normalized,
                         ], $toolCallId);
 
                         continue;
@@ -248,13 +272,14 @@ final class AiAssistantService
                     break;
                 }
 
-                // If only read tools were called, continue the loop for synthesis
-                try {
-                    $currentResult = $this->resolver->complete($messages, $this->registry->definitions());
-                } catch (\Throwable $e) {
-                    $reply = 'Error en la síntesis: '.$e->getMessage();
-                    break;
-                }
+                // If only read tools were called, continue the loop for synthesis.
+                //
+                // A provider failure here is an explicit failure of the turn, not
+                // an answer. Turning it into a string and storing it would put a
+                // fabricated assistant message in the conversation that a later
+                // turn would be sent as legitimate history, so it propagates and
+                // nothing is persisted for this turn.
+                $currentResult = $this->resolver->complete($messages, $this->registry->definitions());
             } else {
                 // No tool calls, we're done
                 $reply = $content;
@@ -262,9 +287,12 @@ final class AiAssistantService
             }
         }
 
-        // If no tool calls at all from the start, the reply is just the model's content
-        if ($round === 1 && empty($result->toolCalls)) {
-            $reply = $result->content;
+        // Reaching here means the model kept asking for tools through every round
+        // without ever producing an answer. Returning whatever the last round said
+        // would be an answer the model never gave, so the turn fails explicitly and
+        // nothing is persisted for it.
+        if ($reply === null) {
+            throw AiTurnFailed::toolRoundsExhausted($maxRounds);
         }
 
         // Persist user message and assistant reply

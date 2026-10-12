@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Ai;
 
 use App\Domain\Ai\AiMessage;
+use App\Domain\Ai\AiResponse;
 use App\Domain\Ai\AiToolDefinition;
 
 /**

@@ -75,6 +75,27 @@ interface AiTool
     public function validate(array $arguments): array;
 
     /**
+     * Refuse a proposal this user is not allowed to make, before anything is stored.
+     *
+     * ## Why this is separate from `execute()`
+     *
+     * `execute()` runs the mutation, so its authorization check happens at the
+     * moment the work is done. A proposal is *stored* before anybody confirms it,
+     * and a row nobody may ever confirm is still a row the model caused to exist.
+     * Checking here means an unauthorized call leaves nothing behind: no
+     * pending proposal, no id handed back to the interface, nothing to confirm
+     * later from a permission that has since been granted.
+     *
+     * The arguments are already normalized when this is called, so a rule that
+     * depends on them may read them directly.
+     *
+     * @param  array<string, mixed>  $arguments
+     *
+     * @throws AiToolRejected
+     */
+    public function authorizeProposal(User $user, array $arguments): void;
+
+    /**
      * Do the work, as this user.
      *
      * @param  array<string, mixed>  $arguments  already validated

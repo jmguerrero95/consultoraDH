@@ -9,6 +9,8 @@ use App\Domain\Audit\Listeners\RecordAuditEvent;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\Listeners\EscalateSupportSla;
 use App\Services\Ai\AiToolRegistry;
+use App\Services\Ai\Net\DnsResolver;
+use App\Services\Ai\Net\SystemDnsResolver;
 use App\Services\Ai\Tools\ActivateAutomationRuleTool;
 use App\Services\Ai\Tools\AutomationVocabularyTool;
 use App\Services\Ai\Tools\ClientAccountTool;
@@ -58,6 +60,11 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->singleton(CreateAutomationRuleTool::class);
         $this->app->singleton(ActivateAutomationRuleTool::class);
         $this->app->singleton(DeactivateAutomationRuleTool::class);
+
+        // SSRF guard: the resolver is an interface so the guard can be exercised
+        // against controlled answers instead of whatever a real name happens to
+        // resolve to. The production binding is the system resolver.
+        $this->app->singleton(DnsResolver::class, SystemDnsResolver::class);
 
         // AiToolRegistry - singleton built with all tools
         $this->app->singleton(AiToolRegistry::class, function ($app) {

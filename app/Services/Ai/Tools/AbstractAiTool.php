@@ -56,6 +56,21 @@ abstract class AbstractAiTool implements AiTool
     }
 
     /**
+     * Proposal-time authorization.
+     *
+     * Permits by default, which is correct for a read tool and for a write whose
+     * only guard is `execute()`'s. A write tool that stores something before
+     * anybody confirms it overrides this with the same permission its
+     * `execute()` checks, so the two can never drift apart silently.
+     *
+     * @param  array<string, mixed>  $arguments
+     */
+    public function authorizeProposal(User $user, array $arguments): void
+    {
+        //
+    }
+
+    /**
      * A required positive integer argument.
      */
     protected function requireId(array $arguments, string $key): int

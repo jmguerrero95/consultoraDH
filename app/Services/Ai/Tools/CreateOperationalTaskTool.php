@@ -94,6 +94,16 @@ final class CreateOperationalTaskTool extends AbstractAiTool
         );
     }
 
+    public function authorizeProposal(User $user, array $arguments): void
+    {
+        $this->denyPortalAccounts($user);
+        $this->authorize($user, 'tasks.create');
+
+        if (($arguments['client_id'] ?? null) !== null) {
+            $this->authorize($user, 'clients.view');
+        }
+    }
+
     public function execute(array $arguments, User $user): array
     {
         $this->denyPortalAccounts($user);

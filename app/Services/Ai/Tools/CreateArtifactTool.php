@@ -94,6 +94,11 @@ final class CreateArtifactTool extends AbstractAiTool
         );
     }
 
+    public function authorizeProposal(User $user, array $arguments): void
+    {
+        $this->authorize($user, 'artifacts.create');
+    }
+
     public function execute(array $arguments, User $user): array
     {
         $this->authorize($user, 'artifacts.create');

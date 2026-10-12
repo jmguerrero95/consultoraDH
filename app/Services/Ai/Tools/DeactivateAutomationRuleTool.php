@@ -53,6 +53,12 @@ final class DeactivateAutomationRuleTool extends AbstractAiTool
         return "Desactivar regla de automatización ID: {$arguments['rule_id']}";
     }
 
+    public function authorizeProposal(User $user, array $arguments): void
+    {
+        $this->denyPortalAccounts($user);
+        $this->authorize($user, 'automations.manage');
+    }
+
     public function execute(array $arguments, User $user): array
     {
         $this->denyPortalAccounts($user);

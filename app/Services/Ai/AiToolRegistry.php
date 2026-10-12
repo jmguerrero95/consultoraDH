@@ -205,6 +205,41 @@ class AiToolRegistry
     }
 
     /**
+     * Prepare a write for storage as a proposal.
+     *
+     * The one authority for what may be proposed, in the one order that matters:
+     *
+     *   1. `validate()` normalizes the model's arguments and rejects what is not
+     *      usable, so what gets stored is the tool's own normalized shape rather
+     *      than whatever the model emitted.
+     *   2. `authorizeProposal()` applies the caller's permissions, so a call this
+     *      person may not make leaves no pending row behind.
+     *
+     * Nothing is executed here. The proposal is still only a proposal until a
+     * person confirms it, and confirmation re-runs both steps again.
+     *
+     * @param  array<string, mixed>  $arguments  model-emitted, untrusted
+     * @return array<string, mixed> normalized arguments, safe to store
+     *
+     * @throws AiToolRejected when the tool is unknown, is not a write, the
+     *                        arguments are invalid, or the caller may not do this
+     */
+    public function proposeWrite(string $tool, array $arguments, User $user): array
+    {
+        $instance = $this->get($tool);
+
+        if (! $instance->isWrite()) {
+            throw new AiToolRejected("'{$tool}' does not change anything.");
+        }
+
+        $normalized = $instance->validate($arguments);
+
+        $instance->authorizeProposal($user, $normalized);
+
+        return $normalized;
+    }
+
+    /**
      * Run a write tool as this user, from arguments the server stored.
      *
      * @param  array<string, mixed>  $arguments  the proposal's own arguments, not the browser's

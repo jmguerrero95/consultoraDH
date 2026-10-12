@@ -6,6 +6,9 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use App\Services\Ai\Net\BoundedBody;
+use App\Services\Ai\Net\DownloadTooLarge;
+use App\Services\Ai\Net\PinnedTransport;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
@@ -42,6 +45,8 @@ final class WebFetchTool extends AbstractAiTool
         'application/xml',
         'text/xml',
     ];
+
+    public function __construct(private readonly PinnedTransport $transport) {}
 
     public function name(): string
     {
@@ -117,12 +122,21 @@ final class WebFetchTool extends AbstractAiTool
         $url = $arguments['url'];
         $maxChars = $arguments['max_chars'];
 
-        // Disable automatic redirects to handle them manually with SSRF validation
+        // Redirects are never followed automatically: every hop has to be
+        // resolved and re-validated before it is requested.
         $client = Http::withHeaders([
             'User-Agent' => 'Consultora-DH-Assistant/1.0',
             'Accept' => 'text/html,application/xhtml+xml,application/xml',
         ])->timeout(15)->withOptions([
             'allow_redirects' => false,
+            // A proxy would resolve the hostname itself, which makes the pinned
+            // address below advisory rather than authoritative: the request would
+            // go to the proxy and the proxy would pick any address it liked,
+            // including the one this tool just refused. An empty proxy disables
+            // both Guzzle's configured proxy and the HTTP_PROXY/HTTPS_PROXY
+            // environment, so the connection reaches the validated address or
+            // nothing does.
+            'proxy' => '',
         ]);
 
         // Track redirects manually to validate each target
@@ -132,26 +146,54 @@ final class WebFetchTool extends AbstractAiTool
         $finalUrl = $url;
 
         while ($redirectCount <= self::MAX_REDIRECTS) {
-            // Validate the current URL before requesting and get resolved IPs
-            $resolved = $this->validateUrlForSsrfAndResolve($currentUrl);
-            $resolvedIps = $resolved['ips'];
-            $parsedUrl = $resolved['parsed'];
+            // Resolve, refuse anything not publicly routable, and pin the
+            // connection to the addresses that survived. Repeated on every hop,
+            // so a later redirect is checked exactly as the first request was.
+            $parsedUrl = parse_url($currentUrl);
+
+            if (! is_array($parsedUrl) || ! isset($parsedUrl['host'])) {
+                throw new AiToolRejected('URL inválida: no se pudo analizar el host.');
+            }
+
             $host = $parsedUrl['host'];
-            $port = $parsedUrl['port'] ?? ($parsedUrl['scheme'] === 'https' ? 443 : 80);
+            $port = (int) ($parsedUrl['port'] ?? (($parsedUrl['scheme'] ?? 'http') === 'https' ? 443 : 80));
+
+            $resolvedIps = $this->transport->validatedAddresses($host);
+
+            // Reset per hop so each response is bounded on its own.
+            $body = new BoundedBody(self::MAX_DOWNLOAD_BYTES);
 
             try {
                 $response = $client->withOptions([
-                    'curl' => [
-                        CURLOPT_CONNECT_TO => array_map(fn ($ip) => "{$host}:{$port}:{$ip}:{$port}", $resolvedIps),
-                        CURLOPT_RESOLVE => array_map(fn ($ip) => "{$host}:{$port}:{$ip}", $resolvedIps),
-                    ],
+                    'curl' => $this->transport->pinOptions($host, $port, $resolvedIps),
+                    // The size cap has to stop the transfer, not shorten the
+                    // result afterwards. Writing through a sink that throws as
+                    // soon as the limit is passed means the remaining bytes are
+                    // never read off the socket at all, where truncating a
+                    // buffered body means they were already downloaded.
+                    'sink' => $body->append(...),
                 ])->get($currentUrl);
+            } catch (DownloadTooLarge) {
+                throw new AiToolRejected(
+                    'La respuesta supera el máximo de '.self::MAX_DOWNLOAD_BYTES.' bytes permitidos.'
+                );
             } catch (\Throwable $e) {
                 throw new AiToolRejected('Error al fetchear URL: '.$e->getMessage());
             }
 
             if ($response->failed()) {
                 throw new AiToolRejected('Error fetching URL: '.$response->status().' '.$response->statusText());
+            }
+
+            // A sender that declares an oversized length is refused before the
+            // body is read at all.
+            $declared = $response->header('Content-Length');
+
+            if ($body->declaredLengthExceeds($declared === null ? null : (int) $declared)) {
+                throw new AiToolRejected(
+                    'La respuesta declara un tamaño superior al máximo de '
+                    .self::MAX_DOWNLOAD_BYTES.' bytes permitidos.'
+                );
             }
 
             $contentType = $response->header('Content-Type') ?? '';
@@ -195,12 +237,10 @@ final class WebFetchTool extends AbstractAiTool
             throw new AiToolRejected('No se pudo obtener respuesta válida tras redirecciones.');
         }
 
-        $content = $finalResponse->body();
-
-        // Enforce download size limit
-        if (strlen($content) > self::MAX_DOWNLOAD_BYTES) {
-            $content = substr($content, 0, self::MAX_DOWNLOAD_BYTES);
-        }
+        // What the transfer actually delivered, which is within the cap because
+        // the writer refuses the chunk that would pass it. The response body is
+        // the fallback for handlers that do not stream into a sink.
+        $content = $body->size() > 0 ? $body->contents() : $finalResponse->body();
 
         // Extract readable text (strip HTML tags, scripts, styles)
         $textContent = $this->extractReadableText($content);
@@ -225,185 +265,8 @@ final class WebFetchTool extends AbstractAiTool
             'content' => $textContent,
             'status_code' => $finalResponse->status(),
             'content_type' => $finalResponse->header('Content-Type'),
-            'content_length' => strlen($finalResponse->body()),
+            'content_length' => strlen($content),
         ];
-    }
-
-    /**
-     * Validate a URL for SSRF protection.
-     */
-    private function validateUrlForSsrf(string $url): void
-    {
-        $this->validateUrlForSsrfAndResolve($url);
-    }
-
-    /**
-     * Validate a URL for SSRF protection and return resolved IPs and parsed URL.
-     *
-     * @return array{ips: array<string>, parsed: array}
-     */
-    private function validateUrlForSsrfAndResolve(string $url): array
-    {
-        $parsed = parse_url($url);
-        if (! $parsed || ! isset($parsed['host'])) {
-            throw new AiToolRejected('URL inválida: no se pudo analizar el host.');
-        }
-
-        $host = $parsed['host'];
-
-        // Reject internal Docker/localhost names
-        $internalHosts = ['localhost', 'host.docker.internal', 'docker.for.mac.host.internal', 'docker.for.win.host.internal'];
-        if (in_array(strtolower($host), $internalHosts, true)) {
-            throw new AiToolRejected("Host interno no permitido: {$host}");
-        }
-
-        // Resolve DNS
-        $ips = [];
-        try {
-            $records = dns_get_record($host, DNS_A | DNS_AAAA);
-            foreach ($records as $record) {
-                if (isset($record['ip'])) {
-                    $ips[] = $record['ip'];
-                } elseif (isset($record['ipv6'])) {
-                    $ips[] = $record['ipv6'];
-                }
-            }
-        } catch (\Throwable) {
-            throw new AiToolRejected("No se pudo resolver el host: {$host}");
-        }
-
-        if (empty($ips)) {
-            throw new AiToolRejected("El host no resuelve a ninguna IP: {$host}");
-        }
-
-        // Validate every resolved IP
-        foreach ($ips as $ip) {
-            $this->validateIpAddress($ip, $host);
-        }
-
-        return [
-            'ips' => $ips,
-            'parsed' => $parsed,
-        ];
-    }
-
-    /**
-     * Validate an IP address against SSRF protection rules.
-     */
-    private function validateIpAddress(string $ip, string $host): void
-    {
-        // Check if it's a valid IP
-        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-            $this->validateIpv4($ip, $host);
-        } elseif (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-            $this->validateIpv6($ip, $host);
-        } else {
-            throw new AiToolRejected("IP inválida resuelta para {$host}: {$ip}");
-        }
-    }
-
-    private function validateIpv4(string $ip, string $host): void
-    {
-        $parts = explode('.', $ip);
-        if (count($parts) !== 4) {
-            throw new AiToolRejected("IPv4 inválida: {$ip}");
-        }
-
-        $a = (int) $parts[0];
-        $b = (int) $parts[1];
-        $c = (int) $parts[2];
-        $d = (int) $parts[3];
-
-        // Loopback (127.0.0.0/8)
-        if ($a === 127) {
-            throw new AiToolRejected("Loopback IPv4 no permitido para {$host}: {$ip}");
-        }
-
-        // RFC1918 private ranges
-        // 10.0.0.0/8
-        if ($a === 10) {
-            throw new AiToolRejected("IP privada RFC1918 (10.0.0.0/8) no permitida para {$host}: {$ip}");
-        }
-        // 172.16.0.0/12
-        if ($a === 172 && $b >= 16 && $b <= 31) {
-            throw new AiToolRejected("IP privada RFC1918 (172.16.0.0/12) no permitida para {$host}: {$ip}");
-        }
-        // 192.168.0.0/16
-        if ($a === 192 && $b === 168) {
-            throw new AiToolRejected("IP privada RFC1918 (192.168.0.0/16) no permitida para {$host}: {$ip}");
-        }
-
-        // Link-local (169.254.0.0/16)
-        if ($a === 169 && $b === 254) {
-            throw new AiToolRejected("Link-local IPv4 (169.254.0.0/16) no permitida para {$host}: {$ip}");
-        }
-
-        // Metadata service (169.254.169.254)
-        if ($a === 169 && $b === 254 && $c === 169 && $d === 254) {
-            throw new AiToolRejected("IP de metadatos no permitida para {$host}: {$ip}");
-        }
-
-        // Reserved ranges
-        // 0.0.0.0/8
-        if ($a === 0) {
-            throw new AiToolRejected("IP reservada (0.0.0.0/8) no permitida para {$host}: {$ip}");
-        }
-        // 100.64.0.0/10 (CGNAT)
-        if ($a === 100 && $b >= 64 && $b <= 127) {
-            throw new AiToolRejected("CGNAT (100.64.0.0/10) no permitida para {$host}: {$ip}");
-        }
-        // 224.0.0.0/4 (multicast)
-        if ($a >= 224 && $a <= 239) {
-            throw new AiToolRejected("Multicast (224.0.0.0/4) no permitida para {$host}: {$ip}");
-        }
-        // 240.0.0.0/4 (reserved)
-        if ($a >= 240) {
-            throw new AiToolRejected("IP reservada (240.0.0.0/4) no permitida para {$host}: {$ip}");
-        }
-    }
-
-    private function validateIpv6(string $ip, string $host): void
-    {
-        // Normalize IPv6
-        $ip = strtolower($ip);
-
-        // Loopback (::1)
-        if ($ip === '::1' || $ip === '0:0:0:0:0:0:0:1') {
-            throw new AiToolRejected("Loopback IPv6 no permitida para {$host}: {$ip}");
-        }
-
-        // Link-local (fe80::/10)
-        if (Str::startsWith($ip, 'fe80:')) {
-            throw new AiToolRejected("Link-local IPv6 (fe80::/10) no permitida para {$host}: {$ip}");
-        }
-
-        // Unique local addresses (fc00::/7) - includes fd00::/8
-        if (preg_match('/^f[cd][0-9a-f]:/', $ip)) {
-            throw new AiToolRejected("IPv6 única local (fc00::/7) no permitida para {$host}: {$ip}");
-        }
-
-        // IPv4-mapped IPv6 (::ffff:0:0/96) - check embedded IPv4
-        if (Str::startsWith($ip, '::ffff:')) {
-            $ipv4 = substr($ip, 7);
-            if (filter_var($ipv4, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-                $this->validateIpv4($ipv4, $host);
-            }
-        }
-
-        // Multicast (ff00::/8)
-        if (Str::startsWith($ip, 'ff')) {
-            throw new AiToolRejected("Multicast IPv6 (ff00::/8) no permitida para {$host}: {$ip}");
-        }
-
-        // Documentation/benchmark (2001:db8::/32)
-        if (Str::startsWith($ip, '2001:db8:')) {
-            throw new AiToolRejected("IPv6 de documentación (2001:db8::/32) no permitida para {$host}: {$ip}");
-        }
-
-        // Teredo (2001::/32)
-        if (Str::startsWith($ip, '2001:')) {
-            // Allow but could be restricted
-        }
     }
 
     /**

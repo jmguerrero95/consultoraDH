@@ -96,6 +96,12 @@ final class CreateReportTool extends AbstractAiTool
             : $description.' con los filtros indicados.';
     }
 
+    public function authorizeProposal(User $user, array $arguments): void
+    {
+        $this->denyPortalAccounts($user);
+        $this->authorize($user, ReportType::parse($arguments['report_type'])->permission());
+    }
+
     public function execute(array $arguments, User $user): array
     {
         $this->denyPortalAccounts($user);
