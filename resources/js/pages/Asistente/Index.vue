@@ -8,6 +8,7 @@ import MicButton from '@/components/assistant/MicButton.vue';
 import SpeakButton from '@/components/assistant/SpeakButton.vue';
 import SuggestionHint from '@/components/assistant/SuggestionHint.vue';
 import { useSuggestion } from '@/composables/useSuggestion';
+import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
 import { ai } from '@/services/ai';
 
@@ -45,6 +46,11 @@ const { dictation, playback } = useVoice();
 // timer: the cost and the interruption both belong to a person who is here.
 const hint = useSuggestion();
 
+// The assistant screen spans every module, so it has no single context of its
+// own and therefore raises nothing by itself. It waits to be told what the
+// person is actually doing, which the surrounding screens decide.
+const { context: suggestionContext } = useSuggestionContext();
+
 const enabled = computed(() => status.value?.ai_enabled === true);
 const model = computed(() => status.value?.primary?.model ?? status.value?.fallback?.model ?? '—');
 
@@ -71,7 +77,16 @@ onMounted(async () => {
 
     // After the page has settled, and independently of it: a suggestion that
     // failed to load must never keep the screen from opening.
-    await hint.refresh('receivables', 'client_account');
+    //
+    // The assistant page is cross-module, so it asks with whatever context the
+    // screen underneath it reports - and with none at all when there is none,
+    // in which case nothing is fetched. That is the general shape every
+    // integrated screen uses; this one only happens to sit on top of them.
+    const context = suggestionContext();
+
+    if (context !== null) {
+        await hint.refresh(context.module, context.operation);
+    }
 });
 
 /**
@@ -81,16 +96,25 @@ onMounted(async () => {
  * person chose to talk about this. What follows is an ordinary first turn, so
  * the transcript, the proposals and the confirm flow all behave exactly as they
  * would if the person had typed the question themselves.
+ *
+ * The turn is sent **only** once the server has confirmed. Sending it
+ * otherwise is the bug this guards: a rejected acceptance left the UI behaving
+ * as though it had been accepted, so the assistant opened a conversation about a
+ * problem the server still believed had never been raised.
  */
 async function acceptHint(id: number): Promise<void> {
     const context = hint.suggestion.value;
 
-    await hint.accept(id);
+    const confirmed = await hint.accept(id);
 
-    if (context !== null) {
-        draft.value = context.suggested_action;
-        await send();
+    if (!confirmed || context === null) {
+        error.value = 'No fue posible registrar la sugerencia. Inténtalo de nuevo.';
+
+        return;
     }
+
+    draft.value = context.suggested_action;
+    await send();
 }
 
 async function dismissHint(id: number): Promise<void> {

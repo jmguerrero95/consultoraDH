@@ -66,6 +66,26 @@ final class SuggestionSignalDetector
     private const BLOCKED_IMPORT_THRESHOLD = 1;
 
     /**
+     * Which screens each kind of problem belongs on.
+     *
+     * Detection used to run every rule regardless of where the person was, and
+     * then hand the engine a collections finding while they were on the imports
+     * screen. The engine could not filter that out afterwards: the suggestion
+     * records the context it was *asked for*, so a mismatch was invisible by
+     * the time it reached it.
+     *
+     * Each signal therefore declares where it is meaningful, and a signal with
+     * no entry here is simply not offered on that screen. That is the mechanism
+     * behind "do not drag one screen's problems into another" - it is enforced
+     * where the knowledge lives, rather than inferred later from a string.
+     */
+    private const CONTEXT_IMPORTS = 'imports/issues';
+
+    private const CONTEXT_CLIENT_ACCOUNT = 'receivables/client_account';
+
+    private const CONTEXT_PORTFOLIO = 'receivables/portfolio';
+
+    /**
      * Every candidate the current data supports for this person, best first.
      *
      * ## Why a list and not just the single best one
@@ -93,15 +113,32 @@ final class SuggestionSignalDetector
      */
     public function detect(User $user, string $module, string $operation): array
     {
+        $wanted = $module.'/'.$operation;
         $candidates = [];
 
+        // Several rules can share a context: the imports screen is served by both
+        // the blocked-import and the repeated-failure rules, and dropping either
+        // would silently reduce what that screen can say.
         foreach ([
-            fn (): array => $this->blockedImports($user),
-            fn (): array => $this->repeatedImportInconsistencies($user),
-            fn (): array => $this->overdueConcentration($user),
-        ] as $detector) {
-            foreach ($detector() as $candidate) {
-                $candidates[] = $candidate;
+            self::CONTEXT_IMPORTS => [
+                fn (): array => $this->blockedImports($user),
+                fn (): array => $this->repeatedImportInconsistencies($user),
+            ],
+            self::CONTEXT_CLIENT_ACCOUNT => [
+                fn (): array => $this->overdueConcentration($user),
+            ],
+            self::CONTEXT_PORTFOLIO => [
+                fn (): array => $this->overdueConcentration($user),
+            ],
+        ] as $context => $detectors) {
+            if ($context !== $wanted) {
+                continue;
+            }
+
+            foreach ($detectors as $detector) {
+                foreach ($detector() as $candidate) {
+                    $candidates[] = $candidate;
+                }
             }
         }
 

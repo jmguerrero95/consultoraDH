@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Domain\Assistant\SuggestionEngine;
+use App\Domain\Assistant\SuggestionSignalDetector;
 use App\Domain\Payments\Actions\ManagePayments;
 use App\Domain\Receivables\ReceivablesService;
 use App\Models\AiConversation;
@@ -10,10 +11,13 @@ use App\Models\AiSuggestion;
 use App\Models\AiSuggestionOffer;
 use App\Models\Client;
 use App\Models\Company;
+use App\Models\LegacyImport;
+use App\Models\LegacyImportIssue;
 use App\Models\MonthlyObligation;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
@@ -77,6 +81,40 @@ final class SuggestionValidityTest extends TestCase
     private function engine(): SuggestionEngine
     {
         return app(SuggestionEngine::class);
+    }
+
+    /**
+     * A real import row, raised by this person.
+     */
+    private function anImport(User $user, string $filename = 'cartera.xlsx'): LegacyImport
+    {
+        $id = DB::table('legacy_imports')->insertGetId([
+            'uuid' => (string) Str::uuid(),
+            'profile' => 'blinden_legacy_monthly_v1',
+            'original_filename' => $filename,
+            'stored_path' => 'imports/'.$filename,
+            'sha256' => hash('sha256', $filename.'|'.Str::random(16)),
+            'file_size' => 2048,
+            'status' => 'review',
+            'created_by' => $user->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return LegacyImport::query()->findOrFail($id);
+    }
+
+    private function issueOn(LegacyImport $import, string $code, bool $blocking = true): LegacyImportIssue
+    {
+        return LegacyImportIssue::query()->create([
+            'legacy_import_id' => $import->id,
+            'row_id' => null,
+            'code' => $code,
+            'severity' => 'error',
+            'blocking' => $blocking,
+            'message' => 'Problema de validación de prueba.',
+            'fingerprint' => hash('sha256', $import->id.'|'.$code.'|'.uniqid()),
+        ]);
     }
 
     /**
@@ -326,6 +364,34 @@ final class SuggestionValidityTest extends TestCase
             ->assertExactJson(['suggestion' => null]);
 
         $this->assertSame(3, AiSuggestionOffer::query()->count(), 'No fourth interruption.');
+    }
+
+    public function test_detection_itself_respects_the_screen_it_was_asked_about(): void
+    {
+        // The engine records the context it was *asked for*, so it cannot tell a
+        // collections finding raised on the imports screen from one raised on the
+        // statement screen. The filter has to live where the knowledge is - in
+        // detection - and this proves it does.
+        $this->overdueClient();
+        $import = $this->anImport($this->user);
+        $this->issueOn($import, 'invalid_company_tax_id');
+        $this->issueOn($import, 'invalid_company_tax_id');
+
+        $detector = app(SuggestionSignalDetector::class);
+
+        $this->assertSame([], $detector->detect($this->user, 'documents', 'search'), 'Nothing is served for a context no rule covers.');
+
+        $this->assertSame(
+            ['import_blocked'],
+            collect($detector->detect($this->user, 'imports', 'issues'))->pluck('category')->all(),
+            'The import screen sees the import problem and not the collections one.'
+        );
+
+        $this->assertSame(
+            ['overdue_concentration'],
+            collect($detector->detect($this->user, 'receivables', 'client_account'))->pluck('category')->all(),
+            'The statement screen sees the collections problem and not the import one.'
+        );
     }
 
     public function test_the_offer_log_records_where_the_interruption_happened(): void

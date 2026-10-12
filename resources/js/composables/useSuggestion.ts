@@ -44,30 +44,54 @@ export function useSuggestion() {
         }
     }
 
-    async function accept(id: number): Promise<void> {
+    /**
+     * Record acceptance.
+     *
+     * ## Why this returns a boolean
+     *
+     * The caller goes on to start a conversation, and that must not happen on
+     * the strength of a request that failed. This used to swallow the failure,
+     * set `error`, and return `void` - so the caller had no way to tell a
+     * recorded acceptance from a 500, and went ahead and sent a turn as though
+     * the person had agreed to something the server had not recorded.
+     *
+     * So: `true` only when the server confirmed. On failure the card stays put,
+     * because it was not answered, and the reason is left in `error`.
+     */
+    async function accept(id: number): Promise<boolean> {
         busy.value = true;
 
         try {
             await ai.acceptSuggestion(id);
-            // Gone either way: the server has recorded the answer, and keeping a
-            // card on screen that can no longer be acted on invites a second
-            // click that would only fail.
+            // Gone once the server has confirmed: keeping a card that can no
+            // longer be acted on invites a second click that would only fail.
             suggestion.value = null;
+            error.value = null;
+
+            return true;
         } catch (e) {
             error.value = e instanceof Error ? e.message : String(e);
+
+            return false;
         } finally {
             busy.value = false;
         }
     }
 
-    async function dismiss(id: number): Promise<void> {
+    /** Record a dismissal. Same contract: `true` only when confirmed. */
+    async function dismiss(id: number): Promise<boolean> {
         busy.value = true;
 
         try {
             await ai.dismissSuggestion(id);
             suggestion.value = null;
+            error.value = null;
+
+            return true;
         } catch (e) {
             error.value = e instanceof Error ? e.message : String(e);
+
+            return false;
         } finally {
             busy.value = false;
         }

@@ -158,6 +158,48 @@ describe('useSuggestion', () => {
         expect(suggestion.value).toBeNull();
     });
 
+    it('reports failure instead of pretending the acceptance was recorded', async () => {
+        // The regression this guards: `accept()` used to swallow the error and
+        // return void, so the caller could not tell a recorded acceptance from a
+        // 500 and went on to open a conversation about a problem the server
+        // still believed had never been raised.
+        vi.spyOn(ai, 'suggestion').mockResolvedValue({ suggestion: overdueSuggestion });
+        vi.spyOn(ai, 'acceptSuggestion').mockRejectedValue(new Error('server said no'));
+
+        const { suggestion, error, accept, refresh } = useSuggestion();
+        await refresh();
+
+        const confirmed = await accept(7);
+
+        expect(confirmed).toBe(false);
+        expect(error.value).toBe('server said no');
+        expect(suggestion.value).not.toBeNull();
+    });
+
+    it('reports success only when the server confirmed', async () => {
+        stubAi();
+        vi.mocked(ai.suggestion).mockResolvedValue({ suggestion: overdueSuggestion });
+
+        const { accept, refresh } = useSuggestion();
+        await refresh();
+
+        expect(await accept(7)).toBe(true);
+    });
+
+    it('does not let a second click race the first', async () => {
+        stubAi();
+        vi.mocked(ai.suggestion).mockResolvedValue({ suggestion: overdueSuggestion });
+
+        const { busy, accept, refresh } = useSuggestion();
+        await refresh();
+
+        const pending = accept(7);
+        expect(busy.value).toBe(true);
+
+        await pending;
+        expect(busy.value).toBe(false);
+    });
+
     it('clears without asking the server when the screen is left', async () => {
         stubAi();
         vi.mocked(ai.suggestion).mockResolvedValue({ suggestion: overdueSuggestion });

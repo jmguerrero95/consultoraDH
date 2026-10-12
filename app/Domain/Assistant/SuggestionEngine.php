@@ -76,7 +76,7 @@ final class SuggestionEngine
         // needs the same answer. Detecting twice would also mean deciding twice.
         $candidates = $this->detector->detect($user, $module, $operation);
 
-        $existing = $this->revalidated($user, $module, $operation, $candidates);
+        $existing = $this->revalidated($user, $module, $operation);
 
         // Already showing one. At most one, always: two would be a queue, and a
         // queue is how an assistant becomes noise.
@@ -146,7 +146,7 @@ final class SuggestionEngine
      * Retiring rather than hiding matters: the row keeps its history, and a
      * condition that comes back is free to be raised again under the cooldown.
      */
-    private function revalidated(User $user, string $module, string $operation, array $candidates): ?AiSuggestion
+    private function revalidated(User $user, string $module, string $operation): ?AiSuggestion
     {
         $rows = AiSuggestion::query()
             ->where('user_id', $user->id)
@@ -156,7 +156,21 @@ final class SuggestionEngine
             ->get();
 
         foreach ($rows as $suggestion) {
-            $verdict = $this->assess($user, $suggestion, $module, $operation, $candidates);
+            // Re-detected against the suggestion's **own** context, not the one
+            // this request is for.
+            //
+            // Detection is context-scoped, so the candidates computed for the
+            // current screen say nothing about a suggestion belonging to another
+            // one. Reusing them here would make "you are on the wrong screen" and
+            // "the debt was paid" indistinguishable, and the first would retire
+            // live offers the moment somebody clicked a link.
+            $ownContext = $this->detector->detect(
+                $user,
+                $suggestion->source_module,
+                $suggestion->source_operation,
+            );
+
+            $verdict = $this->assess($user, $suggestion, $module, $operation, $ownContext);
 
             if ($verdict === self::VERDICT_SHOW) {
                 return $suggestion;
@@ -187,16 +201,16 @@ final class SuggestionEngine
     private const VERDICT_RETIRE = 'retire';
 
     /**
-     * @param  list<array<string, mixed>>  $candidates
+     * @param  list<array<string, mixed>>  $ownContext  candidates for the suggestion's own context
      */
-    private function assess(User $user, AiSuggestion $suggestion, string $module, string $operation, array $candidates): string
+    private function assess(User $user, AiSuggestion $suggestion, string $module, string $operation, array $ownContext): string
     {
         // 1. Temporal validity.
         if ($suggestion->expires_at === null || $suggestion->expires_at->isPast()) {
             return self::VERDICT_RETIRE;
         }
 
-        $stillDetected = collect($candidates)
+        $stillDetected = collect($ownContext)
             ->firstWhere('dedupe_key', $suggestion->dedupe_key);
 
         if ($stillDetected === null) {
