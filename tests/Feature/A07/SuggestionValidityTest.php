@@ -1,0 +1,344 @@
+<?php
+
+declare(strict_types=1);
+
+use App\Domain\Assistant\SuggestionEngine;
+use App\Domain\Payments\Actions\ManagePayments;
+use App\Domain\Receivables\ReceivablesService;
+use App\Models\AiConversation;
+use App\Models\AiSuggestion;
+use App\Models\AiSuggestionOffer;
+use App\Models\Client;
+use App\Models\Company;
+use App\Models\MonthlyObligation;
+use App\Models\User;
+use Carbon\Carbon;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Spatie\Permission\Models\Permission;
+use Spatie\Permission\PermissionRegistrar;
+use Tests\TestCase;
+
+/**
+ * GATE 3, section 1: the properties a stored suggestion has to keep.
+ *
+ * ## The problem these cover
+ *
+ * A suggestion is a statement about somebody's data, made at one moment. It is
+ * then *stored*, and read back later, from a page that may be anywhere and much
+ * later. Three things can go wrong in between, and all three produce the worst
+ * output this feature can produce - a confident sentence that is no longer
+ * true:
+ *
+ *   - the condition stopped being true (the debt was paid, the import applied);
+ *   - the person lost the permission that made it showable;
+ *   - it is being shown on a screen it has nothing to do with.
+ *
+ * A fourth is not about truth but about meaning: the daily ceiling was counting
+ * *problems* rather than *interruptions*, so a problem that was re-raised all
+ * day counted once.
+ */
+final class SuggestionValidityTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private const NOW = '2026-06-01 09:00';
+
+    private User $user;
+
+    private User $other;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        seedPortfolioRoles();
+
+        foreach (['ai.use', 'receivables.view'] as $permission) {
+            Permission::firstOrCreate(['name' => $permission, 'guard_name' => 'web']);
+        }
+
+        $this->user = User::factory()->create();
+        $this->user->givePermissionTo(['ai.use', 'receivables.view']);
+
+        $this->other = User::factory()->create();
+        $this->other->givePermissionTo(['ai.use', 'receivables.view']);
+
+        Carbon::setTestNow(Carbon::parse(self::NOW));
+    }
+
+    protected function tearDown(): void
+    {
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        Carbon::setTestNow();
+
+        parent::tearDown();
+    }
+
+    private function engine(): SuggestionEngine
+    {
+        return app(SuggestionEngine::class);
+    }
+
+    /**
+     * A client owing a large amount that is already past due.
+     */
+    private function overdueClient(string $month = '2026-01', int $amount = 45_000_000, string $first = 'Ana', string $last = 'Torres'): Client
+    {
+        $client = Client::factory()->create(['first_names' => $first, 'last_names' => $last]);
+        $period = a03_generatedPeriod($month);
+        $company = Company::factory()->create();
+        $employer = a03_employer(
+            client: $client,
+            company: $company,
+            relationshipStart: $period->period_month->toDateString(),
+            effectiveMonth: $month,
+        );
+
+        a03_payable($amount, $month, $employer);
+
+        return $client;
+    }
+
+    // ---------------------------------------------------------------------
+    // 1.1 Conversation ownership
+    // ---------------------------------------------------------------------
+
+    public function test_your_own_conversation_is_accepted(): void
+    {
+        $this->overdueClient();
+        $conversation = AiConversation::query()->create(['user_id' => $this->user->id, 'title' => 'Mía']);
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&conversation_id='.$conversation->id)
+            ->assertOk()
+            ->assertJsonPath('suggestion.category', 'overdue_concentration');
+    }
+
+    public function test_someone_elses_conversation_is_refused_without_revealing_that_it_exists(): void
+    {
+        $this->overdueClient();
+        $theirs = AiConversation::query()->create(['user_id' => $this->other->id, 'title' => 'Suya']);
+
+        // The same answer as for an id that was never issued. `exists:` proved the
+        // row was real and said nothing about who owns it, which on an
+        // administrator-wide table means any id belongs to somebody.
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&conversation_id='.$theirs->id)
+            ->assertNotFound();
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&conversation_id=999999')
+            ->assertNotFound();
+
+        // And the refusal is a refusal, not a fallback: it must not quietly
+        // attach the suggestion to a null conversation instead.
+        $this->assertNull(
+            AiSuggestion::query()->whereNotNull('ai_conversation_id')->first(),
+            'A refused conversation must not leave a suggestion recorded against some other one.'
+        );
+    }
+
+    public function test_a_suggestion_is_never_attached_to_another_persons_conversation(): void
+    {
+        $this->overdueClient();
+        $theirs = AiConversation::query()->create(['user_id' => $this->other->id, 'title' => 'Suya']);
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&conversation_id='.$theirs->id)
+            ->assertNotFound();
+
+        $this->assertSame(0, AiSuggestionOffer::query()->count(), 'A refused request interrupts nobody.');
+    }
+
+    // ---------------------------------------------------------------------
+    // 1.2 Re-validation before showing
+    // ---------------------------------------------------------------------
+
+    public function test_a_suggestion_is_withdrawn_once_the_debt_behind_it_is_paid(): void
+    {
+        $client = $this->overdueClient();
+
+        $first = $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->assertOk()
+            ->json('suggestion.id');
+
+        $this->assertNotNull($first);
+
+        // Somebody collects. The statement screen now shows a zero balance, and a
+        // card saying "$45.000.000 ya está vencido" would be a lie about their data.
+        $obligation = DB::table('monthly_obligations')->where('client_id', $client->id)->first();
+        app(ManagePayments::class)->allocate(
+            a03_payablePayment(45_000_000, ['client' => $client, 'company' => Company::query()->first()], '2026-05-02'),
+            MonthlyObligation::query()->findOrFail($obligation->id),
+            45_000_000,
+            actingAsRole(),
+        );
+
+        $this->assertSame(
+            [],
+            app(ReceivablesService::class)->clientsWithConcentratedOverdue(0.5),
+            'The underlying condition really is gone.'
+        );
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->assertOk()
+            ->assertExactJson(['suggestion' => null]);
+
+        $this->assertSame(
+            AiSuggestion::STATUS_EXPIRED,
+            AiSuggestion::query()->findOrFail($first)->status,
+            'Retired rather than merely hidden, so the row keeps its history.'
+        );
+    }
+
+    public function test_a_suggestion_is_withdrawn_when_the_permission_is_taken_away(): void
+    {
+        $this->overdueClient();
+
+        $id = $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->json('suggestion.id');
+
+        $this->assertNotNull($id);
+
+        // The role changes between two page loads. The stored row still says
+        // "show this", and trusting it would show it to somebody who no longer
+        // has any right to see the figures behind it.
+        $this->user->revokePermissionTo('receivables.view');
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->assertOk()
+            ->assertExactJson(['suggestion' => null]);
+
+        $this->assertSame(AiSuggestion::STATUS_EXPIRED, AiSuggestion::query()->findOrFail($id)->status);
+    }
+
+    public function test_a_suggestion_does_not_follow_you_onto_an_unrelated_screen(): void
+    {
+        $this->overdueClient();
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->assertOk()
+            ->assertJsonPath('suggestion.category', 'overdue_concentration');
+
+        // Now on the imports screen. A collections problem raised on a screen
+        // about workbooks is not context, it is an interruption.
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=imports&operation=issues')
+            ->assertOk()
+            ->assertExactJson(['suggestion' => null]);
+    }
+
+    public function test_returning_to_the_original_screen_still_finds_it(): void
+    {
+        // The check above shelves a suggestion whose context no longer matches.
+        // That is only acceptable if coming back finds the same one still
+        // waiting, rather than a row that was thrown away for a wrong reason.
+        $this->overdueClient();
+
+        $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+        $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=imports&operation=issues');
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->assertOk()
+            ->assertJsonPath('suggestion.category', 'overdue_concentration');
+
+        $this->assertSame(
+            AiSuggestion::STATUS_AVAILABLE,
+            AiSuggestion::query()->firstOrFail()->status,
+            'Clicking a link is not a reason to throw the offer away.'
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 1.4 The daily ceiling counts interruptions
+    // ---------------------------------------------------------------------
+
+    public function test_rereading_an_on_offer_suggestion_is_not_a_second_interruption(): void
+    {
+        $this->overdueClient();
+
+        $first = $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->json('suggestion.id');
+
+        // Five refreshes. This is one card being re-rendered, not five times
+        // bothering someone.
+        for ($i = 0; $i < 5; $i++) {
+            $this->actingAs($this->user)
+                ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+                ->assertOk()
+                ->assertJsonPath('suggestion.id', $first);
+        }
+
+        $this->assertSame(1, AiSuggestionOffer::query()->count());
+    }
+
+    public function test_the_daily_ceiling_counts_reoffers_of_the_same_problem(): void
+    {
+        $this->overdueClient();
+
+        // The cooldown is four hours and the offer lives three, so the moments
+        // this problem can be re-raised are four hours apart - not "whenever the
+        // offer lapses". Getting that arithmetic wrong in the test would have
+        // hidden exactly the bug this covers.
+        foreach (['09:00', '13:00', '17:00'] as $time) {
+            Carbon::setTestNow(Carbon::parse('2026-06-01 '.$time));
+
+            $this->actingAs($this->user)
+                ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+                ->assertOk()
+                ->assertJsonPath('suggestion.category', 'overdue_concentration');
+        }
+
+        $this->assertSame(3, AiSuggestionOffer::query()->count(), 'Three interruptions, not one problem.');
+        $this->assertSame(
+            1,
+            AiSuggestion::query()->count(),
+            'And still one row, because it is still the same problem.'
+        );
+    }
+
+    public function test_the_ceiling_stops_further_reoffers(): void
+    {
+        $this->overdueClient();
+
+        foreach (['09:00', '13:00', '17:00'] as $time) {
+            Carbon::setTestNow(Carbon::parse('2026-06-01 '.$time));
+            $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+        }
+
+        $this->assertSame(3, AiSuggestionOffer::query()->count());
+
+        // A fourth would be past the ceiling. The problem is still real and
+        // still unpaid - the cap is what withholds it, not its absence.
+        Carbon::setTestNow(Carbon::parse('2026-06-01 21:00'));
+
+        $this->actingAs($this->user)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->assertOk()
+            ->assertExactJson(['suggestion' => null]);
+
+        $this->assertSame(3, AiSuggestionOffer::query()->count(), 'No fourth interruption.');
+    }
+
+    public function test_the_offer_log_records_where_the_interruption_happened(): void
+    {
+        $this->overdueClient();
+
+        $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+
+        $offer = AiSuggestionOffer::query()->firstOrFail();
+
+        $this->assertSame($this->user->id, $offer->user_id);
+        $this->assertSame('receivables', $offer->source_module);
+        $this->assertSame('client_account', $offer->source_operation);
+        $this->assertTrue($offer->offered_at->equalTo(Carbon::parse(self::NOW)));
+    }
+}

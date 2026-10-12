@@ -6,6 +6,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Domain\Assistant\SuggestionEngine;
+use App\Models\AiConversation;
 use App\Models\AiSuggestion;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -55,14 +56,43 @@ final class SuggestionController extends Controller
         $validated = $request->validate([
             'module' => ['sometimes', 'string', 'max:64'],
             'operation' => ['sometimes', 'string', 'max:64'],
-            'conversation_id' => ['sometimes', 'nullable', 'integer', 'exists:ai_conversations,id'],
+            'conversation_id' => ['sometimes', 'nullable', 'integer'],
         ]);
 
+        $user = $request->user();
+
+        // A query string is a string. `validated()` returns it verbatim, and the
+        // engine's typed parameter is `?int`, so the cast has to happen here -
+        // otherwise a perfectly valid request dies with a TypeError and a 500.
+        $conversationId = isset($validated['conversation_id']) && $validated['conversation_id'] !== null
+            ? (int) $validated['conversation_id']
+            : null;
+
+        if ($conversationId !== null) {
+            // `exists:ai_conversations,id` proves the conversation is real and
+            // nothing about who owns it. An administrator-wide table means any
+            // id that exists belongs to *someone*, and accepting theirs would
+            // attach this person's suggestion to a conversation they have never
+            // seen and cannot read.
+            //
+            // Scoped by owner rather than validated separately, so the failure
+            // mode is the same as for an id that does not exist at all: a 404
+            // that reveals nothing about either.
+            $owned = AiConversation::query()
+                ->whereKey($conversationId)
+                ->where('user_id', $user->id)
+                ->exists();
+
+            if (! $owned) {
+                return $this->fail('La conversación no está disponible.', 404);
+            }
+        }
+
         $suggestion = $this->engine->currentFor(
-            $request->user(),
+            $user,
             $validated['module'] ?? 'receivables',
             $validated['operation'] ?? 'client_account',
-            $validated['conversation_id'] ?? null,
+            $conversationId,
         );
 
         return response()->json([

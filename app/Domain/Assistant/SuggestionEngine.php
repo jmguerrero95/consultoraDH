@@ -6,6 +6,7 @@ namespace App\Domain\Assistant;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\AiSuggestion;
+use App\Models\AiSuggestionOffer;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -70,7 +71,12 @@ final class SuggestionEngine
         // occupy the "already suggested" slot that suppresses a fresh problem.
         $this->expireStale($user);
 
-        $existing = $this->availableFor($user);
+        // Detection runs once per call and its result is reused, because every
+        // check below - may this still be shown, is the condition still true -
+        // needs the same answer. Detecting twice would also mean deciding twice.
+        $candidates = $this->detector->detect($user, $module, $operation);
+
+        $existing = $this->revalidated($user, $module, $operation, $candidates);
 
         // Already showing one. At most one, always: two would be a queue, and a
         // queue is how an assistant becomes noise.
@@ -82,7 +88,7 @@ final class SuggestionEngine
             return null;
         }
 
-        foreach ($this->detector->detect($user, $module, $operation) as $candidate) {
+        foreach ($candidates as $candidate) {
             if ($candidate['relevance'] < self::MIN_RELEVANCE) {
                 continue;
             }
@@ -115,6 +121,105 @@ final class SuggestionEngine
         }
 
         return null;
+    }
+
+    /**
+     * An already-stored suggestion, re-checked before it is shown again.
+     *
+     * ## Why a stored row is not trusted on its own
+     *
+     * A suggestion is created at a moment when it was true and permitted. By
+     * the time the page is opened again, any of those four things may have
+     * stopped holding, and a stale row is the most damaging case the feature
+     * has - it asserts something about a person's data that is no longer so.
+     *
+     * So all four are re-checked here, and the row is retired rather than
+     * shown if any of them fails:
+     *
+     *   1. it has not expired;
+     *   2. the person still holds the permission its action needs;
+     *   3. the condition behind it is *still* detected right now - the client
+     *      paid the debt, the import was applied, the issue was resolved;
+     *   4. it belongs to the screen being looked at, so a receivables problem
+     *      does not follow someone onto the imports screen.
+     *
+     * Retiring rather than hiding matters: the row keeps its history, and a
+     * condition that comes back is free to be raised again under the cooldown.
+     */
+    private function revalidated(User $user, string $module, string $operation, array $candidates): ?AiSuggestion
+    {
+        $rows = AiSuggestion::query()
+            ->where('user_id', $user->id)
+            ->where('status', AiSuggestion::STATUS_AVAILABLE)
+            ->orderByDesc('relevance_score')
+            ->orderByDesc('created_at')
+            ->get();
+
+        foreach ($rows as $suggestion) {
+            $verdict = $this->assess($user, $suggestion, $module, $operation, $candidates);
+
+            if ($verdict === self::VERDICT_SHOW) {
+                return $suggestion;
+            }
+
+            // "Skip" means it is still true and still permitted, but this is not
+            // the screen it belongs to. Retiring it would destroy a live offer
+            // because somebody clicked a link, and coming back would then have
+            // to wait out a cooldown they had no idea was running.
+            if ($verdict === self::VERDICT_RETIRE) {
+                $suggestion->forceFill([
+                    'status' => AiSuggestion::STATUS_EXPIRED,
+                    'resolved_at' => now(),
+                ])->save();
+            }
+        }
+
+        return null;
+    }
+
+    /** Still applicable here; show it. */
+    private const VERDICT_SHOW = 'show';
+
+    /** Still true, but not on this screen; leave it alone. */
+    private const VERDICT_SKIP = 'skip';
+
+    /** No longer true, or no longer permitted; retire it. */
+    private const VERDICT_RETIRE = 'retire';
+
+    /**
+     * @param  list<array<string, mixed>>  $candidates
+     */
+    private function assess(User $user, AiSuggestion $suggestion, string $module, string $operation, array $candidates): string
+    {
+        // 1. Temporal validity.
+        if ($suggestion->expires_at === null || $suggestion->expires_at->isPast()) {
+            return self::VERDICT_RETIRE;
+        }
+
+        $stillDetected = collect($candidates)
+            ->firstWhere('dedupe_key', $suggestion->dedupe_key);
+
+        if ($stillDetected === null) {
+            // 3. The condition is gone. Either the debt was paid, the import was
+            // applied, the issue was resolved, or the person lost the permission
+            // to see it - and all four mean the same thing here: do not show it,
+            // and do not keep it.
+            return self::VERDICT_RETIRE;
+        }
+
+        // 2. Permission, re-read now rather than trusted from when it was made.
+        // A role can change between one page load and the next.
+        if (! $this->userMayAct($user, $stillDetected)) {
+            return self::VERDICT_RETIRE;
+        }
+
+        // 4. Context, checked last so a suggestion that has stopped being true
+        // is retired rather than merely shelved until its TTL runs out.
+        if ($suggestion->source_module !== $module || $suggestion->source_operation !== $operation) {
+            return self::VERDICT_SKIP;
+        }
+
+        return self::VERDICT_SHOW;
     }
 
     /**
@@ -223,31 +328,61 @@ final class SuggestionEngine
         return $this->lastSaidAt($user, $dedupeKey)?->isAfter(now()->subMinutes(self::COOLDOWN_MINUTES)) ?? false;
     }
 
+    /**
+     * How many times this person has actually been interrupted in a day.
+     *
+     * Counted from the offers log rather than from `ai_suggestions`, because the
+     * ceiling is about interruptions and those are not the same thing as
+     * distinct problems. The log also counts an offer that reused an existing
+     * row, which is exactly the case a row count misses.
+     */
     private function dailyCount(User $user): int
     {
-        return AiSuggestion::query()
+        return AiSuggestionOffer::query()
             ->where('user_id', $user->id)
-            ->where('last_offered_at', '>', now()->subDay())
+            ->where('offered_at', '>', now()->subDay())
             ->count();
     }
 
     /**
      * When this problem was last actually put in front of this person.
      *
-     * `last_offered_at` rather than `created_at`: a problem that was offered,
-     * ignored, and is still true has its row refreshed, so `created_at` is
-     * frozen at the first offer and would stop measuring anything useful after
-     * that. `last_offered_at` falls back to `created_at` so a row written
-     * before the column existed still has an answer.
+     * Read from the offers log so that a re-offer moves the cooldown with it.
+     * `ai_suggestions.last_offered_at` says the same thing for the current row,
+     * but the log is the record that survives the row being retired, and having
+     * one authority for "when did we last say this" avoids two disagreeing.
      */
     private function lastSaidAt(User $user, string $dedupeKey): ?Carbon
     {
-        $row = AiSuggestion::query()
+        // Read the row rather than `max('offered_at')`: an aggregate returns the
+        // raw column, so the model's datetime cast never runs and the caller
+        // gets a string where it asked for a Carbon.
+        $offer = AiSuggestionOffer::query()
             ->where('user_id', $user->id)
             ->where('dedupe_key', $dedupeKey)
-            ->first(['last_offered_at', 'created_at']);
+            ->orderByDesc('offered_at')
+            ->orderByDesc('id')
+            ->first();
 
-        return $row?->last_offered_at ?? $row?->created_at;
+        return $offer?->offered_at;
+    }
+
+    /**
+     * Append the offer that is about to happen.
+     *
+     * Written at the same moment as the suggestion row is refreshed, so the
+     * two cannot disagree about whether something was shown.
+     */
+    private function recordOffer(User $user, AiSuggestion $suggestion): void
+    {
+        AiSuggestionOffer::query()->create([
+            'user_id' => $user->id,
+            'ai_suggestion_id' => $suggestion->id,
+            'dedupe_key' => $suggestion->dedupe_key,
+            'source_module' => $suggestion->source_module,
+            'source_operation' => $suggestion->source_operation,
+            'offered_at' => now(),
+        ]);
     }
 
     /**
@@ -304,7 +439,7 @@ final class SuggestionEngine
         ];
 
         try {
-            return AiSuggestion::query()->updateOrCreate(
+            $suggestion = AiSuggestion::query()->updateOrCreate(
                 [
                     'user_id' => $user->id,
                     'dedupe_key' => $candidate['dedupe_key'],
@@ -315,8 +450,22 @@ final class SuggestionEngine
             // Two detections raced. The unique key did its job: one of them
             // wins and the other finds the existing row instead of duplicating
             // the interruption.
+            //
+            // No offer is logged on this path: nothing new was shown, so
+            // counting it would inflate the daily ceiling with interruptions
+            // nobody received.
             return $this->availableFor($user);
         }
+
+        // Reaching here means the problem is going from "not on offer" to "on
+        // offer", which is the only thing an interruption is.
+        //
+        // Re-reading a suggestion that is still on offer is deliberately *not*
+        // counted: that is the same card being re-rendered on a page refresh,
+        // not a second interruption.
+        $this->recordOffer($user, $suggestion);
+
+        return $suggestion;
     }
 
     /**
