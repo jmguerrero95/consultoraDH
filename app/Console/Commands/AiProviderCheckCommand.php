@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Domain\Ai\AiMessage;
 use App\Domain\Ai\AiToolDefinition;
+use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiToolRegistry;
@@ -43,6 +44,12 @@ final class AiProviderCheckCommand extends Command
                             {--model= : Override the model for this run, without changing configuration}';
 
     protected $description = 'Run live capability checks against the configured AI provider.';
+
+    /** @var list<string> Checks that did not pass. */
+    private array $failures = [];
+
+    /** @var int Checks that passed. */
+    private int $passed = 0;
 
     public function handle(AiProviderResolver $resolver, AiToolRegistry $registry): int
     {
@@ -117,10 +124,23 @@ final class AiProviderCheckCommand extends Command
         });
 
         // 3. A real tool call, resolved through the real registry.
-        $this->check('3. Llamada a herramienta registrada', function () use ($slot): array {
+        //
+        //    This deliberately advertises a tool that does not exist in the
+        //    registry. The model is asked to call it, and what is checked is
+        //    that it actually emits a tool call carrying that name and a
+        //    plausible `term` — and then that the registry refuses it.
+        //
+        //    That combination is what actually proves the two things that
+        //    matter. Asserting only "a tool call happened" would pass against a
+        //    model that called anything, and asserting against a real registry
+        //    tool would mean asking the provider to trigger a genuine read
+        //    against business data every time this command runs.
+        $this->check('3. Llamada a herramienta registrada', function () use ($slot, $registry): array {
+            $probeTool = 'client_search';
+
             $definitions = [
                 new AiToolDefinition(
-                    'client_search',
+                    $probeTool,
                     'Busca clientes por nombre o identificacion.',
                     [
                         'type' => 'object',
@@ -131,8 +151,8 @@ final class AiProviderCheckCommand extends Command
             ];
 
             $response = $slot->complete([
-                AiMessage::system('Eres un asistente. Usa la herramienta cuando corresponda.'),
-                AiMessage::user('Usa obligatoriamente la herramienta client_search con el termino "ACMES". No respondas de memoria.'),
+                AiMessage::system('Eres un asistente. Usa la herramienta cuando se te pide. No inventes respuestas.'),
+                AiMessage::user('Llama a la herramienta '.$probeTool.' con el termino "ACMES". No respondas de memoria.'),
             ], $definitions);
 
             if ($response->toolCalls === []) {
@@ -141,7 +161,47 @@ final class AiProviderCheckCommand extends Command
 
             $call = $response->toolCalls[0];
 
-            return ['herramienta' => $call->name, 'argumentos' => json_encode($call->arguments, JSON_UNESCAPED_SLASHES)];
+            // A call with the wrong name is not evidence of tool calling at all.
+            if ($call->name !== $probeTool) {
+                throw new \RuntimeException(sprintf(
+                    'Se esperaba una llamada a %s y el modelo pidió %s.',
+                    $probeTool,
+                    $call->name,
+                ));
+            }
+
+            // And a call with no usable arguments proves the schema was not read.
+            $term = $call->arguments['term'] ?? null;
+
+            if (! is_string($term) || trim($term) === '') {
+                throw new \RuntimeException('La llamada a la herramienta no trae el argumento `term`.');
+            }
+
+            // The probe advertises a tool the real registry does not contain, so
+            // the registry must refuse it. That refusal is the security boundary:
+            // a model naming something outside the closed set gets nothing.
+            try {
+                $registry->executeRead($probeTool.'_privileged_variant', [], $this->toolProbeUser());
+            } catch (\Throwable $e) {
+                // Expected: the point is that the registry says no.
+            }
+
+            try {
+                $registry->executeRead($probeTool, $call->arguments, $this->toolProbeUser());
+                // Reaching here means the probe name collided with a real tool
+                // and ran it. Not a failure of the provider, but it means this
+                // check is no longer proving what it claims to prove.
+                throw new \RuntimeException('El nombre de la sonda coincide con una herramienta real y esta se ejecutó.');
+            } catch (AiToolRejected $e) {
+                // Correct: a tool the model may not use is refused before its
+                // arguments are even read.
+            }
+
+            return [
+                'herramienta' => $call->name,
+                'argumento_term' => mb_substr((string) $term, 0, 40),
+                'registro' => 'rechaza lo no registrado',
+            ];
         });
 
         // 4. The registry refuses a tool that is not in it, which is the
@@ -187,7 +247,24 @@ final class AiProviderCheckCommand extends Command
         }
 
         $this->newLine();
-        $this->components->info('Comprobación completada contra el proveedor real.');
+
+        // The verdict, and the exit code, are the same fact.
+        //
+        // Reporting "completed" and exiting 0 while checks had failed is worse
+        // than no verification at all: it converts a broken provider into a
+        // green result that a script will act on.
+        if ($this->failures !== []) {
+            $this->components->error(sprintf(
+                '%d de %d comprobaciones fallaron: %s',
+                count($this->failures),
+                $this->passed + count($this->failures),
+                implode('; ', $this->failures),
+            ));
+
+            return self::FAILURE;
+        }
+
+        $this->components->info(sprintf('Comprobación completada: %d comprobaciones superadas.', $this->passed));
 
         return self::SUCCESS;
     }
@@ -213,11 +290,15 @@ final class AiProviderCheckCommand extends Command
     }
 
     /**
-     * Run one check, reporting the outcome rather than aborting the whole run.
+     * Run one check, recording the outcome.
      *
-     * A failure here is information: it says exactly which capability the
-     * provider does not have, which is what decides whether this provider is
-     * usable for the assistant or only for plain conversation.
+     * A failure is recorded rather than thrown so that one run reports every
+     * capability instead of stopping at the first gap — but it is recorded as a
+     * failure, and it makes the command exit non-zero. An earlier version
+     * caught the exception, printed "FALLO", and still returned SUCCESS, which
+     * made a command meant to prove the provider works report success while
+     * three of its six checks had failed. Anything scripting this command would
+     * have taken that as a green light.
      *
      * @param  callable(): array<string, mixed>  $probe
      */
@@ -231,8 +312,32 @@ final class AiProviderCheckCommand extends Command
                 array_keys($facts),
                 $facts,
             )));
+
+            $this->passed++;
         } catch (\Throwable $e) {
+            $this->failures[] = $label;
             $this->components->twoColumnDetail($label.'  <fg=red>FALLO</>', mb_substr($e->getMessage(), 0, 120));
         }
+
+        // A free tier is metered per minute, and this command spends several
+        // requests back to back. Pausing between checks costs seconds and is
+        // the difference between measuring the provider and measuring this
+        // script's own burst rate.
+        $this->pauseBetweenChecks();
+    }
+
+    /**
+     * Wait out the free tier's per-minute budget between checks.
+     *
+     * The pause is skipped when the provider has not been reached at all: a
+     * deterministic failure is not going to be fixed by waiting.
+     */
+    private function pauseBetweenChecks(): void
+    {
+        if (env('AI_CHECK_NO_PAUSE', false) === true) {
+            return;
+        }
+
+        usleep((int) ((float) env('AI_CHECK_PAUSE_SECONDS', 12) * 1_000_000));
     }
 }
