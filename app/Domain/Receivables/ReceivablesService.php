@@ -715,6 +715,89 @@ final class ReceivablesService
      */
     private const COMPANY_DISPLAY_NAME = "coalesce(nullif(btrim(companies.trade_name), ''), companies.legal_name)";
 
+    /**
+     * Clients whose outstanding debt is mostly already past due.
+     *
+     * ## Why this lives here rather than in the caller
+     *
+     * A balance is not a column: it is the obligation plus its adjustments minus
+     * its live allocations, and "overdue" depends on an as-of date. Both are
+     * already spelled out once in `obligationsQuery()` and were deliberately
+     * written there as raw SQL because a `where` cannot refer to a select
+     * alias. Recomputing any of it elsewhere would produce a second definition
+     * that agrees with the first until an adjustment or a reversal arrives, and
+     * a suggestion engine that disagrees with the statement screen about who
+     * owes what is worse than no suggestion at all.
+     *
+     * ## The filter is a ratio, not an amount
+     *
+     * What makes late debt a problem is how much of it there is. A peso
+     * threshold would fire constantly for large clients and never for small
+     * ones, and would say the same thing about two clients whose situations are
+     * completely different.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function clientsWithConcentratedOverdue(float $minimumShare = 0.5, int $minimumBalanceCop = 1_000_000, int $limit = 20): array
+    {
+        $asOf = $this->agingReference(null)->toDateString();
+
+        /*
+         | The same derived table the statement screen reads, so the figures this
+         | reports and the figures a person sees come from one definition.
+         |
+         | Two details are not interchangeable with the PHP in `hydrateRow()`:
+         |
+         |  - `is_overdue` is computed in PHP there, because it needs the
+         |    hydrated balance. It has to be restated here as SQL: a column of
+         |    the outer query cannot be referenced from a sibling aggregate, and
+         |    the same rule that keeps the balance expression honest applies
+         |    again.
+         |  - `balance_cop` is already selected by `obligationsQuery()`. Adding a
+         |    second alias with that name produced two columns of one name and
+         |    PostgreSQL refused the whole query, which is why this aggregates
+         |    with distinct names and renames them on the outside.
+         */
+        // `obligationsQuery()` selects `monthly_obligations.*`, which cannot be
+        // grouped by client alone. `select([])` *replaces* that projection rather
+        // than adding to it, which is what drops the ungroupable star.
+        //
+        // `due_on` is read inside `sum()` and `filter()`, so it belongs in the
+        // aggregates; selecting it as a bare column as well is what makes
+        // PostgreSQL demand it in GROUP BY. It is deliberately absent here.
+        $debtors = $this->obligationsQuery()
+            ->select([])
+            ->selectRaw('monthly_obligations.client_id as grouped_client_id')
+            ->selectRaw('coalesce(sum('.self::balanceExpression().'), 0) as grouped_balance_cop')
+            ->selectRaw('coalesce(sum(case when ('.self::balanceExpression().') > 0 and monthly_obligations.due_on < ? then ('.self::balanceExpression().') else 0 end), 0) as grouped_overdue_cop', [$asOf])
+            ->selectRaw('count(*) filter (where ('.self::balanceExpression().') > 0) as grouped_open')
+            ->selectRaw('count(*) filter (where ('.self::balanceExpression().') > 0 and monthly_obligations.due_on < ?) as grouped_overdue', [$asOf])
+            ->selectRaw('max(clients.first_names) as first_names')
+            ->selectRaw('max(clients.last_names) as last_names')
+            ->selectRaw('max(clients.document_number) as document_number')
+            ->whereNotNull('monthly_obligations.client_id')
+            ->groupBy('monthly_obligations.client_id');
+
+        return DB::query()
+            ->fromSub($debtors, 'debtors')
+            ->where('debtors.grouped_balance_cop', '>=', $minimumBalanceCop)
+            ->whereRaw('debtors.grouped_overdue_cop::numeric / nullif(debtors.grouped_balance_cop, 0) >= ?', [$minimumShare])
+            ->orderByDesc('debtors.grouped_overdue_cop')
+            ->limit($limit)
+            ->get()
+            ->map(fn (object $row): array => [
+                'client_id' => (int) $row->grouped_client_id,
+                'balance_cop' => (int) $row->grouped_balance_cop,
+                'overdue_balance_cop' => (int) $row->grouped_overdue_cop,
+                'overdue_share' => round($row->grouped_overdue_cop / max(1, (int) $row->grouped_balance_cop), 4),
+                'open_obligations' => (int) $row->grouped_open,
+                'overdue_obligations' => (int) $row->grouped_overdue,
+                'name' => trim(($row->first_names ?? '').' '.($row->last_names ?? '')) ?: null,
+                'document_number' => $row->document_number ?? null,
+            ])
+            ->all();
+    }
+
     private function obligationsQuery(): QueryBuilder
     {
         return DB::table('monthly_obligations')
@@ -754,15 +837,36 @@ final class ReceivablesService
             // alias, and every filter on this screen needs the balance, so it is
             // written once here and the query above it becomes a derived table where
             // this name is a real column.
-            ->selectRaw('((monthly_obligations.base_amount_cop + coalesce(('
-                .'select sum(oa.delta_cop) from obligation_adjustments oa '
-                .'where oa.obligation_id = monthly_obligations.id'
-                .'), 0)) - coalesce(('
-                .'select sum(pa2.amount_cop) from payment_allocations pa2 '
-                .'inner join payments p2 on p2.id = pa2.payment_id '
-                .'where pa2.obligation_id = monthly_obligations.id '
-                .'and pa2.reversed_at is null and p2.voided_at is null'
-                .'), 0)) as balance_cop');
+            ->selectRaw('('.self::balanceExpression().') as balance_cop');
+    }
+
+    /**
+     * What one obligation is owed right now, as SQL.
+     *
+     * ## Why it is a method and not a constant
+     *
+     * The expression is needed in two different scopes: as a select alias in
+     * `obligationsQuery()`, and *inside* an aggregate in
+     * `clientsWithConcentratedOverdue()`, where an alias cannot be referenced at
+     * all. Spelling it twice is how the two drift apart - and they must not,
+     * because one of them decides what a person is told they owe.
+     *
+     * Reversed and voided allocations are excluded, and that exclusion is the
+     * whole reason this cannot be `base_amount_cop - sum(allocations)`: a
+     * reversed allocation is still a row, and counting it would leave a balance
+     * that no longer matches the statement screen.
+     */
+    private static function balanceExpression(): string
+    {
+        return '(monthly_obligations.base_amount_cop + coalesce(('
+            .'select sum(oa.delta_cop) from obligation_adjustments oa '
+            .'where oa.obligation_id = monthly_obligations.id'
+            .'), 0)) - coalesce(('
+            .'select sum(pa3.amount_cop) from payment_allocations pa3 '
+            .'inner join payments p3 on p3.id = pa3.payment_id '
+            .'where pa3.obligation_id = monthly_obligations.id '
+            .'and pa3.reversed_at is null and p3.voided_at is null'
+            .'), 0)';
     }
 
     /**

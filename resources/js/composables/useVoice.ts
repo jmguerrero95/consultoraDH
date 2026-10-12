@@ -122,7 +122,7 @@ export interface VoicePlayback {
 /** Wording shown to the person, rather than a raw vendor error code. */
 const DICTATION_ERRORS: Record<string, string> = {
     'not-allowed': 'El navegador bloqueó el micrófono. Habilítalo en los permisos del sitio e inténtalo de nuevo.',
-    'service-not-allowed': 'El navegador bloqueó el micrófono. Habilítalo en los permisos del sitio e inténtalo de again.',
+    'service-not-allowed': 'El navegador bloqueó el micrófono. Habilítalo en los permisos del sitio e inténtalo de nuevo.',
     'no-speech': 'No se detectó voz. Inténtalo de nuevo o usa el dictado del teclado.',
     'audio-capture': 'No se encontró un micrófono disponible.',
     network: 'El reconocimiento de voz necesita conexión. Se ha detenido.',
