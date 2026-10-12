@@ -136,31 +136,12 @@ const ACTION_LABELS: Record<string, string> = {
     set_support_priority: 'Establecer prioridad',
 };
 
-const RUN_STATUS_LABELS: Record<string, string> = {
-    pending: 'Pendiente',
-    running: 'En ejecución',
-    succeeded: 'Completada',
-    partial: 'Parcial',
-    failed: 'Fallida',
-    blocked: 'Bloqueada',
-    skipped: 'Omitida',
-};
-
 function triggerLabel(type: string): string {
     return vocabulary.value?.triggers?.[type]?.label ?? TRIGGER_LABELS[type] ?? type;
 }
 
 function actionLabel(type: string): string {
     return vocabulary.value?.actions?.[type]?.label ?? ACTION_LABELS[type] ?? type;
-}
-
-function runStatusLabel(status: string): string {
-    return RUN_STATUS_LABELS[status] ?? status;
-}
-
-/** The outcome colour, so a failed run is not read as a finished one. */
-function runStatusVariant(status: string): string {
-    return status === 'succeeded' ? 'success' : status === 'failed' || status === 'blocked' ? 'danger' : 'warning';
 }
 
 function formatDate(value: string | null): string {

@@ -107,7 +107,7 @@ describe('notificaciones por Telegram', () => {
     });
 
     it('deactivates a destination through a PATCH carrying the inverted flag', async () => {
-        const spy = stubFetch((url, init) => {
+        const spy = stubFetch((_url, init) => {
             if (init?.method === 'PATCH') {
                 return jsonResponse(endpoint({ enabled: false }));
             }

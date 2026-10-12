@@ -17,7 +17,7 @@ import type { RouteLocationRaw } from 'vue-router';
  */
 const props = withDefaults(
     defineProps<{
-        variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
+        variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'link';
         /**
          * `sm` is for actions inside a table row, where a full size button makes the
          * row taller than the data it describes.

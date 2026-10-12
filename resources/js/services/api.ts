@@ -203,6 +203,43 @@ interface ApiClient {
             apply(id: number, identity: { plan_revision: number; plan_digest: string }): Promise<{ message: string; data: LegacyImportDetail }>;
             cancel(id: number): Promise<{ message: string }>;
         };
+        automations: {
+            vocabulary(): Promise<AutomationVocabulary>;
+            list(params: ListParams & { active?: string | null; trigger_type?: string | null }): Promise<AutomationRuleListPayload>;
+            show(id: number): Promise<AutomationRule>;
+            create(payload: AutomationRulePayload): Promise<{ message: string; rule: AutomationRule }>;
+            update(id: number, payload: Partial<AutomationRulePayload>): Promise<{ message: string; rule: AutomationRule }>;
+            activate(id: number): Promise<{ message: string; rule: AutomationRule }>;
+            deactivate(id: number): Promise<{ message: string; rule: AutomationRule }>;
+            runs(id: number, params?: ListParams): Promise<AutomationRunListPayload>;
+            validatePreview(payload: {
+                trigger_type: string;
+                trigger_config: Record<string, unknown>;
+                condition_config?: unknown[];
+                actions: { action_type: string; config: Record<string, unknown>; position: number }[];
+            }): Promise<{ valid: boolean; errors: string[]; warnings: string[]; matched_events?: number }>;
+        };
+        telegram: {
+            list(): Promise<TelegramEndpoint[]>;
+            create(payload: {
+                label: string;
+                chat_id: string;
+                conversation_id?: number | null;
+                enabled?: boolean;
+                event_preferences?: string[];
+            }): Promise<TelegramEndpoint>;
+            update(
+                id: number,
+                payload: {
+                    label?: string;
+                    chat_id?: string;
+                    conversation_id?: number | null;
+                    enabled?: boolean;
+                    event_preferences?: string[];
+                },
+            ): Promise<TelegramEndpoint>;
+            test(id: number, message?: string): Promise<{ message: string }>;
+        };
     };
 
     /**

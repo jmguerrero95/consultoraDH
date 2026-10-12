@@ -37,6 +37,22 @@ final class AiAssistantController extends Controller
     ) {}
 
     /**
+     * An error response.
+     *
+     * The body carries the same text under both `error` and `message`. Every
+     * other controller in this application answers with `message`, and that is
+     * the key the shared HTTP client reads when it builds an `ApiError`; an
+     * answer under `error` alone reached the browser with its detail silently
+     * discarded and replaced by a generic status message, which is how a real
+     * refusal such as "Esta propuesta ha expirado." became an invisible
+     * failure. `error` is kept so anything already reading it keeps working.
+     */
+    private function fail(string $message, int $status): JsonResponse
+    {
+        return response()->json(['error' => $message, 'message' => $message], $status);
+    }
+
+    /**
      * Check if user has ai.use permission.
      */
     private function verifyAiUse(Request $request): ?JsonResponse
@@ -47,7 +63,7 @@ final class AiAssistantController extends Controller
             return null;
         }
         if (! $user->can('ai.use')) {
-            return response()->json(['error' => 'AI assistant access denied.'], 403);
+            return $this->fail('AI assistant access denied.', 403);
         }
 
         return null;
@@ -90,18 +106,18 @@ final class AiAssistantController extends Controller
         $data = $request->only(['conversation_id', 'question']);
 
         if (empty($data['question'])) {
-            return response()->json(['error' => 'Se requiere una pregunta.'], 400);
+            return $this->fail('Se requiere una pregunta.', 400);
         }
 
         if (! empty($data['conversation_id'])) {
             $conversation = AiConversation::find($data['conversation_id']);
 
             if ($conversation === null) {
-                return response()->json(['error' => 'Conversación no encontrada.'], 404);
+                return $this->fail('Conversación no encontrada.', 404);
             }
 
             if ($conversation->user_id !== $request->user()->id) {
-                return response()->json(['error' => 'No es tu conversación.'], 403);
+                return $this->fail('No es tu conversación.', 403);
             }
         } else {
             $conversation = AiConversation::query()->create([
@@ -128,7 +144,7 @@ final class AiAssistantController extends Controller
     public function show(Request $request, AiConversation $conversation): JsonResponse
     {
         if ($conversation->user_id !== $request->user()->id) {
-            return response()->json(['error' => 'No es tu conversación.'], 403);
+            return $this->fail('No es tu conversación.', 403);
         }
 
         $messages = AiMessage::query()
@@ -155,13 +171,13 @@ final class AiAssistantController extends Controller
     public function messages(Request $request, AiConversation $conversation): JsonResponse
     {
         if ($conversation->user_id !== $request->user()->id) {
-            return response()->json(['error' => 'No es tu conversación.'], 403);
+            return $this->fail('No es tu conversación.', 403);
         }
 
         $data = $request->only(['message']);
 
         if (empty($data['message'])) {
-            return response()->json(['error' => 'Se requiere un mensaje.'], 400);
+            return $this->fail('Se requiere un mensaje.', 400);
         }
 
         // Service handles all persistence: user message + assistant reply
@@ -184,15 +200,15 @@ final class AiAssistantController extends Controller
         $proposal = AiActionProposal::findOrFail($proposalId);
 
         if ($proposal->user_id !== $request->user()->id) {
-            return response()->json(['error' => 'No es tu propuesta.'], 403);
+            return $this->fail('No es tu propuesta.', 403);
         }
 
         if ($proposal->status !== AiActionProposal::PENDING) {
-            return response()->json(['error' => 'Esa propuesta ya no está disponible.'], 400);
+            return $this->fail('Esa propuesta ya no está disponible.', 400);
         }
 
         if ($proposal->expires_at->isPast()) {
-            return response()->json(['error' => 'Esta propuesta ha expirado.'], 400);
+            return $this->fail('Esta propuesta ha expirado.', 400);
         }
 
         try {
@@ -205,9 +221,9 @@ final class AiAssistantController extends Controller
                 'result' => $result,
             ]);
         } catch (AiProposalNotConfirmable $e) {
-            return response()->json(['error' => $e->getMessage()], 400);
+            return $this->fail($e->getMessage(), 400);
         } catch (\Throwable $e) {
-            return response()->json(['error' => $e->getMessage()], 500);
+            return $this->fail($e->getMessage(), 500);
         }
     }
 
@@ -219,7 +235,7 @@ final class AiAssistantController extends Controller
         $proposal = AiActionProposal::findOrFail($proposalId);
 
         if ($proposal->user_id !== $request->user()->id) {
-            return response()->json(['error' => 'No es tu propuesta.'], 403);
+            return $this->fail('No es tu propuesta.', 403);
         }
 
         try {
@@ -231,7 +247,7 @@ final class AiAssistantController extends Controller
                 'tool' => $proposal->tool,
             ]);
         } catch (\Throwable $e) {
-            return response()->json(['error' => $e->getMessage()], 500);
+            return $this->fail($e->getMessage(), 500);
         }
     }
 
@@ -250,7 +266,7 @@ final class AiAssistantController extends Controller
 
         $user = request()->user();
         if (! $user) {
-            return response()->json(['error' => 'AI assistant access denied.'], 401);
+            return $this->fail('AI assistant access denied.', 401);
         }
 
         $primaryConfigured = ! empty(config('ai.primary.base_url'))

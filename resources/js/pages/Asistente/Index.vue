@@ -1,269 +1,533 @@
-<template>
-  <div class="min-h-screen bg-gray-50">
-    <nav class="bg-white shadow-sm border-b">
-      <div class="max-w-7xl mx-auto px-4 py-3">
-        <div class="flex items-center justify-between">
-          <h1 class="text-xl font-semibold text-gray-900">Asistente de IA</h1>
-          
-          <div class="flex items-center space-x-2">
-            <span class="text-sm text-gray-500">Estado:</span>
-            <span class="text-sm font-medium" :class="aiStatusClass">{{ aiStatus }}</span>
-            <span class="text-sm text-gray-500">| Modelo:</span>
-            <span class="text-sm text-gray-500">{{ aiModel || '--' }}</span>
-          </div>
-        </div>
-      </div>
-    </nav>
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue';
 
-    <main class="max-w-7xl mx-auto p-4">
-      <div class="pace">
-        <!-- Conversation selector -->
-        <div class="bg-white p-4 rounded-md shadow-sm mb-4">
-          <div class="flex items-center space-x-4">
-            <select v-model="selectedConversationId" class="rounded border border-gray-300 px-3 py-2" @change="loadMessages">
-              <option value="">Nueva conversación</option>
-              <option v-for="c in conversations" :key="c.id" :value="c.id">
-                {{ c.title || 'Sin título' }} ({{ formatDate(c.created_at) }})
-              </option>
-            </select>
-            <button v-if="selectedConversationId" @click="startNewConversation" class="text-sm text-primary hover:underline">
-              Nueva conversación
-            </button>
-          </div>
-        </div>
+import AppAlert from '@/components/ui/AppAlert.vue';
+import AppButton from '@/components/ui/AppButton.vue';
+import AppEmptyState from '@/components/ui/AppEmptyState.vue';
+import { ai } from '@/services/ai';
 
-        <!-- Message history -->
-        <div class="bg-white rounded-md shadow-sm overflow-hidden mb-4" style="max-height: 400px; overflow-y: auto;">
-          <div class="p-4 space-y-4" v-if="messages.length > 0">
-            <div v-for="msg in messages" :key="msg.id" class="flex" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
-              <div :class="[
-                'max-w-[70%] rounded-lg px-4 py-2',
-                msg.role === 'user' ? 'bg-primary text-white' : 'bg-gray-100 text-gray-900'
-              ]">
-                <p class="whitespace-pre-wrap">{{ msg.content }}</p>
-                <p class="text-xs mt-1 opacity-70">{{ formatDate(msg.created_at) }}</p>
-              </div>
-            </div>
-          </div>
-          <div v-else class="p-4 text-center text-gray-400">
-            <p>No hay mensajes. Escribe un mensaje para comenzar.</p>
-          </div>
-        </div>
+import type { AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
 
-        <!-- Web sources -->
-        <div v-if="webSources.length > 0" class="bg-blue-50 rounded-md p-4 mb-4">
-          <h3 class="text-sm font-medium text-blue-800 mb-2">Fuentes web</h3>
-          <ul class="space-y-1">
-            <li v-for="src in webSources" :key="src.url" class="text-sm">
-              <a :href="src.url" target="_blank" class="text-blue-600 hover:underline">{{ src.title || src.url }}</a>
-              <span class="text-gray-400 ml-2">({{ src.domain }})</span>
-            </li>
-          </ul>
-        </div>
+/**
+ * The assistant screen.
+ *
+ * Two contracts this page depends on, both learned the hard way:
+ *
+ * - `request<T>` resolves with the decoded body, so a turn is `{ reply, ... }`
+ *   and not `{ data: { reply } }`. Reading `.data` here is what left the
+ *   transcript empty with nothing logged.
+ * - The controller answers errors as `{ error: '...' }`. The shared error
+ *   object carries that text, so it is surfaced verbatim rather than replaced
+ *   with a generic apology that hides the actual cause.
+ */
 
-        <!-- Artifacts -->
-        <div v-if="artifacts.length > 0" class="bg-green-50 rounded-md p-4 mb-4">
-          <h3 class="text-sm font-medium text-green-800 mb-2">Artefactos generados</h3>
-          <ul class="space-y-1">
-            <li v-for="art in artifacts" :key="art.id" class="text-sm">
-              <a :href="art.download_url" class="text-green-600 hover:underline">{{ art.filename }}</a>
-              <span class="text-gray-400 ml-2">({{ formatBytes(art.size_bytes) }})</span>
-            </li>
-          </ul>
-        </div>
+const conversations = ref<AiConversationSummary[]>([]);
+const selectedId = ref<number | null>(null);
+const messages = ref<AiMessagePayload[]>([]);
+const proposals = ref<AiProposal[]>([]);
+const sources = ref<{ title: string; url: string; domain: string }[]>([]);
+const draft = ref('');
+const sending = ref(false);
+const loading = ref(true);
+const status = ref<AiStatusPayload | null>(null);
+const error = ref<string | null>(null);
 
-        <!-- Pending proposals -->
-        <div v-if="pendingProposals.length > 0" class="bg-yellow-50 rounded-md p-4 mb-4">
-          <h3 class="text-sm font-medium text-yellow-800 mb-2">Propuestas pendientes</h3>
-          <div v-for="prop in pendingProposals" :key="prop.id" class="mb-3 p-3 bg-white rounded border">
-            <p class="text-sm font-medium">{{ prop.tool }}</p>
-            <p class="text-xs text-gray-500 mb-2">{{ JSON.stringify(prop.args, null, 2) }}</p>
-            <div class="flex gap-2">
-              <button @click="confirmProposal(prop.id)" class="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700">Confirmar</button>
-              <button @click="rejectProposal(prop.id)" class="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700">Rechazar</button>
-            </div>
-          </div>
-        </div>
+const enabled = computed(() => status.value?.ai_enabled === true);
+const model = computed(() => status.value?.primary?.model ?? status.value?.fallback?.model ?? '—');
 
-        <!-- Error display -->
-        <div v-if="error" class="bg-red-50 rounded-md p-4 mb-4 text-red-700 text-sm">
-          {{ error }}
-        </div>
+/** An unconfigured provider is reported plainly rather than as a failure. */
+const availability = computed(() => {
+    if (!status.value) {
+        return 'Comprobando el servicio…';
+    }
 
-        <!-- Message form -->
-        <div class="bg-white p-4 rounded-md shadow-sm">
-          <form @submit.prevent="sendMessage" class="flex gap-2">
-            <textarea
-              v-model="newMessage"
-              placeholder="Escribe un mensaje..."
-              class="flex-1 rounded border border-gray-300 px-3 py-2 focus:outline-none focus:border-primary resize-none"
-              :disabled="sending"
-              rows="2"
-            ></textarea>
-            <button 
-              type="submit" 
-              :disabled="!newMessage.trim() || sending"
-              class="rounded border border-primary px-4 py-2 text-white font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed self-end"
-            >
-              {{ sending ? 'Enviando...' : 'Enviar' }}
-            </button>
-          </form>
-        </div>
-      </div>
-    </main>
-  </div>
-</template>
+    if (!status.value.ai_enabled) {
+        return 'Asistente desactivado en este entorno.';
+    }
 
-<script setup>
-import { ref, onMounted } from 'vue'
-import { useApi } from '@/composables/useApi'
+    if (!status.value.primary.configured && !status.value.fallback.configured) {
+        return 'No hay ningún proveedor de IA configurado.';
+    }
 
-const sending = ref(false)
-const newMessage = ref('')
-const conversations = ref([])
-const selectedConversationId = ref('')
-const messages = ref([])
-const webSources = ref([])
-const artifacts = ref([])
-const pendingProposals = ref([])
-const aiStatus = ref('Desconocido')
-const aiModel = ref('--')
-const aiStatusClass = ref('text-gray-500')
-const error = ref(null)
-
-const { api } = useApi()
+    return `Operativo con ${model.value}.`;
+});
 
 onMounted(async () => {
-  await checkAiStatus()
-  await loadConversations()
-})
+    await Promise.all([loadStatus(), loadConversations()]);
+    loading.value = false;
+});
 
-async function checkAiStatus() {
-  try {
-    const response = await api.get('/ai/status')
-    const data = response.data
-    aiStatus.value = data.ai_enabled ? 'Activo' : 'Inactivo'
-    aiStatusClass.value = data.ai_enabled ? 'text-green-600' : 'text-red-600'
-    aiModel.value = data.primary?.model || '--'
-  } catch (e) {
-    aiStatus.value = 'Error'
-    aiStatusClass.value = 'text-red-600'
-  }
+async function loadStatus(): Promise<void> {
+    try {
+        status.value = await ai.status();
+    } catch {
+        status.value = null;
+    }
 }
 
-async function loadConversations() {
-  try {
-    const response = await api.get('/ai/conversations')
-    conversations.value = response.data.conversations || []
-  } catch (e) {
-    console.error('Error loading conversations:', e)
-  }
+async function loadConversations(): Promise<void> {
+    try {
+        const payload = await ai.conversations();
+        conversations.value = payload.conversations;
+    } catch (e) {
+        error.value = readError(e, 'No fue posible cargar las conversaciones.');
+    }
 }
 
-async function loadMessages() {
-  if (!selectedConversationId.value) {
-    messages.value = []
-    webSources.value = []
-    artifacts.value = []
-    pendingProposals.value = []
-    return
-  }
+async function selectConversation(id: number): Promise<void> {
+    selectedId.value = id;
+    proposals.value = [];
+    sources.value = [];
+    error.value = null;
 
-  try {
-    const response = await api.get(`/ai/conversations/${selectedConversationId.value}`)
-    messages.value = response.data.messages || []
-  } catch (e) {
-    console.error('Error loading messages:', e)
-    error.value = 'Error al cargar mensajes'
-  }
+    try {
+        const payload = await ai.history(id);
+        messages.value = payload.messages;
+    } catch (e) {
+        messages.value = [];
+        error.value = readError(e, 'No fue posible cargar la conversación.');
+    }
 }
 
-function startNewConversation() {
-  selectedConversationId.value = ''
-  messages.value = []
-  webSources.value = []
-  artifacts.value = []
-  pendingProposals.value = []
+function startNewConversation(): void {
+    selectedId.value = null;
+    messages.value = [];
+    proposals.value = [];
+    sources.value = [];
+    error.value = null;
 }
 
-async function sendMessage() {
-  if (!newMessage.value.trim() || sending.value) return
+/**
+ * Ask. The backend creates the conversation when none is selected, so the id
+ * comes back on the first turn rather than from a separate create call.
+ */
+async function send(): Promise<void> {
+    const question = draft.value.trim();
 
-  const msg = newMessage.value
-  newMessage.value = ''
-  sending.value = true
-  error.value = null
-
-  try {
-    let response
-    if (selectedConversationId.value) {
-      response = await api.post(`/ai/conversations/${selectedConversationId.value}/messages`, {
-        message: msg
-      })
-    } else {
-      response = await api.post('/ai/conversations', {
-        question: msg
-      })
-      selectedConversationId.value = response.data.conversation_id
-      await loadConversations()
+    if (question === '' || sending.value) {
+        return;
     }
 
-    const data = response.data
-    messages.value = data.messages || []
-    webSources.value = data.tools || []
-    artifacts.value = data.artifacts || []
-    pendingProposals.value = data.proposals || []
+    sending.value = true;
+    error.value = null;
+    draft.value = '';
 
-    // Update message list to include new messages
-    if (data.reply) {
-      // The service returns all messages, so we just use what it returns
+    // Rendered immediately so the question stays on screen while the model
+    // works; the reload below replaces it with the persisted copy.
+    messages.value = [...messages.value, { role: 'user', content: question, provider: null, model: null, created_at: null }];
+
+    try {
+        const turn = await ai.ask(question, selectedId.value);
+
+        selectedId.value = turn.conversation_id;
+        proposals.value = turn.proposals;
+        collectSources(turn.tools);
+
+        if (turn.reply) {
+            messages.value = [
+                ...messages.value,
+                { role: 'assistant', content: turn.reply, provider: turn.provider, model: turn.model, created_at: null },
+            ];
+        }
+
+        await loadConversations();
+    } catch (e) {
+        // Keep the question in the draft: dropping it loses what was typed on a
+        // failure the user can retry, which is the moment it matters most.
+        draft.value = question;
+        error.value = readError(e, 'No fue posible completar la consulta.');
+    } finally {
+        sending.value = false;
     }
-  } catch (e) {
-    console.error('Error sending message:', e)
-    error.value = e.response?.data?.message || 'Error al enviar mensaje'
-  } finally {
-    sending.value = false
-  }
 }
 
-async function confirmProposal(proposalId) {
-  try {
-    await api.post(`/ai/action-proposals/${proposalId}/confirm`)
-    // Reload to get updated state
-    await sendMessage()
-  } catch (e) {
-    error.value = 'Error al confirmar propuesta'
-  }
+/**
+ * Pull source links out of the turn's tool results so the answer can show what
+ * it was based on. Only `web_search` results carry URLs; anything else is
+ * internal data and is not rendered as a citation.
+ */
+function collectSources(tools: { tool: string; output: unknown }[] | undefined): void {
+    if (!tools) {
+        sources.value = [];
+        return;
+    }
+
+    const found: { title: string; url: string; domain: string }[] = [];
+
+    for (const entry of tools) {
+        if (entry.tool !== 'web_search' || typeof entry.output !== 'object' || entry.output === null) {
+            continue;
+        }
+
+        const results = (entry.output as { results?: unknown }).results;
+
+        if (!Array.isArray(results)) {
+            continue;
+        }
+
+        for (const item of results) {
+            if (item && typeof item === 'object' && typeof (item as { url?: unknown }).url === 'string') {
+                const row = item as { title?: string; url: string; domain?: string };
+                found.push({ title: row.title || row.url, url: row.url, domain: row.domain ?? '' });
+            }
+        }
+    }
+
+    sources.value = found;
 }
 
-async function rejectProposal(proposalId) {
-  try {
-    await api.post(`/ai/action-proposals/${proposalId}/reject`)
-    pendingProposals.value = pendingProposals.value.filter(p => p.id !== proposalId)
-  } catch (e) {
-    error.value = 'Error al rechazar propuesta'
-  }
+async function confirmProposal(id: number): Promise<void> {
+    error.value = null;
+
+    try {
+        await ai.confirmProposal(id);
+        proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+        await refreshIfSelected();
+    } catch (e) {
+        error.value = readError(e, 'No fue posible confirmar la propuesta.');
+    }
 }
 
-function formatDate(dateStr) {
-  if (!dateStr) return ''
-  const date = new Date(dateStr)
-  return date.toLocaleString('es-ES', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
+async function rejectProposal(id: number): Promise<void> {
+    error.value = null;
+
+    try {
+        await ai.rejectProposal(id);
+        proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+    } catch (e) {
+        error.value = readError(e, 'No fue posible rechazar la propuesta.');
+    }
 }
 
-function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+async function refreshIfSelected(): Promise<void> {
+    if (selectedId.value !== null) {
+        const payload = await ai.history(selectedId.value);
+        messages.value = payload.messages;
+    }
+}
+
+/** Surface the server's own words; they are already free of internals. */
+function readError(e: unknown, fallback: string): string {
+    const message = (e as { message?: string } | null)?.message;
+    return message !== undefined && message !== '' ? message : fallback;
+}
+
+function formatDate(value: string | null): string {
+    if (!value) {
+        return '';
+    }
+
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('es-CO');
 }
 </script>
 
+<template>
+    <div class="cdh-ai">
+        <header class="cdh-ai__header">
+            <div>
+                <h1 class="cdh-ai__title">Asistente de IA</h1>
+                <p class="cdh-ai__status" :class="{ 'cdh-ai__status--off': !enabled }">{{ availability }}</p>
+            </div>
+        </header>
+
+        <AppAlert v-if="error" variant="danger" :title="error" class="mb-3" />
+
+        <div class="cdh-ai__body">
+            <aside class="cdh-ai__sidebar" aria-label="Conversaciones">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h2 class="cdh-ai__sidebar-title">Conversaciones</h2>
+                    <AppButton variant="link" size="sm" @click="startNewConversation">Nueva</AppButton>
+                </div>
+
+                <AppEmptyState v-if="conversations.length === 0" title="Sin conversaciones" icon="bi-chat-square-text" />
+
+                <ul v-else class="cdh-ai__conversations">
+                    <li v-for="conversation in conversations" :key="conversation.id">
+                        <button
+                            type="button"
+                            class="cdh-ai__conversation"
+                            :class="{ 'cdh-ai__conversation--active': conversation.id === selectedId }"
+                            :aria-current="conversation.id === selectedId ? 'true' : undefined"
+                            @click="selectConversation(conversation.id)"
+                        >
+                            <span class="cdh-ai__conversation-title">{{ conversation.title || 'Sin título' }}</span>
+                            <span class="cdh-ai__conversation-date">{{ formatDate(conversation.created_at) }}</span>
+                        </button>
+                    </li>
+                </ul>
+            </aside>
+
+            <section class="cdh-ai__main" aria-label="Conversación">
+                <div class="cdh-ai__transcript" role="log" aria-live="polite">
+                    <AppEmptyState
+                        v-if="messages.length === 0"
+                        title="Empieza una conversación"
+                        icon="bi-stars"
+                        action-label="Pregunta por la cartera, genera un informe o redacta un documento."
+                    />
+
+                    <div
+                        v-for="(message, index) in messages"
+                        :key="`${message.created_at ?? 'local'}-${index}`"
+                        class="cdh-ai__message"
+                        :class="message.role === 'user' ? 'cdh-ai__message--user' : 'cdh-ai__message--assistant'"
+                    >
+                        <p class="cdh-ai__message-body">{{ message.content }}</p>
+                        <p v-if="message.created_at" class="cdh-ai__message-meta">{{ formatDate(message.created_at) }}</p>
+                    </div>
+
+                    <p v-if="sending" class="cdh-ai__pending">Consultando…</p>
+                </div>
+
+                <div v-if="sources.length > 0" class="cdh-ai__sources">
+                    <h3 class="cdh-ai__sources-title">Fuentes</h3>
+                    <ul>
+                        <li v-for="source in sources" :key="source.url">
+                            <a :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a>
+                            <span v-if="source.domain" class="cdh-ai__source-domain">{{ source.domain }}</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <div v-if="proposals.length > 0" class="cdh-ai__proposals">
+                    <h3 class="cdh-ai__proposals-title">Acciones propuestas</h3>
+                    <p class="cdh-ai__proposals-note">Nada se ejecuta hasta que lo confirmes.</p>
+
+                    <div v-for="proposal in proposals" :key="proposal.id" class="cdh-ai__proposal">
+                        <p class="cdh-ai__proposal-tool">{{ proposal.tool }}</p>
+                        <pre class="cdh-ai__proposal-args">{{ JSON.stringify(proposal.arguments, null, 2) }}</pre>
+                        <div class="d-flex gap-2">
+                            <AppButton size="sm" @click="confirmProposal(proposal.id)">Confirmar</AppButton>
+                            <AppButton size="sm" variant="secondary" @click="rejectProposal(proposal.id)">Rechazar</AppButton>
+                        </div>
+                    </div>
+                </div>
+
+                <form class="cdh-ai__composer" @submit.prevent="send">
+                    <label for="cdh-ai-input" class="visually-hidden">Mensaje para el asistente</label>
+                    <textarea
+                        id="cdh-ai-input"
+                        v-model="draft"
+                        class="cdh-ai__input"
+                        rows="3"
+                        placeholder="Escribe tu consulta…"
+                        :disabled="sending || loading"
+                    />
+                    <AppButton type="submit" :busy="sending" :disabled="draft.trim() === ''">Enviar</AppButton>
+                </form>
+            </section>
+        </div>
+    </div>
+</template>
+
 <style scoped>
-/* No additional styles needed - using Tailwind classes */
+.cdh-ai__header {
+    margin-bottom: var(--cdh-space-4);
+}
+
+.cdh-ai__title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.cdh-ai__status {
+    color: var(--cdh-text-muted);
+    font-size: 0.875rem;
+    margin: 0.25rem 0 0;
+}
+
+.cdh-ai__status--off {
+    color: var(--cdh-warning, #b45309);
+}
+
+.cdh-ai__body {
+    display: grid;
+    gap: var(--cdh-space-4);
+    grid-template-columns: 1fr;
+}
+
+.cdh-ai__sidebar-title,
+.cdh-ai__sources-title,
+.cdh-ai__proposals-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--cdh-text-muted);
+    margin: 0;
+}
+
+.cdh-ai__conversations {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.cdh-ai__conversation {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--cdh-border);
+    border-radius: var(--cdh-radius-md, 0.375rem);
+    background: var(--cdh-surface);
+    color: inherit;
+}
+
+.cdh-ai__conversation--active {
+    border-color: var(--cdh-primary);
+    background: var(--cdh-surface-sunken);
+}
+
+.cdh-ai__conversation-title {
+    font-size: 0.875rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cdh-ai__conversation-date {
+    font-size: 0.75rem;
+    color: var(--cdh-text-muted);
+}
+
+.cdh-ai__main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--cdh-space-3);
+    min-width: 0;
+}
+
+.cdh-ai__transcript {
+    border: 1px solid var(--cdh-border);
+    border-radius: var(--cdh-radius-lg, 0.5rem);
+    background: var(--cdh-surface);
+    padding: var(--cdh-space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--cdh-space-3);
+    /* Bounded so a long transcript scrolls inside the panel instead of
+       pushing the composer off a mobile viewport. */
+    max-height: min(60vh, 32rem);
+    overflow-y: auto;
+}
+
+.cdh-ai__message {
+    max-width: 85%;
+    padding: 0.625rem 0.875rem;
+    border-radius: var(--cdh-radius-lg, 0.5rem);
+}
+
+.cdh-ai__message--user {
+    align-self: flex-end;
+    background: var(--cdh-primary);
+    color: #fff;
+}
+
+.cdh-ai__message--assistant {
+    align-self: flex-start;
+    background: var(--cdh-surface-sunken);
+}
+
+.cdh-ai__message-body {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.cdh-ai__message-meta {
+    margin: 0.25rem 0 0;
+    font-size: 0.6875rem;
+    opacity: 0.75;
+}
+
+.cdh-ai__pending {
+    margin: 0;
+    color: var(--cdh-text-muted);
+    font-size: 0.875rem;
+}
+
+.cdh-ai__sources,
+.cdh-ai__proposals {
+    border: 1px solid var(--cdh-border);
+    border-radius: var(--cdh-radius-lg, 0.5rem);
+    padding: var(--cdh-space-3);
+}
+
+.cdh-ai__sources ul {
+    list-style: none;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.875rem;
+}
+
+.cdh-ai__source-domain {
+    color: var(--cdh-text-muted);
+    margin-left: 0.375rem;
+    font-size: 0.75rem;
+}
+
+.cdh-ai__proposals-note {
+    margin: 0.25rem 0 0.75rem;
+    font-size: 0.8125rem;
+    color: var(--cdh-text-muted);
+}
+
+.cdh-ai__proposal {
+    border: 1px solid var(--cdh-border);
+    border-radius: var(--cdh-radius-md, 0.375rem);
+    padding: 0.75rem;
+}
+
+.cdh-ai__proposal-tool {
+    margin: 0 0 0.375rem;
+    font-weight: 600;
+    font-size: 0.875rem;
+}
+
+.cdh-ai__proposal-args {
+    margin: 0 0 0.5rem;
+    font-size: 0.75rem;
+    max-height: 12rem;
+    overflow: auto;
+}
+
+.cdh-ai__composer {
+    display: flex;
+    gap: var(--cdh-space-2);
+    align-items: flex-end;
+}
+
+.cdh-ai__input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--cdh-border);
+    border-radius: var(--cdh-radius-md, 0.375rem);
+    padding: 0.625rem 0.75rem;
+    font: inherit;
+    resize: vertical;
+}
+
+/* The sidebar becomes a column above the transcript rather than disappearing:
+   the conversation switcher is how a returning user resumes their work. */
+@media (min-width: 992px) {
+    .cdh-ai__body {
+        grid-template-columns: 16rem 1fr;
+    }
+
+    .cdh-ai__sidebar {
+        max-height: min(60vh, 32rem);
+        overflow-y: auto;
+    }
+}
 </style>

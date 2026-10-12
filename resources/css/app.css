@@ -464,6 +464,32 @@ pre {
     background: var(--cdh-surface-sunken);
 }
 
+/*
+ * The lowest-emphasis action: an inline "Editar" or a pager step that has to
+ * read as text inside a table row rather than as a control competing with the
+ * row's own buttons. It keeps the focus ring of the other variants, so keyboard
+ * users can still see where they are.
+ */
+.cdh-btn--link {
+    color: var(--cdh-primary);
+    background: transparent;
+    border-color: transparent;
+    padding-inline: 0.25rem;
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+}
+
+.cdh-btn--link:hover:not(:disabled) {
+    color: var(--cdh-primary-hover, var(--cdh-primary));
+    background: var(--cdh-surface-sunken);
+}
+
+.cdh-btn--link:disabled {
+    color: var(--cdh-text-muted);
+    text-decoration: none;
+    cursor: not-allowed;
+}
+
 .cdh-btn--block {
     width: 100%;
 }
