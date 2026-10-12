@@ -98,6 +98,23 @@ export interface AiSuggestionEnvelope {
     suggestion: AiSuggestionPayload | null;
 }
 
+export interface AiTaskPayload {
+    id: number;
+    kind: string;
+    status: string;
+    progress: number;
+    stage: string | null;
+    name: string | null;
+    result: Record<string, unknown> | null;
+    error: string | null;
+    attempts: number;
+    finished: boolean;
+    recoverable: boolean;
+    conversation_id: number | null;
+    created_at: string | null;
+    finished_at: string | null;
+}
+
 export const ai = {
     status(): Promise<AiStatusPayload> {
         return request<AiStatusPayload>('GET', '/api/ai/status');
@@ -160,4 +177,35 @@ export const ai = {
     rejectProposal(proposalId: number): Promise<{ rejected: boolean; proposal_id: number; tool: string }> {
         return request<{ rejected: boolean; proposal_id: number; tool: string }>('POST', `/api/ai/action-proposals/${proposalId}/reject`);
     },
+    /**
+     * Background work this person has asked for.
+     *
+     * Also the recovery path: the server holds the result, so this answers
+     * correctly after a reload, a lock screen, or a reconnect.
+     */
+    tasks(): Promise<{ tasks: AiTaskPayload[] }> {
+        return request<{ tasks: AiTaskPayload[] }>('GET', '/api/ai/tasks');
+    },
+
+    /**
+     * Queue an upload.
+     *
+     * 202, not 200: the file is stored and the work is queued, and answering
+     * "created" would claim a result that does not exist yet.
+     */
+    uploadTask(file: File, conversationId?: number | null): Promise<{ task: AiTaskPayload }> {
+        const form = new FormData();
+        form.append('file', file);
+
+        if (conversationId !== undefined && conversationId !== null) {
+            form.append('conversation_id', String(conversationId));
+        }
+
+        return request<{ task: AiTaskPayload }>('POST', '/api/ai/tasks', { body: form });
+    },
+
+    cancelTask(id: number): Promise<{ task: AiTaskPayload }> {
+        return request<{ task: AiTaskPayload }>('POST', `/api/ai/tasks/${id}/cancel`);
+    },
+
 } as const;

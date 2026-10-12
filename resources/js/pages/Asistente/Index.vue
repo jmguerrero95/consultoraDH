@@ -7,6 +7,7 @@ import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import MicButton from '@/components/assistant/MicButton.vue';
 import SpeakButton from '@/components/assistant/SpeakButton.vue';
 import SuggestionHint from '@/components/assistant/SuggestionHint.vue';
+import TaskPanel from '@/components/assistant/TaskPanel.vue';
 import { useSuggestion } from '@/composables/useSuggestion';
 import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
@@ -330,6 +331,12 @@ function formatDate(value: string | null): string {
             Above the transcript and below the error, so it is the first thing
             read after the page opens and never covers work already on screen.
         -->
+        <!--
+            Background work, and what became of it. Shown here because this is the
+            screen people come back to after closing the app mid-task.
+        -->
+        <TaskPanel class="mb-3" />
+
         <SuggestionHint
             v-if="hint.hasSuggestion.value && hint.suggestion.value"
             class="mb-3"
