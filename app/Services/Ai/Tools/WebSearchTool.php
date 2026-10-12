@@ -107,14 +107,18 @@ final class WebSearchTool extends AbstractAiTool
         ];
 
         try {
+            // `withQueryParameters` is what puts these in the URL. Passing them
+            // as `['query' => ...]` to `get()` does not: that key is Guzzle's
+            // *body* option, so the request went out with no `q` at all and the
+            // provider answered 403 for a query it had never received. The tool
+            // therefore never returned a real result against a real provider.
             $response = Http::timeout($timeout)
-                ->get($url, [
-                    'query' => $params,
-                    'headers' => [
-                        'User-Agent' => 'Consultora-DH-Assistant/1.0',
-                        'Accept' => 'application/json',
-                    ],
-                ]);
+                ->withQueryParameters($params)
+                ->withHeaders([
+                    'User-Agent' => 'Consultora-DH-Assistant/1.0',
+                    'Accept' => 'application/json',
+                ])
+                ->get($url);
         } catch (\Throwable $e) {
             throw new AiToolRejected('Error de conexión con el proveedor de búsqueda: '.$e->getMessage());
         }
@@ -172,21 +176,21 @@ final class WebSearchTool extends AbstractAiTool
             }
         }
 
-        if (empty($results)) {
-            $results[] = [
-                'title' => 'No se encontraron resultados.',
-                'url' => '#',
-                'domain' => '',
-                'snippet' => 'La búsqueda web no devolvió resultados para: '.$query,
-                'published_at' => null,
-            ];
-        }
-
+        // An empty result set is reported as an empty result set.
+        //
+        // This used to be padded with a placeholder row carrying `'url' => '#'`,
+        // which is indistinguishable from a real citation: the assistant was
+        // told it had one source whose title was "No se encontraron
+        // resultados.", and any UI that rendered a link list would draw an
+        // entry for a page that does not exist. A model reading that has no way
+        // to tell a fabricated citation from a real one, which is the failure
+        // mode this whole tool exists to prevent.
         return [
             'query' => $query,
             'results' => array_slice($results, 0, $maxResults),
             'source' => 'searxng',
             'total_results' => count($results),
+            'found_any' => $results !== [],
         ];
     }
 }

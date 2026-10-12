@@ -251,6 +251,41 @@ services:
     networks:
       - consultora-dh
 
+  # ------------------------------------------------------ web search (A07)
+  #
+  # A free, self-hosted meta search engine. It is what makes the assistant's
+  # web research real rather than simulated: there is no paid search API here
+  # and no key, and `WebSearchTool` speaks its JSON format already.
+  #
+  # Two things make this safe to add alongside the frozen application:
+  #
+  #   - It is opt-in. `profiles: ["search"]` means a plain `docker compose up`
+  #     behaves exactly as it did before; search is started deliberately.
+  #   - It publishes no port. It is reachable only as `http://searxng:8080`
+  #     from inside the project's network, so it cannot be used as an open
+  #     relay by anything on the host or the LAN. An open SearXNG is a
+  #     denial-of-service surface and an abuse target; that is precisely why it
+  #     must not be exposed.
+  #
+  # The limiter is on so an accidentally unbounded query loop cannot be used to
+  # amplify requests against the upstream engines on our behalf.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: consultora-dh-searxng
+    restart: unless-stopped
+    profiles: ["search"]
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://searxng:8080/}
+      SEARXNG_BIND_ADDRESS: "0.0.0.0:8080"
+      # The application only ever reads the JSON format. Leaving it disabled
+      # keeps an engine response from being rendered as HTML somewhere.
+      SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    depends_on: []
+    networks:
+      - consultora-dh
+
 networks:
   consultora-dh:
     name: consultora-dh

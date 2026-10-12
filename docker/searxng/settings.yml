@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# Consultora DH - SearXNG configuration
+#
+# This is the free, self-hosted meta search engine the assistant uses for web
+# research. It carries no API key and no paid subscription: it queries the same
+# public search engines a browser would and aggregates what they return.
+#
+# Three settings here are load-bearing rather than cosmetic, and each one is a
+# decision about what this instance is allowed to be:
+#
+#   formats            JSON only. `WebSearchTool` parses the JSON shape, and an
+#                      HTML answer page is not something the tool can read.
+#   limiter: true      The limiter is what stops this instance being used as an
+#                      amplifier. Without it, a loop in application code could
+#                      turn into a flood of requests against the upstream
+#                      engines, sourced from here.
+#   bind 0.0.0.0       Inside the compose network only. The service publishes no
+#                      host port, so nothing outside the project can reach it.
+#                      An exposed SearXNG is an open relay and gets an instance
+#                      banned; that is why it stays internal.
+#
+# No secret lives in this file, which is why it is committed.
+# ---------------------------------------------------------------------------
+
+use_default_settings: true
+
+# Bot detection reads the client address from a proxy header. Without this,
+# every request is refused with a 403: SearXNG answers `X-Forwarded-For nor
+# X-Real-IP header is not set!` and refuses before it ever searches. There is
+# exactly one client on this network (the application), so the value is a fixed
+# identifier for it rather than a real forwarded address — it identifies the
+# caller to the bot check and is trusted for nothing else.
+#
+# `WEBPAGES` is disabled for the same reason this service publishes no port:
+# the JSON API is what the application uses, and leaving result rendering open
+# would add a surface with no consumer.
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  # A reverse proxy in front of this is how SearXNG expects to be reached.
+  # Nothing here terminates TLS: the service is internal and unpublished.
+  secret_key: "consultora-dh-local-development-only"
+  # SearXNG's own limiter is a bot detector for a *public* instance: it counts
+  # requests per client IP across the whole instance and needs its own Valkey
+  # server to do it. This instance is unpublished and has exactly one caller,
+  # so that machinery would add a datastore and a shared Redis database to
+  # protect nothing. What actually bounds the requests is the per-query
+  # timeout and the result cap in `WebSearchTool`, which are already in place.
+  limiter: false
+  image_proxy: false
+  method: "POST"
+  default_http_headers:
+    X-Forwarded-For: 127.0.0.1
+    X-Real-IP: 127.0.0.1
+
+search:
+  # Only the machine-readable shape. The application never renders HTML.
+  formats:
+    - json
+  safe_search: 1
+  autocomplete: ""
+  default_lang: "es"
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  pool_connections: 20
+  pool_maxsize: 10
+
+# Google's public JSON endpoint answers, so there is no key to configure and
+# nothing paid to activate. Engines that require a credential are simply absent
+# rather than half-configured, which is what keeps this file free of secrets.
+engines:
+  - name: brave
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: false
