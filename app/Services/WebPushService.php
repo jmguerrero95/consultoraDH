@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Models\PushSubscription;
 use App\Models\User;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Minishlink\WebPush\Subscription as WebPushSubscription;
 use Minishlink\WebPush\WebPush;
@@ -27,13 +28,29 @@ class WebPushService
 
     public function sendNotification(User $user, string $title, string $body, array $data = []): void
     {
-        $subscriptions = PushSubscription::where('user_id', $user->id)
-            ->where('failed_at', null)
-            ->get();
-
-        foreach ($subscriptions as $subscription) {
+        foreach ($this->activeSubscriptions($user) as $subscription) {
             $this->sendToSubscription($subscription, $title, $body, $data);
         }
+    }
+
+    /**
+     * The subscriptions this person can still be reached on.
+     *
+     * A subscription the push service has told us is gone is skipped forever
+     * rather than retried: every attempt at a dead endpoint is latency on a
+     * notification that cannot arrive, and the endpoint will not come back.
+     *
+     * Exposed so "who would be written to" is answerable without sending
+     * anything - it is a question about eligibility, and eligibility should not
+     * require a network call to observe.
+     *
+     * @return Collection<int, PushSubscription>
+     */
+    public function activeSubscriptions(User $user)
+    {
+        return PushSubscription::where('user_id', $user->id)
+            ->whereNull('failed_at')
+            ->get();
     }
 
     public function sendToSubscription(PushSubscription $subscription, string $title, string $body, array $data = []): void
@@ -69,10 +86,20 @@ class WebPushService
                 'error' => $e->getMessage(),
             ]);
 
-            // Check if subscription is gone
-            if (str_contains($e->getMessage(), '404') || str_contains($e->getMessage(), '410')) {
-                $subscription->update(['failed_at' => now()]);
-            } else {
+            // Only retire a subscription the push service says is gone.
+            //
+            // This used to set `failed_at` on every error through two identical
+            // branches, so a momentary network blip permanently silenced that
+            // device - and `sendNotification()` skips subscriptions with a
+            // `failed_at`, so one failed attempt meant the person stopped being
+            // reachable for good, with no way back.
+            //
+            // A 404 or 410 is the browser telling us the endpoint is invalid or
+            // gone. Anything else - a timeout, a 500, a DNS failure - is about
+            // the moment, and the subscription is still good.
+            $message = $e->getMessage();
+
+            if (str_contains($message, '404') || str_contains($message, '410')) {
                 $subscription->update(['failed_at' => now()]);
             }
         }

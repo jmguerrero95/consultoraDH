@@ -33,6 +33,11 @@ class AiAttachment extends Model
     protected $fillable = [
         'user_id',
         'ai_conversation_id',
+        // Which background task produced this. Absent from the list the first
+        // time, and mass assignment silently dropped it - so a queued upload
+        // created an attachment with no link back to its task, and the worker's
+        // lookup found nothing and failed every job.
+        'ai_task_id',
         'storage_path',
         'original_name',
         'mime_type',

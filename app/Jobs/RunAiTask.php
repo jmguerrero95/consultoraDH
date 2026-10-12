@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Jobs;
 
 use App\Domain\Ai\AiToolRejected;
+use App\Events\AiTaskCompleted;
 use App\Models\AiTask;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -145,6 +146,26 @@ class RunAiTask implements ShouldQueue
                 'error' => null,
                 'finished_at' => now(),
             ])->save();
+
+            // Announced after the row is written, and only on success.
+            //
+            // Wrapped because announcing is not part of doing the work. Without
+            // this, a push provider that is down turns every completed document
+            // into a failed job: the work is already done and saved, the listener
+            // throws, and the worker retries a job whose result is already on the
+            // disk. The person would see a finished document reported as failed,
+            // and the work would be redone.
+            //
+            // The listener already handles its own send failures; this catches the
+            // failures that happen before it gets that far.
+            try {
+                AiTaskCompleted::dispatch($task->id);
+            } catch (\Throwable $e) {
+                Log::warning('Task completed but could not be announced.', [
+                    'task_id' => $task->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         } catch (\Throwable $e) {
             // Recorded before rethrowing, because `failed()` only runs once the
             // retries are exhausted - and a person watching progress needs to
