@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Http\Controllers\Api\AiArtifactController;
 use App\Http\Controllers\Api\AiAssistantController;
+use App\Http\Controllers\Api\AiTaskController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutomationController;
 use App\Http\Controllers\Api\BillingConfigurationController;
@@ -865,6 +866,17 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
 
         Route::get('/ai/status', [AiAssistantController::class, 'status'])
             ->name('api.ai.status');
+
+        // Background work. Queued, persisted and polled, so it survives a closed
+        // tab: see AiTaskController.
+        Route::get('/ai/tasks', [AiTaskController::class, 'index'])
+            ->name('api.ai.tasks.index');
+        Route::post('/ai/tasks', [AiTaskController::class, 'store'])
+            ->name('api.ai.tasks.store');
+        Route::get('/ai/tasks/{task}', [AiTaskController::class, 'show'])
+            ->name('api.ai.tasks.show');
+        Route::post('/ai/tasks/{task}/cancel', [AiTaskController::class, 'cancel'])
+            ->name('api.ai.tasks.cancel');
 
         // Proactive assistance. Deliberately a single suggestion and not a list:
         // see SuggestionController for why silence is a 200 here.

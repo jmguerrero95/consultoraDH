@@ -9,6 +9,7 @@ use App\Models\AiAttachment;
 use App\Models\AiAttachmentChunk;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use PhpOffice\PhpSpreadsheet\Reader\Xlsx as XlsxReader;
@@ -157,12 +158,37 @@ final class DocumentIngestor
             'status' => AiAttachment::STATUS_PROCESSED,
         ]);
 
+        return $this->processStoredAttachment($attachment);
+    }
+
+    /**
+     * Read, extract and index a file that is already in storage.
+     *
+     * ## Why this is separate from `ingest()`
+     *
+     * Because the two halves of storing a document - "is this file acceptable,
+     * and where does it live" and "what does it say" - have very different
+     * timing. The first must happen inside the request that received the file,
+     * before the upload is acknowledged. The second is slow enough that it
+     * belongs in a worker, where a closed tab does not cancel it.
+     *
+     * Splitting them here means both paths run the *same* extraction and the same
+     * chunking, so a document processed by a worker is indexed identically to
+     * one processed inline. Duplicating that logic would eventually make the
+     * two disagree about what a document contains, which is the same class of
+     * defect as two different balance calculations.
+     *
+     * A file that cannot be parsed is kept with the reason rather than deleted:
+     * the person uploaded something real and deserves to be told why it did not
+     * read.
+     */
+    public function processStoredAttachment(AiAttachment $attachment): AiAttachment
+    {
+        $extension = $attachment->extension;
+
         try {
-            $extracted = $this->extract($storagePath, $extension);
+            $extracted = $this->extract($attachment->storage_path, $extension);
         } catch (\Throwable $e) {
-            // A file that cannot be parsed is still kept, with the reason. The
-            // person uploaded something real and deserves to be told why it did
-            // not read rather than being left with a silent failure.
             $attachment->update([
                 'status' => AiAttachment::STATUS_UNREADABLE,
                 'status_note' => 'No fue posible extraer texto de este archivo.',
@@ -188,15 +214,21 @@ final class DocumentIngestor
 
         $chunks = $this->chunker->chunk($extracted['text']);
 
-        $attachment->update([
-            'status' => AiAttachment::STATUS_PROCESSED,
-            'page_count' => $extracted['pages'],
-            'character_count' => mb_strlen($extracted['text']),
-            'chunk_count' => count($chunks),
-            'preview' => Str::limit(preg_replace('/\s+/', ' ', $extracted['text']) ?? '', 400),
-        ]);
+        // The counts and the chunks move together. A crash between them would
+        // otherwise leave an attachment that claims to be indexed while the
+        // index is empty - which looks like a search bug rather than a lost job.
+        DB::transaction(function () use ($attachment, $extracted, $chunks): void {
+            $attachment->update([
+                'status' => AiAttachment::STATUS_PROCESSED,
+                'status_note' => null,
+                'page_count' => $extracted['pages'],
+                'character_count' => mb_strlen($extracted['text']),
+                'chunk_count' => count($chunks),
+                'preview' => Str::limit(preg_replace('/\s+/', ' ', $extracted['text']) ?? '', 400),
+            ]);
 
-        $this->storeChunks($attachment, $chunks, $extracted['locators'] ?? []);
+            $this->storeChunks($attachment, $chunks, $extracted['locators'] ?? []);
+        });
 
         return $attachment->fresh();
     }
@@ -503,10 +535,24 @@ final class DocumentIngestor
             ];
         }
 
-        // Inserted in one statement: a document with hundreds of chunks would
-        // otherwise be hundreds of round trips inside one request.
-        if ($rows !== []) {
-            AiAttachmentChunk::query()->insert($rows);
-        }
+        // Replaces rather than appends.
+        //
+        // This is what makes a retried job safe. A worker can be dispatched
+        // twice - Redis visibility timeout, a restart mid-flight - and an
+        // appending insert would leave the same passage retrievable twice, so
+        // every answer drawn from that document would be quietly biased toward
+        // whatever happened to be indexed twice. Replacing means the second run
+        // converges on the same state as the first.
+        DB::transaction(function () use ($attachment, $rows): void {
+            AiAttachmentChunk::query()
+                ->where('ai_attachment_id', $attachment->id)
+                ->delete();
+
+            // Inserted in one statement: a document with hundreds of chunks
+            // would otherwise be hundreds of round trips.
+            if ($rows !== []) {
+                AiAttachmentChunk::query()->insert($rows);
+            }
+        });
     }
 }
