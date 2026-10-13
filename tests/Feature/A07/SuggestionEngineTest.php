@@ -6,6 +6,8 @@ use App\Domain\Ai\AiToolRejected;
 use App\Domain\Assistant\SuggestionEngine;
 use App\Domain\Assistant\SuggestionSignalDetector;
 use App\Domain\Receivables\ReceivablesService;
+use App\Models\AiConversation;
+use App\Models\AiMessage;
 use App\Models\AiSuggestion;
 use App\Models\Client;
 use App\Models\Company;
@@ -315,10 +317,22 @@ final class SuggestionEngineTest extends TestCase
 
         app(SuggestionSignalDetector::class)->detect($this->owner, 'receivables', 'client_account');
 
-        // Detection is arithmetic over rows. If it reached a provider, or wrote
-        // a message, it would be paying for and showing something it has no
+        // Scoped to this person rather than to the table. A global count is only
+        // true when nothing else in the run has ever written a message, which is
+        // a property of the run order and not of this behaviour.
+        //
+        // Detection is arithmetic over rows. If it reached a provider, or wrote a
+        // message, it would be paying for and showing something it has no
         // evidence for yet.
-        $this->assertSame(0, DB::table('ai_messages')->count());
+        $this->assertSame(
+            0,
+            AiMessage::query()
+                ->whereIn(
+                    'ai_conversation_id',
+                    AiConversation::query()->where('user_id', $this->owner->id)->pluck('id'),
+                )
+                ->count(),
+        );
         $this->assertSame(0, DB::table('ai_conversations')->count());
     }
 

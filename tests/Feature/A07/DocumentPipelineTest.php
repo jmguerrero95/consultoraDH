@@ -239,7 +239,19 @@ final class DocumentPipelineTest extends TestCase
 
     public function test_uploading_the_same_bytes_twice_queues_the_work_once(): void
     {
-        $upload = fn (): UploadedFile => $this->workbookUpload();
+        // The very same bytes, built once. A workbook written twice carries a
+        // creation timestamp, so two builds can differ - and the upload is
+        // content-addressed, which would make them two different uploads and the
+        // test would pass for the wrong reason whenever the two builds landed in
+        // different seconds.
+        $once = $this->workbookUpload();
+        $upload = fn (): UploadedFile => new UploadedFile(
+            $once->getRealPath(),
+            $once->getClientOriginalName(),
+            $once->getClientMimeType(),
+            null,
+            true,
+        );
 
         $first = $this->actingAs($this->user)
             ->post('/api/ai/tasks', ['file' => $upload(), 'conversation_id' => $this->conversation->id])
