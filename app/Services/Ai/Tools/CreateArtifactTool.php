@@ -220,10 +220,22 @@ final class CreateArtifactTool extends AbstractAiTool
         $spreadsheet = new Spreadsheet;
         $sheet = $spreadsheet->getActiveSheet();
 
-        foreach ($data as $rowIndex => $row) {
-            foreach ($row as $colIndex => $cell) {
-                $sheet->setCellValueByColumnAndRow($colIndex + 1, $rowIndex + 1, $cell);
-            }
+        // `setCellValueByColumnAndRow()` was removed from PhpSpreadsheet; the
+        // column-and-row API was deprecated long ago and is now gone. Calling it
+        // produced a fatal "undefined method" rather than a file, so every XLSX
+        // this tool was asked for failed - and the format was still advertised in
+        // the tool's own parameter list.
+        //
+        // `fromArray()` is the supported equivalent and writes a rectangular
+        // block in one call.
+        $rows = [];
+
+        foreach ($data as $row) {
+            $rows[] = is_array($row) ? array_values($row) : [$row];
+        }
+
+        if ($rows !== []) {
+            $sheet->fromArray($rows, null, 'A1');
         }
 
         $writer = new Xlsx($spreadsheet);

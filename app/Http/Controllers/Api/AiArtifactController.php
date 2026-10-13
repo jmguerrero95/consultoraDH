@@ -20,9 +20,15 @@ final class AiArtifactController extends Controller
 {
     public function download(Request $request, AiArtifact $artifact): StreamedResponse
     {
-        // Check ownership
+        // Ownership, answered exactly like an artifact that does not exist.
+        //
+        // A 403 distinguishes "this id is real and it is not yours" from "this
+        // id is not real", which is itself a disclosure about other people's
+        // documents - and the ids here are sequential. Everything else in the
+        // assistant answers a request for someone else's row with the same 404
+        // as for a missing one; this is the same rule applied consistently.
         if ((int) $artifact->user_id !== (int) $request->user()->id) {
-            abort(403);
+            abort(404, 'El artefacto no está disponible.');
         }
 
         // Check expiration

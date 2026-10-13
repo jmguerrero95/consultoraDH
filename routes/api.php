@@ -873,6 +873,10 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.ai.tasks.index');
         Route::post('/ai/tasks', [AiTaskController::class, 'store'])
             ->name('api.ai.tasks.store');
+        Route::post('/ai/tasks/research', [AiTaskController::class, 'storeResearch'])
+            ->name('api.ai.tasks.research.store');
+        Route::post('/ai/tasks/document-generate', [AiTaskController::class, 'storeDocumentGeneration'])
+            ->name('api.ai.tasks.document-generate.store');
         Route::get('/ai/tasks/{task}', [AiTaskController::class, 'show'])
             ->name('api.ai.tasks.show');
         Route::post('/ai/tasks/{task}/cancel', [AiTaskController::class, 'cancel'])

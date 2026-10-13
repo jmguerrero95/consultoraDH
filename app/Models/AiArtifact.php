@@ -19,6 +19,10 @@ class AiArtifact extends Model
     protected $fillable = [
         'user_id',
         'conversation_id',
+        // Which background task produced it. Listed so a future create() cannot
+        // silently drop the link, which is what happened with `ai_task_id` on
+        // `ai_attachment`.
+        'ai_task_id',
         'display_filename',
         'mime_type',
         'format',

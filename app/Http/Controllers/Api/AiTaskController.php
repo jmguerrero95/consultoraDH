@@ -96,6 +96,93 @@ final class AiTaskController extends Controller
         return response()->json(['task' => $this->present($task)], 202);
     }
 
+    /**
+     * Queue a research run.
+     *
+     * 202 like an upload: the work is queued, not done.
+     */
+    public function storeResearch(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'question' => ['required', 'string', 'max:2000'],
+            'conversation_id' => ['sometimes', 'nullable', 'integer'],
+        ]);
+
+        if (! $this->conversationBelongsTo($request, $validated['conversation_id'] ?? null)) {
+            return $this->fail('La conversación no está disponible.', 404);
+        }
+
+        try {
+            $task = $this->tasks->queueResearch(
+                $request->user(),
+                (string) $validated['question'],
+                $this->conversationId($validated['conversation_id'] ?? null),
+            );
+        } catch (InvalidArgumentException $e) {
+            return $this->fail($e->getMessage(), 422);
+        }
+
+        return response()->json(['task' => $this->present($task)], 202);
+    }
+
+    /**
+     * Queue a document generation.
+     */
+    public function storeDocumentGeneration(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'format' => ['required', 'string', 'max:8'],
+            'filename' => ['sometimes', 'string', 'max:120'],
+            'content' => ['sometimes', 'nullable', 'string'],
+            'brief' => ['sometimes', 'nullable', 'string', 'max:4000'],
+            'conversation_id' => ['sometimes', 'nullable', 'integer'],
+        ]);
+
+        if (! $this->conversationBelongsTo($request, $validated['conversation_id'] ?? null)) {
+            return $this->fail('La conversación no está disponible.', 404);
+        }
+
+        try {
+            $task = $this->tasks->queueDocumentGeneration(
+                $request->user(),
+                (string) $validated['format'],
+                (string) ($validated['filename'] ?? 'documento'),
+                $validated['content'] ?? null,
+                $validated['brief'] ?? null,
+                $this->conversationId($validated['conversation_id'] ?? null),
+            );
+        } catch (InvalidArgumentException $e) {
+            return $this->fail($e->getMessage(), 422);
+        }
+
+        return response()->json(['task' => $this->present($task)], 202);
+    }
+
+    /**
+     * A query string is a string; the service takes an int.
+     */
+    private function conversationId(mixed $value): ?int
+    {
+        return $value === null ? null : (int) $value;
+    }
+
+    /**
+     * Ownership, checked before anything is created.
+     *
+     * Same reasoning as the conversation on the suggestion endpoint: `exists`
+     * would prove the row is real and say nothing about who owns it.
+     */
+    private function conversationBelongsTo(Request $request, mixed $value): bool
+    {
+        $id = $this->conversationId($value);
+
+        if ($id === null) {
+            return true;
+        }
+
+        return AiConversation::query()->whereKey($id)->where('user_id', $request->user()->id)->exists();
+    }
+
     public function show(Request $request, AiTask $task): JsonResponse
     {
         // Scoped lookup: a task belonging to somebody else resolves to nothing.

@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Jobs;
 
 use App\Domain\Assistant\Tasks\AiTaskHandler;
+use App\Domain\Assistant\Tasks\GenerateDocumentTask;
 use App\Domain\Assistant\Tasks\IngestDocumentTask;
+use App\Domain\Assistant\Tasks\ResearchTask;
 
 /**
  * Which handler runs a given kind of task.
@@ -50,7 +52,7 @@ final class AiTaskHandlerResolver
     {
         return array_map(
             fn (string $class): AiTaskHandler => app($class),
-            $this->handlers !== [] ? $this->handlers : [IngestDocumentTask::class],
+            $this->handlers !== [] ? $this->handlers : [IngestDocumentTask::class, ResearchTask::class, GenerateDocumentTask::class],
         );
     }
 }

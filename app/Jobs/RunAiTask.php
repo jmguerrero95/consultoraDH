@@ -84,6 +84,16 @@ class RunAiTask implements ShouldQueue
      * production - the defaults are also three - and wrong in a test that
      * shortened the policy, which then quietly tested the real one.
      */
+    /**
+     * How long a `running` row may sit untouched before another worker may take
+     * it over.
+     *
+     * Comfortably longer than any document parse, so a slow-but-alive worker is
+     * never robbed of its job, and short enough that a person is not looking at
+     * a permanently "running" task after a restart.
+     */
+    private const STALE_CLAIM_SECONDS = 900;
+
     public function __construct(
         public readonly int $taskId,
     ) {
@@ -101,7 +111,11 @@ class RunAiTask implements ShouldQueue
             return;
         }
 
-        // A cancel that landed while this job sat in the queue.
+        // A cancel that landed while this job sat in the queue, or a job that
+        // already finished. Redis will redeliver a job whose worker died after
+        // the work was saved but before the acknowledgement, and re-running it
+        // would overwrite a good result with a second attempt's - or send the
+        // completion notification twice.
         if ($task->isFinished()) {
             return;
         }
@@ -115,9 +129,21 @@ class RunAiTask implements ShouldQueue
         }
 
         // The claim. Conditional, so two workers cannot both proceed.
+        //
+        // `queued`, or a `running` row whose worker died without ever getting to
+        // release or fail it. A worker killed mid-flight - a deploy, an OOM, the
+        // container being restarted - leaves the row exactly as it was, and
+        // nothing else would ever move it: the row would say "running" for ever
+        // and the person would watch a job that stopped three weeks ago.
         $claimed = AiTask::query()
             ->whereKey($task->id)
-            ->where('status', AiTask::STATUS_QUEUED)
+            ->where(function ($query): void {
+                $query->where('status', AiTask::STATUS_QUEUED)
+                    ->orWhere(function ($stale): void {
+                        $stale->where('status', AiTask::STATUS_RUNNING)
+                            ->where('started_at', '<', now()->subSeconds(self::STALE_CLAIM_SECONDS));
+                    });
+            })
             ->update([
                 'status' => AiTask::STATUS_RUNNING,
                 'started_at' => now(),
@@ -167,10 +193,17 @@ class RunAiTask implements ShouldQueue
                 ]);
             }
         } catch (\Throwable $e) {
-            // Recorded before rethrowing, because `failed()` only runs once the
-            // retries are exhausted - and a person watching progress needs to
-            // see that something went wrong on the attempt that went wrong.
+            // Recorded, and the claim released, before rethrowing.
+            //
+            // Releasing is the part that was missing. The row was left as
+            // `running`, and the claim only ever accepts `queued`, so every retry
+            // found a task that was already running, skipped it, and returned
+            // without doing anything: three attempts, no work, and a row stuck
+            // on "running" for ever. A transient failure therefore never
+            // actually retried - which is the opposite of what a bounded retry
+            // is for.
             $task->forceFill([
+                'status' => AiTask::STATUS_QUEUED,
                 'error' => $this->readableReason($e),
                 'stage' => 'Reintentando',
             ])->save();

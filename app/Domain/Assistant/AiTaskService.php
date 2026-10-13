@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Assistant;
 
+use App\Domain\Assistant\Tasks\GenerateDocumentTask;
 use App\Jobs\AiTaskHandlerResolver;
 use App\Jobs\RunAiTask;
 use App\Models\AiTask;
@@ -74,9 +75,19 @@ final class AiTaskService
         $sha = hash('sha256', $bytes);
         $name = $file->getClientOriginalName();
 
-        // Content-addressed by default: the same bytes uploaded twice is the same
-        // upload, whatever the person called it or which tab sent it.
-        $dedupeKey ??= 'document:'.$sha;
+        // Content-addressed, and scoped to the conversation.
+        //
+        // Keyed on the hash alone, the same file attached to a second
+        // conversation returned the task from the first - so the document landed
+        // in a thread it was never attached to, and the thread it *was*
+        // attached to silently lost it. The bytes are the same work either way,
+        // but the result belongs to the conversation that asked for it, and a
+        // conversation is the boundary the retriever enforces.
+        //
+        // Existing rows keep their old keys. They are history, they are still
+        // readable, and a new upload simply produces a new task rather than
+        // matching one from before this key existed.
+        $dedupeKey ??= 'document:'.($conversationId === null ? 'none' : $conversationId).':'.$sha;
 
         $existing = AiTask::query()
             ->where('user_id', $user->id)
@@ -145,6 +156,130 @@ final class AiTaskService
     public function supports(string $kind): bool
     {
         return in_array($kind, $this->handlers->supportedKinds(), true);
+    }
+
+    /**
+     * Queue a research run.
+     *
+     * Rejects an unsupported kind *before* a row exists, so an unsupported
+     * request leaves no task behind for the person to wonder about.
+     *
+     * @throws InvalidArgumentException with a message meant for the person
+     */
+    public function queueResearch(User $user, string $question, ?int $conversationId = null, ?string $dedupeKey = null): AiTask
+    {
+        if (! $this->supports(AiTask::KIND_RESEARCH)) {
+            throw new InvalidArgumentException('Este tipo de trabajo no está disponible en esta instalación.');
+        }
+
+        $question = trim($question);
+
+        if ($question === '') {
+            throw new InvalidArgumentException('Escribe la pregunta que quieres investigar.');
+        }
+
+        if (mb_strlen($question) > 2_000) {
+            throw new InvalidArgumentException('La pregunta es demasiado larga.');
+        }
+
+        // Keyed on the question and the conversation, so the same question asked
+        // again tomorrow is a new piece of work and the same question asked
+        // twice by a double-clicking client is one.
+        $dedupeKey ??= 'research:'.($conversationId ?? 'none').':'.hash('sha256', mb_strtolower($question));
+
+        return $this->createTask($user, AiTask::KIND_RESEARCH, [
+            'question' => $question,
+        ], $conversationId, $dedupeKey);
+    }
+
+    /**
+     * Queue a document generation.
+     *
+     * @throws InvalidArgumentException with a message meant for the person
+     */
+    public function queueDocumentGeneration(
+        User $user,
+        string $format,
+        string $filename,
+        ?string $content = null,
+        ?string $brief = null,
+        ?int $conversationId = null,
+        ?string $dedupeKey = null,
+    ): AiTask {
+        if (! $this->supports(AiTask::KIND_DOCUMENT_GENERATE)) {
+            throw new InvalidArgumentException('Este tipo de trabajo no está disponible en esta instalación.');
+        }
+
+        $format = strtolower(trim($format));
+
+        if (! in_array($format, GenerateDocumentTask::FORMATS, true)) {
+            throw new InvalidArgumentException(sprintf(
+                'Formato no admitido: «%s». Se aceptan %s.',
+                $format === '' ? 'sin formato' : $format,
+                implode(', ', GenerateDocumentTask::FORMATS),
+            ));
+        }
+
+        $filename = trim($filename);
+        $content = $content === null ? null : trim($content);
+        $brief = $brief === null ? null : trim($brief);
+
+        if (($content === null || $content === '') && ($brief === null || $brief === '')) {
+            throw new InvalidArgumentException('Indica el contenido del documento o qué debe contener.');
+        }
+
+        if ($filename === '') {
+            $filename = 'documento';
+        }
+
+        // Strip an extension the person typed: the format is authoritative and
+        // "reporte.pdf" with format pdf would otherwise become "reporte.pdf.pdf".
+        $filename = preg_replace('/\.'.preg_quote($format, '/').'$/i', '', $filename) ?? $filename;
+
+        $dedupeKey ??= 'generate:'.($conversationId ?? 'none').':'.hash(
+            'sha256',
+            implode('|', [$format, mb_strtolower($filename), $content ?? '', $brief ?? '']),
+        );
+
+        return $this->createTask($user, AiTask::KIND_DOCUMENT_GENERATE, [
+            'format' => $format,
+            'filename' => $filename,
+            'content' => $content,
+            'brief' => $brief,
+        ], $conversationId, $dedupeKey);
+    }
+
+    /**
+     * Create the row and enqueue it, once.
+     *
+     * @param  array<string, mixed>  $input
+     */
+    private function createTask(User $user, string $kind, array $input, ?int $conversationId, string $dedupeKey): AiTask
+    {
+        $existing = AiTask::query()
+            ->where('user_id', $user->id)
+            ->where('dedupe_key', $dedupeKey)
+            ->first();
+
+        if ($existing !== null) {
+            return $existing;
+        }
+
+        $task = AiTask::query()->create([
+            'user_id' => $user->id,
+            'ai_conversation_id' => $conversationId,
+            'kind' => $kind,
+            'status' => AiTask::STATUS_QUEUED,
+            'progress' => 0,
+            'stage' => 'En cola',
+            'input' => $input,
+            'dedupe_key' => $dedupeKey,
+            'queued_at' => now(),
+        ]);
+
+        RunAiTask::dispatch($task->id);
+
+        return $task->refresh();
     }
 
     private function rejectUnusable(UploadedFile $file): void
