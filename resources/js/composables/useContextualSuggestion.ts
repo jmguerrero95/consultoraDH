@@ -41,6 +41,7 @@ import type { AiSuggestionPayload } from '@/services/ai';
 export function useContextualSuggestion(
     routeName: string | null,
     relevantKey?: () => string | number | null,
+    clientId?: () => number | null,
 ): { context: ReturnType<typeof contextForRoute> } & ReturnType<typeof useSuggestion> & {
     load: () => Promise<void>;
     accept: (id: number) => Promise<boolean>;
@@ -80,7 +81,7 @@ export function useContextualSuggestion(
             return;
         }
 
-        await hint.refresh(context.module, context.operation);
+        await hint.refresh(context.module, context.operation, clientId?.() ?? null);
     }
 
     /**

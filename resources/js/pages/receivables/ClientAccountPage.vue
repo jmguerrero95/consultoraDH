@@ -84,7 +84,7 @@ const hasDebt = computed(() => (account.value?.summary.outstanding_balance_cop ?
 // `null` when the screen has no context, which is the case the backend then
 // answers with nothing and no banner is drawn. The key is the data that could
 // change the signal, so a reload re-asks once instead of polling.
-const hint = useContextualSuggestion('clients.account', () => account.value?.client?.id ?? null);
+const hint = useContextualSuggestion('clients.account', () => account.value?.client?.id ?? null, () => account.value?.client?.id ?? null);
 </script>
 
 

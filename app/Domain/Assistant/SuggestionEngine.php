@@ -66,7 +66,7 @@ final class SuggestionEngine
      *
      * Null is the expected result during ordinary work and is not an error.
      */
-    public function currentFor(User $user, string $module, string $operation, ?int $conversationId = null): ?AiSuggestion
+    public function currentFor(User $user, string $module, string $operation, ?int $conversationId = null, ?int $entityReference = null): ?AiSuggestion
     {
         // Expired rows are retired first so they cannot be re-offered and do not
         // occupy the "already suggested" slot that suppresses a fresh problem.
@@ -75,9 +75,14 @@ final class SuggestionEngine
         // Detection runs once per call and its result is reused, because every
         // check below - may this still be shown, is the condition still true -
         // needs the same answer. Detecting twice would also mean deciding twice.
-        $candidates = $this->detector->detect($user, $module, $operation);
+        $candidates = $this->forEntity(
+            $this->detector->detect($user, $module, $operation),
+            $module,
+            $operation,
+            $entityReference,
+        );
 
-        $existing = $this->revalidated($user, $module, $operation);
+        $existing = $this->revalidated($user, $module, $operation, $entityReference);
 
         // Already showing one. At most one, always: two would be a queue, and a
         // queue is how an assistant becomes noise.
@@ -147,7 +152,7 @@ final class SuggestionEngine
      * Retiring rather than hiding matters: the row keeps its history, and a
      * condition that comes back is free to be raised again under the cooldown.
      */
-    private function revalidated(User $user, string $module, string $operation): ?AiSuggestion
+    private function revalidated(User $user, string $module, string $operation, ?int $entityReference = null): ?AiSuggestion
     {
         $rows = AiSuggestion::query()
             ->where('user_id', $user->id)
@@ -157,6 +162,17 @@ final class SuggestionEngine
             ->get();
 
         foreach ($rows as $suggestion) {
+            // Another entity's live offer is not this screen's business.
+            //
+            // Deliberately `continue` and nothing else: not shown, not retired,
+            // not marked resolved, and no offer recorded. A person's statement
+            // for one client says nothing about another client's, and an offer
+            // that is still on the table somewhere else has to stay exactly
+            // where it is when they click through to a different account.
+            if ($this->belongsElsewhere($suggestion, $module, $operation, $entityReference)) {
+                continue;
+            }
+
             // Re-detected against the suggestion's **own** context, not the one
             // this request is for.
             //
@@ -190,6 +206,68 @@ final class SuggestionEngine
         }
 
         return null;
+    }
+
+    /**
+     * Is this screen about one particular entity, rather than a whole module?
+     *
+     * The portfolio screen is about everybody and is served by everybody's
+     * findings. A single client's statement is about that client alone, and the
+     * difference is what keeps one person's debt from being announced on
+     * somebody else's account.
+     */
+    private function requiresEntity(string $module, string $operation): bool
+    {
+        return $module === 'receivables' && $operation === 'client_account';
+    }
+
+    /**
+     * Keep only the candidates that are about the entity being asked for.
+     *
+     * With no entity demanded, everything the rules produced is a candidate -
+     * which is what the portfolio screen wants.
+     */
+    private function forEntity(array $candidates, string $module, string $operation, ?int $entityReference): array
+    {
+        if (! $this->requiresEntity($module, $operation)) {
+            return $candidates;
+        }
+
+        if ($entityReference === null) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            $candidates,
+            fn (array $candidate): bool => $this->referencesEntity($candidate['entity_type'] ?? null, $candidate['entity_reference'] ?? null, $entityReference),
+        ));
+    }
+
+    /**
+     * Whether a suggestion or candidate is about an entity other than this screen's.
+     *
+     * Only meaningful where the screen is about one entity; everywhere else the
+     * answer is always "no", because there is nothing to be the wrong one about.
+     */
+    private function belongsElsewhere(AiSuggestion $suggestion, string $module, string $operation, ?int $entityReference): bool
+    {
+        if (! $this->requiresEntity($module, $operation) || $entityReference === null) {
+            return false;
+        }
+
+        return ! $this->referencesEntity($suggestion->entity_type, $suggestion->entity_reference, $entityReference);
+    }
+
+    /**
+     * Identity comparison, tolerant of the two shapes the references take.
+     *
+     * Candidates carry an entity type alongside the reference; stored rows carry
+     * both as columns. A suggestion whose entity is not a client is never a
+     * match for a client's statement, so an absent type is not waved through.
+     */
+    private function referencesEntity(?string $entityType, string|int|null $reference, int $entityReference): bool
+    {
+        return $entityType === 'client' && $reference !== null && (int) $reference === $entityReference;
     }
 
     /** Still applicable here; show it. */

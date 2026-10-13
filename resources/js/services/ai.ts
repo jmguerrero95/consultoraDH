@@ -126,10 +126,13 @@ export const ai = {
      * `module` and `operation` say where the person is, so a signal can be
      * relevant to the screen they are actually looking at.
      */
-    suggestion(module?: string, operation?: string): Promise<AiSuggestionEnvelope> {
+    suggestion(module?: string, operation?: string, clientId?: number | null): Promise<AiSuggestionEnvelope> {
         const query = new URLSearchParams();
         if (module) query.set('module', module);
         if (operation) query.set('operation', operation);
+        // Which client the screen is about. A single client's statement has to
+        // say so, or the server has no way to tell whose debt it is reporting.
+        if (typeof clientId === 'number') query.set('client_id', String(clientId));
 
         const suffix = query.toString() ? `?${query.toString()}` : '';
         return request<AiSuggestionEnvelope>('GET', `/api/ai/suggestion${suffix}`);

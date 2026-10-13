@@ -27,18 +27,38 @@ export function useSuggestion() {
     const busy = ref(false);
     const error = ref<string | null>(null);
 
+    /** Bumped by every refresh; a reply from an older one is ignored. */
+    let sequence = 0;
+
     /** A suggestion is showing right now. */
     const hasSuggestion = computed(() => suggestion.value !== null);
 
-    async function refresh(module?: string, operation?: string): Promise<void> {
+    async function refresh(module?: string, operation?: string, clientId?: number | null): Promise<void> {
+        // Every call is numbered, and only the newest one is allowed to write.
+        //
+        // Without this, moving from one client's statement to another's can let
+        // the first answer land last: the person would be reading client B's
+        // page while a card about client A appears on it. The sequence is
+        // bumped before the request goes out, so a stale reply is recognised as
+        // stale and dropped rather than displayed.
+        const ticket = ++sequence;
+
         try {
-            const response = await ai.suggestion(module, operation);
+            const response = await ai.suggestion(module, operation, clientId);
+
+            if (ticket !== sequence) {
+                return;
+            }
 
             // `null` is the expected answer on almost every call, so it is
             // cleared rather than treated as an absence to keep the previous one.
             suggestion.value = response.suggestion;
             error.value = null;
         } catch (e) {
+            if (ticket !== sequence) {
+                return;
+            }
+
             suggestion.value = null;
             error.value = e instanceof Error ? e.message : String(e);
         }
@@ -99,6 +119,10 @@ export function useSuggestion() {
 
     /** Clear locally, without asking the server. For leaving the screen. */
     function clear(): void {
+        // Invalidate anything still in flight, so leaving a screen cannot be
+        // undone by a reply that was already on its way.
+        sequence++;
+
         suggestion.value = null;
         error.value = null;
     }

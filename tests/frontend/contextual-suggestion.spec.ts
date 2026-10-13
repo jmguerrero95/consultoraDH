@@ -50,13 +50,13 @@ function suggestion(overrides: Partial<AiSuggestionPayload> = {}): AiSuggestionP
 
 const current = ref<string | null>('clients.account');
 
-function withComposable(relevantKey?: () => string | number | null) {
+function withComposable(relevantKey?: () => string | number | null, clientId?: () => number | null) {
     let result!: ReturnType<typeof useContextualSuggestion>;
 
     const wrapper = mount(
         defineComponent({
             setup() {
-                result = useContextualSuggestion(current.value, relevantKey);
+                result = useContextualSuggestion(current.value, relevantKey, clientId);
 
                 return () => h('div');
             },
@@ -67,7 +67,16 @@ function withComposable(relevantKey?: () => string | number | null) {
 }
 
 function stubSuggestionApi(value: AiSuggestionPayload | null = suggestion()) {
-    const ask = vi.spyOn(ai, 'suggestion').mockResolvedValue({ suggestion: value });
+    const ask = vi
+        .spyOn(ai, 'suggestion')
+        .mockImplementation((_module?: string, _operation?: string, clientId?: number | null) =>
+            Promise.resolve({
+                suggestion:
+                    value === null
+                        ? null
+                        : suggestion({ ...value, evidence: { ...value.evidence, client_id: clientId ?? 0 } }),
+            }),
+        );
     vi.spyOn(ai, 'acceptSuggestion').mockResolvedValue({ accepted: true, suggestion_id: value?.id ?? 7 });
     vi.spyOn(ai, 'dismissSuggestion').mockResolvedValue({ dismissed: true, suggestion_id: value?.id ?? 7 });
 
@@ -82,7 +91,7 @@ describe('useContextualSuggestion', () => {
         withComposable();
         await flushPromises();
 
-        expect(ask).toHaveBeenCalledWith('imports', 'issues');
+        expect(ask).toHaveBeenCalledWith('imports', 'issues', null);
     });
 
     it('does not ask at all on a screen with no context', async () => {
@@ -104,6 +113,75 @@ describe('useContextualSuggestion', () => {
         await flushPromises();
 
         expect(hint.hasSuggestion.value).toBe(false);
+    });
+
+    it('asks about the client whose statement is open', async () => {
+        const ask = stubSuggestionApi();
+        current.value = 'clients.account';
+
+        withComposable(() => 42, () => 42);
+        await flushPromises();
+
+        // Without the client id the server has no way to tell whose debt it is
+        // reporting, and one client's finding ends up on another's page.
+        expect(ask).toHaveBeenCalledWith('receivables', 'client_account', 42);
+    });
+
+    it('asks again for the new client when the page changes person', async () => {
+        const ask = stubSuggestionApi();
+        current.value = 'clients.account';
+
+        const who = ref<number | null>(7);
+
+        withComposable(() => who.value, () => who.value);
+        await flushPromises();
+
+        expect(ask).toHaveBeenLastCalledWith('receivables', 'client_account', 7);
+
+        // Moving to another client's statement has to ask about that client.
+        who.value = 9;
+        await nextTick();
+        await flushPromises();
+
+        expect(ask).toHaveBeenLastCalledWith('receivables', 'client_account', 9);
+        expect(ask).toHaveBeenCalledWith('receivables', 'client_account', 7);
+    });
+
+    it('drops a late answer from the client we have already left', async () => {
+        const ask = stubSuggestionApi();
+        current.value = 'clients.account';
+
+        const who = ref<number | null>(7);
+
+        // The first request is answered slowly, the way a real one can be, and
+        // the person navigates while it is still in flight.
+        let releaseFirst: (() => void) | null = null;
+
+        vi.mocked(ai.suggestion).mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    releaseFirst = () => resolve({ suggestion: suggestion({ id: 7, evidence: { client_id: 7 } }) });
+                }),
+        );
+
+        const [hint] = withComposable(() => who.value, () => who.value);
+
+        await flushPromises();
+
+        who.value = 9;
+        await nextTick();
+        await flushPromises();
+
+        expect(hint.suggestion.value?.evidence.client_id).toBe(9);
+
+        // Now the slow answer for the client we left arrives.
+        releaseFirst?.();
+        await flushPromises();
+
+        // It must not overwrite what is on screen now: that is one client's debt
+        // being announced on another client's statement.
+        expect(hint.suggestion.value?.evidence.client_id).toBe(9);
+        expect(ask).toHaveBeenCalledWith('receivables', 'client_account', 7);
     });
 
     it('shows a real suggestion with its evidence', async () => {
@@ -165,7 +243,7 @@ describe('useContextualSuggestion', () => {
         const [, second] = withComposable();
         await flushPromises();
 
-        expect(ask).toHaveBeenCalledWith('imports', 'issues');
+        expect(ask).toHaveBeenCalledWith('imports', 'issues', null);
         expect(ask.mock.calls.length).toBeGreaterThan(1);
 
         second.unmount();
@@ -242,7 +320,7 @@ describe('useContextualSuggestion', () => {
         const [onImports, importsWrapper] = withComposable();
         await flushPromises();
 
-        expect(ask).toHaveBeenLastCalledWith('imports', 'issues');
+        expect(ask).toHaveBeenLastCalledWith('imports', 'issues', null);
         expect(onImports.suggestion.value).toBeNull();
 
         wrapper.unmount();

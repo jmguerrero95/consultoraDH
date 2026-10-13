@@ -127,7 +127,7 @@ final class SuggestionEngineTest extends TestCase
     {
         $client = $this->overdueClient();
 
-        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
 
         $this->assertNotNull($suggestion, 'A balance that is entirely past due is a real signal.');
         $this->assertSame('overdue_concentration', $suggestion->trigger_category);
@@ -144,9 +144,9 @@ final class SuggestionEngineTest extends TestCase
 
     public function test_the_explanation_is_generated_from_the_evidence(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
-        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
         $presented = $this->engine()->present($suggestion);
 
         // The sentence names this person and states these figures. A generic
@@ -161,9 +161,9 @@ final class SuggestionEngineTest extends TestCase
     {
         // The same 100% overdue shape, but a small amount. Without the floor, a
         // client with any debt at all would generate a suggestion on every visit.
-        $this->overdueClient(amount: 50_000);
+        $client = $this->overdueClient(amount: 50_000);
 
-        $this->assertNull($this->engine()->currentFor($this->owner, 'receivables', 'client_account'));
+        $this->assertNull($this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id));
     }
 
     public function test_a_partly_overdue_balance_is_not_concentrated_enough(): void
@@ -189,16 +189,16 @@ final class SuggestionEngineTest extends TestCase
             ->clientsWithConcentratedOverdue(0.5);
 
         $this->assertSame([], $rows, '40% overdue is below the 50% threshold.');
-        $this->assertNull($this->engine()->currentFor($this->owner, 'receivables', 'client_account'));
+        $this->assertNull($this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id));
     }
 
     public function test_someone_without_permission_is_never_suggested_anything(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         // `receivables.view` is deliberately not granted.
         $this->assertNull(
-            $this->engine()->currentFor($this->colleague, 'receivables', 'client_account'),
+            $this->engine()->currentFor($this->colleague, 'receivables', 'client_account', null, $client->id),
             'A hint nobody can act on is not a hint, it is an interruption with no way out.'
         );
 
@@ -211,35 +211,35 @@ final class SuggestionEngineTest extends TestCase
 
     public function test_a_dismissed_suggestion_is_never_raised_again(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
-        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
         $this->engine()->dismiss($suggestion, $this->owner);
 
         // Not merely for now. The condition has not changed, and a reworded
         // version of the same problem carries the same key, so it is refused for
         // the same reason.
         Carbon::setTestNow(Carbon::parse('2026-06-05'));
-        $this->assertNull($this->engine()->currentFor($this->owner, 'receivables', 'client_account'));
+        $this->assertNull($this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id));
     }
 
     public function test_the_same_live_condition_is_not_repeated_inside_its_cooldown(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
-        $first = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $first = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
         $this->engine()->accept($first, $this->owner);
 
-        $second = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $second = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
 
         $this->assertNull($second, 'Having acted on it, they are not asked again about the same client.');
     }
 
     public function test_a_condition_that_was_only_offered_comes_back_after_the_cooldown(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
-        $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
 
         // An offer lives three hours and a cooldown lasts four, so there is a
         // one-hour window where the first offer has lapsed but the second is not
@@ -247,7 +247,7 @@ final class SuggestionEngineTest extends TestCase
         Carbon::setTestNow(Carbon::parse('2026-06-01 12:30'));
 
         $this->assertNull(
-            $this->engine()->currentFor($this->owner, 'receivables', 'client_account'),
+            $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id),
             'The cooldown still holds.'
         );
 
@@ -262,7 +262,7 @@ final class SuggestionEngineTest extends TestCase
         // useful for a collections assistant.
         Carbon::setTestNow(Carbon::parse('2026-06-01 13:30'));
 
-        $again = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $again = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
 
         $this->assertNotNull($again, 'A problem that outlived its offer deserves to be mentioned again.');
         $this->assertSame('overdue_concentration', $again->trigger_category);
@@ -272,14 +272,18 @@ final class SuggestionEngineTest extends TestCase
     {
         // Four genuinely different clients, so this is four problems rather
         // than one problem seen four times.
+        $clients = [];
+
         foreach (['2026-01', '2026-02', '2026-03', '2026-04'] as $i => $month) {
-            $this->overdueClient($month, 45_000_000, 'Luis', 'Ramos'.$i);
+            $clients[] = $this->overdueClient($month, 45_000_000, 'Luis', 'Ramos'.$i);
         }
 
         $offered = [];
 
+        // Each of the four accounts asked about in turn, which is what four
+        // visits to four different statements look like to the engine.
         for ($attempt = 0; $attempt < 4; $attempt++) {
-            $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+            $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $clients[$attempt]->id);
 
             if ($suggestion === null) {
                 continue;
@@ -302,9 +306,9 @@ final class SuggestionEngineTest extends TestCase
 
     public function test_one_person_never_sees_another_persons_suggestion(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
-        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
 
         // Probing must not even confirm that someone else's row exists.
         $this->expectException(AiToolRejected::class);
@@ -313,7 +317,7 @@ final class SuggestionEngineTest extends TestCase
 
     public function test_detection_does_not_call_a_model_or_create_conversation_traffic(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         app(SuggestionSignalDetector::class)->detect($this->owner, 'receivables', 'client_account');
 
@@ -509,12 +513,14 @@ final class SuggestionEngineTest extends TestCase
         $dismissed = $this->overdueClient('2026-01', 45_000_000, 'Ana', 'Torres');
         $other = $this->overdueClient('2026-02', 45_000_000, 'Luis', 'Ramos');
 
-        $first = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        // Asked about the client it is about, which is what a statement screen
+        // for that person would ask.
+        $first = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $dismissed->id);
         $this->assertSame((string) $dismissed->id, $first->entity_reference);
 
         $this->engine()->dismiss($first, $this->owner);
 
-        $second = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $second = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $other->id);
 
         $this->assertNotNull($second, 'Declining one problem is not a request to never be helped again.');
         $this->assertSame((string) $other->id, $second->entity_reference);
@@ -527,7 +533,7 @@ final class SuggestionEngineTest extends TestCase
         $account = app(ReceivablesService::class)
             ->clientAccount($client, now());
 
-        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account');
+        $suggestion = $this->engine()->currentFor($this->owner, 'receivables', 'client_account', null, $client->id);
         $evidence = $suggestion->evidence;
 
         // The reason the detector borrows the receivables arithmetic instead of

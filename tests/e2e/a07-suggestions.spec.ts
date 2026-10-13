@@ -201,7 +201,17 @@ test.describe('GATE 7: suggestions on the screens they belong to', () => {
 
         await expect(card).toBeVisible({ timeout: 30_000 });
 
-        const action = (await page.getByTestId('suggestion-action').textContent())?.trim() ?? '';
+        // Which client's suggestion this is, by name.
+        //
+        // Not by the action text: `suggested_action` is one sentence per kind
+        // of finding, so every overdue client proposes the very same words and
+        // comparing it cannot tell "the dismissed one came back" from "another
+        // client has a problem too". The client named on the card is what makes
+        // the two distinguishable, and it is also the thing this journey is
+        // really about.
+        const dismissedFor = (await page.getByTestId('suggestion-evidence').textContent())?.match(/Cobro \d+ Prueba A03/)?.[0];
+
+        expect(dismissedFor, 'the card should name the client it is about').toBe('Cobro 91 Prueba A03');
 
         await page.getByTestId('suggestion-dismiss').click();
 
@@ -209,14 +219,18 @@ test.describe('GATE 7: suggestions on the screens they belong to', () => {
         await expect(card).toHaveCount(0, { timeout: 20_000 });
 
         await page.goto('/receivables');
-        await page.waitForTimeout(800);
 
+        // Polled rather than slept on: the card has to have had its chance to
+        // appear, or this journey proves nothing at all. A fixed wait is what
+        // let this assertion be skipped silently for as long as it existed.
         const onReceivables = page.getByTestId('suggestion-hint');
 
-        // The engine may legitimately have another problem to raise; what must
-        // not happen is the dismissed one coming back.
+        await onReceivables.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {});
+
+        // The engine may legitimately have another client's problem to raise;
+        // what must not happen is the dismissed one coming back.
         if ((await onReceivables.count()) > 0) {
-            await expect(onReceivables).not.toContainText(action);
+            await expect(onReceivables).not.toContainText(dismissedFor!);
         }
     });
 

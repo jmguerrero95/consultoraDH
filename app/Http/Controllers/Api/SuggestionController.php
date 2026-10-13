@@ -8,6 +8,7 @@ use App\Domain\Ai\AiToolRejected;
 use App\Domain\Assistant\SuggestionEngine;
 use App\Models\AiConversation;
 use App\Models\AiSuggestion;
+use App\Models\Client;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -51,12 +52,30 @@ final class SuggestionController extends Controller
      * signal be relevant: an import problem is only worth raising on the import
      * screen, and a collections problem on a receivables one.
      */
+    /**
+     * Is this a client whose statement could be on screen?
+     *
+     * Existence only. The permission itself is deliberately *not* decided here:
+     * the engine re-reads it on every offer and retires the ones whose author
+     * has lost the right, and answering earlier with a bare `null` would strand
+     * those rows as available forever, still waiting for somebody who may no
+     * longer look at them.
+     */
+    private function isRealClient(int $clientId): bool
+    {
+        return Client::query()->whereKey($clientId)->exists();
+    }
+
     public function show(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'module' => ['sometimes', 'string', 'max:64'],
             'operation' => ['sometimes', 'string', 'max:64'],
             'conversation_id' => ['sometimes', 'nullable', 'integer'],
+            // Which client the statement on screen is about. Optional in the
+            // request because the portfolio screen is not about one, and
+            // required in effect by the engine for a single client's account.
+            'client_id' => ['sometimes', 'nullable', 'integer'],
         ]);
 
         $user = $request->user();
@@ -88,11 +107,29 @@ final class SuggestionController extends Controller
             }
         }
 
+        $module = $validated['module'] ?? 'receivables';
+        $operation = $validated['operation'] ?? 'client_account';
+        $clientId = isset($validated['client_id']) && $validated['client_id'] !== null
+            ? (int) $validated['client_id']
+            : null;
+
+        // A client's identity has to be checked, not trusted. Without this the
+        // endpoint would happily scope its findings to whatever id a caller
+        // cared to send.
+        //
+        // A client that does not exist answers exactly as one with nothing to
+        // say: silence. Nothing is revealed about whether the id was ever
+        // issued, which is the same refusal the conversation check above makes.
+        if ($clientId !== null && ! $this->isRealClient($clientId)) {
+            return response()->json(['suggestion' => null]);
+        }
+
         $suggestion = $this->engine->currentFor(
             $user,
-            $validated['module'] ?? 'receivables',
-            $validated['operation'] ?? 'client_account',
+            $module,
+            $operation,
             $conversationId,
+            $clientId,
         );
 
         return response()->json([

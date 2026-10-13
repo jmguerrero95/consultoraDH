@@ -143,25 +143,25 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_your_own_conversation_is_accepted(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
         $conversation = AiConversation::query()->create(['user_id' => $this->user->id, 'title' => 'Mía']);
 
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&conversation_id='.$conversation->id)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id.'&conversation_id='.$conversation->id)
             ->assertOk()
             ->assertJsonPath('suggestion.category', 'overdue_concentration');
     }
 
     public function test_someone_elses_conversation_is_refused_without_revealing_that_it_exists(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
         $theirs = AiConversation::query()->create(['user_id' => $this->other->id, 'title' => 'Suya']);
 
         // The same answer as for an id that was never issued. `exists:` proved the
         // row was real and said nothing about who owns it, which on an
         // administrator-wide table means any id belongs to somebody.
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&conversation_id='.$theirs->id)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id.'&conversation_id='.$theirs->id)
             ->assertNotFound();
 
         $this->actingAs($this->user)
@@ -178,11 +178,11 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_a_suggestion_is_never_attached_to_another_persons_conversation(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
         $theirs = AiConversation::query()->create(['user_id' => $this->other->id, 'title' => 'Suya']);
 
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&conversation_id='.$theirs->id)
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id.'&conversation_id='.$theirs->id)
             ->assertNotFound();
 
         $this->assertSame(0, AiSuggestionOffer::query()->count(), 'A refused request interrupts nobody.');
@@ -197,7 +197,7 @@ final class SuggestionValidityTest extends TestCase
         $client = $this->overdueClient();
 
         $first = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->assertOk()
             ->json('suggestion.id');
 
@@ -220,7 +220,7 @@ final class SuggestionValidityTest extends TestCase
         );
 
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->assertOk()
             ->assertExactJson(['suggestion' => null]);
 
@@ -233,10 +233,10 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_a_suggestion_is_withdrawn_when_the_permission_is_taken_away(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $id = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         $this->assertNotNull($id);
@@ -248,7 +248,7 @@ final class SuggestionValidityTest extends TestCase
         app(PermissionRegistrar::class)->forgetCachedPermissions();
 
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->assertOk()
             ->assertExactJson(['suggestion' => null]);
 
@@ -257,10 +257,10 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_a_suggestion_does_not_follow_you_onto_an_unrelated_screen(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->assertOk()
             ->assertJsonPath('suggestion.category', 'overdue_concentration');
 
@@ -277,13 +277,13 @@ final class SuggestionValidityTest extends TestCase
         // The check above shelves a suggestion whose context no longer matches.
         // That is only acceptable if coming back finds the same one still
         // waiting, rather than a row that was thrown away for a wrong reason.
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
-        $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+        $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id);
         $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=imports&operation=issues');
 
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->assertOk()
             ->assertJsonPath('suggestion.category', 'overdue_concentration');
 
@@ -300,17 +300,17 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_rereading_an_on_offer_suggestion_is_not_a_second_interruption(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $first = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         // Five refreshes. This is one card being re-rendered, not five times
         // bothering someone.
         for ($i = 0; $i < 5; $i++) {
             $this->actingAs($this->user)
-                ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+                ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
                 ->assertOk()
                 ->assertJsonPath('suggestion.id', $first);
         }
@@ -320,7 +320,7 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_the_daily_ceiling_counts_reoffers_of_the_same_problem(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         // The cooldown is four hours and the offer lives three, so the moments
         // this problem can be re-raised are four hours apart - not "whenever the
@@ -330,7 +330,7 @@ final class SuggestionValidityTest extends TestCase
             Carbon::setTestNow(Carbon::parse('2026-06-01 '.$time));
 
             $this->actingAs($this->user)
-                ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+                ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
                 ->assertOk()
                 ->assertJsonPath('suggestion.category', 'overdue_concentration');
         }
@@ -345,11 +345,11 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_the_ceiling_stops_further_reoffers(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         foreach (['09:00', '13:00', '17:00'] as $time) {
             Carbon::setTestNow(Carbon::parse('2026-06-01 '.$time));
-            $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+            $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id);
         }
 
         $this->assertSame(3, AiSuggestionOffer::query()->count());
@@ -359,7 +359,7 @@ final class SuggestionValidityTest extends TestCase
         Carbon::setTestNow(Carbon::parse('2026-06-01 21:00'));
 
         $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->assertOk()
             ->assertExactJson(['suggestion' => null]);
 
@@ -394,6 +394,80 @@ final class SuggestionValidityTest extends TestCase
         );
     }
 
+    /**
+     * 1.6 Entity identity on a single client's statement.
+     *
+     * The statement screen is about one person. A finding about a different
+     * person must neither be shown there nor destroyed by the asking: the
+     * offer stays on its own client's screen, live and unanswered.
+     */
+    public function test_a_suggestion_is_confined_to_the_client_it_is_about(): void
+    {
+        $clientA = $this->overdueClient(first: 'Ana', last: 'Torres');
+        $clientB = Client::factory()->create(['first_names' => 'Beto', 'last_names' => 'Rios']);
+
+        // A's account produces the finding and puts it on offer.
+        $forA = $this->engine()->currentFor($this->user, 'receivables', 'client_account', null, $clientA->id);
+
+        $this->assertNotNull($forA, "A's own account should raise the overdue finding.");
+        $this->assertSame($clientA->id, (int) $forA->entity_reference);
+
+        // B's account is asked while A's offer is still live.
+        $forB = $this->engine()->currentFor($this->user, 'receivables', 'client_account', null, $clientB->id);
+
+        $this->assertNull($forB, "B's account must not show a finding about A.");
+
+        // Asking about B did not destroy, retire or resolve A's offer.
+        $stillThere = $this->engine()->currentFor($this->user, 'receivables', 'client_account', null, $clientA->id);
+
+        $this->assertNotNull($stillThere, "A's pending suggestion should survive B's account being opened.");
+        $this->assertSame($forA->id, $stillThere->id, 'It should be the same offer, not a replacement.');
+
+        // And it is the same status it had before: not answered on B's behalf.
+        $this->assertSame(AiSuggestion::STATUS_AVAILABLE, $stillThere->status);
+    }
+
+    /**
+     * The same question asked without saying whose account it is.
+     *
+     * A client's statement is only ever about one client, so an unscoped
+     * request has no client to be scoped to and is answered with silence. It
+     * must not fall back to "whoever is most overdue", which is how one
+     * person's debt ended up announced on another's page.
+     */
+    public function test_an_unscoped_account_request_returns_nothing(): void
+    {
+        $this->overdueClient(first: 'Ana', last: 'Torres');
+
+        $this->assertNull(
+            $this->engine()->currentFor($this->user, 'receivables', 'client_account'),
+            'A client_account request with no client id must not resolve to anyone.'
+        );
+    }
+
+    /**
+     * The portfolio screen is about everybody, and that stays true.
+     *
+     * Scoping the statement screen must not narrow the collection screen: a
+     * finding about any client they may act on is still fair to raise there.
+     */
+    public function test_the_portfolio_screen_still_sees_any_client(): void
+    {
+        // Different months, so these are two separate payables rather than a
+        // second charge for the same one.
+        $clientA = $this->overdueClient('2026-01', 45_000_000, 'Ana', 'Torres');
+        $clientB = $this->overdueClient('2026-02', 45_000_000, 'Beto', 'Rios');
+
+        $offered = $this->engine()->currentFor($this->user, 'receivables', 'portfolio');
+
+        $this->assertNotNull($offered, 'The portfolio screen should still be served a finding.');
+        $this->assertContains(
+            (int) $offered->entity_reference,
+            [$clientA->id, $clientB->id],
+            'The portfolio finding should be about one of the overdue clients.'
+        );
+    }
+
     public function test_a_candidate_is_stamped_with_the_screen_that_asked_for_it(): void
     {
         $this->overdueClient();
@@ -422,9 +496,9 @@ final class SuggestionValidityTest extends TestCase
 
     public function test_the_offer_log_records_where_the_interruption_happened(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
-        $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+        $this->actingAs($this->user)->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id);
 
         $offer = AiSuggestionOffer::query()->firstOrFail();
 

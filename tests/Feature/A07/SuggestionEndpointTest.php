@@ -85,18 +85,23 @@ final class SuggestionEndpointTest extends TestCase
         // The most common response this endpoint will ever give. If it were an
         // error status, every client would need special handling for "nothing to
         // say", and the first thing that would be written is a retry.
+        //
+        // Asked about a client who owes nothing: a real client, with nothing to
+        // say about them.
+        $client = Client::factory()->create();
+
         $response = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id);
 
         $response->assertOk()->assertExactJson(['suggestion' => null]);
     }
 
     public function test_a_real_signal_arrives_with_its_explanation_and_evidence(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $response = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id);
 
         $response->assertOk();
 
@@ -120,10 +125,10 @@ final class SuggestionEndpointTest extends TestCase
 
     public function test_accepting_records_the_answer_and_changes_nothing_else(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $id = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         $before = [
@@ -151,10 +156,10 @@ final class SuggestionEndpointTest extends TestCase
 
     public function test_dismissing_records_the_answer(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $id = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         $this->actingAs($this->user)
@@ -167,10 +172,10 @@ final class SuggestionEndpointTest extends TestCase
 
     public function test_someone_else_cannot_dismiss_your_suggestion_and_cannot_confirm_it_exists(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $id = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         // The same 404 as a row that does not exist. A 403 would confirm it
@@ -188,10 +193,10 @@ final class SuggestionEndpointTest extends TestCase
 
     public function test_answering_a_dismissed_suggestion_again_is_still_not_found_after_it_is_gone(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $id = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         AiSuggestion::query()->findOrFail($id)->delete();
@@ -203,14 +208,14 @@ final class SuggestionEndpointTest extends TestCase
 
     public function test_a_second_call_returns_the_same_suggestion_rather_than_a_new_one(): void
     {
-        $this->overdueClient();
+        $client = $this->overdueClient();
 
         $first = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         $second = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account')
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$client->id)
             ->json('suggestion.id');
 
         $this->assertSame($first, $second);

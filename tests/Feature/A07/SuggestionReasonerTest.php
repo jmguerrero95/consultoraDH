@@ -85,6 +85,9 @@ final class SuggestionReasonerTest extends TestCase
         ]);
     }
 
+    /** One overdue client per test, shared by the setup and `offer()`. */
+    private ?Client $client = null;
+
     private function overdueClient(): Client
     {
         $client = Client::factory()->create(['first_names' => 'Ana', 'last_names' => 'Torres']);
@@ -102,10 +105,19 @@ final class SuggestionReasonerTest extends TestCase
         return $client;
     }
 
+    /**
+     * An offer on the overdue client's own statement.
+     *
+     * Scoped to that client, because that is the only question a single
+     * client's account can now ask - and an unscoped one is answered with
+     * silence rather than with whoever happens to be worst.
+     */
     private function offer(): AiSuggestion
     {
+        $client = $this->client ??= $this->overdueClient();
+
         $suggestion = app(SuggestionEngine::class)
-            ->currentFor($this->user, 'receivables', 'client_account');
+            ->currentFor($this->user, 'receivables', 'client_account', null, $client->id);
 
         return $suggestion;
     }
@@ -118,7 +130,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_a_well_formed_answer_is_used_and_recorded(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         $this->providerSays(json_encode([
             'decision' => 'answer',
@@ -138,7 +150,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_the_reasoned_answer_is_what_the_client_is_shown(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         $this->providerSays(json_encode([
             'decision' => 'answer',
@@ -163,7 +175,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_an_answer_with_a_number_the_evidence_does_not_contain_is_thrown_away(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         // $98.000.000 is not anywhere in the evidence. It is the model doing
         // arithmetic nobody asked for, and a collections operator acting on it
@@ -184,7 +196,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_an_answer_that_invents_an_action_is_thrown_away(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         // "Dar de baja el cliente" is not something this feature may propose, and
         // nothing downstream would catch it - accepting a suggestion only opens
@@ -204,7 +216,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_an_answer_that_is_not_json_is_thrown_away(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         $this->providerSays('Estimado usuario, su cliente tiene una deuda importante.');
 
@@ -216,7 +228,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_the_model_is_allowed_to_decide_it_has_nothing_to_add(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         $this->providerSays(json_encode([
             'decision' => 'silent',
@@ -235,7 +247,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_a_provider_outage_leaves_the_generated_sentence_untouched(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         Http::fake([self::PROVIDER_URL => Http::response(['error' => 'overloaded'], 503)]);
 
@@ -255,7 +267,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_no_provider_configured_is_not_an_error(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         config([
             'ai.primary' => ['base_url' => null, 'api_key' => null, 'model' => null],
@@ -273,7 +285,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_rereading_an_offer_never_costs_a_model_call(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         $this->providerSays(json_encode([
             'decision' => 'answer',
@@ -295,7 +307,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_the_same_problem_is_not_reasoned_twice_in_a_day(): void
     {
-        $this->overdueClient();
+        $client = $this->client ??= $this->overdueClient();
 
         $this->providerSays(json_encode([
             'decision' => 'answer',
@@ -309,14 +321,14 @@ final class SuggestionReasonerTest extends TestCase
         // Cooldown has passed, so it is offered again - but the reasoning window
         // has not, and the stored answer is reused.
         Carbon::setTestNow(Carbon::parse('2026-06-01 18:00'));
-        app(SuggestionEngine::class)->currentFor($this->user, 'receivables', 'client_account');
+        app(SuggestionEngine::class)->currentFor($this->user, 'receivables', 'client_account', null, $client->id);
 
         $this->assertSame(1, $this->providerCalls(), 'Reasoned once, then reused.');
     }
 
     public function test_reasoning_is_skipped_entirely_when_switched_off(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         config(['ai.suggestions.reasoning.enabled' => false]);
         $this->providerSays('{"decision":"answer","headline":"x","rationale":"y","action":"z"}');
@@ -375,7 +387,7 @@ final class SuggestionReasonerTest extends TestCase
             a03_payable(45_000_000, $month, $employer);
 
             Carbon::setTestNow(Carbon::parse('2026-06-01 0'.min($i + 1, 9).':00'));
-            app(SuggestionEngine::class)->currentFor($this->user, 'receivables', 'client_account');
+            app(SuggestionEngine::class)->currentFor($this->user, 'receivables', 'client_account', null, $client->id);
         }
 
         // Free tiers are metered by request, and an assistant that spends the
@@ -386,7 +398,7 @@ final class SuggestionReasonerTest extends TestCase
 
     public function test_stale_reasoning_is_dropped_when_the_evidence_moves(): void
     {
-        $this->overdueClient();
+        $this->client ??= $this->overdueClient();
 
         $this->providerSays(json_encode([
             'decision' => 'answer',
