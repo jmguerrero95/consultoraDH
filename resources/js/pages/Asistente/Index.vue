@@ -76,7 +76,19 @@ async function attachFile(file: File): Promise<void> {
     uploadError.value = null;
 
     try {
-        await ai.uploadTask(file, selectedId.value);
+        // A conversation is opened first if there is none, so the attachment
+        // belongs to a thread from the start. Uploading without one produced a
+        // document no conversation could reach, which is the difference between
+        // "the assistant read my file" and "it answered from its own memory".
+        let conversationId = selectedId.value;
+
+        if (conversationId === null) {
+            const opened = await ai.openConversation();
+            conversationId = opened.conversation_id;
+            selectedId.value = conversationId;
+        }
+
+        await ai.uploadTask(file, conversationId);
         // The panel owns the list; refreshing it here is what makes the new row
         // appear without waiting for the next poll.
         await tasks.refresh();

@@ -95,6 +95,42 @@ final class AiAssistantController extends Controller
      * POST body: { "conversation_id": 123, "question": "..." }
      * If conversation_id is omitted a new conversation is created.
      */
+    /**
+     * Open an empty conversation.
+     *
+     * ## Why this exists
+     *
+     * `store()` used to be the only way to get a conversation, and it requires a
+     * question. That made "attach a file, then ask about it" impossible in the
+     * order a person naturally wants to do it: there is no conversation to
+     * attach to until something has been asked, and the upload either lands
+     * unscoped - where no question in that conversation can reach it - or is
+     * refused.
+     *
+     * Creating it first costs one request and makes the upload belong to a
+     * conversation from the start. Nothing is made globally visible by it: the
+     * attachment still belongs to this person and this thread.
+     */
+    public function open(Request $request): JsonResponse
+    {
+        $deny = $this->verifyAiUse($request);
+
+        if ($deny) {
+            return $deny;
+        }
+
+        $conversation = AiConversation::query()->create([
+            'user_id' => $request->user()->id,
+            'title' => 'Conversación '.now()->format('Y-m-d H:i'),
+        ]);
+
+        return response()->json([
+            'conversation_id' => $conversation->id,
+            'title' => $conversation->title,
+            'created_at' => $conversation->created_at?->toDateTimeString(),
+        ], 201);
+    }
+
     public function store(Request $request): JsonResponse
     {
         // Check ai.use permission

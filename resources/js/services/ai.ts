@@ -163,6 +163,18 @@ export const ai = {
         });
     },
 
+    /**
+     * Open an empty conversation.
+     *
+     * So a document can be attached *before* the first question. Waiting until
+     * something has been asked means the upload lands with no conversation to
+     * belong to - and a question asked afterwards, in whatever thread it lands
+     * in, cannot reach it.
+     */
+    openConversation(): Promise<{ conversation_id: number; title: string | null; created_at: string | null }> {
+        return request<{ conversation_id: number; title: string | null; created_at: string | null }>('POST', '/api/ai/conversations/open');
+    },
+
     history(conversationId: number): Promise<{ conversation_id: number; messages: AiMessagePayload[] }> {
         return request<{ conversation_id: number; messages: AiMessagePayload[] }>('GET', `/api/ai/conversations/${conversationId}`);
     },

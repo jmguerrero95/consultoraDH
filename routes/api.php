@@ -854,6 +854,10 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.ai.conversations.index');
         Route::post('/ai/conversations', [AiAssistantController::class, 'store'])
             ->name('api.ai.conversations.store');
+        // Opens an empty conversation, so a document can be attached before the
+        // first question rather than after it.
+        Route::post('/ai/conversations/open', [AiAssistantController::class, 'open'])
+            ->name('api.ai.conversations.open');
         Route::get('/ai/conversations/{conversation}', [AiAssistantController::class, 'show'])
             ->name('api.ai.conversations.show');
         Route::post('/ai/conversations/{conversation}/messages', [AiAssistantController::class, 'messages'])

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Assistant\Tasks;
 
 use App\Domain\Ai\AiMessage;
+use App\Domain\Documents\DocumentRetriever;
 use App\Models\AiTask;
 use App\Models\User;
 use App\Services\Ai\AiProviderException;
@@ -55,6 +56,7 @@ final class ResearchTask implements AiTaskHandler
     public function __construct(
         private readonly AiToolRegistry $tools,
         private readonly AiProviderResolver $providers,
+        private readonly DocumentRetriever $documents,
     ) {}
 
     public function kind(): string
@@ -74,7 +76,7 @@ final class ResearchTask implements AiTaskHandler
 
         $task->forceFill(['stage' => 'Buscando fuentes', 'progress' => 20])->save();
 
-        $sources = $this->gather($user, $question);
+        $sources = $this->gather($user, $question, $task->ai_conversation_id);
 
         $task->forceFill([
             'stage' => $sources === [] ? 'Sin fuentes' : 'Sintetizando',
@@ -113,10 +115,21 @@ final class ResearchTask implements AiTaskHandler
      *
      * @return list<array{title: string, url: string, domain: string, snippet: string}>
      */
-    private function gather(User $user, string $question): array
+    private function gather(User $user, string $question, ?int $conversationId): array
     {
         $sources = [];
         $seen = [];
+
+        // The person's own attachments come first: they are the most relevant
+        // thing they could have, they are already authorised, and they are what
+        // "investigate this spreadsheet I just gave you" is asking about.
+        //
+        // Scoped to this task's conversation, exactly as an assistant turn is, so
+        // a document attached to a different thread stays out - and so a
+        // conversation's contents never leak into another's research.
+        foreach ($this->attachments($user, $question, $conversationId) as $source) {
+            $sources[] = $source;
+        }
 
         foreach ([
             ['tool' => 'document_search', 'arguments' => ['query' => $question, 'max_results' => 5]],
@@ -153,6 +166,51 @@ final class ResearchTask implements AiTaskHandler
                 if (count($sources) >= self::MAX_SOURCES) {
                     return $sources;
                 }
+            }
+        }
+
+        return $sources;
+    }
+
+    /**
+     * Passages from the documents attached to the task's conversation.
+     *
+     * @return list<array{title: string, url: string, domain: string, snippet: string}>
+     */
+    private function attachments(User $user, string $question, ?int $conversationId): array
+    {
+        if ($conversationId === null) {
+            return [];
+        }
+
+        try {
+            $found = $this->documents->search($user, $question, $conversationId);
+        } catch (\Throwable $e) {
+            Log::info('Research attachments unavailable.', ['reason' => $e->getMessage()]);
+
+            return [];
+        }
+
+        $sources = [];
+
+        foreach ($found['passages'] ?? [] as $passage) {
+            $file = (string) ($passage['file'] ?? 'documento');
+
+            $sources[] = [
+                // Named like a source so the synthesis prompt treats it the same
+                // way as a web page: something to cite, not something to obey.
+                'title' => $file,
+                // Not a URL. Inventing one for a local file would produce a
+                // citation that resolves to nothing.
+                'url' => '',
+                'domain' => 'adjunto',
+                'snippet' => trim((string) ($passage['content'] ?? '')).'
+'
+                    .'(fragmento '.($passage['chunk'] ?? '?').')',
+            ];
+
+            if (count($sources) >= self::MAX_SOURCES) {
+                break;
             }
         }
 
