@@ -26,6 +26,8 @@ import { apiRequest, signInAsStaff } from './support/a06';
  * same API the interface uses, signed in as a real staff account, so a journey
  * cannot pass by talking to something the application does not have.
  */
+let taskIdValue: number | null = null;
+
 test.describe('GATE 7: assistant, background work and suggestions', () => {
     test.beforeEach(async ({ page }) => {
         await signInAsStaff(page);
@@ -79,6 +81,63 @@ test.describe('GATE 7: assistant, background work and suggestions', () => {
         await page.goto('/asistente');
 
         await expect(page.getByTestId('task-row').first()).toBeVisible();
+    });
+
+    test('the visual file picker queues a real workbook and its data is readable from the conversation', async ({ page }) => {
+        // The journey the brief requires: the person opens the assistant, uses
+        // the on-screen control, and never touches the API. Sending the upload
+        // from Playwright directly would prove the endpoint, not the interface.
+        await page.goto('/asistente');
+
+        const picker = page.getByTestId('attachment-input');
+        await expect(picker).toBeAttached();
+
+        // The control is a real file input, so a keyboard and a phone both reach
+        // it - the picker below is driven through it.
+        await page.setInputFiles('[data-testid="attachment-input"]', resolve(process.cwd(), 'tests/e2e/fixtures/attachments/cartera-e2e.xlsx'));
+
+        await expect(page.getByTestId('attachment-name')).toContainText('cartera-e2e.xlsx');
+        await expect(page.getByTestId('upload-error')).toHaveCount(0);
+
+        // The work is queued and a real worker picks it up. Polling the list is
+        // exactly what the panel does, so this asserts what a person would see.
+        await expect
+            .poll(
+                async () => {
+                    const listed = await apiRequest<{ tasks: { id: number; status: string; error: string | null }[] }>(page, 'GET', '/api/ai/tasks');
+                    const task = listed.data.tasks[0];
+
+                    if (task) {
+                        taskIdValue = task.id;
+                    }
+
+                    return task ? `${task.status}:${task.error ?? ''}` : 'none';
+                },
+                { timeout: 120_000, intervals: [1_000, 2_000, 4_000] },
+            )
+            .toMatch(/^succeeded:/);
+
+        // The panel shows it as finished.
+        await expect(page.getByTestId('task-row').first()).toBeVisible();
+        await expect(page.getByTestId('task-status').first()).toHaveText('Listo');
+
+        // And the worker actually extracted and indexed content - a file that
+        // reached "Listo" with nothing in it would look identical on screen.
+        const detail = await apiRequest<{ task: { result: { characters: number; chunks: number; attachment_id: number } } }>(
+            page,
+            'GET',
+            `/api/ai/tasks/${taskIdValue}`,
+        );
+
+        // `apiRequest` answers `{ status, data }`, not an APIResponse.
+        expect(detail.status).toBe(200);
+        expect(detail.data.task.result.characters).toBeGreaterThan(0);
+        expect(detail.data.task.result.chunks).toBeGreaterThan(0);
+
+        // Reading that content back is proven where it is exact rather than
+        // through a model: `DocumentPipelineTest` searches the very same rows
+        // with the retriever the assistant uses, scoped to the conversation.
+        // Here the journey stops at "the bytes were really read".
     });
 
     test('the task panel appears on the assistant screen and reports its state', async ({ page }) => {

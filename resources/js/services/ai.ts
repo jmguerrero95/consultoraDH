@@ -208,4 +208,33 @@ export const ai = {
         return request<{ task: AiTaskPayload }>('POST', `/api/ai/tasks/${id}/cancel`);
     },
 
+    /** Queue a research run. 202: queued, not answered. */
+    researchTask(question: string, conversationId?: number | null): Promise<{ task: AiTaskPayload }> {
+        return request<{ task: AiTaskPayload }>('POST', '/api/ai/tasks/research', {
+            body: {
+                question,
+                ...(conversationId === undefined || conversationId === null ? {} : { conversation_id: conversationId }),
+            },
+        });
+    },
+
+    /**
+     * Queue a document generation.
+     *
+     * Either `content` (the body, ready to write) or `brief` (what it should
+     * say) - the server refuses a request with neither, rather than producing an
+     * empty file.
+     */
+    generateTask(
+        options: { format: string; filename: string; content?: string; brief?: string },
+        conversationId?: number | null,
+    ): Promise<{ task: AiTaskPayload }> {
+        return request<{ task: AiTaskPayload }>('POST', '/api/ai/tasks/document-generate', {
+            body: {
+                ...options,
+                ...(conversationId === undefined || conversationId === null ? {} : { conversation_id: conversationId }),
+            },
+        });
+    },
+
 } as const;

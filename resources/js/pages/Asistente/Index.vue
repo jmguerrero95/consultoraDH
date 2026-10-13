@@ -4,11 +4,13 @@ import { computed, onMounted, ref } from 'vue';
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
+import AttachmentPicker from '@/components/assistant/AttachmentPicker.vue';
 import MicButton from '@/components/assistant/MicButton.vue';
 import SpeakButton from '@/components/assistant/SpeakButton.vue';
 import SuggestionHint from '@/components/assistant/SuggestionHint.vue';
 import TaskPanel from '@/components/assistant/TaskPanel.vue';
 import { useSuggestion } from '@/composables/useSuggestion';
+import { useAiTasks } from '@/composables/useTasks';
 import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
 import { ai } from '@/services/ai';
@@ -38,6 +40,91 @@ const sending = ref(false);
 const loading = ref(true);
 const status = ref<AiStatusPayload | null>(null);
 const error = ref<string | null>(null);
+
+// --- Background work -------------------------------------------------------
+//
+// One set of task states for the whole screen. The picker, the research and
+// generate controls and the panel all report into `tasks`, so a file uploaded
+// here is the same row the panel lists and the same one a push notification is
+// about.
+const tasks = useAiTasks();
+
+const uploading = ref(false);
+
+const uploadError = ref<string | null>(null);
+
+const longRunningError = ref<string | null>(null);
+
+const briefOpen = ref(false);
+
+const briefFormat = ref('pdf');
+
+const briefFilename = ref('documento');
+
+const briefText = ref('');
+
+/**
+ * Upload a document and queue its indexing.
+ *
+ * Sent without a conversation when none is selected yet: the work is queued and
+ * persistent, so it does not need a thread to exist first, and refusing the
+ * upload until somebody had asked a question would be an arbitrary rule. The
+ * attachment can be read from any conversation afterwards.
+ */
+async function attachFile(file: File): Promise<void> {
+    uploading.value = true;
+    uploadError.value = null;
+
+    try {
+        await ai.uploadTask(file, selectedId.value);
+        // The panel owns the list; refreshing it here is what makes the new row
+        // appear without waiting for the next poll.
+        await tasks.refresh();
+    } catch (e) {
+        // Said plainly and shown. A silent failure here is the worst outcome:
+        // the person chose a file, watched nothing happen, and has no idea
+        // whether it arrived.
+        uploadError.value = readError(e, 'No fue posible adjuntar el archivo.');
+    } finally {
+        uploading.value = false;
+    }
+}
+
+async function startResearch(): Promise<void> {
+    const question = draft.value.trim();
+
+    if (question === '') {
+        longRunningError.value = 'Escribe la pregunta que quieres investigar.';
+
+        return;
+    }
+
+    longRunningError.value = null;
+
+    try {
+        await ai.researchTask(question, selectedId.value);
+        draft.value = '';
+        await tasks.refresh();
+    } catch (e) {
+        longRunningError.value = readError(e, 'No fue posible iniciar la investigación.');
+    }
+}
+
+async function startGeneration(): Promise<void> {
+    longRunningError.value = null;
+
+    try {
+        await ai.generateTask(
+            { format: briefFormat.value, filename: briefFilename.value, brief: briefText.value },
+            selectedId.value,
+        );
+        briefOpen.value = false;
+        briefText.value = '';
+        await tasks.refresh();
+    } catch (e) {
+        longRunningError.value = readError(e, 'No fue posible iniciar la generación.');
+    }
+}
 
 // Voice is optional everywhere: neither control appears where the browser
 // cannot provide it, and the composer works exactly the same without them.
@@ -327,6 +414,60 @@ function formatDate(value: string | null): string {
 
         <AppAlert v-if="error" variant="danger" :title="error" class="mb-3" />
 
+        <div v-if="uploadError" class="mb-3" data-testid="upload-error">
+            <AppAlert variant="danger" :title="uploadError" />
+        </div>
+
+        <div v-if="longRunningError" class="mb-3" data-testid="long-running-error">
+            <AppAlert variant="danger" :title="longRunningError" />
+        </div>
+
+        <form
+            v-if="briefOpen"
+            class="mb-3 rounded-lg border border-slate-200 p-3"
+            data-testid="generate-form"
+            @submit.prevent="startGeneration"
+        >
+            <div class="mb-2 flex flex-wrap gap-2">
+                <label class="text-xs text-slate-600">
+                    Formato
+                    <select v-model="briefFormat" class="ml-1 rounded border border-slate-300 px-2 py-1" data-testid="generate-format">
+                        <option value="pdf">PDF</option>
+                        <option value="docx">DOCX</option>
+                        <option value="xlsx">XLSX</option>
+                        <option value="csv">CSV</option>
+                        <option value="md">Markdown</option>
+                        <option value="txt">Texto</option>
+                    </select>
+                </label>
+
+                <label class="text-xs text-slate-600">
+                    Nombre
+                    <input
+                        v-model="briefFilename"
+                        type="text"
+                        class="ml-1 rounded border border-slate-300 px-2 py-1"
+                        data-testid="generate-filename"
+                    />
+                </label>
+            </div>
+
+            <label class="visually-hidden" for="cdh-generate-brief">Qué debe contener el documento</label>
+            <textarea
+                id="cdh-generate-brief"
+                v-model="briefText"
+                rows="3"
+                class="w-full rounded border border-slate-300 p-2 text-sm"
+                placeholder="Describe qué debe contener el documento…"
+                data-testid="generate-brief"
+            />
+
+            <div class="mt-2 flex gap-2">
+                <AppButton type="submit" data-testid="generate-submit">Generar</AppButton>
+                <AppButton type="button" variant="link" size="sm" @click="briefOpen = false">Cancelar</AppButton>
+            </div>
+        </form>
+
         <!--
             Above the transcript and below the error, so it is the first thing
             read after the page opens and never covers work already on screen.
@@ -335,7 +476,7 @@ function formatDate(value: string | null): string {
             Background work, and what became of it. Shown here because this is the
             screen people come back to after closing the app mid-task.
         -->
-        <TaskPanel class="mb-3" />
+        <TaskPanel class="mb-3" :controller="tasks" />
 
         <SuggestionHint
             v-if="hint.hasSuggestion.value && hint.suggestion.value"
@@ -437,6 +578,36 @@ function formatDate(value: string | null): string {
                         placeholder="Escribe tu consulta…"
                         :disabled="sending || loading"
                     />
+                    <div class="cdh-ai__composer-tools">
+                        <AttachmentPicker
+                            :busy="uploading"
+                            :disabled="sending || loading"
+                            @choose="attachFile"
+                        />
+
+                        <AppButton
+                            type="button"
+                            variant="link"
+                            size="sm"
+                            :disabled="sending || loading"
+                            data-testid="research-button"
+                            @click="startResearch"
+                        >
+                            Investigar
+                        </AppButton>
+
+                        <AppButton
+                            type="button"
+                            variant="link"
+                            size="sm"
+                            :disabled="sending || loading"
+                            data-testid="generate-button"
+                            @click="briefOpen = !briefOpen"
+                        >
+                            Generar documento
+                        </AppButton>
+                    </div>
+
                     <MicButton :dictation="dictation" @send="appendDictation" />
 
                     <AppButton type="submit" :busy="sending" :disabled="draft.trim() === ''">Enviar</AppButton>
@@ -625,6 +796,13 @@ function formatDate(value: string | null): string {
     font-size: 0.75rem;
     max-height: 12rem;
     overflow: auto;
+}
+
+.cdh-ai__composer-tools {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
 }
 
 .cdh-ai__composer {

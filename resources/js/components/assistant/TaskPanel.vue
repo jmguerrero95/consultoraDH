@@ -24,8 +24,25 @@
 import { computed } from 'vue';
 
 import { useAiTasks } from '@/composables/useTasks';
+import type { useAiTasks as AiTasksController } from '@/composables/useTasks';
 
-const { tasks, pending, loading, refresh, cancel } = useAiTasks();
+/**
+ * Takes the task controller from its parent rather than creating one.
+ *
+ * Two instances of this composable on one screen would be two lists polling the
+ * same endpoint, and - worse - two independent views of the same work: a file
+ * uploaded by the picker would appear in the parent's list and not in the
+ * panel's, which is exactly the "I uploaded it and nothing happened" feeling
+ * this feature exists to avoid.
+ *
+ * The fallback keeps the component usable on its own, and is what the unit
+ * tests drive.
+ */
+const props = defineProps<{ controller?: ReturnType<typeof useAiTasks> }>();
+
+const own = props.controller === undefined ? useAiTasks() : null;
+
+const { tasks, pending, loading, refresh, cancel } = own ?? (props.controller as NonNullable<typeof props.controller>);
 
 const finished = computed(() => tasks.value.filter((task) => task.finished));
 
