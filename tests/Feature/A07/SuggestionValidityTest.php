@@ -394,6 +394,32 @@ final class SuggestionValidityTest extends TestCase
         );
     }
 
+    public function test_a_candidate_is_stamped_with_the_screen_that_asked_for_it(): void
+    {
+        $this->overdueClient();
+
+        $detector = app(SuggestionSignalDetector::class);
+
+        // The same rule answers both receivables screens, so the category alone
+        // does not say which screen asked. This is what the engine stores on
+        // the row, and it is what decides whether the row survives being shown
+        // on the screen that asked.
+        foreach (['client_account', 'portfolio'] as $operation) {
+            $candidates = $detector->detect($this->user, 'receivables', $operation);
+
+            $this->assertNotEmpty($candidates, "The collections rule should answer {$operation}.");
+
+            foreach ($candidates as $candidate) {
+                $this->assertSame('receivables', $candidate['module'], 'A candidate is stamped with the module that asked.');
+                $this->assertSame(
+                    $operation,
+                    $candidate['operation'],
+                    'A candidate is stamped with the operation that asked, so a shared rule cannot store the wrong context.'
+                );
+            }
+        }
+    }
+
     public function test_the_offer_log_records_where_the_interruption_happened(): void
     {
         $this->overdueClient();

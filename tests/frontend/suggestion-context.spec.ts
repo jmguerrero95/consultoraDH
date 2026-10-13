@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { SUGGESTION_CONTEXTS, contextForRoute } from '@/composables/useSuggestionContext';
@@ -23,7 +26,14 @@ describe('suggestion contexts', () => {
 
     it('gives both import screens the same issues context', () => {
         expect(contextForRoute('imports')).toEqual({ module: 'imports', operation: 'issues' });
-        expect(contextForRoute('imports.detail')).toEqual({ module: 'imports', operation: 'issues' });
+
+        // `imports.show`, not `imports.detail`. The router names the detail
+        // screen `imports.show`, and the map used a name that matched nothing -
+        // so the entry looked right, passed review, and left the detail screen
+        // permanently unable to ask. This test asserted the wrong name and so
+        // agreed with the bug.
+        expect(contextForRoute('imports.show')).toEqual({ module: 'imports', operation: 'issues' });
+        expect(contextForRoute('imports.detail')).toBeNull();
     });
 
     it('says nothing on a screen with no context', () => {
@@ -49,6 +59,18 @@ describe('suggestion contexts', () => {
         for (const [route, context] of Object.entries(SUGGESTION_CONTEXTS)) {
             expect(`${context.module}/${context.operation}`, `route ${route}`).toBeDefined();
             expect(known.has(`${context.module}/${context.operation}`), `route ${route} context`).toBe(true);
+        }
+    });
+
+    it('names screens the router actually defines', () => {
+        // Read from the router itself, so a route that is renamed cannot leave
+        // this table quietly pointing at nothing. A mapping typo does not throw;
+        // it just makes a screen permanently quiet, which is the whole bug.
+        const router = readFileSync(resolve(process.cwd(), 'resources/js/router/index.ts'), 'utf-8');
+        const defined = new Set([...router.matchAll(/name:\s*'([^']+)'/g)].map((m) => m[1]));
+
+        for (const route of Object.keys(SUGGESTION_CONTEXTS)) {
+            expect(defined.has(route), `SUGGESTION_CONTEXTS has "${route}", which the router does not define`).toBe(true);
         }
     });
 

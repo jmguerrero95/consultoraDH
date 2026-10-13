@@ -7,6 +7,8 @@ import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
 import { useDebouncedRef } from '@/composables/useDebouncedRef';
+import { useContextualSuggestion } from '@/composables/useContextualSuggestion';
+import SuggestionHint from '@/components/assistant/SuggestionHint.vue';
 import { fecha as formatDate } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
@@ -203,7 +205,15 @@ function appliedCount(row: LegacyImport): string {
 
     return String(Object.values(applied).reduce((sum, value) => sum + value, 0));
 }
+
+// The proactive hint for this screen.
+//
+// `null` when the screen has no context, which is the case the backend then
+// answers with nothing and no banner is drawn. The key is the data that could
+// change the signal, so a reload re-asks once instead of polling.
+const hint = useContextualSuggestion('imports', () => pagination.value?.total ?? 0);
 </script>
+
 
 <template>
     <section class="cdh-content">
@@ -217,6 +227,22 @@ function appliedCount(row: LegacyImport): string {
         </header>
 
         <AppAlert v-if="error" variant="danger" :title="error" class="mb-4" />
+
+        <!--
+            The proactive hint. Drawn only when the backend returned a real,
+            authorised suggestion for *this* screen; `hasSuggestion` is false
+            otherwise, and nothing is rendered. Nothing here performs work:
+            accepting confirms with the server and opens the assistant with the
+            suggested action as a draft to read.
+        -->
+        <SuggestionHint
+            v-if="hint.hasSuggestion.value && hint.suggestion.value"
+            class="mb-4"
+            :suggestion="hint.suggestion.value"
+            :busy="hint.busy.value"
+            @accept="hint.accept"
+            @dismiss="hint.dismiss"
+        />
 
         <!--
             §17.2: the explanation that this changes nothing comes before the button, not

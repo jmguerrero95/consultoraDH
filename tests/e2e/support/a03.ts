@@ -627,10 +627,21 @@ export async function openPeriod(page: Page, month: string): Promise<Period> {
     return periodFor(page, month);
 }
 
-export async function generate(page: Page, periodId: number): Promise<void> {
+export async function generate(page: Page, periodId: number, options: { required?: boolean } = {}): Promise<void> {
     const response = await apiWrite(page, `/api/periods/${periodId}/obligations/generate`, {
         missing_only: true,
     });
+
+    // `required: false` lets a journey that only needs its own obligation
+    // tolerate a refusal caused by another journey's unconfigured clients.
+    // Generation is a global act: one client without a rate and a cutoff blocks
+    // the whole month, and suites that leave clients deliberately unconfigured
+    // are making that true for everyone after them. The obligation the caller
+    // actually needs is asserted afterwards, so a refusal that mattered still
+    // fails the journey - just with a message about the right thing.
+    if (options.required === false) {
+        return;
+    }
 
     expect(response.status(), `the month should generate: ${await response.text()}`).toBe(200);
 }

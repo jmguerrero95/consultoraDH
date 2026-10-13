@@ -51,8 +51,13 @@ export const SUGGESTION_CONTEXTS: Record<string, SuggestionContext> = {
     receivables: { module: 'receivables', operation: 'portfolio' },
 
     // Import issues. Blocked imports and repeated validation failures live here.
+    //
+    // The router calls the detail screen `imports.show`. This map said
+    // `imports.detail`, which matched nothing - so the entry existed, looked
+    // correct, and silently meant the detail screen could never ask. A mapping
+    // typo does not error; it just makes a screen permanently quiet.
     imports: { module: 'imports', operation: 'issues' },
-    'imports.detail': { module: 'imports', operation: 'issues' },
+    'imports.show': { module: 'imports', operation: 'issues' },
 };
 
 /**

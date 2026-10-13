@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
@@ -13,6 +13,7 @@ import { useSuggestion } from '@/composables/useSuggestion';
 import { useAiTasks } from '@/composables/useTasks';
 import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
+import { useRoute } from 'vue-router';
 import { ai } from '@/services/ai';
 
 import type { AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
@@ -137,6 +138,45 @@ async function startGeneration(): Promise<void> {
         longRunningError.value = readError(e, 'No fue posible iniciar la generación.');
     }
 }
+
+// Where an acceptance from another screen arrives.
+//
+// The suggested action is put in the composer and nothing more. Accepting a
+// suggestion is a decision to *talk about* something; sending is a separate,
+// deliberate act, and no administrative write happens on the way here.
+const route = useRoute();
+
+function applySuggestedAction(value: unknown): void {
+    if (typeof value !== 'string' || value.trim() === '') {
+        return;
+    }
+
+    draft.value = value.trim();
+    focusComposer();
+}
+
+/**
+ * Move the caret to the composer, so the prepared action is ready to be read,
+ * corrected and sent rather than fired off unseen.
+ */
+function focusComposer(): void {
+    if (typeof document === 'undefined') {
+        return;
+    }
+
+    requestAnimationFrame(() => {
+        document.getElementById('cdh-ai-input')?.focus();
+    });
+}
+
+// Read on arrival and on any change, so a link that swaps the query while the
+// screen is open still lands.
+//
+// `route` is optional: this page is mounted in tests without a router, and
+// `useRoute()` returns nothing there. Reading `route.query` unguarded threw a
+// TypeError before anything was rendered, which took every assertion on the
+// screen down with it.
+watch(() => route?.query?.suggested, applySuggestedAction, { immediate: true });
 
 // Voice is optional everywhere: neither control appears where the browser
 // cannot provide it, and the composer works exactly the same without them.

@@ -137,6 +137,20 @@ final class SuggestionSignalDetector
 
             foreach ($detectors as $detector) {
                 foreach ($detector() as $candidate) {
+                    // Stamped with the context actually asked for.
+                    //
+                    // A rule can serve more than one screen - the overdue rule
+                    // answers both the statement and the portfolio - so the
+                    // candidate's own context is not necessarily the screen
+                    // being looked at. The engine stores the candidate's context
+                    // on the row and retires a row whose context does not match
+                    // the request, so a rule that stamped its own context would
+                    // store `client_account` for a portfolio request and then
+                    // immediately retire it: the portfolio screen would receive
+                    // the signal and never be able to show it.
+                    $candidate['module'] = $module;
+                    $candidate['operation'] = $operation;
+
                     $candidates[] = $candidate;
                 }
             }
