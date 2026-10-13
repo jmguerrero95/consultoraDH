@@ -99,6 +99,11 @@ it('gives collections the reads and the money work, and nothing else', function 
             'reports.export',
             'reports.view',
             'support.view',
+            // `tasks.create` is what the assistant's CreateOperationalTaskTool
+            // checks. It was missing from the seeder's catalogue entirely, so the
+            // tool's authorization could never be granted to anybody and the
+            // permission was invisible here.
+            'tasks.create',
             'tasks.manage',
             'tasks.view',
         ])
@@ -146,6 +151,11 @@ it('gives support reads including affiliations but no writes', function (): void
             'support.reply',
             'support.resolve',
             'support.view',
+            // `tasks.create` is what the assistant's CreateOperationalTaskTool
+            // checks. It was missing from the seeder's catalogue entirely, so the
+            // tool's authorization could never be granted to anybody and the
+            // permission was invisible here.
+            'tasks.create',
             'tasks.manage',
             'tasks.view',
         ])
