@@ -11,12 +11,27 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Testing\PendingCommand;
 use Spatie\Permission\Models\Role;
 
-/** Roles must exist before the command can assign them. */
 beforeEach(function (): void {
+    /** Roles must exist before the command can assign them. */
     Role::query()->firstOrCreate([
         'name' => 'Super Admin',
         'guard_name' => 'web',
     ]);
+
+    /*
+     * How many users exist before the command runs.
+     *
+     * These tests used to assert `User::count() === 0`, which is not a property
+     * of the command - it is a property of whatever ran earlier in the suite.
+     * Any test that left a row behind (or that runs without rolling back) made
+     * six unrelated assertions fail, and the failure pointed at the admin
+     * command rather than at whatever leaked.
+     *
+     * What is actually being tested is that a refused command creates nobody.
+     * A before/after count says exactly that, and says it whatever else is in
+     * the database.
+     */
+    $this->usersBefore = User::query()->count();
 });
 
 afterEach(function (): void {
@@ -84,7 +99,7 @@ it('refuses a password passed as a command line argument', function (): void {
         expect($e->getMessage())->toContain('The "--password" option does not exist');
     }
 
-    expect(User::query()->count())->toBe(0);
+    expect(User::query()->count())->toBe($this->usersBefore);
 });
 
 // --- The supported mechanisms ----------------------------------------------
@@ -141,7 +156,7 @@ it('rejects a mismatched confirmation from the environment', function (): void {
         '--email' => 'ana@consultora-dh.test',
     ])->assertFailed();
 
-    expect(User::query()->count())->toBe(0);
+    expect(User::query()->count())->toBe($this->usersBefore);
 });
 
 it('prompts with a hidden field when the environment variables are absent', function (): void {
@@ -172,7 +187,7 @@ it('fails without a password and without a prompt when non interactive', functio
         '--email' => 'ana@consultora-dh.test',
     ])->assertFailed();
 
-    expect(User::query()->count())->toBe(0);
+    expect(User::query()->count())->toBe($this->usersBefore);
 });
 
 // --- Existing behaviour ----------------------------------------------------
@@ -197,7 +212,7 @@ it('rejects a duplicate address, including one that differs only in case', funct
         '--email' => 'EXISTENTE@consultora-dh.test',
     ])->assertFailed();
 
-    expect(User::query()->count())->toBe(1);
+    expect(User::query()->count())->toBe($this->usersBefore + 1);
 });
 
 it('rejects a password that does not meet the policy', function (): void {
@@ -217,7 +232,7 @@ it('requires a name and an address', function (): void {
     runCreateAdmin(['--email' => 'sin-nombre@consultora-dh.test'])->assertFailed();
     runCreateAdmin(['--name' => 'Sin Correo'])->assertFailed();
 
-    expect(User::query()->count())->toBe(0);
+    expect(User::query()->count())->toBe($this->usersBefore);
 });
 
 it('validates the address format', function (): void {
@@ -228,7 +243,7 @@ it('validates the address format', function (): void {
         '--email' => 'esto-no-es-un-correo',
     ])->assertFailed();
 
-    expect(User::query()->count())->toBe(0);
+    expect(User::query()->count())->toBe($this->usersBefore);
 });
 
 it('records the creation in the audit trail', function (): void {

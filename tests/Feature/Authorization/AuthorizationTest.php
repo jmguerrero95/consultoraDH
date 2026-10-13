@@ -74,7 +74,19 @@ it('reports the permissions of the signed in user without leaking anything else'
     // than the single one that used to be the only one. Both sides are sorted
     // because the order the interface receives them in is not the contract.
     $reported = collect($response->json('user.permissions'))->sort()->values()->all();
-    $granted = Permission::query()->pluck('name')->sort()->values()->all();
+
+    // The person's own permissions - not the whole catalogue.
+    //
+    // These were compared against `Permission::pluck('name')`, which is every
+    // permission that exists. That only holds while one role happens to hold all
+    // of them, and it stops holding the moment a permission is declared for a
+    // module that no role grants - which is a normal thing to do, and which made
+    // this fail while the endpoint was reporting exactly what it should.
+    //
+    // What the test is actually for is that the interface is told what the person
+    // can really do: no more (a permission shown that would be refused) and no
+    // less (a screen hidden that would have worked).
+    $granted = $user->getAllPermissions()->pluck('name')->sort()->values()->all();
 
     expect($reported)->toBe($granted)
         ->and($granted)->toContain('settings.view', 'clients.view', 'affiliations.view');
@@ -129,7 +141,7 @@ it('creates no permission ahead of the module that enforces it', function (): vo
         'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
         'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
         'novelties.view', 'novelties.manage',
-        'tasks.view', 'tasks.manage',
+        'tasks.view', 'tasks.create', 'tasks.manage',
         'documents.view', 'documents.manage', 'documents.request', 'documents.review',
         'portal_accounts.manage',
         'client_update_requests.view', 'client_update_requests.review',
@@ -144,6 +156,18 @@ it('creates no permission ahead of the module that enforces it', function (): vo
         'support.review_unlinked_email',
         'automations.view', 'automations.manage',
         'notification_channels.manage',
+    ]);
+    // A07: the assistant's own permissions. They were declared by the seeder and
+    // never added here, so this test failed on a catalogue that was correct and a
+    // list that was stale - the two are maintained apart and nothing compared
+    // them.
+    //
+    // Listing them is what keeps the rule intact. This test exists to say "every
+    // permission belongs to a module that enforces it"; leaving these out did
+    // not make them less real, it just made the assertion wrong.
+    $expected = array_merge($expected, [
+        'ai.use', 'ai.manage', 'artifacts.create', 'mcp.tokens.manage',
+        'web_search', 'web_fetch',
     ]);
 
     expect($declared)->toEqualCanonicalizing($expected);

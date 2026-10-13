@@ -140,6 +140,7 @@ final class DatabaseSeeder extends Seeder
         'novelties.manage',
 
         'tasks.view',
+        'tasks.create',
         'tasks.manage',
 
         'documents.view',
@@ -242,7 +243,7 @@ final class DatabaseSeeder extends Seeder
             'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
             'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
             'novelties.view', 'novelties.manage',
-            'tasks.view', 'tasks.manage',
+            'tasks.view', 'tasks.create', 'tasks.manage',
             'documents.view', 'documents.manage', 'documents.request', 'documents.review',
             'portal_accounts.manage',
             'client_update_requests.view', 'client_update_requests.review',
@@ -253,7 +254,7 @@ final class DatabaseSeeder extends Seeder
             'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
             'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
             'novelties.view', 'novelties.manage',
-            'tasks.view', 'tasks.manage',
+            'tasks.view', 'tasks.create', 'tasks.manage',
             'documents.view', 'documents.manage', 'documents.request', 'documents.review',
             'portal_accounts.manage',
             'client_update_requests.view', 'client_update_requests.review',
@@ -264,7 +265,7 @@ final class DatabaseSeeder extends Seeder
             'planillas.view', 'planillas.create', 'planillas.update', 'planillas.validate',
             'planillas.submit', 'planillas.mark_paid', 'planillas.cancel',
             'novelties.view', 'novelties.manage',
-            'tasks.view', 'tasks.manage',
+            'tasks.view', 'tasks.create', 'tasks.manage',
             'documents.view', 'documents.manage', 'documents.request', 'documents.review',
             'portal_accounts.manage',
             'client_update_requests.view', 'client_update_requests.review',
@@ -274,14 +275,14 @@ final class DatabaseSeeder extends Seeder
         'Collections' => [
             'planillas.view',
             'novelties.view',
-            'tasks.view', 'tasks.manage',
+            'tasks.view', 'tasks.create', 'tasks.manage',
             'documents.view',
             'reports.view', 'reports.export',
         ],
 
         'Support' => [
             'novelties.view', 'novelties.manage',
-            'tasks.view', 'tasks.manage',
+            'tasks.view', 'tasks.create', 'tasks.manage',
             'documents.view', 'documents.request', 'documents.review',
             'portal_accounts.manage',
             'reports.view',

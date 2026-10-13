@@ -333,7 +333,13 @@ final class SuggestionEngineTest extends TestCase
                 )
                 ->count(),
         );
-        $this->assertSame(0, DB::table('ai_conversations')->count());
+        // Scoped, like the assertion above: a global count is only zero when
+        // nothing else in the run has ever opened a conversation, which is a
+        // property of the run order and not of detection.
+        $this->assertSame(
+            0,
+            AiConversation::query()->where('user_id', $this->owner->id)->count(),
+        );
     }
 
     /**
