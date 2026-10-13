@@ -172,7 +172,7 @@ echo "--- ensuring the end to end database exists"
 # since the fix that stopped it. A suite that can quietly test yesterday's code cannot be used to
 # decide whether yesterday's bug is gone, so the services are recreated on every run.
 echo "--- starting the end to end services"
-"${E2E_COMPOSE[@]}" up -d --force-recreate app-e2e nginx-e2e node queue-e2e >/dev/null
+"${E2E_COMPOSE[@]}" up -d --force-recreate ai-e2e app-e2e nginx-e2e node queue-e2e >/dev/null
 
 # `node` runs the suite. Starting it here rather than assuming somebody already did
 # is the difference between "the suite runs" and "the suite runs on this machine".

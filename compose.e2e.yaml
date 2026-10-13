@@ -116,17 +116,62 @@ services:
       # Debug is off so that a failure inside a test run reports an exception
       # rather than rendering a debug page into a screenshot.
       APP_DEBUG: "false"
+
+      # --- The assistant, pointed at the local deterministic provider.
+      #
+      # Both slots are set, and the fallback is disabled rather than left to
+      # fall through to OpenRouter. A fallback that still reached the real
+      # provider would restore exactly the dependency this replaces: the suite
+      # would pass on a good day and 500 on a day somebody else spent the
+      # quota. A journey that cannot reach its provider must fail here, loudly,
+      # rather than sometimes succeed against a stranger's account.
+      AI_ENABLED: "true"
+      AI_PRIMARY_BASE_URL: http://ai-e2e:8100/v1
+      AI_PRIMARY_API_KEY: e2e-deterministic-not-a-secret
+      AI_PRIMARY_MODEL: e2e-deterministic
+      AI_FALLBACK_BASE_URL: ""
+      AI_FALLBACK_API_KEY: ""
+      AI_FALLBACK_MODEL: ""
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      ai-e2e:
+        condition: service_started
     healthcheck:
       test: ["CMD", "bash", "/usr/local/bin/consultora-dh-healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 60s
+    networks:
+      - consultora-dh
+
+  # A deterministic stand-in for the AI provider, for this stack only.
+  #
+  # ## Why it was added
+  #
+  # `a07-attachments` asks the assistant a question about a spreadsheet it just
+  # uploaded, which needs a model to answer. It was reaching OpenRouter's free
+  # tier, so the outcome depended on a shared daily allowance belonging to
+  # somebody else: when that ran out, `AiProviderException` surfaced as a 500
+  # and the journey failed for a reason that had nothing to do with attachments.
+  #
+  # The suite cannot decide whether a feature works if it can also fail because
+  # a free tier is exhausted upstream, so the provider is local here. Only the
+  # HTTP hop to the model is replaced — the upload, the queue, the worker, the
+  # ingestion, the indexing and the retrieval all remain the product's own, and
+  # the stub answers from the passages it is actually sent. Development and
+  # production are not touched by this file.
+  ai-e2e:
+    image: node:22-alpine
+    container_name: consultora-dh-ai-e2e
+    restart: unless-stopped
+    working_dir: /opt/ai-stub
+    command: ["node", "server.mjs"]
+    volumes:
+      - ./tests/e2e/support/ai-provider-stub.mjs:/opt/ai-stub/server.mjs:ro
     networks:
       - consultora-dh
 
