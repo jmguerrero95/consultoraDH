@@ -162,17 +162,6 @@ final class SuggestionEngine
             ->get();
 
         foreach ($rows as $suggestion) {
-            // Another entity's live offer is not this screen's business.
-            //
-            // Deliberately `continue` and nothing else: not shown, not retired,
-            // not marked resolved, and no offer recorded. A person's statement
-            // for one client says nothing about another client's, and an offer
-            // that is still on the table somewhere else has to stay exactly
-            // where it is when they click through to a different account.
-            if ($this->belongsElsewhere($suggestion, $module, $operation, $entityReference)) {
-                continue;
-            }
-
             // Re-detected against the suggestion's **own** context, not the one
             // this request is for.
             //
@@ -187,7 +176,7 @@ final class SuggestionEngine
                 $suggestion->source_operation,
             );
 
-            $verdict = $this->assess($user, $suggestion, $module, $operation, $ownContext);
+            $verdict = $this->assess($user, $suggestion, $module, $operation, $ownContext, $entityReference);
 
             if ($verdict === self::VERDICT_SHOW) {
                 return $suggestion;
@@ -244,29 +233,22 @@ final class SuggestionEngine
     }
 
     /**
-     * Whether a suggestion or candidate is about an entity other than this screen's.
-     *
-     * Only meaningful where the screen is about one entity; everywhere else the
-     * answer is always "no", because there is nothing to be the wrong one about.
-     */
-    private function belongsElsewhere(AiSuggestion $suggestion, string $module, string $operation, ?int $entityReference): bool
-    {
-        if (! $this->requiresEntity($module, $operation) || $entityReference === null) {
-            return false;
-        }
-
-        return ! $this->referencesEntity($suggestion->entity_type, $suggestion->entity_reference, $entityReference);
-    }
-
-    /**
      * Identity comparison, tolerant of the two shapes the references take.
      *
      * Candidates carry an entity type alongside the reference; stored rows carry
      * both as columns. A suggestion whose entity is not a client is never a
      * match for a client's statement, so an absent type is not waved through.
      */
-    private function referencesEntity(?string $entityType, string|int|null $reference, int $entityReference): bool
+    private function referencesEntity(?string $entityType, string|int|null $reference, ?int $entityReference): bool
     {
+        // No client asked about is no match, and deliberately not "match
+        // anything": a statement screen without a client has nobody to be about,
+        // so it is answered with silence rather than with whoever happens to be
+        // most overdue.
+        if ($entityReference === null) {
+            return false;
+        }
+
         return $entityType === 'client' && $reference !== null && (int) $reference === $entityReference;
     }
 
@@ -282,7 +264,7 @@ final class SuggestionEngine
     /**
      * @param  list<array<string, mixed>>  $ownContext  candidates for the suggestion's own context
      */
-    private function assess(User $user, AiSuggestion $suggestion, string $module, string $operation, array $ownContext): string
+    private function assess(User $user, AiSuggestion $suggestion, string $module, string $operation, array $ownContext, ?int $entityReference = null): string
     {
         // 1. Temporal validity.
         if ($suggestion->expires_at === null || $suggestion->expires_at->isPast()) {
@@ -309,6 +291,22 @@ final class SuggestionEngine
         // 4. Context, checked last so a suggestion that has stopped being true
         // is retired rather than merely shelved until its TTL runs out.
         if ($suggestion->source_module !== $module || $suggestion->source_operation !== $operation) {
+            return self::VERDICT_SKIP;
+        }
+
+        // 5. Whose statement is this, and who is being asked about?
+        //
+        // Checked last, on the same footing as the context: an offer that is
+        // about somebody else is not this screen's business, so it is left
+        // exactly where it is - not shown, not retired, not answered on the
+        // owner's behalf.
+        //
+        // `SKIP` rather than `RETIRE` also means a row whose author has since
+        // lost the permission keeps being assessed above and is retired by that
+        // check, which is what it deserves. Bailing out before the assessment
+        // would have stranded those rows as available forever, waiting for
+        // somebody who may no longer be allowed to look at them.
+        if ($this->requiresEntity($module, $operation) && ! $this->referencesEntity($suggestion->entity_type, $suggestion->entity_reference, $entityReference)) {
             return self::VERDICT_SKIP;
         }
 

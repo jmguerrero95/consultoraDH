@@ -191,47 +191,56 @@ test.describe('GATE 7: suggestions on the screens they belong to', () => {
         // what this journey did rather than because of an earlier one.
         const clientId = await seedOverdueObligation(page, '91');
 
-        // Through the screen, not the API. Asking the endpoint first would
-        // consume this person's one offer, and the engine retires a suggestion
-        // it has already handed out when the screen asks again - so the card
-        // this journey means to dismiss would never appear.
+        // The suggestion this journey is about, identified the way the server
+        // agrees on identity: the client's own id, not the wording.
+        //
+        // `suggested_action` was no use here - it is one sentence per kind of
+        // finding, so every overdue client proposes the same words and matching
+        // on it cannot tell "the dismissed one came back" from "somebody else
+        // has a problem too".
+        const askFor = async (id: number) =>
+            apiRequest<{ suggestion: { id: number } | null }>(
+                page,
+                'GET',
+                `/api/ai/suggestion?module=receivables&operation=client_account&client_id=${id}`,
+            );
+
+        const before = await askFor(clientId);
+
+        expect(before.status).toBe(200);
+        expect(before.data.suggestion, 'the seeded overdue signal should be detected').not.toBeNull();
+
+        const offeredId = before.data.suggestion!.id;
+
+        // The same suggestion through the visible control, which is what a
+        // person actually presses.
         await page.goto(`/clients/${clientId}/account`);
 
         const card = page.getByTestId('suggestion-hint');
 
         await expect(card).toBeVisible({ timeout: 30_000 });
-
-        // Which client's suggestion this is, by name.
-        //
-        // Not by the action text: `suggested_action` is one sentence per kind
-        // of finding, so every overdue client proposes the very same words and
-        // comparing it cannot tell "the dismissed one came back" from "another
-        // client has a problem too". The client named on the card is what makes
-        // the two distinguishable, and it is also the thing this journey is
-        // really about.
-        const dismissedFor = (await page.getByTestId('suggestion-evidence').textContent())?.match(/Cobro \d+ Prueba A03/)?.[0];
-
-        expect(dismissedFor, 'the card should name the client it is about').toBe('Cobro 91 Prueba A03');
+        await expect(page.getByTestId('suggestion-evidence')).toContainText(`Cobro 91`);
 
         await page.getByTestId('suggestion-dismiss').click();
 
-        // It goes away, and coming back to the screen does not bring it back.
         await expect(card).toHaveCount(0, { timeout: 20_000 });
 
-        await page.goto('/receivables');
+        // Confirmed on the server, rather than the card merely having
+        // disappeared locally. Asking again is the only way to see that: the
+        // engine is what remembers a dismissal, and it answers with what it now
+        // considers worth saying.
+        //
+        // Answering a second time would prove nothing extra and is not
+        // attempted - the row is already closed, and the server treats a repeat
+        // as gone rather than as an answer.
+        //
+        // `null` is the normal answer and is a pass. Another client's suggestion
+        // is also a pass, because the engine is entitled to have other real
+        // problems. What is not a pass is this one coming back.
+        const after = await askFor(clientId);
 
-        // Polled rather than slept on: the card has to have had its chance to
-        // appear, or this journey proves nothing at all. A fixed wait is what
-        // let this assertion be skipped silently for as long as it existed.
-        const onReceivables = page.getByTestId('suggestion-hint');
-
-        await onReceivables.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {});
-
-        // The engine may legitimately have another client's problem to raise;
-        // what must not happen is the dismissed one coming back.
-        if ((await onReceivables.count()) > 0) {
-            await expect(onReceivables).not.toContainText(dismissedFor!);
-        }
+        expect(after.status).toBe(200);
+        expect(after.data.suggestion?.id, 'the dismissed suggestion must not be offered again').not.toBe(offeredId);
     });
 
     test('T6: a screen never shows another screen\'s suggestion', async ({ page }) => {

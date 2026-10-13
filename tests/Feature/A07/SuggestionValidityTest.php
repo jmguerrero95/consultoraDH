@@ -446,6 +446,73 @@ final class SuggestionValidityTest extends TestCase
     }
 
     /**
+     * A statement screen asked without saying whose.
+     *
+     * `currentFor()` already refuses to *build* anything without a client. This
+     * is the other half: a suggestion stored earlier by somebody who did say,
+     * and still on offer, must not come back through the back door either.
+     */
+    public function test_an_unscoped_account_request_cannot_reach_a_stored_offer(): void
+    {
+        $clientA = $this->overdueClient('2026-01', 45_000_000, 'Ana', 'Torres');
+
+        $offered = $this->engine()->currentFor($this->user, 'receivables', 'client_account', null, $clientA->id);
+
+        $this->assertNotNull($offered, "A's own statement should put the finding on offer.");
+
+        // Asked without saying whose statement it is.
+        $unscoped = $this->engine()->currentFor($this->user, 'receivables', 'client_account');
+
+        $this->assertNull($unscoped, 'A stored offer must not be reachable without saying whose account it is.');
+
+        // And the asking changed nothing: same offer, same id, still on offer,
+        // still unanswered, and no second offer recorded.
+        $stillThere = AiSuggestion::query()->findOrFail($offered->id);
+
+        $this->assertSame(AiSuggestion::STATUS_AVAILABLE, $stillThere->status);
+        $this->assertNull($stillThere->resolved_at);
+        $this->assertSame(1, AiSuggestion::query()->count(), 'Asking about nobody should not create anything.');
+        $this->assertSame(1, AiSuggestionOffer::query()->count(), 'Asking about nobody should not interrupt anybody.');
+
+        // Which is the whole point: A's own statement still has it.
+        $again = $this->engine()->currentFor($this->user, 'receivables', 'client_account', null, $clientA->id);
+
+        $this->assertNotNull($again, 'The offer survived the unscoped question.');
+        $this->assertSame($offered->id, $again->id);
+    }
+
+    /**
+     * Silence about identity must not become silence about permission.
+     *
+     * An offer whose author has lost the right is retired by the check that runs
+     * before the identity one. If the identity check had short-circuited the
+     * assessment, those rows would sit as available forever, waiting for
+     * somebody who may no longer look at them - so this pins the ordering.
+     */
+    public function test_an_invalid_offer_is_still_retired_alongside_the_identity_check(): void
+    {
+        $client = $this->overdueClient('2026-01', 45_000_000, 'Ana', 'Torres');
+
+        $id = $this->engine()->currentFor($this->user, 'receivables', 'client_account', null, $client->id)?->id;
+
+        $this->assertNotNull($id);
+
+        // The role changes between two page loads.
+        $this->user->revokePermissionTo('receivables.view');
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        // Asked about the client, and asked about nobody: either way the offer
+        // is no longer permitted, and no longer permitted means retired.
+        $this->engine()->currentFor($this->user, 'receivables', 'client_account', null, $client->id);
+
+        $this->assertSame(
+            AiSuggestion::STATUS_EXPIRED,
+            AiSuggestion::query()->findOrFail($id)->status,
+            'An offer nobody may see any more has to be retired, not left waiting.'
+        );
+    }
+
+    /**
      * The portfolio screen is about everybody, and that stays true.
      *
      * Scoping the statement screen must not narrow the collection screen: a
