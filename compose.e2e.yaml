@@ -162,7 +162,13 @@ services:
     #
     # A04's jobs are dispatched with `onQueue('imports')`. A worker on the default queue alone
     # never sees them, which is what left every journey staring at "En cola · 0 filas leídas".
-    command: ["php", "artisan", "queue:work", "--queue=default,imports", "--sleep=1", "--tries=3", "--max-time=3600", "--verbose"]
+    #
+    # `ai-tasks` is the assistant's background work: document uploads, generation and research.
+    # It was missing here and in the development worker, so a job could be accepted by the API,
+    # shown to the person as "En cola", and never run at all - with no error anywhere. A named
+    # queue that nothing listens to is the quietest possible failure, and the only thing that
+    # finds it is a journey that waits for the work to finish.
+    command: ["php", "artisan", "queue:work", "--queue=default,imports,ai-tasks", "--sleep=1", "--tries=3", "--max-time=3600", "--verbose"]
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor

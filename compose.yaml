@@ -141,7 +141,7 @@ services:
     #
     # Both names are listed rather than only `imports` so this worker stays the single worker for
     # the application instead of needing a second container when another module starts queueing.
-    command: ["php", "artisan", "queue:work", "--queue=default,imports,support,notifications,automations", "--sleep=3", "--tries=3", "--max-time=3600", "--verbose"]
+    command: ["php", "artisan", "queue:work", "--queue=default,imports,support,notifications,automations,ai-tasks", "--sleep=3", "--tries=3", "--max-time=3600", "--verbose"]
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor
