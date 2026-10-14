@@ -27,6 +27,17 @@ final class ReportFactory
             ReportType::PorEmpresa => new CompanyPortfolioReport($validated),
             ReportType::PorEntidad => new EntityReport($validated),
             ReportType::Planillas => new PlanillaSummaryReport($validated),
+
+            // FIX-EXPORT-IMPORT-03. Explicitly refused rather than left to `UnhandledMatchError`.
+            //
+            // The workbook has no flat representation: it is monthly sheets of company blocks with
+            // colours, and a `columns()`/`rows()` shape would mean inventing a flat form and then
+            // re-interpreting it — which is the thing the milestone forbids. It is still a
+            // `ReportType`, so it reaches the generated-reports list, the audit trail and the
+            // download authorisation; `ReportGenerator` routes it to its own writer instead.
+            ReportType::LibroOperativo => throw new \LogicException(
+                'El libro operativo no es un ReportResult: lo construye LegacyWorkbookBuilder.',
+            ),
         };
     }
 

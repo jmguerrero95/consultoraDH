@@ -47,7 +47,7 @@ final class CreateReportTool extends AbstractAiTool
                 'report_type' => [
                     'type' => 'string',
                     'description' => 'Tipo de reporte.',
-                    'enum' => array_map(fn (ReportType $t): string => $t->value, ReportType::cases()),
+                    'enum' => array_map(fn (ReportType $t): string => $t->value, array_filter(ReportType::cases(), static fn (ReportType $t): bool => $t !== ReportType::LibroOperativo)),
                 ],
                 'format' => [
                     'type' => 'string',

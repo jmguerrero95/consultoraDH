@@ -167,6 +167,12 @@ Este documento verifica que la aplicación está lista para producción. Cada it
 - [ ] `php artisan event:cache`
 - [ ] `composer install --no-dev --optimize-autoloader`
 - [ ] `npm run build` (assets de producción)
+- [ ] `npm run build` **terminó sin errores** y `public/build/manifest.json` es más reciente que
+      `resources/`. Si el build falla, el despliegue no está incompleto: está **publicando el
+      bundle anterior**, porque `public/build` está en `.gitignore` y `@vite` sirve lo que haya en
+      disco. La pantalla puede verse correcta en los tests y rota en el navegador sin que nada
+      falle. Ocurrió en FIX-EXPORT-IMPORT-03: `laravel-echo` y `pusher-js` estaban declarados en
+      `package.json` pero no instalados, así que el build llevaba días roto y nadie lo notó.
 - [ ] OPcache habilitado en PHP (`opcache.enable=1`)
 
 ---

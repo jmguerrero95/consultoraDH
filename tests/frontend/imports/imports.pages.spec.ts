@@ -328,10 +328,20 @@ describe('ImportDetailPage', () => {
     async function mountDetail(
         payloads: Record<string, () => Response>,
         permissions = ['imports.view', 'imports.apply'],
+        customFetch?: (input: RequestInfo | URL) => Promise<Response>,
     ) {
         useAuthStore().setUser(user(permissions));
 
         mockApi(payloads);
+
+        // FIX-EXPORT-IMPORT-03: a test that needs to answer *differently on successive calls* —
+        // which is what reproducing an out-of-order response means — cannot express it through the
+        // fragment/handler map above, because that map answers the same way every time. The second
+        // argument installs its own `fetch` after `mockApi()` and before `mount()`, so the component
+        // under test never sees the map.
+        if (customFetch !== undefined) {
+            vi.stubGlobal('fetch', vi.fn(customFetch));
+        }
 
         const router = await testRouter('/imports/1');
 
@@ -341,7 +351,31 @@ describe('ImportDetailPage', () => {
                     ...routerStubs,
                     // `AppModal` renders a native `<dialog>` through `showModal()`, which jsdom
                     // does not implement. Stubbed so the resolution form can be inspected.
-                    AppModal: { template: '<div class="cdh-modal"><slot /></div>', props: ['open', 'title'] },
+                    // A stand-in that behaves like the real modal rather than a shell.
+                    //
+                    // It renders its **title**, because several modals are mounted at once whether
+                    // or not they are open and `find('.cdh-modal')` would always return the first
+                    // one in the template — the Apply confirmation — whichever dialog the test
+                    // meant.
+                    //
+                    // And it renders its **footer buttons wired to the emits**, because a stub that
+                    // only renders the slot cannot fire `@confirm`. That is the wiring under test
+                    // for the cancellation flow: the button the reviewer presses has to reach the
+                    // handler, and a stub that quietly dropped it would let a broken page pass.
+                    AppModal: {
+                        template: `
+                            <div class="cdh-modal">
+                                <h2 class="cdh-modal__title">{{ title }}</h2>
+                                <slot />
+                                <button type="button" @click="$emit('cancel')">{{ cancelLabel }}</button>
+                                <button type="button" :disabled="disabled" @click="$emit('confirm')">
+                                    {{ confirmLabel }}
+                                </button>
+                            </div>
+                        `,
+                        props: ['open', 'title', 'confirmLabel', 'cancelLabel', 'busy', 'disabled'],
+                        emits: ['confirm', 'cancel'],
+                    },
                 },
                 plugins: [router],
             },
@@ -602,16 +636,6 @@ describe('ImportDetailPage', () => {
     // would have dropped 77 clients from the import.
     // -------------------------------------------------------------------------
 
-    const groupedHandlers = (groups: ImportIssueGroup[], findings: ImportIssue[]) => ({
-        ...baseHandlers(),
-        '/issues': () =>
-            json({
-                data: findings,
-                meta: { current_page: 1, last_page: 1, per_page: 50, total: findings.length },
-                groups,
-            }),
-    });
-
     /**
      * A role that can review.
      *
@@ -622,6 +646,19 @@ describe('ImportDetailPage', () => {
      */
     const REVIEWER = ['imports.view', 'imports.apply', 'imports.review'];
 
+    /**
+     * Wait past the code filter's debounce.
+     *
+     * `flushPromises()` drains the microtask queue and nothing else; the 300 ms debounce is a
+     * macrotask, so a test that sets the filter and flushes is asserting against a request that has
+     * not been made yet. This is the only place in the suite that waits on wall-clock time, and it
+     * is here because the debounce is the behaviour under test.
+     */
+    const afterDebounce = async (): Promise<void> => {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        await flushPromises();
+    };
+
     const openIssuesTab = async (wrapper: VueWrapper) => {
         await flushPromises();
 
@@ -629,152 +666,501 @@ describe('ImportDetailPage', () => {
         await flushPromises();
     };
 
-    it('separates the kinds that need a decision from the ones that do not', async () => {
+    // -------------------------------------------------------------------------
+    // FIX-EXPORT-IMPORT-03 Block A — the three categories, and the Resolver rule.
+    //
+    // The numbers below are the delivered workbook's, and they are the point of the whole
+    // milestone: 195 findings that are 3 blockers, 38 optional observations and 154 with
+    // nothing to answer.
+    // -------------------------------------------------------------------------
+
+    const group = (over: Partial<ImportIssueGroup> = {}): ImportIssueGroup => ({
+        code: 'invalid_email',
+        label: 'Correos omitidos por formato inválido',
+        severity: 'warning',
+        blocking: false,
+        total: 77,
+        open: 77,
+        resolvable: false,
+        ...over,
+    });
+
+    /**
+     * A finding whose `allowed_decisions` match its category.
+     *
+     * FIX-EXPORT-IMPORT-03 made the "Resolver" button read `allowed_decisions` instead of the
+     * grouped `resolvable` flag, so a fixture with the wrong decisions would test the wrong rule.
+     * `SettlesNothing` is the shape the backend sends for an informational finding: no decision at
+     * all, or none that resolves it.
+     */
+    const SettlesNothing: ImportIssue['allowed_decisions'] = [];
+
+    const Blocking: ImportIssue['allowed_decisions'] = [
+        {
+            value: 'use_company_nit',
+            label: 'Elegir el NIT',
+            value_schema: { tax_id: 'tax_id' },
+            requires_value: true,
+            resolves: true,
+        },
+    ];
+
+    const Optional: ImportIssue['allowed_decisions'] = [
+        {
+            value: 'map_entity',
+            label: 'Mapear la entidad',
+            value_schema: { social_security_entity_id: 'positive_integer' },
+            requires_value: true,
+            resolves: true,
+        },
+    ];
+
+    const serving = (groups: ImportIssueGroup[], findings: ImportIssue[]) => ({
+        ...baseHandlers(),
+        '/issues': () =>
+            json({
+                data: findings,
+                meta: { current_page: 1, last_page: 1, per_page: 50, total: findings.length },
+                groups,
+            }),
+    });
+
+    const REAL_WORLD = () =>
+        serving(
+            [
+                group({ code: 'company_identity_conflict', label: 'Conflictos de identidad empresarial', severity: 'error', blocking: true, total: 2, open: 2, resolvable: true }),
+                group({ code: 'duplicate_conflicting_row', label: 'Filas repetidas con datos distintos', severity: 'error', blocking: true, total: 1, open: 1, resolvable: true }),
+                group({ code: 'affiliation_entity_unknown', label: 'Entidad de afiliación pendiente de identificar', total: 36, open: 36, resolvable: true }),
+                group({ code: 'invalid_affiliation_date', label: 'Fechas de afiliación a revisar', total: 2, open: 2, resolvable: true }),
+                group({ code: 'invalid_email', total: 77, open: 77, resolvable: false }),
+                group({ code: 'missing_monthly_value', label: 'Valores mensuales desconocidos', total: 56, open: 56, resolvable: false }),
+                group({ code: 'credential_like_content', label: 'Posibles credenciales protegidas', total: 20, open: 20, resolvable: false }),
+                group({ code: 'duplicate_exact_row', label: 'Filas repetidas, consolidadas', total: 1, open: 1, resolvable: false }),
+            ],
+            [
+                issue({ id: 1, code: 'company_identity_conflict', allowed_decisions: Blocking }),
+                issue({ id: 2, code: 'affiliation_entity_unknown', allowed_decisions: Optional }),
+                issue({ id: 3, code: 'invalid_email', allowed_decisions: SettlesNothing }),
+            ],
+        );
+
+    it('splits the findings into blockers, optional observations and informational', async () => {
+        const wrapper = await mountDetail(REAL_WORLD(), REVIEWER);
+
+        await openIssuesTab(wrapper);
+
+        expect(wrapper.text()).toContain('Bloquean la importación');
+        expect(wrapper.text()).toContain('Opcionales — puede continuar sin responderlas');
+        expect(wrapper.text()).toContain('Informativas — no requieren ninguna acción');
+
+        // The delivered workbook's numbers, which is what a reviewer needs to see before the
+        // table: 3 blockers, 38 optional, 154 with nothing to answer.
+        const summary = wrapper.find('.cdh-issue-summary').text().replace(/\s+/g, ' ');
+
+        expect(summary).toContain('3');
+        expect(summary).toContain('38');
+        expect(summary).toContain('154');
+    });
+
+    it('collapses the informational block by default and expands it on demand', async () => {
+        // 154 rows of "invalid email" is not something anybody reads, and the previous screen made
+        // them scroll all of it to reach the three that mattered.
+        const wrapper = await mountDetail(REAL_WORLD(), REVIEWER);
+
+        await openIssuesTab(wrapper);
+
+        expect(wrapper.text()).not.toContain('Posibles credenciales protegidas');
+
+        const toggle = wrapper
+            .findAll('button')
+            .find((element) => element.text().includes('Informativas'));
+
+        expect(toggle?.attributes('aria-expanded')).toBe('false');
+
+        await toggle?.trigger('click');
+        await flushPromises();
+
+        expect(wrapper.text()).toContain('Posibles credenciales protegidas');
+        expect(
+            wrapper
+                .findAll('button')
+                .find((element) => element.text().includes('Informativas'))
+                ?.attributes('aria-expanded'),
+        ).toBe('true');
+    });
+
+    it('offers Resolver only where the backend offers a decision that resolves', async () => {
+        // The rule the previous version got backwards: it derived the button from the grouped
+        // `resolvable` flag with a fallback that showed it when the breakdown was *missing*.
+        const wrapper = await mountDetail(REAL_WORLD(), REVIEWER);
+
+        await openIssuesTab(wrapper);
+
+        const rows = wrapper.findAll('tbody tr');
+
+        // The blocker and the optional observation carry a settling decision; the informational
+        // one carries none.
+        expect(wrapper.findAll('button').filter((b) => b.text() === 'Resolver')).toHaveLength(2);
+
+        const informationalRow = rows.find((row) => row.text().includes('invalid_email'));
+
+        expect(informationalRow?.text()).toContain('Nada que responder');
+    });
+
+    it('offers no Resolver at all when the breakdown is missing', async () => {
+        // The inverted fallback, asserted directly. `resolvableCodes.size === 0 || …` meant a failed
+        // or incomplete response put a "Resolver" button on every row — on the delivered workbook,
+        // 77 of them whose only answer is "excluir fila".
+        //
+        // The button now reads each finding's own `allowed_decisions`, so a response with no
+        // groups still answers correctly for the findings it does carry.
         const wrapper = await mountDetail(
-            groupedHandlers(
-                [
-                    {
-                        code: 'affiliation_entity_unknown',
-                        label: 'Entidad de afiliación pendiente de identificar',
-                        severity: 'warning',
-                        blocking: false,
-                        total: 36,
-                        open: 36,
-                        resolvable: true,
-                    },
-                    {
-                        code: 'invalid_email',
-                        label: 'Correos omitidos por formato inválido',
-                        severity: 'warning',
-                        blocking: false,
-                        total: 77,
-                        open: 77,
-                        resolvable: false,
-                    },
-                ],
-                [
-                    issue({ id: 1, code: 'affiliation_entity_unknown' }),
-                    issue({ id: 2, code: 'invalid_email' }),
-                ],
+            {
+                ...baseHandlers(),
+                '/issues': () =>
+                    json({
+                        data: [issue({ id: 3, code: 'invalid_email', allowed_decisions: SettlesNothing })],
+                        meta: { current_page: 1, last_page: 1, per_page: 50, total: 1 },
+                    }),
+            },
+            REVIEWER,
+        );
+
+        await openIssuesTab(wrapper);
+
+        expect(wrapper.findAll('button').filter((b) => b.text() === 'Resolver')).toHaveLength(0);
+    });
+
+    it('says the request failed rather than showing an empty list', async () => {
+        // "No hay incidencias" and "no pudimos preguntar" look identical on a screen, and only one
+        // of them means it is safe to press Apply.
+        const wrapper = await mountDetail(
+            {
+                ...baseHandlers(),
+                '/issues': () => json({ message: 'Error interno del servidor.' }, 500),
+            },
+            REVIEWER,
+        );
+
+        await openIssuesTab(wrapper);
+
+        expect(wrapper.text()).toContain('No se pudieron cargar las incidencias');
+        expect(wrapper.text()).not.toContain('No hay incidencias pendientes');
+        // And there is a way back, rather than a dead end.
+        expect(
+            wrapper.findAll('button').some((element) => element.text().includes('Reintentar')),
+        ).toBe(true);
+    });
+
+    it('does not let a stale response overwrite a newer filter', async () => {
+        // `loadIssues()` had no sequencing and is called from the initial load and from three
+        // watchers. Two requests overlap, the slow one lands last, and the table ends up showing
+        // the previous filter's rows under the new filter's label — which is exactly the reported
+        // symptom: the code field said one thing and the table showed another.
+        //
+        // The overlap is driven from the **initial load** rather than from typing, because the code
+        // filter is debounced: two keystrokes 100 ms apart collapse into one request, so typing is
+        // no longer a way to produce the race. The initial load is, and it is the realistic one —
+        // a reviewer changes the filter while the first page of findings is still in flight.
+        const slow = { release: (): void => {} };
+        const pending = new Promise<void>((resolve) => {
+            slow.release = resolve;
+        });
+
+        let firstCall = true;
+
+        const racingFetch = async (input: RequestInfo | URL): Promise<Response> => {
+            const url = String(input);
+
+            if (url.includes('/api/company-options')) {
+                return json({ companies: [] });
+            }
+
+            if (url.includes('/issues')) {
+                // The initial load, held open until the filter's response has landed.
+                if (firstCall) {
+                    firstCall = false;
+
+                    await pending;
+
+                    return json({
+                        data: [issue({ id: 9, code: 'invalid_email', allowed_decisions: SettlesNothing })],
+                        meta: { current_page: 1, last_page: 1, total: 1 },
+                        groups: [group({ code: 'invalid_email', total: 1, open: 1 })],
+                    });
+                }
+
+                return json({
+                    data: [issue({ id: 8, code: 'company_identity_conflict', allowed_decisions: Blocking })],
+                    meta: { current_page: 1, last_page: 1, total: 1 },
+                    groups: [
+                        group({
+                            code: 'company_identity_conflict',
+                            label: 'Conflictos de identidad empresarial',
+                            severity: 'error',
+                            blocking: true,
+                            total: 1,
+                            open: 1,
+                            resolvable: true,
+                        }),
+                    ],
+                });
+            }
+
+            if (url.includes('/plan')) {
+                return json({ data: plan() });
+            }
+
+            if (url.includes('/api/imports/1')) {
+                return json({ data: detail() });
+            }
+
+            return json({ data: [row()], meta: { current_page: 1, last_page: 1, total: 1 } });
+        };
+
+        const wrapper = await mountDetail({}, REVIEWER, racingFetch);
+
+        await openIssuesTab(wrapper);
+
+        // While the first request is still in flight, ask for a different kind.
+        const code = wrapper.find('#issues-code');
+
+        await code.setValue('company_identity_conflict');
+        await afterDebounce();
+
+        // The filter's response has landed and is on screen.
+        expect(wrapper.findAll('tbody tr').some((row) => row.text().includes('company_identity_conflict'))).toBe(
+            true,
+        );
+
+        // Now let the stale one arrive. It must be discarded, not applied.
+        slow.release();
+        await afterDebounce();
+        await flushPromises();
+
+        const shown = wrapper.findAll('tbody tr').map((row) => row.text());
+
+        expect(shown.some((text) => text.includes('invalid_email'))).toBe(false);
+        expect(shown.some((text) => text.includes('company_identity_conflict'))).toBe(true);
+    });
+
+    it('narrows the list to the kind that was clicked', async () => {
+        const wrapper = await mountDetail(
+            serving(
+                [group({ code: 'invalid_email', total: 77, open: 77, resolvable: false })],
+                [issue({ id: 3, code: 'invalid_email', allowed_decisions: SettlesNothing })],
             ),
             REVIEWER,
         );
 
         await openIssuesTab(wrapper);
 
-        // Both kinds are named, and the counts say how much of each is open.
-        expect(wrapper.text()).toContain('Entidad de afiliación pendiente de identificar');
-        expect(wrapper.text()).toContain('Correos omitidos por formato inválido');
-        expect(wrapper.text()).toContain('Requieren una decisión');
-        expect(wrapper.text()).toContain('Informativas');
-        expect(wrapper.text()).toContain('36');
-        expect(wrapper.text()).toContain('77');
-    });
+        // Informational groups are collapsed, so the block is opened first — the same two clicks a
+        // reviewer makes.
+        const toggle = wrapper
+            .findAll('button')
+            .find((element) => element.text().includes('Informativas'));
 
-    it('offers no Resolver on a kind that has nothing to answer', async () => {
-        // The button is the defect this milestone exists to remove: on the delivered workbook it
-        // invited somebody to press "excluir fila" 77 times and lose 77 clients.
-        const wrapper = await mountDetail(
-            groupedHandlers(
-                [
-                    {
-                        code: 'invalid_email',
-                        label: 'Correos omitidos por formato inválido',
-                        severity: 'warning',
-                        blocking: false,
-                        total: 77,
-                        open: 77,
-                        resolvable: false,
-                    },
-                    {
-                        code: 'company_identity_conflict',
-                        label: 'Conflictos de identidad empresarial',
-                        severity: 'error',
-                        blocking: true,
-                        total: 2,
-                        open: 2,
-                        resolvable: true,
-                    },
-                ],
-                [
-                    issue({ id: 2, code: 'invalid_email' }),
-                    issue({ id: 3, code: 'company_identity_conflict' }),
-                ],
-            ),
-            REVIEWER,
-        );
-
-        await openIssuesTab(wrapper);
-
-        const resolveButtons = wrapper.findAll('button').filter((element) => element.text() === 'Resolver');
-
-        // Exactly one, for the one kind that can be answered.
-        expect(resolveButtons).toHaveLength(1);
-
-        // And the row that cannot be answered says so, rather than showing an empty cell that
-        // reads like a control that failed to load.
-        expect(wrapper.text()).toContain('Nada que responder');
-    });
-
-    it('still shows every Resolver when the server sends no breakdown at all', async () => {
-        // `groups` is a new field, so an older server — or a failed request — leaves it absent. The
-        // screen must fall back to the old behaviour rather than quietly hiding every control,
-        // which would look like a batch with nothing to answer.
-        const wrapper = await mountDetail({
-            ...baseHandlers(),
-            '/issues': () => json({ data: [issue()], meta: { current_page: 1, last_page: 1, total: 1 } }),
-        }, REVIEWER);
-
-        await openIssuesTab(wrapper);
-
-        const resolveButtons = wrapper.findAll('button').filter((element) => element.text() === 'Resolver');
-
-        expect(resolveButtons.length).toBeGreaterThan(0);
-        expect(wrapper.text()).not.toContain('Nada que responder');
-    });
-
-    it('narrows the list to the kind that was clicked, and can be cleared', async () => {
-        const wrapper = await mountDetail(
-            groupedHandlers(
-                [
-                    {
-                        code: 'invalid_email',
-                        label: 'Correos omitidos por formato inválido',
-                        severity: 'warning',
-                        blocking: false,
-                        total: 77,
-                        open: 77,
-                        resolvable: false,
-                    },
-                ],
-                [issue({ id: 2, code: 'invalid_email' })],
-            ),
-            REVIEWER,
-        );
-
-        await openIssuesTab(wrapper);
+        await toggle?.trigger('click');
+        await flushPromises();
 
         const groupButton = wrapper
             .findAll('button')
             .find((element) => element.text().includes('Correos omitidos por formato inválido'));
 
         await groupButton?.trigger('click');
-        await flushPromises();
+        await afterDebounce();
 
         // Reuses the existing code filter rather than adding a second narrowing mechanism, so
         // there is one place the list is filtered and one control that shows what it is.
         expect((wrapper.find('#issues-code').element as HTMLInputElement).value).toBe('invalid_email');
+        expect(wrapper.text()).toContain('Quitar filtros');
     });
+});
 
-    it('marks the current step of the stepper and does not mark later ones', async () => {
-        const wrapper = await mountDetail(baseHandlers({ status: 'review' }));
+// =============================================================================
+// FIX-EXPORT-IMPORT-03 Block B — cancelling an import
+// =============================================================================
+
+describe('cancelling an import', () => {
+    /**
+     * The states the lifecycle allows, and the two it refuses.
+     *
+     * `applied` is the one that matters: cancelling it would be a route to rolling back business
+     * data without going through anything that reverses a write, and `ImportLifecycle::ALLOWED`
+     * gives it an empty transition list. `cancelled` is terminal, and `applying` is mid-transaction.
+     */
+    const REVIEW = ['imports.view', 'imports.apply', 'imports.review'];
+
+    /**
+     * Mount the detail page against a batch in `status`, recording every cancel call.
+     *
+     * Self-contained rather than reusing the other describe's `mountDetail`, which is scoped to it.
+     */
+    const mounted = async (status: string, permissions: string[]) => {
+        const calls: string[] = [];
+
+        useAuthStore().setUser(user(permissions));
+
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input);
+
+                if (url.includes('/api/company-options')) {
+                    return json({ companies: [] });
+                }
+
+                if (url.includes('/issues')) {
+                    return json({ data: [], meta: { current_page: 1, last_page: 1, total: 0 }, groups: [] });
+                }
+
+                if (url.includes('/plan')) {
+                    return json({ data: plan() });
+                }
+
+                // Before the catch-all, so the cancel POST is not mistaken for the detail GET.
+                if (url.includes('/cancel')) {
+                    calls.push(url);
+
+                    return json({ message: 'Importación cancelada.' });
+                }
+
+                if (url.includes('/api/imports/1')) {
+                    return json({ data: detail({ status } as Partial<LegacyImportDetail>) });
+                }
+
+                return json({ data: [row()], meta: { current_page: 1, last_page: 1, total: 1 } });
+            }),
+        );
+
+        const router = await testRouter('/imports/1');
+
+        const wrapper = mount(ImportDetailPage, {
+            global: {
+                stubs: {
+                    ...routerStubs,
+                    // The title is rendered so a test can say *which* dialog it is looking at.
+                    // Several modals are mounted at once whether or not they are open, so
+                    // `find('.cdh-modal')` alone would always return the first one in the
+                    // template — the Apply confirmation — whichever dialog the test meant.
+                    AppModal: {
+                        template: `
+                            <div class="cdh-modal">
+                                <h2 class="cdh-modal__title">{{ title }}</h2>
+                                <slot />
+                                <button type="button" @click="$emit('cancel')">{{ cancelLabel }}</button>
+                                <button type="button" :disabled="disabled" @click="$emit('confirm')">
+                                    {{ confirmLabel }}
+                                </button>
+                            </div>
+                        `,
+                        props: ['open', 'title', 'confirmLabel', 'cancelLabel', 'busy', 'disabled'],
+                        emits: ['confirm', 'cancel'],
+                    },
+                },
+                plugins: [router],
+            },
+        });
 
         await flushPromises();
-        const steps = wrapper.findAll('.cdh-stepper__step');
-        const current = steps.findIndex((step) => step.classes().includes('cdh-stepper__step--current'));
-        const done = steps.filter((step) => step.classes().includes('cdh-stepper__step--done')).length;
 
-        expect(current).toBe(2);
-        expect(done).toBe(2);
+        return { wrapper, calls };
+    };
+
+    /** The dialog whose heading names it. See the note on the `AppModal` stub above. */
+    const dialogTitled = (wrapper: VueWrapper, title: string) => {
+        const match = wrapper
+            .findAll('.cdh-modal')
+            .find((candidate) => candidate.find('.cdh-modal__title').text() === title);
+
+        if (match === undefined) {
+            throw new Error(`No dialog titled "${title}".`);
+        }
+
+        return match;
+    };
+
+    const clickText = (wrapper: VueWrapper, text: string, scope = 'button'): Promise<unknown> => {
+        const target = wrapper.findAll(scope).find((element) => element.text().trim() === text);
+
+        return target?.trigger('click') ?? Promise.resolve();
+    };
+
+    it('offers the cancellation on a batch that is still in review', async () => {
+        const { wrapper } = await mounted('review', REVIEW);
+
+        // `resumen` is the default tab, so the card under test is already rendered.
+        await flushPromises();
+
+        expect(wrapper.findAll('button').some((b) => b.text().trim() === 'Cancelar importación')).toBe(
+            true,
+        );
+    });
+
+    it('says what will and will not happen before cancelling', async () => {
+        // The sentence that decides whether somebody presses the button at all is the third one,
+        // and it is asserted here rather than trusted to a design review.
+        const { wrapper } = await mounted('review', REVIEW);
+
+        // `resumen` is the default tab, so the card under test is already rendered.
+        await flushPromises();
+
+        await clickText(wrapper, 'Cancelar importación');
+        await flushPromises();
+
+        const dialog = dialogTitled(wrapper, '¿Cancelar esta importación?');
+
+        expect(dialog.text()).toContain('¿Cancelar esta importación?');
+        expect(dialog.text()).toContain('dejará de utilizarse');
+        expect(dialog.text()).toContain('copia privada del archivo');
+        expect(dialog.text()).toContain('No se eliminarán clientes, empresas ni pagos');
+        expect(dialog.text()).toContain('quedará registrada para auditoría');
+        // Two ways out, and one of them is "go back".
+        expect(dialog.text()).toContain('No, volver');
+    });
+
+    it('calls the existing endpoint and reports the outcome', async () => {
+        const { wrapper, calls } = await mounted('review', REVIEW);
+
+        // `resumen` is the default tab, so the card under test is already rendered.
+        await flushPromises();
+
+        await clickText(wrapper, 'Cancelar importación');
+        await flushPromises();
+
+        await dialogTitled(wrapper, '¿Cancelar esta importación?')
+            .findAll('button')
+            .find((element) => element.text().trim() === 'Sí, cancelar')
+            ?.trigger('click');
+        await flushPromises();
+
+        // The endpoint the backend already had, not a second one.
+        expect(calls.some((url) => url.includes('/api/imports/1/cancel'))).toBe(true);
+        expect(wrapper.text()).toContain('quedó cancelada');
+    });
+
+    it('hides it from a role that may only look', async () => {
+        const { wrapper } = await mounted('review', ['imports.view']);
+
+        // `resumen` is the default tab, so the card under test is already rendered.
+        await flushPromises();
+
+        expect(wrapper.findAll('button').some((b) => b.text().trim() === 'Cancelar importación')).toBe(
+            false,
+        );
+    });
+
+    it('hides it on an applied batch', async () => {
+        // Cancelling an applied import would be a way to undo business data without anything that
+        // reverses a write, so the button is never offered.
+        const { wrapper } = await mounted('applied', REVIEW);
+
+        // `resumen` is the default tab, so the card under test is already rendered.
+        await flushPromises();
+
+        expect(wrapper.findAll('button').some((b) => b.text().trim() === 'Cancelar importación')).toBe(
+            false,
+        );
     });
 });

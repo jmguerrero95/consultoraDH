@@ -1566,6 +1566,69 @@ button.cdh-link {
 }
 
 /*
+ | A blocking group is the only one that stops Apply, and it is the only one that gets a coloured
+ | edge. The distinction has to be readable before a person reads a word: on the delivered workbook
+ | it is three findings against 38 optional and 154 informational, and the three are the reason
+ | the reviewer is here.
+ */
+.cdh-issue-summary__block--blocking {
+    border-inline-start: 3px solid var(--cdh-danger, #c0392b);
+    padding-inline-start: 0.75rem;
+}
+
+/*
+ | The informational block is a toggle rather than a heading, because 154 rows under a plain
+ | heading is the wall this screen exists to remove. It is a real `<button>` with `aria-expanded`,
+ | not a styled `<div>`: it changes what is on the page and a keyboard user has to be able to say
+ | so.
+ */
+.cdh-issue-summary__toggle {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    inline-size: 100%;
+    padding: 0.25rem 0.35rem;
+    border: 0;
+    border-radius: 3px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    text-align: start;
+    cursor: pointer;
+}
+
+.cdh-issue-summary__toggle:hover,
+.cdh-issue-summary__toggle:focus-visible {
+    background-color: var(--cdh-surface-hover, rgba(0, 0, 0, 0.04));
+}
+
+.cdh-issue-summary__chevron {
+    display: inline-block;
+    transition: transform 120ms ease-out;
+}
+
+.cdh-issue-summary__chevron.is-open {
+    transform: rotate(90deg);
+}
+
+/*
+ | The state of the current filter, shown next to the table.
+ |
+ | Without it, "Sólo sin resolver" is invisible in a result list of zero: a reviewer who filters,
+ | finds nothing and does not notice the checkbox concludes the batch is clean. The "quitar
+ | filtros" control is the way back, in the place the eye already is.
+ */
+.cdh-filters__result {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-block-end: 0.75rem;
+}
+
+/*
  | Only short codes are held on one line. A document number or a NIT should never
  | break; a name must, because a company name has no natural length and forcing
  | it onto one line pushes the whole page into a horizontal scroll.
@@ -1960,4 +2023,82 @@ button.cdh-link {
 .cdh-badge--cancelled {
     color: var(--cdh-text-muted, #5b6472);
     background: var(--cdh-surface-muted, #f6f7f9);
+}
+
+/*
+ | FIX-EXPORT-IMPORT-03 — cancellation.
+ |
+ | Two things here are load-bearing rather than decorative.
+ |
+ | The list is modal styling for a four-item confirmation. The sentences are what a person reads
+ | before discarding work, and the one that decides whether they press the button at all — "no se
+ | eliminarán clientes, empresas ni pagos" — has to be a list item rather than a paragraph, because
+ | a paragraph is skimmable and this is the paragraph that gets skimmed.
+ */
+.cdh-modal__list {
+    margin: 0.75rem 0 0;
+    padding-inline-start: 1.25rem;
+}
+
+.cdh-modal__list li + li {
+    margin-block-start: 0.35rem;
+}
+
+/*
+ | A destructive row action, and a card that frames the cancel control apart from "Aplicar plan".
+ |
+ | They are opposites. Side by side in the same button group, a reviewer on a bad day presses the
+ | wrong one, and "aplicar" is the one that writes to the master.
+ */
+.cdh-link--danger {
+    color: var(--cdh-danger, #c0392b);
+}
+
+.cdh-card--danger {
+    border-inline-start: 3px solid var(--cdh-danger, #c0392b);
+}
+
+/*
+ | FIX-EXPORT-IMPORT-03 — the workbook export's colour legend.
+ |
+ | The swatches use the same six colours as the XLSX, which is the point: a person reads the
+ | legend here and then recognises the same colour in Excel. The "sin color" entry has no swatch
+ | fill on purpose — an empty box next to "sin información de pago" says more than a grey one
+ | would, because a grey reads as pending to anybody who has used a spreadsheet.
+ */
+.cdh-leyenda summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.cdh-leyenda__lista {
+    margin: 0.5rem 0 0;
+    padding-inline-start: 0;
+    list-style: none;
+}
+
+.cdh-leyenda__item {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    margin-block-start: 0.35rem;
+}
+
+.cdh-leyenda__muestra {
+    flex: 0 0 auto;
+    inline-size: 1.5rem;
+    block-size: 1rem;
+    border: 1px solid var(--cdh-border, #b6b6b6);
+}
+
+.cdh-leyenda__muestra--verde {
+    background-color: #00b050;
+}
+
+.cdh-leyenda__muestra--amarillo {
+    background-color: #ffff00;
+}
+
+.cdh-leyenda__muestra--rojo {
+    background-color: #ff0000;
 }

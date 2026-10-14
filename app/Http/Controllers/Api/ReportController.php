@@ -8,6 +8,8 @@ use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Reports\Exceptions\InvalidSchedule;
 use App\Domain\Reports\Export\CsvExporter;
+use App\Domain\Reports\LegacyWorkbook\InvalidLegacyWorkbookSelection;
+use App\Domain\Reports\LegacyWorkbook\LegacyWorkbookSelection;
 use App\Domain\Reports\ReportCadence;
 use App\Domain\Reports\ReportFactory;
 use App\Domain\Reports\ReportFilter;
@@ -57,7 +59,7 @@ final class ReportController extends Controller
      * A one-off download. The filters are the same ones the screen used, so the PDF
      * describes the population on screen rather than the whole portfolio.
      */
-    public function download(Request $request): StreamedResponse
+    public function download(Request $request): StreamedResponse|JsonResponse
     {
         $type = ReportType::parse($request->string('type', ReportType::Morosos->value)->toString());
 
@@ -68,29 +70,75 @@ final class ReportController extends Controller
             $request->string('format', ReportFormat::Pdf->value)->toString(),
         );
 
-        $filters = ReportFilter::fromRequest($type, $request);
-        $report = $this->factory->make($type, $filters);
+        // FIX-EXPORT-IMPORT-03: the operational workbook is XLSX only. The refusal is a 422 with a
+        // sentence, because CSV and PDF would both produce a file that quietly loses the colours,
+        // the widths and the block structure that are the entire point of asking for it.
+        if ($type === ReportType::LibroOperativo && $format !== ReportFormat::Xlsx) {
+            return response()->json([
+                'message' => 'El libro operativo sólo se puede exportar en XLSX.',
+                'code' => 'invalid_report_format',
+            ], 422);
+        }
 
+        $filters = ReportFilter::fromRequest($type, $request);
+
+        // CSV is streamed and never stored. That branch stays in front of the workbook path for a
+        // structural reason, not a cosmetic one: the workbook is not a `ReportResult`, so reaching
+        // `$this->factory->make()` with it would throw a `UnhandledMatchError` from a `match` with
+        // no arm for `LibroOperativo`.
         if ($format === ReportFormat::Csv) {
+            $report = $this->factory->make($type, $filters);
             $stream = $this->csv->stream($report->rows(), $report->columns());
 
             return response()->stream($stream, 200, [
                 'Content-Type' => 'text/csv; charset=UTF-8',
                 'Content-Disposition' => 'attachment; filename="'.$type->value.'.csv"',
+                // Personal data on its way out of the building.
+                'Cache-Control' => 'private, no-store',
             ]);
         }
 
-        $stored = $this->generator->generate($type, $filters, $format, $request->user());
+        // FIX-EXPORT-IMPORT-03. The selection is built **once** here and used three times: to
+        // refuse a bad month before anything is generated, to name the download, and — inside the
+        // generator — to decide what to build. Building it in each place is how two of them end up
+        // disagreeing about which months the file covers.
+        $selection = null;
+
+        try {
+            if ($type === ReportType::LibroOperativo) {
+                $selection = LegacyWorkbookSelection::fromInput(
+                    isset($filters['year']) ? (string) $filters['year'] : null,
+                    isset($filters['months']) ? (string) $filters['months'] : null,
+                    isset($filters['company_id']) ? (string) $filters['company_id'] : null,
+                );
+            }
+
+            $stored = $this->generator->generate($type, $filters, $format, $request->user());
+        } catch (InvalidLegacyWorkbookSelection $invalid) {
+            return response()->json([
+                'message' => $invalid->getMessage(),
+                'code' => 'invalid_workbook_selection',
+            ], 422);
+        }
+
         $contents = $this->generator->contents($stored);
 
         abort_if($contents === null, 404);
 
+        // FIX-EXPORT-IMPORT-03: the stored file is a UUID, so the name the user downloads is the
+        // only place the scope is ever stated: `CONSULTORA_DH_2026_ENERO-OCTUBRE.xlsx`.
+        $filename = $selection?->filename() ?? $type->value.'.'.$format->value;
+
         return response()->streamDownload(function () use ($contents): void {
             echo $contents;
-        }, $type->value.'.'.$format->value, [
+        }, $filename, [
             'Content-Type' => $format === ReportFormat::Pdf
                 ? 'application/pdf'
                 : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            // The file carries every worker's document, address and salary. It must not sit in a
+            // shared cache on its way out, and it must not be sniffed into something else.
+            'Cache-Control' => 'private, no-store',
+            'X-Content-Type-Options' => 'nosniff',
         ]);
     }
 

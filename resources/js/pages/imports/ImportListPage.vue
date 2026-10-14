@@ -6,6 +6,7 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
+import AppModal from '@/components/ui/AppModal.vue';
 import { useDebouncedRef } from '@/composables/useDebouncedRef';
 import { useContextualSuggestion } from '@/composables/useContextualSuggestion';
 import SuggestionHint from '@/components/assistant/SuggestionHint.vue';
@@ -55,6 +56,7 @@ const imports = ref<LegacyImport[]>([]);
 const pagination = ref<{ current_page: number; last_page: number; total: number } | null>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const busy = ref(false);
 
 const file = ref<File | null>(null);
 const uploading = ref(false);
@@ -99,6 +101,56 @@ async function load(): Promise<void> {
 
 function isPending(row: LegacyImport): boolean {
     return ['uploaded', 'queued', 'parsing', 'applying'].includes(row.status);
+}
+
+// --- Cancel -----------------------------------------------------------------
+
+const canReview = computed(() => auth.can('imports.review'));
+
+/**
+ * FIX-EXPORT-IMPORT-03 Block B.
+ *
+ * Mirrors `ImportLifecycle::ALLOWED`'s cancellable states so the button is never offered for a
+ * transition the server will refuse. `applied` is the one that matters most: cancelling an applied
+ * batch would be a way to roll back business data without going through anything that reverses a
+ * write, and `cancelled` is terminal.
+ */
+const CANCELLABLE_STATUSES = ['uploaded', 'queued', 'review', 'ready', 'failed'];
+
+function canCancelRow(row: LegacyImport): boolean {
+    return canReview.value && CANCELLABLE_STATUSES.includes(row.status);
+}
+
+/** The batch the dialog is about, or null when it is closed. */
+const cancellingRow = ref<LegacyImport | null>(null);
+
+function askCancel(row: LegacyImport): void {
+    cancellingRow.value = row;
+}
+
+async function confirmCancel(): Promise<void> {
+    const row = cancellingRow.value;
+
+    if (row === null) {
+        return;
+    }
+
+    busy.value = true;
+
+    try {
+        await businessApi.imports.cancel(row.id);
+
+        // The row is reloaded rather than patched. The server owns the state machine and decided
+        // the transition under a row lock; writing `'cancelled'` into the local copy would show a
+        // batch as cancelled even if the lock had sent it elsewhere.
+        await load();
+    } catch (cause) {
+        error.value =
+            cause instanceof ApiError ? cause.message : 'No fue posible cancelar la importación.';
+    } finally {
+        busy.value = false;
+        cancellingRow.value = null;
+    }
 }
 
 function schedulePoll(): void {
@@ -373,13 +425,32 @@ const hint = useContextualSuggestion('imports', () => pagination.value?.total ??
                             <td>{{ formatDate(row.created_at) }}</td>
                             <td>{{ row.created_by ?? '—' }}</td>
                             <td>{{ appliedCount(row) }}</td>
-                            <td>
+                            <td class="cdh-table__actions">
                                 <RouterLink
                                     class="cdh-link"
                                     :to="{ name: 'imports.show', params: { id: row.id } }"
                                 >
                                     Ver
                                 </RouterLink>
+
+                                <!--
+                                    FIX-EXPORT-IMPORT-03 Block B: cancel from the list.
+
+                                    The problem this solves is the one in the report: a batch left
+                                    in "En revisión" months ago has no obvious way out from here, so
+                                    the only route was opening it and hunting. It sits beside "Ver"
+                                    rather than behind a menu because the row already says what
+                                    state the batch is in, and the button is offered for exactly the
+                                    states the lifecycle allows.
+                                -->
+                                <button
+                                    v-if="canCancelRow(row)"
+                                    type="button"
+                                    class="cdh-link cdh-link--danger"
+                                    @click="askCancel(row)"
+                                >
+                                    Cancelar
+                                </button>
                             </td>
                         </tr>
                     </tbody>
@@ -402,5 +473,35 @@ const hint = useContextualSuggestion('imports', () => pagination.value?.total ??
                 </AppButton>
             </nav>
         </template>
+
+        <!--
+            FIX-EXPORT-IMPORT-03 Block B. The same confirmation the detail page shows, for the same
+            reason: four sentences and two buttons, in the project's own modal, rather than a native
+            `window.confirm()` that can say none of them.
+        -->
+        <AppModal
+            :open="cancellingRow !== null"
+            title="¿Cancelar esta importación?"
+            confirm-label="Sí, cancelar"
+            cancel-label="No, volver"
+            destructive
+            :busy="busy"
+            @confirm="confirmCancel"
+            @cancel="cancellingRow = null"
+        >
+            <p v-if="cancellingRow">
+                <strong>{{ cancellingRow.original_filename }}</strong> — {{ cancellingRow.status_label }}.
+            </p>
+
+            <ul class="cdh-modal__list">
+                <li>El análisis de este archivo dejará de utilizarse.</li>
+                <li>Se eliminará la copia privada del archivo asociada a este lote.</li>
+                <li>
+                    <strong>No se eliminarán clientes, empresas ni pagos</strong> ya registrados: esta
+                    operación no toca los datos del sistema.
+                </li>
+                <li>La cancelación quedará registrada para auditoría.</li>
+            </ul>
+        </AppModal>
     </section>
 </template>

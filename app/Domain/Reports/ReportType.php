@@ -24,6 +24,19 @@ enum ReportType: string
     case PorEntidad = 'por_entidad';
     case Planillas = 'planillas';
 
+    /**
+     * FIX-EXPORT-IMPORT-03: the operational workbook, in the historical shape.
+     *
+     * A `ReportType` even though it is not a flat table, so it reaches the existing generated-
+     * reports list, the audit trail and the storage lifecycle instead of growing a second set of
+     * them beside the first. What it is **not** is a `ReportResult`: the workbook is monthly
+     * sheets of company blocks with colours, and forcing it through a `columns()`/`rows()` shape
+     * would mean inventing a flat representation and then re-interpreting it — the exact thing the
+     * milestone forbids. `ReportFactory` is therefore not consulted for this type; see
+     * `ReportGenerator::writeToFile()`.
+     */
+    case LibroOperativo = 'libro_operativo';
+
     public function label(): string
     {
         return match ($this) {
@@ -32,6 +45,7 @@ enum ReportType: string
             self::PorEmpresa => 'Por empresa',
             self::PorEntidad => 'Por entidad de seguridad social',
             self::Planillas => 'Resumen de planillas',
+            self::LibroOperativo => 'Libro operativo (formato original)',
         };
     }
 
@@ -43,12 +57,21 @@ enum ReportType: string
             self::PorEmpresa => 'reports.view',
             self::PorEntidad => 'reports.view',
             self::Planillas => 'planillas.view',
+            // `reports.export`, not `reports.view`. The file contains every worker's document
+            // number, address, phone and salary across every selected month, which is strictly
+            // more than the on-screen portfolio report a role with `reports.view` may read — so
+            // viewing and downloading are separate gates, and this one is the stricter.
+            self::LibroOperativo => 'reports.export',
         };
     }
 
     public function supportsFormats(): array
     {
-        return ['screen', 'csv', 'xlsx', 'pdf'];
+        // XLSX only. The colours, widths and borders are the point, and neither CSV nor PDF can
+        // carry them; offering them would offer a file that loses the thing it was asked for.
+        return $this === self::LibroOperativo
+            ? ['xlsx']
+            : ['screen', 'csv', 'xlsx', 'pdf'];
     }
 
     /**
@@ -93,6 +116,14 @@ enum ReportType: string
                 'status' => ['nullable', 'string'],
                 'submitted_from' => ['nullable', 'date'],
                 'submitted_to' => ['nullable', 'date'],
+            ],
+            self::LibroOperativo => [
+                // Deliberately **not** `integer`. The month filter accepts `1,2,3` and `1-10` as one
+                // string, and validating it as an integer here would reject the range before
+                // `LegacyWorkbookSelection` ever got to explain what it accepts.
+                'year' => ['required', 'integer', 'min:2000', 'max:2100'],
+                'months' => ['nullable', 'string', 'max:40'],
+                'company_id' => ['nullable', 'integer'],
             ],
         };
     }

@@ -194,6 +194,14 @@ it('lets a reviewer answer every finding that can block an import', function () 
     //    so there is nothing left for a person to decide and nothing for them to be able to
     //    decide wrongly. Before that they were the *only* answer offered — "excluir fila" — and
     //    pressing it to clear a warning about a missing email address dropped the client.
+    //
+    //  - FIX-EXPORT-IMPORT-03 added `duplicate_exact_row`. §7.3 collapses an exact duplicate
+    //    automatically, and every decision it used to offer was read by **nothing**:
+    //    `ImportDecisionSet::keepsBothRows()` and `::duplicateOf()` both key on
+    //    `DuplicateConflictingRow`. A reviewer could open the dialog, press a button, see the
+    //    finding turn resolved, and watch the import stay exactly as it was. Offering a control
+    //    that cannot change anything is worse than offering none, because the screen reports the
+    //    question as answered.
     $refusals = [
         'unsupported_workbook_profile',
         'invalid_sheet_name',
@@ -203,6 +211,7 @@ it('lets a reviewer answer every finding that can block an import', function () 
         'source_already_applied',
         'invalid_email',
         'missing_monthly_value',
+        'duplicate_exact_row',
     ];
 
     $answerable = [];

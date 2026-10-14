@@ -298,9 +298,20 @@ enum IssueResolutionDecision: string
             ],
 
             // Where there is a parsed value to stand behind.
+            //
+            // `DuplicateExactRow` is deliberately absent, and the reason is not tidiness: §7.3
+            // collapses an exact duplicate automatically, so there is nothing left to decide. It
+            // used to be offered `accept_source`, `treat_as_duplicate_of` and `keep_both`, and
+            // **none of them was read anywhere** — `ImportDecisionSet::keepsBothRows()` and
+            // `::duplicateOf()` both key on `DuplicateConflictingRow`. So a reviewer could open the
+            // dialog, press a button, watch the finding turn resolved, and see no change in the
+            // import at all.
+            //
+            // That is the same defect this file already documents for `accept_source` on an
+            // unreadable email: a resolution that is stored and consulted by nothing is worse than
+            // not asking, because the screen says the question was answered.
             self::AcceptSource => [
                 LegacyImportIssue::InvalidAffiliationDate,
-                LegacyImportIssue::DuplicateExactRow,
                 LegacyImportIssue::DuplicateConflictingRow,
             ],
 
@@ -320,7 +331,9 @@ enum IssueResolutionDecision: string
             ],
 
             self::TreatAsDuplicateOf, self::KeepBoth => [
-                LegacyImportIssue::DuplicateExactRow,
+                // Only the **conflicting** duplicate. See the note on `AcceptSource` above: an
+                // exact duplicate is already collapsed, and these two answers were read by nothing
+                // when it was offered them.
                 LegacyImportIssue::DuplicateConflictingRow,
             ],
 

@@ -194,6 +194,15 @@ interface ApiClient {
             rows(id: number, params: ListParams & { parse_state?: string | null; company_tax_id?: string | null; sheet?: string | null }): Promise<ImportRowsPayload>;
             issues(id: number, params: ListParams & { code?: string | null; severity?: string | null; blocking?: boolean; unresolved?: boolean }): Promise<ImportIssuesPayload>;
             plan(id: number): Promise<ImportPlanPayload>;
+            /**
+             * FIX-EXPORT-IMPORT-03 Block B.
+             *
+             * Discards a batch's analysis and deletes its private copy of the file. The server owns
+             * the state machine: it refuses anything outside `ImportLifecycle::ALLOWED` with a 409,
+             * deletes the file through `ImportFileStore`, and takes the row lock so a queued parse
+             * cannot revive the batch afterwards.
+             */
+            cancel(id: number): Promise<{ message: string }>;
             setRetirementPolicy(id: number, policy: ImportRetirementPolicy): Promise<{ message: string }>;
             resolveIssue(id: number, issueId: number, resolution: { decision: IssueResolutionDecision; value?: Record<string, unknown> | null; note?: string | null }): Promise<{
                 message: string;
@@ -960,6 +969,17 @@ export const api: ApiClient = {
                 return request('POST', `/api/imports/${id}/apply`, { body: identity });
             },
 
+            /**
+             * FIX-EXPORT-IMPORT-03 Block B.
+             *
+             * Discards a batch's analysis and deletes its private copy of the file. The server owns
+             * the state machine: it refuses anything outside `ImportLifecycle::ALLOWED` with a 409,
+             * deletes the file through `ImportFileStore`, and takes the row lock so a queued parse
+             * cannot revive the batch afterwards.
+             *
+             * The endpoint and this wrapper already existed; Block B only had to be **reachable**,
+             * from a screen with a confirmation.
+             */
             cancel(id: number): Promise<{ message: string }> {
                 return request('POST', `/api/imports/${id}/cancel`);
             },

@@ -144,6 +144,26 @@ class ClientAffiliationObservation extends Model
     {
         $months = $this->months ?? [];
 
+        // FIX-EXPORT-IMPORT-03. A guard, not a shrug.
+        //
+        // The `array` cast json-decodes on read, so a well-formed row always yields an array. A row
+        // written by a path that encoded twice instead — `'"[\"2026-01\"]"'` in the database —
+        // decodes to a **string**, and `array_filter()` then dies with "Argument #1 must be of type
+        // array, string given". One malformed row took down every reader of the table, and the
+        // operational-workbook export reads all of them to decide who has an unnamed affiliation.
+        //
+        // So a value that is not an array is treated as the absent month list §8.3's `unknown`
+        // precision describes. The row keeps its `reason`; it simply contributes no months, which
+        // is what it cannot honestly claim.
+        if (is_string($months)) {
+            $decoded = json_decode($months, true);
+            $months = is_array($decoded) ? $decoded : [];
+        }
+
+        if (! is_array($months)) {
+            $months = [];
+        }
+
         $months = array_values(array_unique(array_filter(
             $months,
             static fn (mixed $month): bool => is_string($month) && preg_match('/^\d{4}-\d{2}$/', $month) === 1,

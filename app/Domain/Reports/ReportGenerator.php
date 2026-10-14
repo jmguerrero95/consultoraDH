@@ -7,8 +7,13 @@ namespace App\Domain\Reports;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Domain\Reports\Export\FormulaGuard;
+use App\Domain\Reports\Export\LegacyWorkbookExporter;
 use App\Domain\Reports\Export\PdfExporter;
 use App\Domain\Reports\Export\XlsxExporter;
+use App\Domain\Reports\LegacyWorkbook\InvalidLegacyWorkbookSelection;
+use App\Domain\Reports\LegacyWorkbook\LegacyWorkbook;
+use App\Domain\Reports\LegacyWorkbook\LegacyWorkbookBuilder;
+use App\Domain\Reports\LegacyWorkbook\LegacyWorkbookSelection;
 use App\Models\GeneratedReport;
 use App\Models\User;
 use Illuminate\Contracts\Filesystem\Filesystem;
@@ -40,6 +45,12 @@ final class ReportGenerator
         private readonly PdfExporter $pdf,
         private readonly XlsxExporter $xlsx,
         private readonly AuditRecorder $audit,
+        // FIX-EXPORT-IMPORT-03. Two collaborators for the operational workbook: the one that reads
+        // the database and the one that styles the result. They exist because that report is not a
+        // `ReportResult` — it is monthly sheets of company blocks — so neither of the existing two
+        // can do its job.
+        private readonly LegacyWorkbookBuilder $workbookBuilder,
+        private readonly LegacyWorkbookExporter $workbookExporter,
     ) {}
 
     public function disk(): Filesystem
@@ -54,7 +65,27 @@ final class ReportGenerator
      */
     public function generate(ReportType $type, array $filters, ReportFormat $format, User $actor, ?string $occurrence = null): GeneratedReport
     {
-        $report = $this->factory->make($type, $filters);
+        // FIX-EXPORT-IMPORT-03: the workbook is not a `ReportResult`, so the factory is not asked
+        // for one. Everything else about this method — the UUID filename, the file-before-row
+        // order, the audit event, the `GeneratedReport` row — is shared with every other report,
+        // which is the point: the storage lifecycle, the authorisation on download and the audit
+        // trail are not re-invented for a new format.
+        $workbook = null;
+
+        if ($type === ReportType::LibroOperativo) {
+            $selection = LegacyWorkbookSelection::fromInput(
+                isset($filters['year']) ? (string) $filters['year'] : null,
+                isset($filters['months']) ? (string) $filters['months'] : null,
+                isset($filters['company_id']) ? (string) $filters['company_id'] : null,
+            );
+
+            // The stored filters are the **selection**, not the raw request, so a later download
+            // rebuilds the same workbook even if the range syntax is changed later.
+            $filters = $selection->toFilters();
+            $workbook = $this->workbookBuilder->build($selection);
+        } else {
+            $workbook = $this->factory->make($type, $filters);
+        }
 
         $relative = 'reports/'.now()->format('Y/m').'/'.Str::uuid()->toString().'.'.$format->value;
 
@@ -65,7 +96,7 @@ final class ReportGenerator
             mkdir($directory, 0o750, true);
         }
 
-        $this->writeToFile($report, $format, $absolute);
+        $this->writeToFile($workbook, $type, $format, $absolute);
 
         // The file is written first and the row second, so a database failure can be
         // cleaned up by hand; the reverse order would leave a row claiming a file that
@@ -92,6 +123,16 @@ final class ReportGenerator
             'report_type' => $type->value,
             'format' => $format->value,
             'generated_report_id' => (int) $row->id,
+            // FIX-EXPORT-IMPORT-03: what the workbook covered. The audit needs the scope and the
+            // shape, not the rows — a download of every month of every company is a materially
+            // different event from one company, and an audit that recorded only "xlsx" would not
+            // tell them apart.
+            ...($type === ReportType::LibroOperativo ? [
+                'sheets' => $workbook->sheetCount(),
+                'company_blocks' => $workbook->blockCount(),
+                'rows' => $workbook->rowCount(),
+                'selection' => $filters,
+            ] : []),
         ], null, $row);
 
         return $row;
@@ -118,14 +159,33 @@ final class ReportGenerator
         $report->forceFill(['status' => 'expired'])->save();
     }
 
-    private function writeToFile(ReportResult $report, ReportFormat $format, string $absolute): void
-    {
+    private function writeToFile(
+        ReportResult|LegacyWorkbook $workbook,
+        ReportType $type,
+        ReportFormat $format,
+        string $absolute,
+    ): void {
+        // FIX-EXPORT-IMPORT-03. The workbook takes its own writer and asserts that it is XLSX,
+        // because there is no flat representation to feed the CSV and PDF exporters and a silent
+        // attempt would produce an empty file rather than an error.
+        if ($workbook instanceof LegacyWorkbook) {
+            if ($format !== ReportFormat::Xlsx) {
+                throw InvalidLegacyWorkbookSelection::for(
+                    'El libro operativo sólo se puede exportar en XLSX.',
+                );
+            }
+
+            $this->workbookExporter->writeTo($workbook, $absolute);
+
+            return;
+        }
+
         match ($format) {
-            ReportFormat::Pdf => $this->pdf->writeTo($report, $absolute),
-            ReportFormat::Xlsx => $this->xlsx->writeTo($report, $absolute),
+            ReportFormat::Pdf => $this->pdf->writeTo($workbook, $absolute),
+            ReportFormat::Xlsx => $this->xlsx->writeTo($workbook, $absolute),
             // CSV is written here rather than streamed because the artifact has to exist
             // on disk for the download controller to authorise and serve it later.
-            ReportFormat::Csv => $this->writeCsv($report, $absolute),
+            ReportFormat::Csv => $this->writeCsv($workbook, $absolute),
         };
     }
 

@@ -164,7 +164,42 @@ async function loadRows(): Promise<void> {
     }
 }
 
+/**
+ * FIX-EXPORT-IMPORT-03: the state of the findings request, kept apart from the data.
+ *
+ * The previous version set `issues.value = []` on failure, which is a lie the reviewer cannot
+ * see through: an empty table reads as "this batch is clean" and it is not — the request failed.
+ * Three states, not two, and only one of them is "nothing to show".
+ *
+ * `issuesError` is deliberately not the page's `error`: a failed findings request leaves the rest
+ * of the screen perfectly usable, and blanking the whole page for it would hide the summary, the
+ * plan and the blockers that the reviewer came for.
+ */
+const issuesError = ref<string | null>(null);
+const issuesLoaded = ref(false);
+
+/**
+ * Sequence number for the findings request.
+ *
+ * ## Why the stale response was a real bug and not a theoretical one
+ *
+ * `loadIssues()` had no sequencing, and it is called from three places that can overlap: the
+ * initial load, the code filter's watcher, and the pagination watcher. Typing a code and then
+ * clicking next — or simply typing two characters quickly — fires two requests. If the first is
+ * slower than the second, the first response lands last and writes `invalid_affiliation_date`
+ * rows over a table the reviewer is now looking at `company_identity_conflict`.
+ *
+ * That is precisely the reported symptom: the code filter said one thing and the table showed
+ * another. The fix is the same pattern `load()` already used, applied to the request that had
+ * been left out of it.
+ */
+let issuesRequestId = 0;
+
 async function loadIssues(): Promise<void> {
+    const current = ++issuesRequestId;
+
+    issuesError.value = null;
+
     try {
         const payload = await businessApi.imports.issues(importId.value, {
             code: issueCode.value === '' ? undefined : issueCode.value,
@@ -172,63 +207,122 @@ async function loadIssues(): Promise<void> {
             page: issuePage.value,
         });
 
+        // A response for a filter the reviewer has already moved on from is discarded, not
+        // applied. The check is on the way in *and* on the way out, so a slow earlier request
+        // cannot overwrite a fast later one in either order.
+        if (current !== issuesRequestId) {
+            return;
+        }
+
         issues.value = payload.data;
         issuesMeta.value = payload.meta;
         issueGroups.value = payload.groups ?? [];
-    } catch {
+        issuesLoaded.value = true;
+    } catch (cause) {
+        if (current !== issuesRequestId) {
+            return;
+        }
+
+        // The list is emptied and the reason is shown, rather than the other way round: keeping
+        // the previous rows under a new filter would be showing data that does not match the
+        // filter above it.
         issues.value = [];
-        // An empty breakdown is better than a stale one: if the aggregate cannot be read, showing
-        // the previous batch's numbers would tell a reviewer how much work there is and be wrong.
         issueGroups.value = [];
+        issuesLoaded.value = false;
+        issuesError.value =
+            cause instanceof ApiError ? cause.message : 'No fue posible cargar las incidencias.';
     }
 }
 
 /**
- * The kinds that are waiting on a person, most numerous first.
+ * The three categories a reviewer actually has to think about.
  *
- * `resolvable` rather than `blocking` is the test, and the difference matters: a kind can be
- * blocking yet already answered, and a kind can still be answerable after it stopped blocking.
- * What a reviewer needs here is "which of these is waiting for *me*", and only `open > 0` on an
- * answerable kind says that.
+ * The previous version had two — "needs a decision" and "informational" — which merged the two
+ * things that behave differently. A **blocker** stops Apply and cannot be ignored. An **optional
+ * observation** is a real question with a real answer available (name the AFP, write the date) that
+ * a person may simply skip: the batch applies without it. Showing both under one heading taught
+ * people to treat the blockers as optional, which is the failure this screen exists to prevent.
  */
-const decisionGroups = computed(() =>
-    issueGroups.value.filter((group) => group.resolvable && group.open > 0),
+
+/** Blocking, answerable, and still unanswered. The only category that stops Apply. */
+const blockingGroups = computed(() =>
+    issueGroups.value.filter((group) => group.blocking && group.resolvable && group.open > 0),
+);
+
+/** Answerable but no longer blocking: a real question that a person may skip. */
+const optionalGroups = computed(() =>
+    issueGroups.value.filter((group) => !group.blocking && group.resolvable && group.open > 0),
 );
 
 /**
- * The kinds nobody has to do anything about.
+ * Nothing to answer.
  *
- * Shown, and not hidden, because silence is the worse lie: 153 findings that quietly vanished
- * from the screen would leave a reviewer unable to tell whether the import was clean or the
- * screen was broken.
+ * Collapsed because 153 rows of "invalid email" is not information a reviewer reads; shown
+ * because hiding them would leave them unable to tell a clean import from a screen that lost
+ * them.
  */
 const informationalGroups = computed(() =>
     issueGroups.value.filter((group) => !group.resolvable),
 );
+function totalOf(groups: readonly ImportIssueGroup[]): number {
+    return groups.reduce((sum, group) => sum + group.total, 0);
+}
 
-const decisionFindings = computed(() =>
-    decisionGroups.value.reduce((total, group) => total + group.open, 0),
-);
-
-const informationalFindings = computed(() =>
-    informationalGroups.value.reduce((total, group) => total + group.total, 0),
-);
+function openOf(groups: readonly ImportIssueGroup[]): number {
+    return groups.reduce((sum, group) => sum + group.open, 0);
+}
 
 /**
- * The finding kinds this batch has, keyed by code.
+ * Whether the backend offers this finding an answer that actually settles it.
  *
- * The "Resolver" control below reads this rather than the server's per-finding decision list,
- * because the grouped `resolvable` flag is computed once over every finding of that kind instead
- * of once per row — and on a batch of 77 identical email warnings, computing it 77 times is how
- * the screen and the server end up disagreeing about whether a button should be there.
+ * ## Why this reads `allowed_decisions` and not `groups`
+ *
+ * The previous version derived it from the grouped `resolvable` flag, with a fallback that
+ * **inverted the failure**: `resolvableCodes.size === 0 || resolvableCodes.has(code)` meant that
+ * when the breakdown was missing or the request had failed, every row got a "Resolver" button. An
+ * incomplete response enabled controls. That is the wrong way round for anything that can exclude
+ * a row, and on the delivered workbook it put 77 "Resolver" buttons on warnings whose only
+ * available answer is "excluir fila".
+ *
+ * `allowed_decisions` is the backend's own per-finding contract: it is computed where the
+ * decisions are defined, it survives a failure of the aggregate, and it is already what the
+ * dialog reads. If the request failed there are no findings at all, so there is nothing to
+ * resolve — and `issuesError` says why.
+ *
+ * The `resolves` flag is what separates "there is a way to answer" from "here are buttons that
+ * would be refused": `ContractClosureTest` holds every finding with no settling decision in a
+ * named list, and this is the reader that list exists for.
  */
-const resolvableCodes = computed(
-    () => new Set(issueGroups.value.filter((group) => group.resolvable).map((group) => group.code)),
-);
+function hasSettlingDecision(issue: ImportIssue): boolean {
+    return (issue.allowed_decisions ?? []).some((decision) => decision.resolves === true);
+}
 
 function groupSeverityClass(group: ImportIssueGroup): string {
     return `cdh-badge--${group.severity}`;
 }
+
+/**
+ * The Spanish name of a category, used as the summary's heading.
+ *
+ * Server labels for the individual findings, and interface wording for the categories — the two
+ * answer different questions. `groups[].label` names *what the finding is* ("Correos omitidos por
+ * formato inválido"); these name *what a person has to do about it*, which is the question the
+ * summary exists to answer. Both are Spanish: the codes stay technical and stay in the table.
+ */
+const CATEGORY_HEADINGS = {
+    blocking: 'Bloquean la importación',
+    optional: 'Opcionales — puede continuar sin responderlas',
+    informational: 'Informativas — no requieren ninguna acción',
+} as const;
+
+/**
+ * Whether the informational block is expanded.
+ *
+ * Collapsed by default, and the state is local to this component rather than remembered across
+ * visits: someone who opened it once to check a number should not have to re-expand it on every
+ * reload, and someone who never did should not land in an expanded 153-row table.
+ */
+const informationalExpanded = ref(false);
 
 /**
  * Jump to one kind from the summary.
@@ -240,6 +334,19 @@ function groupSeverityClass(group: ImportIssueGroup): string {
  */
 function focusIssueGroup(group: ImportIssueGroup): void {
     issueCode.value = group.code;
+    issuePage.value = 1;
+}
+
+/**
+ * Drop both filters and go back to page one.
+ *
+ * Exists because "Sólo sin resolver" being on is invisible in a result list of zero: a reviewer
+ * who filters, finds nothing, and does not notice the checkbox has quietly hidden every answered
+ * finding concludes the batch is clean.
+ */
+function clearIssueFilters(): void {
+    issueCode.value = '';
+    issueUnresolved.value = true;
     issuePage.value = 1;
 }
 
@@ -587,12 +694,33 @@ watch(rowSearch, () => {
     rowPage.value = 1;
     void loadRows();
 });
-watch([issueCode, issueUnresolved], () => {
+// `issueUnresolved` is a checkbox: one keystroke, one request, no debounce.
+watch(issueUnresolved, () => {
     issuePage.value = 1;
     void loadIssues();
 });
 watch(rowPage, () => void loadRows());
 watch(issuePage, () => void loadIssues());
+
+/**
+ * A debounced search rather than one request per keystroke.
+ *
+ * Two reasons, and the second is the one that matters. One request per character is eight
+ * requests for an eight-character code, each one queued against the same database; and it is
+ * exactly the overlap that `issuesRequestId` was added to survive. Debouncing does not replace the
+ * sequence guard — a request can still be in flight when the user clicks a summary group — but it
+ * stops the page generating work nobody is waiting for.
+ */
+let codeSearchTimer: number | undefined;
+
+watch(issueCode, () => {
+    window.clearTimeout(codeSearchTimer);
+
+    codeSearchTimer = window.setTimeout(() => {
+        issuePage.value = 1;
+        void loadIssues();
+    }, 300);
+});
 watch(tab, (value) => {
     if (value === 'filas' && rows.value.length === 0) {
         void loadRows();
@@ -642,6 +770,55 @@ const blockers = computed(() => detail.value?.issues.blocking ?? 0);
 const canApplyNow = computed(
     () => canApply.value && detail.value?.applicable === true && !busy.value,
 );
+
+/**
+ * FIX-EXPORT-IMPORT-03 Block B: whether this batch may be cancelled at all.
+ *
+ * ## Why the states are listed here rather than left to the server
+ *
+ * `ImportLifecycle::ALLOWED` is the authority and the server refuses anything else with a 409. This
+ * list exists so the button is not offered for a transition that is certain to be refused — and,
+ * more importantly, so a reviewer looking at a batch that is mid-parse is not invited to cancel it
+ * and then told it could not be.
+ *
+ * The three states absent from the list are deliberate and all three come from the lifecycle:
+ *
+ *  - `applying` — the plan is being written inside a transaction. Cancelling then would promise to
+ *    undo an apply that is already in flight.
+ *  - `applied` and `cancelled` — terminal. `Applied` is the important one: cancelling it would be
+ *    a way to roll back business data without going through anything that reverses a write.
+ */
+const CANCELLABLE_STATUSES = ['uploaded', 'queued', 'review', 'ready', 'failed'];
+
+const canCancel = computed(
+    () =>
+        canReview.value &&
+        detail.value !== null &&
+        CANCELLABLE_STATUSES.includes(detail.value.status),
+);
+
+const confirmCancel = ref(false);
+
+async function cancelImport(): Promise<void> {
+    busy.value = true;
+
+    try {
+        await businessApi.imports.cancel(importId.value);
+
+        // Re-read the batch rather than patching `detail` by hand: the server owns the state
+        // machine and the reason the transition succeeded is whatever it says. A local `'cancelled'`
+        // would show a batch as cancelled even if the row lock had sent it somewhere else.
+        await load();
+
+        notice.value = 'La importación quedó cancelada y se eliminó su copia privada del archivo.';
+    } catch (cause) {
+        error.value =
+            cause instanceof ApiError ? cause.message : 'No fue posible cancelar la importación.';
+    } finally {
+        busy.value = false;
+        confirmCancel.value = false;
+    }
+}
 
 const summary = computed(() => detail.value?.summary ?? {});
 
@@ -926,6 +1103,29 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                         </AppButton>
                     </div>
                 </section>
+
+                <!--
+                    FIX-EXPORT-IMPORT-03 Block B. Cancel a batch the reviewer is not going to use.
+
+                    Its own card rather than another button next to "Aplicar plan", because the two
+                    actions are opposites and putting them side by side invites the wrong one on a
+                    bad day. It is shown for every cancellable state and hidden for `applying` and
+                    the two terminal ones, so the button never promises something the lifecycle will
+                    refuse.
+                -->
+                <section v-if="canCancel" class="cdh-card mb-3 cdh-card--danger" aria-labelledby="cancel-title">
+                    <div class="cdh-card__body">
+                        <h2 id="cancel-title" class="cdh-card__title">Cancelar esta importación</h2>
+                        <p class="cdh-text-muted">
+                            Descarta el análisis de este archivo. No se borran clientes, empresas ni
+                            pagos ya registrados, y la operación queda registrada para auditoría.
+                        </p>
+
+                        <AppButton variant="danger" :disabled="busy" @click="confirmCancel = true">
+                            Cancelar importación
+                        </AppButton>
+                    </div>
+                </section>
             </section>
 
             <!-- --------------------------------------------------------- Filas -->
@@ -1038,34 +1238,46 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
             <!-- ---------------------------------------------------- Incidencias -->
             <section v-else-if="tab === 'incidencias'" role="tabpanel" aria-label="Incidencias">
                 <!--
-                    FIX-IMPORT-02 Correction J. The summary a reviewer reads first.
+                    FIX-EXPORT-IMPORT-03. The summary a reviewer reads first.
 
-                    The table below is unchanged and is still the list; this is the map that says
-                    how much of it is actually a decision. Before it, the screen showed 210 rows
-                    with a "Resolver" button on each, and the 77 of those that were invalid email
-                    addresses offered exactly one way to be answered — "excluir fila" — so
-                    clearing those warnings would have dropped 77 clients. Grouping says which
-                    kinds have a question at all.
+                    Three categories, not two, because the two things that used to be merged
+                    behave differently and conflating them taught people to treat blockers as
+                    optional:
+
+                      1. Bloqueantes — stop Apply. Cannot be skipped.
+                      2. Opcionales — a real question with a real answer available (name the AFP,
+                         write the date) that a person may simply skip.
+                      3. Informativas — nothing to answer. Collapsed, and shown.
+
+                    On the delivered workbook that is 3 / 38 / 154 instead of a 195-row table with
+                    a "Resolver" button on every row.
                 -->
-                <div v-if="issueGroups.length > 0" class="cdh-issue-summary">
-                    <div v-if="decisionGroups.length > 0" class="cdh-issue-summary__block">
+                <div v-if="issuesError !== null" class="cdh-alert cdh-alert--danger" role="alert">
+                    <p>{{ issuesError }}</p>
+                    <button type="button" class="cdh-link" @click="loadIssues()">Reintentar</button>
+                </div>
+
+                <div v-else-if="issueGroups.length > 0" class="cdh-issue-summary">
+                    <!-- 1. Blocking. The only category that stops Apply. -->
+                    <div
+                        v-if="blockingGroups.length > 0"
+                        class="cdh-issue-summary__block cdh-issue-summary__block--blocking"
+                    >
                         <h3 class="cdh-issue-summary__title">
-                            Requieren una decisión
-                            <span class="cdh-text-muted">
-                                ({{ decisionGroups.length }} tipos · {{ decisionFindings }} incidencias)
+                            {{ CATEGORY_HEADINGS.blocking }}
+                            <span class="cdh-issue-summary__count">
+                                {{ openOf(blockingGroups) }}
                             </span>
                         </h3>
 
                         <ul class="cdh-issue-summary__list">
-                            <li v-for="group in decisionGroups" :key="`d-${group.code}`">
+                            <li v-for="group in blockingGroups" :key="`b-${group.code}`">
                                 <button
                                     type="button"
                                     class="cdh-issue-summary__item"
                                     @click="focusIssueGroup(group)"
                                 >
-                                    <span class="cdh-badge" :class="groupSeverityClass(group)">
-                                        {{ group.severity }}
-                                    </span>
+                                    <span class="cdh-badge cdh-badge--error">bloqueante</span>
                                     <span class="cdh-issue-summary__label">{{ group.label }}</span>
                                     <span class="cdh-issue-summary__count">
                                         {{ group.open }}<span v-if="group.open !== group.total">/{{ group.total }}</span>
@@ -1075,16 +1287,51 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                         </ul>
                     </div>
 
-                    <div v-if="informationalGroups.length > 0" class="cdh-issue-summary__block">
+                    <!-- 2. Optional. Answerable, and skippable. -->
+                    <div v-if="optionalGroups.length > 0" class="cdh-issue-summary__block">
                         <h3 class="cdh-issue-summary__title">
-                            Informativas
-                            <span class="cdh-text-muted">
-                                ({{ informationalGroups.length }} tipos · {{ informationalFindings }} incidencias — nada
-                                que responder)
-                            </span>
+                            {{ CATEGORY_HEADINGS.optional }}
+                            <span class="cdh-issue-summary__count">{{ openOf(optionalGroups) }}</span>
                         </h3>
 
                         <ul class="cdh-issue-summary__list">
+                            <li v-for="group in optionalGroups" :key="`o-${group.code}`">
+                                <button
+                                    type="button"
+                                    class="cdh-issue-summary__item"
+                                    @click="focusIssueGroup(group)"
+                                >
+                                    <span class="cdh-badge cdh-badge--info">opcional</span>
+                                    <span class="cdh-issue-summary__label">{{ group.label }}</span>
+                                    <span class="cdh-issue-summary__count">
+                                        {{ group.open }}<span v-if="group.open !== group.total">/{{ group.total }}</span>
+                                    </span>
+                                </button>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <!--
+                        3. Informational. Collapsed by default, and never hidden: a reviewer has
+                        to be able to tell a clean import from a screen that lost 154 rows.
+                    -->
+                    <div v-if="informationalGroups.length > 0" class="cdh-issue-summary__block">
+                        <button
+                            type="button"
+                            class="cdh-issue-summary__toggle"
+                            :aria-expanded="informationalExpanded"
+                            @click="informationalExpanded = !informationalExpanded"
+                        >
+                            <span class="cdh-issue-summary__chevron" :class="{ 'is-open': informationalExpanded }"
+                                >&#9656;</span
+                            >
+                            {{ CATEGORY_HEADINGS.informational }}
+                            <span class="cdh-issue-summary__count">
+                                {{ totalOf(informationalGroups) }}
+                            </span>
+                        </button>
+
+                        <ul v-if="informationalExpanded" class="cdh-issue-summary__list">
                             <li v-for="group in informationalGroups" :key="`i-${group.code}`">
                                 <button
                                     type="button"
@@ -1123,8 +1370,38 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                     </div>
                 </div>
 
-                <div v-if="issues.length === 0" class="cdh-empty">
-                    <p class="cdh-text-muted">No hay incidencias que coincidan.</p>
+                <div v-if="issueCode !== '' || !issueUnresolved" class="cdh-filters__result">
+                    <span class="cdh-text-muted">
+                        Filtrando por <code>{{ issueCode || 'todos los códigos' }}</code
+                        >{{ issueUnresolved ? ', sólo sin resolver' : '' }} ·
+                        {{ issuesMeta.total }} de {{ totalOf(issueGroups) }} incidencias.
+                    </span>
+
+                    <button type="button" class="cdh-link" @click="clearIssueFilters">
+                        Quitar filtros
+                    </button>
+                </div>
+
+                <!--
+                    The empty state is only allowed to say "nothing matches" once the request has
+                    actually succeeded. `issuesLoaded` is what distinguishes "this batch is clean"
+                    from "the request failed", and conflating them is how a reviewer ends up
+                    pressing Apply on a batch they never saw.
+                -->
+                <div v-if="issuesError !== null" class="cdh-empty">
+                    <p class="cdh-text-muted">
+                        No se pudieron cargar las incidencias. Use «Reintentar» arriba.
+                    </p>
+                </div>
+
+                <div v-else-if="issues.length === 0 && issuesLoaded" class="cdh-empty">
+                    <p class="cdh-text-muted">
+                        {{
+                            issueCode === '' && issueUnresolved
+                                ? 'No hay incidencias pendientes en esta importación.'
+                                : 'No hay incidencias que coincidan con el filtro.'
+                        }}
+                    </p>
                 </div>
 
                 <div v-else class="cdh-table-wrap">
@@ -1167,29 +1444,32 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                                 <td>{{ answerState(issue) }}</td>
                                 <td>
                                     <!--
-                                        A04-R2: no "Resolver" on a finding that stopped applying.
-                                        The endpoint refuses it now as well; disabling the control
-                                        is what keeps the screen and the server agreeing.
+                                        FIX-EXPORT-IMPORT-03. The "Resolver" button now reads
+                                        `issue.allowed_decisions` — the backend's own per-finding
+                                        contract — and nothing else.
 
-                                        FIX-IMPORT-02 adds a second condition, and it is the one
-                                        this milestone exists for: no button on a kind that has
-                                        nothing to ask. `invalid_email` and `missing_monthly_value`
-                                        carried exactly one button — "excluir fila" — and pressing
-                                        it to clear a warning about a missing email address drops
-                                        a real client from the import. 77 of them, in the delivered
-                                        workbook.
+                                        The previous condition was
+                                        `resolvableCodes.size === 0 || resolvableCodes.has(code)`,
+                                        which meant that when the grouped breakdown was missing or
+                                        the request had failed, **every** row got the button. An
+                                        incomplete response enabled controls, which is the wrong way
+                                        round for anything that can exclude a row: on the delivered
+                                        workbook it put 77 "Resolver" buttons on invalid-email
+                                        warnings whose only available answer is "excluir fila", and
+                                        clearing them would have dropped 77 clients.
 
-                                        When the breakdown could not be read, `resolvableCodes` is
-                                        empty and this hides every button. That is the wrong way
-                                        round, so it is corrected for below rather than left as a
-                                        screen that is suddenly full of controls nobody can justify.
+                                        `resolves === true` is the test because it separates "there
+                                        is a way to answer this" from "here are buttons the server
+                                        would refuse" — `ContractClosureTest` keeps every finding
+                                        with no settling decision in a named list, and this is that
+                                        list's only reader.
                                     -->
                                     <button
                                         v-if="
                                             canReview &&
                                             issue.resolved_at === null &&
                                             !issue.is_superseded &&
-                                            (resolvableCodes.size === 0 || resolvableCodes.has(issue.code))
+                                            hasSettlingDecision(issue)
                                         "
                                         type="button"
                                         class="cdh-link"
@@ -1197,7 +1477,7 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                                     >
                                         Resolver
                                     </button>
-                                    <span v-else-if="!resolvableCodes.has(issue.code)" class="cdh-text-muted">
+                                    <span v-else-if="!hasSettlingDecision(issue)" class="cdh-text-muted">
                                         Nada que responder
                                     </span>
                                     <span v-else class="cdh-text-muted">—</span>
@@ -1362,6 +1642,49 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                     Quedan {{ blockers }} incidencias bloqueantes sin resolver. El servidor rechazará
                     la operación.
                 </p>
+            </AppModal>
+
+            <!--
+                FIX-EXPORT-IMPORT-03 Block B. The cancellation confirmation.
+
+                Four things are said, because each one answers a question a person has before
+                pressing a button that discards work:
+
+                  - the analysis stops being used;
+                  - the private copy of the file is deleted — it is a file of national identifiers
+                    and §4.3's premise is that it is not kept once there is no reason to;
+                  - **nothing already in the master is touched** — no clients, no companies, no
+                    payments. That is the sentence that decides whether somebody presses the button
+                    at all, so it is not left implicit;
+                  - the operation is recorded for audit.
+
+                The project's own `AppModal`, not `window.confirm()`: the native dialog cannot
+                render four sentences and two buttons with any consistency, and it cannot be
+                styled to match the rest of the screen.
+            -->
+            <AppModal
+                :open="confirmCancel"
+                title="¿Cancelar esta importación?"
+                confirm-label="Sí, cancelar"
+                cancel-label="No, volver"
+                destructive
+                :busy="busy"
+                @confirm="cancelImport"
+                @cancel="confirmCancel = false"
+            >
+                <p v-if="detail">
+                    Se descartará el análisis de <strong>{{ detail.original_filename }}</strong>.
+                </p>
+
+                <ul class="cdh-modal__list">
+                    <li>El análisis de este archivo dejará de utilizarse.</li>
+                    <li>Se eliminará la copia privada del archivo asociada a este lote.</li>
+                    <li>
+                        <strong>No se eliminarán clientes, empresas ni pagos</strong> ya registrados:
+                        esta operación no toca los datos del sistema.
+                    </li>
+                    <li>La cancelación quedará registrada para auditoría.</li>
+                </ul>
             </AppModal>
 
             <!-- §17.4: a decision is one of the options this issue offers. -->
