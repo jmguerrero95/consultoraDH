@@ -23,6 +23,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Affiliations\CloseAffiliationRequest;
 use App\Http\Requests\Affiliations\CloseRelationshipRequest;
 use App\Http\Requests\Affiliations\LinkClientCompanyRequest;
+use App\Http\Requests\Affiliations\ResolveAffiliationObservationRequest;
 use App\Http\Requests\Affiliations\StoreAffiliationRequest;
 use App\Http\Requests\Affiliations\TransferRelationshipRequest;
 use App\Http\Requests\Clients\ChangeClientStatusRequest;
@@ -543,6 +544,142 @@ final class ClientController extends Controller
         return response()->json([
             'affiliation_observations' => AffiliationObservationResource::collection($observations)->resolve(),
         ]);
+    }
+
+    /**
+     * POST /api/clients/{client}/affiliation-observations/{observation}/resolve
+     *
+     * Answer §9.1's bare `SI`: name the entity the file said existed and did not identify.
+     *
+     * ## Why this goes through A02 rather than writing the row here
+     *
+     * Three reasons, and the first is the important one:
+     *
+     *  1. an `client_affiliations` row **is** an affiliation. Writing it outside `ManageAffiliations`
+     *     would create a record the domain's invariants — §9.5's one open affiliation per type,
+     *     the client and entity locks, the status checks — never saw. The observation would stop
+     *     being a note about a gap and become an affiliation that skipped every rule about
+     *     affiliations;
+     *  2. the audit trail is `ManageAffiliations`' own event, so §17.4's "who changed this
+     *     person's record" is answered by the same write as every other affiliation;
+     *  3. `AffiliationAlreadyExists` and `DomainException` already carry the sentences to show a
+     *     person, and duplicating them here would be how two versions of the same message start
+     *     to drift.
+     *
+     * ## The observation is not deleted, and not modified
+     *
+     * It records what the **file** said, and the file still says `SI`. Deleting it would erase the
+     * provenance; editing it would make the master's record of the source disagree with the source.
+     * What changes is `isAnswered()` — computed, not stored — because a real affiliation of the
+     * same type now covers the months it observed.
+     *
+     * ## No duplicates
+     *
+     * Refused with 409 when the gap is already filled, so a double-click cannot produce two
+     * identical affiliations and §9.5's invariant does not have to catch it after the fact.
+     */
+    public function resolveAffiliationObservation(
+        ResolveAffiliationObservationRequest $request,
+        Client $client,
+        ClientAffiliationObservation $observation,
+    ): JsonResponse {
+        // Scoped to the client in the route. Without this a request for `/clients/1/…/99` would
+        // resolve an observation belonging to somebody else, because `ClientAffiliationObservation`
+        // is bound by id alone.
+        abort_unless($observation->client_id === $client->id, 404);
+
+        if ($observation->isAnswered()) {
+            return response()->json([
+                'message' => 'Esta afiliación ya tiene una entidad identificada.',
+                'code' => 'already_answered',
+            ], 409);
+        }
+
+        $entity = SocialSecurityEntity::query()
+            ->findOrFail($request->validated('social_security_entity_id'));
+
+        // The type the **file** asserted, compared against the entity being named. An AFP gap may
+        // not be answered with an EPS, and this is the only place that knows both.
+        if ($entity->type->value !== $observation->type->value) {
+            return response()->json([
+                'message' => sprintf(
+                    'La observación corresponde a una afiliación de tipo %s y la entidad indicada es de tipo %s.',
+                    $observation->type->label(),
+                    $entity->type->label(),
+                ),
+                'code' => 'entity_type_mismatch',
+            ], 422);
+        }
+
+        if ($request->validated('type') !== $observation->type->value) {
+            return response()->json([
+                'message' => sprintf(
+                    'La observación corresponde a una afiliación de tipo %s.',
+                    $observation->type->label(),
+                ),
+                'code' => 'entity_type_mismatch',
+            ], 422);
+        }
+
+        $startedOn = $observation->started_on !== null
+            ? new \DateTimeImmutable($observation->started_on->toDateString())
+            : null;
+
+        $notes = $this->resolutionNote($observation, $request->validated('notes'));
+
+        try {
+            $affiliation = $this->affiliations->create(
+                client: $client,
+                entity: $entity,
+                actor: $request->user(),
+                // §8's own vocabulary: the date the file stated, at the precision it stated it.
+                // Null when the source gave no date, which A02 accepts — §8 widens the constraint
+                // precisely so an unknown start is preserved rather than invented.
+                startedOn: $startedOn,
+                notes: $notes,
+            );
+        } catch (\DomainException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => 'affiliation_rejected',
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => 'La entidad de la afiliación quedó identificada.',
+            'affiliation' => new AffiliationResource($affiliation->load('entity')),
+            'observation' => new AffiliationObservationResource($observation->fresh()),
+        ]);
+    }
+
+    /**
+     * The note written on the affiliation this resolution creates.
+     *
+     * Not optional and not free text alone: it says **which** observation it answers and that it
+     * came from an import, so a reader of the master's history in three years' time can tell a
+     * fund that was named by a person from one the file wrote out. The operator's own note is
+     * appended rather than replaced.
+     */
+    private function resolutionNote(
+        ClientAffiliationObservation $observation,
+        ?string $operatorNote,
+    ): string {
+        $note = sprintf(
+            'Entidad identificada por revisión manual sobre una observación del archivo ('
+            .'meses observados: %s; motivo registrado: %s).',
+            $observation->monthKeys() === [] ? 'sin meses declarados' : implode(', ', $observation->monthKeys()),
+            $observation->reason,
+        );
+
+        if ($observation->legacy_import_id !== null) {
+            $note .= sprintf(' Importación #%d.', $observation->legacy_import_id);
+        }
+
+        if (is_string($operatorNote) && trim($operatorNote) !== '') {
+            $note .= ' Nota del revisor: '.trim($operatorNote);
+        }
+
+        return $note;
     }
 
     public function storeAffiliation(

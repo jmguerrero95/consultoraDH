@@ -30,6 +30,7 @@ final class HistoryReconstruction
      * @param  list<RateSegment>  $rateSegments
      * @param  list<Disappearance>  $disappearances  §8.4 blockers
      * @param  list<CompanyOverlap>  $overlaps  §8.5 blockers
+     * @param  list<ContradictoryStarts>  $contradictoryStarts  one employment whose stated starts contradict its months
      */
     public function __construct(
         private readonly array $episodes,
@@ -39,6 +40,7 @@ final class HistoryReconstruction
         private readonly ImportRetirementPolicy $retirementPolicy,
         private readonly array $disappearances = [],
         private readonly array $overlaps = [],
+        private readonly array $contradictoryStarts = [],
     ) {}
 
     /** @return list<RelationshipEpisode> */
@@ -69,6 +71,12 @@ final class HistoryReconstruction
     public function overlaps(): array
     {
         return $this->overlaps;
+    }
+
+    /** @return list<ContradictoryStarts> */
+    public function contradictoryStarts(): array
+    {
+        return $this->contradictoryStarts;
     }
 
     public function fileLastMonth(): ?string
@@ -149,6 +157,26 @@ final class HistoryReconstruction
             );
         }
 
+        // Blocking, and deliberately so.
+        //
+        // Every answer here is a date the file wrote, and until a person picks one the episodes
+        // stay as they are — three contradictory relationships at one employer, which A02 refuses
+        // and §12.3 turns into a refused batch. Refusing is the honest outcome: the file says two
+        // incompatible things and no rule can say which one is true.
+        foreach ($this->contradictoryStarts as $group) {
+            $issues[] = new ParsedIssue(
+                LegacyImportIssue::ContradictoryRelationshipStarts,
+                null,
+                null,
+                null,
+                LegacyIssueSeverity::Error,
+                true,
+                $group->explanation(),
+                IssueSubject::contradictoryStarts($group),
+                $group->toArray(),
+            );
+        }
+
         return $issues;
     }
 
@@ -180,6 +208,7 @@ final class HistoryReconstruction
             'rate_segments' => count($this->rateSegments),
             'disappearances' => count($this->disappearances),
             'overlaps' => count($this->overlaps),
+            'contradictory_starts' => count($this->contradictoryStarts),
             'blocking' => $this->blockingCount(),
         ];
     }

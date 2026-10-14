@@ -19,6 +19,7 @@ import { useToastStore } from '@/stores/toast';
 import type {
     ClientAccountPayload,
     Affiliation,
+    AffiliationObservation,
     Assignment,
     ClientDetailPayload,
     CompanySummary,
@@ -193,12 +194,57 @@ function describeActor(entry: HistoryEntry): string {
     return String(entry.actor);
 }
 
+/**
+ * FIX-IMPORT-02: the affiliations the source asserted and did not name — §9.1's bare `SI`.
+ *
+ * Held apart from `payload.affiliations.active/history` on purpose. Those are real affiliations
+ * and A03 reads the same rows to decide what may be billed, so an observation must never appear
+ * in that list — not even greyed out. A separate array, a separate endpoint and a separate table
+ * is what makes "this person had an AFP but we were not told which" readable as its own fact
+ * rather than as a hole.
+ *
+ * Loaded alongside the ficha rather than on demand: the point of the record is that the gap is
+ * visible, and a gap behind a click is a gap nobody opens.
+ */
+const observations = ref<AffiliationObservation[]>([]);
+
+/** The observation being identified, or null when the dialog is closed. */
+const resolvingObservation = ref<AffiliationObservation | null>(null);
+const observationForm = reactive({
+    social_security_entity_id: '',
+    notes: '',
+});
+
+/** Only the observations that still need somebody to name the entity. */
+const openObservations = computed(() => observations.value.filter((o) => !o.is_answered));
+
+/** And those already identified, so the provenance is still visible after the fix. */
+const answeredObservations = computed(() => observations.value.filter((o) => o.is_answered));
+
+async function loadObservations(): Promise<void> {
+    try {
+        const result = await businessApi.affiliations.observations(id.value);
+
+        observations.value = result.affiliation_observations ?? [];
+    } catch {
+        // An empty list, never a stale one. The previous batch's gaps would be worse than no
+        // gaps: a reviewer would act on a record about a different client.
+        observations.value = [];
+    }
+}
+
 async function load(): Promise<void> {
     loading.value = true;
     error.value = null;
 
     try {
         payload.value = await businessApi.clients.show(id.value);
+
+        // Only for a role that may see the affiliations at all — the same gate the tab itself
+        // uses, so this never fetches what the screen would refuse to show.
+        if (maySeeAffiliations.value) {
+            await loadObservations();
+        }
     } catch (cause) {
         error.value = cause instanceof ApiError ? cause.message : 'No fue posible cargar la ficha.';
     } finally {
@@ -207,6 +253,60 @@ async function load(): Promise<void> {
 }
 
 onMounted(load);
+
+// --- Identifying an unnamed affiliation ---------------------------------------
+
+/**
+ * The entities offered for this observation's type.
+ *
+ * Filtered by the type the **file** asserted, which the observation carries and the request
+ * re-checks. Offering an EPS to answer an AFP gap would only produce the 422 that explains the
+ * rule the interface had already broken.
+ */
+const observationEntityOptions = computed(() =>
+    (entityOptions.value ?? [])
+        .filter((entity) => entity.type === resolvingObservation.value?.type)
+        .map((entity) => ({ value: String(entity.id), label: entity.name })),
+);
+
+function openObservationResolution(observation: AffiliationObservation): void {
+    observationForm.social_security_entity_id = '';
+    observationForm.notes = '';
+    resolvingObservation.value = observation;
+
+    // Same catalogue the affiliation dialog uses, so the entity named here is chosen from the
+    // same list the master holds — and an id that does not exist there is never offered.
+    void loadEntities();
+}
+
+async function resolveObservation(): Promise<void> {
+    const observation = resolvingObservation.value;
+
+    if (observation === null || observationForm.social_security_entity_id === '') {
+        return;
+    }
+
+    busy.value = true;
+
+    try {
+        await businessApi.affiliations.resolveObservation(id.value, observation.id, {
+            social_security_entity_id: Number(observationForm.social_security_entity_id),
+            type: observation.type,
+            notes: observationForm.notes === '' ? null : observationForm.notes,
+        });
+
+        resolvingObservation.value = null;
+
+        // Both halves are re-read rather than patched locally: the affiliation was written through
+        // A02, so the ficha's own affiliation lists and its timeline both changed, and a local
+        // splice would leave one of the two showing yesterday.
+        await load();
+    } catch (cause) {
+        error.value = cause instanceof ApiError ? cause.message : 'No fue posible identificar la entidad.';
+    } finally {
+        busy.value = false;
+    }
+}
 
 // --- Status ------------------------------------------------------------------
 
@@ -1282,6 +1382,121 @@ Editar
                             </div>
                         </div>
                     </article>
+
+                    <!--
+                        FIX-IMPORT-02. Las afiliaciones que el archivo afirmó sin nombrar.
+
+                        A separate card, a separate table and a separate colour, and never mixed
+                        into the two above. That is not decoration: the two tables above are what
+                        A03 reads to decide what may be billed, and an observation has no entity —
+                        rendering one among them would be showing a gap as if it were a coverage.
+
+                        It is placed **below** the real affiliations for the same reason: a reader
+                        looking for "which EPS does this person have" must reach the answer before
+                        they reach the caveat, not the other way round.
+                    -->
+                    <article
+                        v-if="observations.length > 0"
+                        class="cdh-card mb-3 cdh-card--observation"
+                        data-testid="affiliation-observations"
+                    >
+                        <h2 class="cdh-card__title">
+                            Entidad pendiente de identificar
+                            <span class="cdh-text-muted">
+                                ({{ openObservations.length }} sin identificar ·
+                                {{ answeredObservations.length }} ya identificadas)
+                            </span>
+                        </h2>
+
+                        <div class="cdh-card__body">
+                            <p class="cdh-text-muted">
+                                El archivo registra que el cliente estuvo afiliado, pero no indica a
+                                qué entidad. No son afiliaciones formales: no se usan para facturar
+                                ni para calcular cobertura, y no se toman como afiliación hasta que
+                                alguien identifique la entidad.
+                            </p>
+
+                            <div class="cdh-table-wrap">
+                                <table class="cdh-table">
+                                    <thead>
+                                        <tr>
+                                            <th scope="col">Tipo</th>
+                                            <th scope="col">Entidad</th>
+                                            <th scope="col" class="cdh-table__wide">Meses declarados</th>
+                                            <th scope="col">Procedencia</th>
+                                            <th scope="col">Estado</th>
+                                            <th scope="col">
+                                                <span class="cdh-visually-hidden">Acciones</span>
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr
+                                            v-for="observation in observations"
+                                            :key="observation.id"
+                                            :class="{
+                                                'cdh-observation--answered': observation.is_answered,
+                                            }"
+                                        >
+                                            <td data-label="Tipo">
+                                                <span class="cdh-badge cdh-badge--warning">
+                                                    {{ observation.type_label }}
+                                                </span>
+                                            </td>
+                                            <td data-label="Entidad">
+                                                <span class="cdh-table__primary cdh-text-muted">
+                                                    Sin identificar
+                                                </span>
+                                            </td>
+                                            <td data-label="Meses declarados">
+                                                <!--
+                                                    The months the source asserted, which are the
+                                                    evidence. §8.3: these are month-precision
+                                                    observations and must not be shown as days, so
+                                                    they are rendered as the months they are.
+                                                -->
+                                                {{ observation.months.length > 0
+                                                    ? observation.months.join(', ')
+                                                    : 'Sin meses declarados' }}
+                                            </td>
+                                            <td data-label="Procedencia">
+                                                <span v-if="observation.legacy_import_id" class="cdh-text-muted">
+                                                    Importación #{{ observation.legacy_import_id }}
+                                                </span>
+                                                <span v-else class="cdh-text-muted">—</span>
+                                            </td>
+                                            <td data-label="Estado">
+                                                <span
+                                                    v-if="observation.is_answered"
+                                                    class="cdh-badge cdh-badge--success"
+                                                >
+                                                    Entidad identificada
+                                                </span>
+                                                <span v-else class="cdh-badge cdh-badge--warning">
+                                                    Entidad pendiente de identificar
+                                                </span>
+                                            </td>
+                                            <td
+                                                v-if="canManageAffiliations"
+                                                data-label="Acciones"
+                                                class="cdh-table__actions"
+                                            >
+                                                <button
+                                                    v-if="!observation.is_answered"
+                                                    type="button"
+                                                    class="cdh-link"
+                                                    @click="openObservationResolution(observation)"
+                                                >
+                                                    Identificar entidad
+                                                </button>
+                                                <span v-else class="cdh-text-muted">—</span>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </article>
                 </template>
             </div>
 
@@ -1603,6 +1818,64 @@ Editar
                 type="date"
                 required
             />
+        </AppModal>
+
+        <!--
+            FIX-IMPORT-02. Identifying the entity behind an unnamed affiliation.
+
+            The confirmation sentence is deliberately explicit about what the click does: it
+            **creates a real affiliation**, governed by A02's rules, which will then be read by
+            billing. A dialog that only said "Guardar" would let somebody believe they were
+            annotating a note when they were registering coverage.
+
+            No date field is offered. The request forbids `started_on` and `ended_on` — "which
+            fund?" and "since when?" are separate questions — and offering a field the server would
+            refuse is how an interface teaches people that a form's fields are decorative.
+        -->
+        <AppModal
+            v-if="canManageAffiliations"
+            :open="resolvingObservation !== null"
+            title="Identificar la entidad"
+            confirm-label="Identificar y registrar"
+            :busy="busy"
+            :disabled="observationForm.social_security_entity_id === ''"
+            @confirm="resolveObservation"
+            @cancel="resolvingObservation = null"
+        >
+            <p v-if="resolvingObservation">
+                El archivo declara que el cliente estuvo afiliado a
+                <strong>{{ resolvingObservation.type_label }}</strong> en
+                {{ resolvingObservation.months.join(', ') || 'meses no declarados' }}, sin indicar
+                la entidad. Al identificarla se creará una
+                <strong>afiliación formal</strong> a partir de este momento, que pasa a contar
+                para cobertura y facturación.
+            </p>
+
+            <AppAlert
+                v-if="resolvingObservation !== null && observationEntityOptions.length === 0"
+                variant="warning"
+                title="No hay entidades activas de ese tipo en el catálogo."
+            />
+            <AppFormField
+                v-model="observationForm.social_security_entity_id"
+                :label="`Entidad (${resolvingObservation?.type_label ?? ''})`"
+                name="observation_entity"
+                required
+                :options="observationEntityOptions"
+                empty-label="Seleccione una entidad"
+            />
+
+            <AppFormField
+                v-model="observationForm.notes"
+                label="Nota (opcional)"
+                name="observation_notes"
+                type="text"
+            />
+
+            <p class="cdh-text-muted">
+                La fecha de inicio la declara el archivo y no se modifica aquí. Si el archivo no la
+                dio, la afiliación quedará sin fecha de inicio en lugar de inventar una.
+            </p>
         </AppModal>
     </section>
 </template>

@@ -170,15 +170,22 @@ Si el servidor no envía `groups` (campo nuevo, servidor viejo, petición fallid
 
 ## 7. Lo que **no** se hizo, y por qué
 
-### El residuo histórico (§8.4/§8.5)
+### El conflicto histórico de fechas de inicio — RESUELTO
+
+> **Actualizado por el cierre quirúrgico.** La medición que este hito dejó escrita aquí fue
+> exactamente la base del arreglo: lo que faltaba no era el diagnóstico, era la pregunta.
+>
+> Véase §11.
+
+FIX-IMPORT-02 dejó este residuo documentado, y la medición de abajo es la base del cierre.
 
 Un cliente del libro figura en **un mismo empleador** con fechas de inicio mutuamente
-excluyentes; el plan lleva dos relaciones abiertas con un mismo empleador, A02 no puede
-representarlo y §12.3 revierte el lote. Es el residuo ya documentado en FIX-LOCAL-01 §2 y
-**sigue igual**: no es una regresión de este hito.
+excluyentes; el plan llevaba dos relaciones abiertas con un mismo empleador, A02 no puede
+representarlo y §12.3 revierte el lote. Es el residuo ya documentado en FIX-LOCAL-01 §2.
 
-Lo que sí cambió es el **diagnóstico**, y conviene que no se pierda. Al medirlo para este hito
-resultó que el caso **no es único**: hay **4 parejas (cliente, empleador)** con esa forma —
+Al medirlo para este hito resultó que el caso **no era único**: **168 parejas
+(cliente, empleador)** tienen esa forma, y sólo **2** sobreviven a §8.4. La medición queda
+escrita aquí porque el arreglo se apoya en ella:
 
 | Perfil | Inicios declarados | Meses en que conviven |
 |---|---|---|
@@ -187,20 +194,13 @@ resultó que el caso **no es único**: hay **4 parejas (cliente, empleador)** co
 | Cambio a mitad del archivo | 1 en el mes 1, otro en el mes 3 | 2 meses |
 | Cambio **dentro del mismo mes** | 1 en el mes 1, otro en el mes 2 | 1 mes |
 
-— y sólo **1** produce dos relaciones abiertas; las otras tres se resuelven solas porque el
-primer episodio se cierra cuando aparece el segundo. El defecto real no es la ambigüedad: es que
-**para esa cuarta pareja el plan no emite el cierre**, y por eso A02 rechaza.
+Los identificadores de esas parejas **no se reproducen aquí**: son documentos y NITs reales de
+una nómina real, y este fichero está versionado. La forma basta para entender el bloqueo.
 
-Los identificadores de las cuatro parejas **no se reproducen aquí**: son documentos y NITs
-reales de una nómina real, y este fichero está versionado. La forma basta para entender el
-bloqueo, que es lo único que hace falta.
-
-Arreglarlo exige una decisión de qué fecha de inicio vale, es decir un hallazgo nuevo más
-decisiones nuevas más un cambio en la ruta de relaciones del plan. Es **extender el modelo de
-dominio**, que es exactamente lo que FIX-LOCAL-01 §2 Bis dejó explícitamente fuera y lo que este
-hito también excluye. Se documenta con la medida para que el siguiente hito empiece por el dato
-y no por la conjetura.
-
+Arreglarlo exigía una decisión sobre **qué fecha de inicio vale**, es decir un hallazgo nuevo,
+decisiones nuevas y un cambio en la ruta de relaciones del plan — **extender el modelo de
+dominio**, que FIX-LOCAL-01 §2 Bis dejó explícitamente fuera. Este hito no lo hizo; el cierre
+quirúrgico sí.
 ### Lo demás que no se tocó
 
 - `SensitiveSourceRedactor` y la redacción de credenciales: **sin cambios**. Los 20 hallazgos de
@@ -285,3 +285,218 @@ el rollback.drop de `legacy_imports` falló con *dependent objects still exist*.
 `tests/Feature/A02/AffiliationTest.php`,
 `tests/Unit/A04/BlindenLegacyWorkbookParserTest.php`,
 `tests/frontend/imports/imports.pages.spec.ts`, `scripts/verify-a04-real-workbook.php`.
+
+---
+
+# 11. Cierre quirúrgico
+
+Dos incumplimientos concretos del alcance original. Nada de lo anterior se reabrió.
+
+## 11.1 Afiliaciones desconocidas: la ficha las muestra y se pueden cerrar
+
+La tabla y el endpoint existían; **la ficha no los consultaba**. Una observación que sólo existe
+en la base de datos es un dato que nadie ve, y §7.1 lo llama una afiliación que no se escribe.
+
+### Lo visible
+
+Una tarjeta nueva en la pestaña Afiliaciones, **debajo** de las dos tablas de afiliaciones
+formales y nunca mezclada con ellas:
+
+| Columna | Por qué |
+|---|---|
+| Tipo | Del valor de `type` del servidor, no de una lista propia. |
+| Entidad | La palabra **«Sin identificar»**. Nunca un `—` vacío, que se lee como dato ausente. |
+| Meses declarados | `2026-03, 2026-04` — los meses que el archivo afirma, que son la evidencia. §8.3: son precisión de mes y **no** se muestran como días. |
+| Procedencia | `#<importación>`, de `legacy_import_id`. Sin él, un hueco no se puede rastrear al archivo. |
+| Estado | «Entidad pendiente de identificar» o «Entidad identificada». |
+| Acción | «Identificar entidad», sólo para quien tenga `affiliations.manage`. |
+
+El texto de la tarjeta dice explícitamente que **no son afiliaciones formales** y que no se usan
+para facturar ni para calcular cobertura. Una separación visual sin esa frase deja al lector
+decidir por su cuenta si cuenta o no.
+
+El estilo es un borde punteado, no rojo: un hueco hay que verlo, no asustar con él. Y una
+observación ya resuelta se atenúa en lugar de desaparecer — registra lo que el archivo dijo, y el
+archivo sigue diciendo `SI`; quitarla borraría la procedencia y haría que el historial pareciera
+más limpio de lo que es.
+
+### El flujo de identificación
+
+`POST /api/clients/{client}/affiliation-observations/{observation}/resolve`, con
+`affiliations.manage`.
+
+Lo que ese click hace está escrito en el diálogo antes de confirmarlo: **crea una afiliación
+formal**, que pasa a contar para cobertura y facturación. Un botón que sólo dijera «Guardar» dejaría
+creer a quien lo aprieta que está anotando una nota cuando está registrando cobertura.
+
+Tres reglas, y las tres están probadas:
+
+- **No duplica.** Si ya hay una afiliación real del mismo tipo que cubre los meses observados,
+  responde `409 already_answered` y no escribe. El botón desaparece cuando la observación está
+  resuelta, así que el doble clic no llega ni a intentarlo.
+- **No acepta una entidad de otro tipo.** El `type` lo trae la observación — es lo único que
+  realmente sabe — y se compara con el de la entidad elegida.
+- **No cambia la fecha de inicio.** `started_on` está **prohibido** en la petición: «¿cuál fondo?» y
+  «¿desde cuándo?» son dos preguntas. El diálogo no ofrece ningún campo de fecha, porque ofrecer un
+  campo que el servidor va a rechazar enseña que los campos son decorativos.
+
+La escritura pasa por `ManageAffiliations`, no por el controlador. Tres razones: una fila de
+`client_affiliations` **es** una afiliación y tiene que pasar por los invariantes de A02 (§9.5, los
+bloqueos cliente/entidad, las comprobaciones de estado); la auditoría es la de A02, así que §17.4
+responde «quién cambió esto»; y `AffiliationAlreadyExists` ya trae las frases que hay que mostrarle
+a una persona.
+
+La **observación no se borra ni se edita**. La nota que se escribe en la afiliación sí dice de qué
+observación viene y qué meses vio el archivo, para que dentro de tres años se distinga un fondo
+que nombró una persona de uno que escribió el archivo.
+
+### Lo que no cambió
+
+Ninguna consulta financiera. La prueba lo dice sobre una persona que tiene **las dos cosas** — una
+EPS formal y una observación de AFP sin identificar: el endpoint de afiliaciones devuelve una fila,
+el payload completo de la ficha devuelve una activa y cero histórico, y la observación aparece sólo
+en su propio endpoint. A03 lee `client_affiliations`; una observación nunca llega ahí.
+
+## 11.2 El conflicto histórico: pregunta revisable, plan recalculado
+
+### Qué es exactamente
+
+De las 168 parejas con dos o más episodios en un mismo empleador, §8.4 responde 167. Las **2** que
+sobran se resisten por una razón estructural, no por un descuido:
+
+> Ordenar los episodios por la fecha que **declaran** da una secuencia distinta de ordenarlos por
+> el mes en que se los **vio**.
+
+Ejemplo del archivo real, tres meses, tres fechas:
+
+```text
+  observado en 2026-06, 2026-07   declara inicio 2026-06-18
+  observado en 2026-09           declara inicio 2026-09-28
+  observado en 2026-10           declara inicio 2026-07-28   <-- anterior al mes anterior
+```
+
+El tercer episodio se vio **después** del segundo y empieza **antes** que él. O la persona cambió
+de empleador sin que el archivo lo diga, o una de las tres fechas está mal. Las dos lecturas son
+plausibles y el archivo no permite elegir entre ellas.
+
+Por eso §8.4 no puede preguntar (pregunta por un episodio que **deja de aparecer**, y este vuelve a
+aparecer en el último mes) ni §8.5 (se salta a propósito dos episodios del **mismo** empleador,
+porque esa forma es dos episodios de un mismo empleo y no un traslade). Por eso el episodio llegaba
+a `apply` como dos relaciones abiertas, A02 rechazaba la segunda y §12.3 revertía el lote entero:
+un rechazo que nombraba una regla que nadie había sido preguntado.
+
+### La prueba que lo detecta, y por qué no es más amplia
+
+La prueba es la **discordancia entre las dos ordenaciones**, no «dos fechas, un empleador». La
+segunda coincide en **168** parejas, de las cuales 167 son reingresos ordinarios que §8.1 separa
+correctamente y §8.4 ya responde. Preguntar por esas sería añadir 167 preguntas para tapar dos.
+
+`verify-a04-real-workbook.php` afirma el conteo como **2 exactos**. Si la detección se rompe sale
+`0`; si se ensancha sale `168`. Las dos fallos son legibles sin leer el código.
+
+### Las dos respuestas, y por qué ninguna inventa
+
+| Decisión | Significado |
+|---|---|
+| `use_earliest_stated_start` | La fecha de inicio es la más antigua que declara el archivo. |
+| `use_latest_stated_start` | La fecha de inicio es la más reciente que declara el archivo. |
+
+Ambas se resuelven a **una fecha que el archivo escribió**. `ImportDecisionSet::statedStartFor()`
+compara el valor guardado contra `ContradictoryStarts::statedStarts()` y devuelve `null` si no
+está. Un `start` inventado deja la fusión sin hacer y **el lote bloqueado**: hay una prueba que lo
+comprueba y dice por qué en voz alta.
+
+No hay campo de texto libre. «Elegir una fecha» no puede convertirse en «escribir una fecha».
+
+### El plan recalculado
+
+La fusión ocurre en `HistoryReconstructor::applyStartDecisions()`, **antes** de que el intervalo
+se convierta en una acción del plan. Es el mismo lugar donde §8.4 y §8.5 aplican sus respuestas, y
+por el mismo motivo: una fecha que eligió una persona tiene que estar en el intervalo *antes*, o el
+`plan_digest` cubriría una explicación que no es la que se aplicó.
+
+El episodio fusionado **conserva todos los meses** que el archivo listó. La decisión es sobre **una
+fecha**; una fusión que descartara un mes borraría parte del empleo de una persona en silencio.
+
+Sin traslado, sin empleo paralelo, sin tocar los otros casos: `findOverlaps()` sigue saltándose
+pares del mismo empleador, y las 167 parejas ordinarias no generan hallazgo nuevo.
+
+### El resultado
+
+`RealWorkbookFlowTest` ya **no tiene rama de residual**. Afirma que el lote aplica entero
+(`200`/`202`), que ninguna acción quedó en `failed`, y que **ningún cliente queda con dos
+relaciones abiertas con un mismo empleador** (§9.5, por consulta directa).
+
+Eso es más fuerte que «como mucho una acción puede quedar varada», y no se puede satisfacer
+ampliando una tolerancia. Assertions: **1783** (antes 1246, con la mitad del lote rechazada).
+
+## 11.3 Tres trampas, y por qué están escritas en el código
+
+Ninguna es visible en el diff, y las tres seumbuscan como otra cosa.
+
+1. **`legacy_import_issues_code_check`** se genera desde `LegacyImportIssue::cases()` cuando corre
+   la migración que crea la tabla. Añadir un caso al enum no cambia la restricción que ya está en
+   la base. Síntoma: **409 `wrong_state`** en Apply, porque el job del plan había muerto y el lote
+   nunca llegó a `review` — nada que ver con el estado del lote.
+2. **`ImportDecisionSet` sólo indexaba dos códigos** en su cubo de decisiones de intervalo. La
+   respuesta se guardaba, la incidencia quedaba resuelta, el plan se reconstruía… y los episodios
+   **no se fusionaban**. Una resolución que nadie lee es peor que no preguntar: es un sistema que
+   aparenta funcionar.
+3. **`reconcileIssues()` acotaba su alcance a esos mismos dos códigos.** El caso nuevo quedaba
+   fuera, así que la rama «mismo hallazgo, refrescado en sitio» nunca se tomaba y el rebuild
+   intentaba insertar un segundo con el mismo `fingerprint`. El índice único lo rechazó, el job
+   murió, y el síntoma fue el mismo `wrong_state` de (1).
+
+La primera y la tercera son la **misma** trampa que ya había salido en
+`2026_10_14_100000_allow_affiliation_observation_actions`. Un `CHECK` generado desde un enum no se
+actualiza solo: es una decisión de esquema que hay que volver a tomar cada vez que el enum crece.
+
+## 11.4 Verificación
+
+Sólo pruebas dirigidas y el Excel original, en la base E2E aislada. La principal no recibió los
+datos originales.
+
+| Comprobación | Resultado |
+|---|---|
+| `RealWorkbookFlowTest` (libro real, base real) | **PASS** — 1783 aserciones, **lote aplicado entero** |
+| `scripts/verify-a04-real-workbook.php` | **PASS** — *Fingerprint matches*, salida 0, `contradictory_starts = 2` |
+| `tests/Feature/A04` + `tests/Unit/A04` | **PASS** — 197 |
+| `tests/Feature/A02/AffiliationTest.php` | **PASS** — 68 |
+| Los 4 ficheros externos que tocan `LegacyImport` | **PASS** — 62 |
+| `vitest clientDetail.spec.ts` | **PASS** — 19 |
+| `vitest imports.pages.spec.ts` | **PASS** — 20 |
+| `npm run typecheck` | 57 errores, **los mismos 57** que antes del cierre |
+| `eslint` sobre los ficheros tocados | idéntico a la línea base |
+| `pint --test` | 9 ficheros, **las mismas 9** que antes |
+
+### Datos y volúmenes
+
+Base principal, antes y después de la migración:
+
+| Tabla | Antes | Después |
+|---|---:|---:|
+| users | 67 | 67 |
+| clients | 5 | 5 |
+| companies | 1 | 1 |
+| client_affiliations | 4 | 4 |
+| client_company_rates | 1 | 1 |
+| monthly_obligations | 1 | 1 |
+| payments | 1 | 1 |
+| payment_allocations | 1 | 1 |
+| legacy_imports | 1 | 1 |
+| client_affiliation_observations | — | **0** (tabla nueva, sin datos) |
+
+El caso H del bloque manual sigue exacto: cliente 4 (Alexandra Gislason), obligación 30 000, pagado
+15 000, una imputación, vencimiento 2026-11-10. Migraciones pendientes: **0**.
+
+En la base E2E, tras aplicar el libro real: **10 observaciones** en el maestro, una por persona y
+tramo, correspondientes a las 36 filas que el archivo declara como `SI`.
+
+### Migraciones de este cierre
+
+| Migración | Qué hace |
+|---|---|
+| `2026_10_14_110000_allow_contradictory_starts_issues` | Recrea `legacy_import_issues_code_check`. |
+
+Su `down()` **borra** las filas del código retirado antes de restaurar la restricción: dejar filas
+que la restricción restaurada rechazaría es un estado que nadie debería poder observar.

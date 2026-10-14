@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Domain\Imports\IssueResolutionDecision;
+use App\Domain\Imports\ImportActionState;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Models\Company;
 use App\Models\LegacyImport;
@@ -12,6 +13,7 @@ use App\Models\LegacyImportRow;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Spatie\Permission\Models\Permission;
@@ -58,42 +60,6 @@ final class RealWorkbookFlowTest extends TestCase
      * belongs to the automated suite.
      */
     private const ISOLATED_DATABASES = ['consultora_dh_e2e', 'consultora_dh_real_workbook'];
-
-    /**
-     * The largest number of refused actions this run may end on.
-     *
-     * Everything else in the plan applies. One action is left, and it is left **on purpose**.
-     *
-     * One client in the delivered workbook is listed at a **single employer** across four
-     * consecutive sheet-months, with **three mutually exclusive start dates** across those
-     * months. The plan therefore carries two open relationships with one employer, which
-     * `ManageClientCompanies` cannot represent — it permits exactly one open relationship per
-     * employer — so the second is refused at Apply and §12.3 rolls the batch back whole.
-     *
-     * No document number, tax id or date is written here. They are real values from a real
-     * payroll, and this file is committed: the shape is enough to understand the block and
-     * nothing in it needs the specific person.
-     *
-     * It is not resolvable from the file, and it is not made resolvable here:
-     *
-     *  - §8.4 cannot ask, because none of those episodes ever stops appearing before the end of
-     *    the file, and there is no boundary to close one on.
-     *  - §8.5 cannot ask, because `findOverlaps()` deliberately skips two episodes at the *same*
-     *    employer — that shape is two episodes of one employment, not a parallel.
-     *  - §8.5's decisions would not fit anyway: `recognize_transfer` and `authorize_parallel`
-     *    are about two *different* employers, and `transferIsExecutable()` refuses a pair whose
-     *    starts are equal.
-     *
-     * Deciding it needs a question about **which start date is right**, which no existing finding
-     * asks and which §4.3 forbids inventing: the date has to come from the consultant. Adding
-     * that finding would be extending the domain model rather than fixing a defect, which this
-     * milestone does not do, so the batch stays blocked with the domain's own sentence naming the
-     * rule that refused it.
-     *
-     * The bound is set so a regression that strands many more actions fails loudly instead of
-     * passing quietly inside this allowance.
-     */
-    private const RESIDUAL_UNDECIDABLE = 1;
 
     private string $workbookPath;
 
@@ -319,66 +285,50 @@ final class RealWorkbookFlowTest extends TestCase
         //
         // §5.4: the confirmation carries the revision and digest the reviewer was shown, and a
         // mismatch is a 409 rather than a silent apply of whatever the table holds by now.
+        //
+        // ## Why there is no residual branch any more
+        //
+        // This used to accept §12.3's 409 with a single stranded action, which it documented as
+        // "one client at one employer with three mutually exclusive start dates — not decidable
+        // from the file". That was accurate then and is not now.
+        //
+        // The measurement behind FIX-IMPORT-02 §7 found the shape was not unique: 168 pairs
+        // shared it, §8.4 answered 167 of them, and **two** were left — because for those the
+        // stated start dates contradict the months they were observed in, which §8.4's question
+        // ("this episode stops appearing") cannot express and §8.5 deliberately skips.
+        //
+        // `contradictory_relationship_starts` asks it, and both of its answers name a date the
+        // file itself wrote. So the batch now applies whole, and the assertion below says exactly
+        // that — which is a stronger claim than "at most one action may be stranded", and one that
+        // cannot be satisfied by widening an allowance.
         $applied = $this->actingAs($this->operator)
             ->postJson('/api/imports/'.$import->id.'/apply', [
                 'plan_revision' => $import->plan_revision,
                 'plan_digest' => $import->plan_digest,
             ]);
 
-        if ($applied->status() !== 202) {
-            // §12.3 refused the batch, and that is the system working: it names how many
-            // actions could not run, why, and rolls the whole thing back rather than writing a
-            // partial import. The residual is reported rather than forced — see the note on
-            // `RESIDUAL_UNDECIDABLE` below.
-            $this->assertSame(
-                409,
-                $applied->status(),
-                'apply answered neither 202 nor §12.3\'s 409: '.$applied->json('message'),
-            );
-
-            $this->assertSame('apply_failed', $applied->json('code'));
-
-            preg_match('/No se aplicaron (\d+)/', (string) $applied->json('message'), $count);
-
-            $stranded = (int) ($count[1] ?? 0);
-
-            $this->assertGreaterThan(0, $stranded);
-            $this->assertLessThanOrEqual(
-                self::RESIDUAL_UNDECIDABLE,
-                $stranded,
-                '§12.3 stranded '.$stranded.' actions; see the class docblock for what is left and why.',
-            );
-
-            $this->runImportQueue();
-            $import->refresh();
-
-            // §12.3: nothing is half-written. This is the property that matters most.
-            $this->assertSame(LegacyImportStatus::Failed, $import->status);
-            $this->assertSame(
-                0,
-                LegacyImportAction::query()
-                    ->where('legacy_import_id', $import->id)
-                    ->whereNotNull('target_id')
-                    ->count(),
-                '§12.3: no action was applied to a record',
-            );
-
-            fwrite(STDERR, sprintf(
-                "\n[real-workbook] applied nothing: %d action(s) refused by the domain.\n"
-                ."  One client is listed at a single employer across four months with three different\n"
-                ."  start dates, so the plan holds two open relationships with one employer.\n"
-                ."  That is not decidable from the file and needs the consultant. See\n"
-                ."  RESIDUAL_UNDECIDABLE on this class for why no existing finding asks it.\n",
-                $stranded,
-            ));
-
-            return;
-        }
+        $this->assertContains(
+            $applied->status(),
+            [200, 202],
+            'apply refused the batch: '.$applied->json('message').' ('.$applied->json('code').')',
+        );
 
         $this->runImportQueue();
         $import->refresh();
 
         $this->assertSame(LegacyImportStatus::Applied, $import->status);
+
+        // §12.3 is an all-or-nothing guarantee, so a batch that reports success must have written
+        // *everything*: no action may be sitting in `failed` behind the 200.
+        //
+        // `failed` rather than "refused" because that is the state the state machine uses — the
+        // refusal is the *reason* recorded on it, not a separate state.
+        $stranded = LegacyImportAction::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('state', ImportActionState::Failed->value)
+            ->count();
+
+        $this->assertSame(0, $stranded, '§12.3: no action failed');
 
         $this->assertGreaterThan(0, Company::query()->count(), 'companies were written');
         $this->assertGreaterThan(
@@ -390,6 +340,21 @@ final class RealWorkbookFlowTest extends TestCase
             0,
             LegacyImportAction::query()->where('legacy_import_id', $import->id)->whereNotNull('target_id')->count(),
             'actions resolved to real records',
+        );
+
+        // The contradiction itself: §9.5's invariant is that one client holds at most one open
+        // relationship per employer, and A02 enforces it. If the merge had not happened, this is
+        // the assertion that would have failed — the same refusal that used to arrive as a 409.
+        $this->assertSame(
+            0,
+            DB::table('client_company_assignments')
+                ->selectRaw('client_id, company_id')
+                ->whereNull('ended_on')
+                ->groupBy('client_id', 'company_id')
+                ->havingRaw('COUNT(*) > 1')
+                ->get()
+                ->count(),
+            '§9.5: no client holds two open relationships with one employer',
         );
     }
 
@@ -652,7 +617,20 @@ final class RealWorkbookFlowTest extends TestCase
                 // month, so a reviewer answering with it is applying the module's convention
                 // rather than inventing a date — and the alternative (`keep_open`) is what
                 // A02 refuses, because a client cannot hold two open employers.
-                'date' => $type === 'date' ? $this->boundaryAfterLastSighting($context) : null,
+                // The match is on the field's **type**, so both date-valued fields land here and
+                // are told apart by key: `boundary`/`ended_on` is §8.2's derived boundary, and
+                // `start` is §8.1's contradiction, whose answer is one of the dates the file
+                // itself wrote.
+                //
+                // §8.1's list is read, never derived. A date not in `stated_starts` yields null,
+                // the decision is declined, and the finding is left for a person — so this test
+                // can never answer it with a date the workbook does not contain.
+                'date' => match ($key) {
+                    'start' => $decision === IssueResolutionDecision::UseLatestStatedStart
+                        ? $this->lastStatedStart($context)
+                        : $this->firstStatedStart($context),
+                    default => $this->boundaryAfterLastSighting($context),
+                },
 
                 'precision' => $type === 'precision' ? 'month' : null,
 
@@ -678,6 +656,52 @@ final class RealWorkbookFlowTest extends TestCase
         }
 
         return $value;
+    }
+
+    /**
+     * The earliest start date this finding says the file stated.
+     *
+     * Read from `stated_starts`, which `ContradictoryStarts` writes sorted ascending. `null` when
+     * the context carries no such list, which makes the decision decline rather than answer with a
+     * date the file never wrote.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    private function firstStatedStart(array $context): ?string
+    {
+        $starts = $this->statedStarts($context);
+
+        return $starts[0] ?? null;
+    }
+
+    /**
+     * The latest of them. The mirror of {@see firstStatedStart()}.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    private function lastStatedStart(array $context): ?string
+    {
+        $starts = $this->statedStarts($context);
+
+        return $starts === [] ? null : $starts[count($starts) - 1];
+    }
+
+    /**
+     * The dates the file stated, ascending, and only those that are dates.
+     *
+     * @param  array<string, mixed>  $context
+     * @return list<string>
+     */
+    private function statedStarts(array $context): array
+    {
+        $starts = array_values(array_filter(
+            (array) ($context['stated_starts'] ?? []),
+            static fn (mixed $start): bool => is_string($start) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $start) === 1,
+        ));
+
+        sort($starts);
+
+        return $starts;
     }
 
     /**

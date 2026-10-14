@@ -231,6 +231,17 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         ->get('/clients/{client}/affiliation-observations', [ClientController::class, 'affiliationObservations'])
         ->name('api.clients.affiliation-observations');
 
+    // …and answering one. `affiliations.manage`, the same permission as registering an
+    // affiliation, because the effect is to register one — through `ManageAffiliations`, so the
+    // invariants and the audit trail are the domain's and not this controller's.
+    //
+    // Scoped under the client route on purpose: an observation id is not sufficient authorisation,
+    // and binding it here makes "this observation belongs to this person" a fact the request cannot
+    // contradict.
+    Route::middleware('can:affiliations.manage')
+        ->post('/clients/{client}/affiliation-observations/{observation}/resolve', [ClientController::class, 'resolveAffiliationObservation'])
+        ->name('api.clients.affiliation-observations.resolve');
+
     Route::middleware('can:clients.create')->post('/clients', [ClientController::class, 'store'])
         ->name('api.clients.store');
 

@@ -50,6 +50,16 @@ final class HistoryReconstructor
         $disappearances = $this->findDisappearances($episodes, $lastMonth);
         $overlaps = $this->findOverlaps($episodes, $lastMonth);
 
+        // One employment whose start dates contradict its own months. Asked before §8.4 and §8.5
+        // because neither of them can: §8.4 asks about an episode that stops appearing, and §8.5
+        // skips two episodes at the same employer on purpose.
+        $contradictoryStarts = $this->findContradictoryStarts($episodes);
+
+        // …and its answer applied, so the plan a reviewer is shown already holds one employment
+        // instead of three. The same reasoning as the two decisions below: a date a person chose
+        // has to be part of the interval before the interval becomes a plan action.
+        $episodes = $this->applyStartDecisions($episodes, $contradictoryStarts);
+
         // §8.4 and §8.5's answers, applied *before* the questions are handed on.
         //
         // ## Why this has to happen here
@@ -105,7 +115,237 @@ final class HistoryReconstructor
             $this->retirementPolicy,
             $disappearances,
             $overlaps,
+            $contradictoryStarts,
         );
+    }
+
+    // --------------------------------------------------- contradictory start dates
+
+    /**
+     * Episodes at one employer whose stated starts contradict the months they were observed in.
+     *
+     * ## The test, and why it is this one
+     *
+     * Sort a pair's episodes by the date they claim to have started, and sort the same episodes by
+     * the month they were first seen. For a genuine re-hire the two sequences agree: the earlier
+     * employment is also the earlier observation. For 168 pairs in the delivered workbook they
+     * agree, and **two** do not — including the person listed at one employer across four months
+     * with three mutually exclusive start dates that has been blocking Apply since FIX-LOCAL-01.
+     *
+     * A cheaper test would be "two episodes, two starts, one employer", and it is wrong: 168
+     * pairs have that shape and §8.1 separates them correctly, because a person who leaves and
+     * comes back is two employments and the file is right to say so. Asking about those would add
+     * 168 questions to hide one, which is the trade §8.4 explicitly refuses to make.
+     *
+     * @param  list<RelationshipEpisode>  $episodes
+     * @return list<ContradictoryStarts>
+     */
+    private function findContradictoryStarts(array $episodes): array
+    {
+        /** @var array<string, list<RelationshipEpisode>> $byPair */
+        $byPair = [];
+
+        foreach ($episodes as $episode) {
+            if ($episode->companyTaxId === null) {
+                continue;
+            }
+
+            $byPair[$episode->clientKey.'|'.$episode->companyTaxId][] = $episode;
+        }
+
+        $found = [];
+
+        foreach ($byPair as $group) {
+            if (count($group) < 2 || ! $this->startsContradictMonths($group)) {
+                continue;
+            }
+
+            // Ordered by the month they were first seen, which is the order a person reading the
+            // finding expects — "seen in June, then September, then October".
+            usort(
+                $group,
+                static fn (RelationshipEpisode $a, RelationshipEpisode $b): int => min($a->months) <=> min($b->months),
+            );
+
+            $found[] = new ContradictoryStarts(
+                $group[0]->clientKey,
+                $group[0]->documentType,
+                $group[0]->documentNumber,
+                $group[0]->companyTaxId,
+                $group[0]->companyName,
+                array_values($group),
+            );
+        }
+
+        return $found;
+    }
+
+    /**
+     * Whether sorting by start gives a different sequence than sorting by first month.
+     *
+     * @param  list<RelationshipEpisode>  $group
+     */
+    private function startsContradictMonths(array $group): bool
+    {
+        // An episode with no start at all cannot contradict anything: §8.1 already folds an
+        // undated repeat observation into the episode that is open, so it never forms a group.
+        $starts = array_map(
+            static fn (RelationshipEpisode $e): ?string => $e->interval->start?->format('Y-m-d'),
+            $group,
+        );
+
+        if (in_array(null, $starts, true) || count(array_unique($starts)) < 2) {
+            return false;
+        }
+
+        $byStart = $group;
+        usort($byStart, static fn (RelationshipEpisode $a, RelationshipEpisode $b): int => $a->interval->start <=> $b->interval->start);
+
+        $byMonth = $group;
+        usort($byMonth, static fn (RelationshipEpisode $a, RelationshipEpisode $b): int => min($a->months) <=> min($b->months));
+
+        return array_map(
+            static fn (RelationshipEpisode $e): string => (string) $e->interval->start?->format('Y-m-d'),
+            $byStart,
+        ) !== array_map(
+            static fn (RelationshipEpisode $e): string => (string) $e->interval->start?->format('Y-m-d'),
+            $byMonth,
+        );
+    }
+
+    /**
+     * §8.1's answer: one employment, starting on the date the reviewer believed.
+     *
+     * ## What it does and does not do
+     *
+     * It merges the contradicting episodes into one and starts it on a date **the file wrote**.
+     * Both available answers are among the stated dates; `ImportDecisionSet::statedStartFor()`
+     * returns null for anything else, and an unanswered group is left untouched.
+     *
+     * It does not invent a transfer, a departure, or a parallel employment. The merged episode
+     * keeps every month the file listed, so nothing is lost from the history — the only thing
+     * decided is the one date that was genuinely ambiguous.
+     *
+     * ## Why the merge happens here rather than in the plan builder
+     *
+     * Because the interval has to be right before it becomes a plan action. A merge applied
+     * downstream would leave `legacy_import_actions.payload.interval` describing three episodes
+     * while the plan proposed one, and `plan_digest` would cover an explanation that is not the
+     * one applied.
+     *
+     * @param  list<RelationshipEpisode>  $episodes
+     * @param  list<ContradictoryStarts>  $groups
+     * @return list<RelationshipEpisode>
+     */
+    private function applyStartDecisions(array $episodes, array $groups): array
+    {
+        if ($this->decisions === null || $groups === []) {
+            return $episodes;
+        }
+
+        /** @var array<string, RelationshipEpisode> $merged pair key => the single episode */
+        $merged = [];
+
+        foreach ($groups as $group) {
+            // The decision set is the only place a stored value is compared against the file's own
+            // dates, so an answer that names one the file never wrote yields null here and the
+            // group is left untouched — which keeps the batch blocked rather than applying a date
+            // nobody can account for.
+            $chosen = $this->decisions->statedStartFor($group->subjectKey(), $group->statedStarts());
+
+            if ($chosen === null) {
+                continue;
+            }
+
+            $merged[$group->clientKey.'|'.$group->companyTaxId] = $this->mergeInto($group, $chosen);
+        }
+
+        if ($merged === []) {
+            return $episodes;
+        }
+
+        $kept = [];
+        $emitted = [];
+
+        foreach ($episodes as $episode) {
+            $key = $episode->clientKey.'|'.$episode->companyTaxId;
+
+            if (! array_key_exists($key, $merged)) {
+                $kept[] = $episode;
+
+                continue;
+            }
+
+            // Every episode of this employment is dropped and the merged one added exactly once,
+            // at the position of the **first** one. Keying on the pair rather than on the group is
+            // what makes this idempotent: a rebuild re-runs the whole reconstruction from the rows,
+            // so this method always sees the unmerged episodes and replaces them the same way.
+            if (isset($emitted[$key])) {
+                continue;
+            }
+
+            $emitted[$key] = true;
+            $kept[] = $merged[$key];
+        }
+
+        // An episode whose pair has no merged counterpart is never reached above only if it was in
+        // a group; a group whose decision was absent left `$merged` without its key, so those
+        // episodes flow through untouched and the batch stays blocked.
+        return $kept;
+    }
+
+    /** One episode covering every month the group was seen in, starting on the believed date. */
+    private function mergeInto(ContradictoryStarts $group, string $start): RelationshipEpisode
+    {
+        $months = [];
+
+        foreach ($group->episodes as $episode) {
+            $months = array_merge($months, $episode->months);
+        }
+
+        $months = array_values(array_unique($months));
+        sort($months);
+
+        // `day` precision, because the chosen date is a date somebody typed. §8.3 forbids
+        // presenting a month as a day; this is the opposite case, where the source really did
+        // state a day and the reviewer really did confirm it.
+        $interval = HistoricalInterval::fromUnknownStart()
+            ->startingAt(Carbon::parse($start), HistoricalInterval::DAY);
+
+        $first = $group->episodes[0];
+
+        return new RelationshipEpisode(
+            $group->clientKey,
+            $group->documentType,
+            $group->documentNumber,
+            $group->companyTaxId,
+            $group->companyName,
+            $interval,
+            $months,
+            $group->sourceRowIds(),
+            // A merge is not a retirement. The newest retirement note among the merged episodes
+            // is carried because it is evidence either way, and dropping it would delete a
+            // departure the file recorded.
+            $this->latestRetirement($group->episodes),
+            $first->clientDisplayName,
+            $first->companyVerificationDigit,
+        );
+    }
+
+    /**
+     * @param  list<RelationshipEpisode>  $episodes
+     */
+    private function latestRetirement(array $episodes): ?RetirementNote
+    {
+        $note = null;
+
+        foreach ($episodes as $episode) {
+            if ($episode->retirement !== null) {
+                $note = $episode->retirement;
+            }
+        }
+
+        return $note;
     }
 
     /**

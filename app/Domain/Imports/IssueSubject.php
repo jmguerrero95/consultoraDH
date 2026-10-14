@@ -251,6 +251,32 @@ final readonly class IssueSubject implements \JsonSerializable
      * reviewed boundary correction changes, so a correction must produce a new finding rather
      * than silently overwrite the old one.
      */
+    /**
+     * One employment whose start dates contradict its own months.
+     *
+     * §5.3's "one question per subject", and the subject is the **employment**: three contradicting
+     * dates for one person at one employer are one question — "when did this start?" — and three
+     * dialogs would invite three different answers to the same thing.
+     *
+     * The key carries the client and the employer and deliberately not the dates, for the reason
+     * `overlap()` gives above: answering this once and then changing the answer has to produce a
+     * new finding, not silently overwrite a resolved one.
+     */
+    public static function contradictoryStarts(ContradictoryStarts $group): self
+    {
+        return new self(
+            $group->subjectKey(),
+            'started_on',
+            [
+                'client' => $group->clientKey,
+                'company_tax_id' => $group->companyTaxId,
+                'stated_starts' => $group->statedStarts(),
+                'first_month' => $group->firstMonth(),
+                'last_month' => $group->lastMonth(),
+            ],
+        );
+    }
+
     public static function overlap(CompanyOverlap $overlap): self
     {
         // `RelationshipEpisode::key()` is already §8.1's canonical episode identity, so the pair is

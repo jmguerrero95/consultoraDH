@@ -1150,11 +1150,25 @@ it('exposes an unnamed affiliation beside the real ones, and only there', functi
         ->assertJsonPath('affiliation_observations.0.is_active', true);
 
     // And the existing list is untouched: one real affiliation, no observation in it.
+    //
+    // This is the case the milestone asks to be checked — a person with an AFP the file left
+    // unnamed **and** a formal affiliation they are known to hold — and it is the one where a
+    // careless implementation would leak: if an observation were folded into the affiliations
+    // list, this client would show two EPS/AFP rows and A03 would read the unnamed one as
+    // coverage.
     $this->actingAs($reader)
         ->getJson("/api/clients/{$client->id}/affiliations")
         ->assertOk()
         ->assertJsonCount(1, 'affiliations')
         ->assertJsonPath('affiliations.0.social_security_entity_id', $entity->id);
+
+    // And the same is true of the whole-client payload the ficha reads, which is the query that
+    // would feed a billing screen.
+    $this->actingAs($reader)
+        ->getJson("/api/clients/{$client->id}")
+        ->assertOk()
+        ->assertJsonCount(1, 'affiliations.active')
+        ->assertJsonCount(0, 'affiliations.history');
 });
 
 it('marks an observation answered once somebody names the fund', function (): void {
@@ -1196,4 +1210,199 @@ it('marks an observation answered once somebody names the fund', function (): vo
         // Still there. The record of what the file said does not disappear because somebody
         // later fixed it — an import's provenance is not a to-do list.
         ->assertJsonCount(1, 'affiliation_observations');
+});
+
+// =============================================================================
+// FIX-IMPORT-02 surgical closure — identifying an unnamed affiliation
+// =============================================================================
+
+it('lets an authorised reviewer identify the entity behind an unnamed affiliation', function (): void {
+    // The other half of Correction C. Recording that a person *was* affiliated without naming the
+    // fund is only half the answer: the gap has to be closable later, by somebody who knows, and
+    // the result must be a real affiliation governed by A02's invariants.
+    $client = Client::factory()->create();
+
+    $observation = ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-03', '2026-04'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$client->document_number.':unknown',
+    ]);
+
+    $entity = SocialSecurityEntity::factory()->create([
+        'type' => SocialSecurityEntityType::Afp,
+        'name' => 'PORVENIR',
+    ]);
+
+    $reviewer = userWithPermissions(['clients.view', 'affiliations.view', 'affiliations.manage']);
+
+    $response = $this->actingAs($reviewer)
+        ->postJson("/api/clients/{$client->id}/affiliation-observations/{$observation->id}/resolve", [
+            'social_security_entity_id' => $entity->id,
+            'type' => 'AFP',
+            'notes' => 'Confirmado con la consultora.',
+        ])
+        ->assertOk();
+
+    // A **real** affiliation, not a note about one. This is the point: the gap becomes a fact.
+    $created = ClientAffiliation::where('client_id', $client->id)->sole();
+
+    expect($created->social_security_entity_id)->toBe($entity->id)
+        ->and($created->type->value)->toBe('AFP')
+        // Undated, because the observation was: §8 widens the constraint so an unknown start is
+        // preserved rather than invented. Nothing here may supply a date the file did not state.
+        ->and($created->started_on)->toBeNull()
+        ->and($created->started_on_precision)->toBe('unknown')
+        // The note names the provenance, so a reader in three years' time can tell a fund a person
+        // identified from one the file wrote out.
+        ->and($created->notes)->toContain('observación del archivo')
+        ->and($created->notes)->toContain('2026-03, 2026-04')
+        ->and($created->notes)->toContain('Confirmado con la consultora.');
+
+    // The observation is **kept**: it records what the file said, and the file still says `SI`.
+    expect(ClientAffiliationObservation::where('client_id', $client->id)->count())->toBe(1)
+        ->and($observation->fresh()->isAnswered())->toBeTrue();
+
+    // And the answer is in the client's timeline, because it went through A02 rather than around it.
+    $this->actingAs($reviewer)
+        ->getJson("/api/clients/{$client->id}")
+        ->assertOk()
+        ->assertJsonFragment(['action' => 'affiliation.created']);
+});
+
+it('refuses to answer the same observation twice', function (): void {
+    // A double-click must not produce two identical affiliations. Refusing here is what stops
+    // that; §9.5's invariant would otherwise have to catch it after the fact, with a much worse
+    // sentence.
+    $client = Client::factory()->create();
+
+    ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-03'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$client->document_number.':unknown',
+    ]);
+
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Afp]);
+    $reviewer = userWithPermissions(['clients.view', 'affiliations.view', 'affiliations.manage']);
+
+    $payload = ['social_security_entity_id' => $entity->id, 'type' => 'AFP'];
+
+    $this->actingAs($reviewer)
+        ->postJson("/api/clients/{$client->id}/affiliation-observations/".ClientAffiliationObservation::where('client_id', $client->id)->value('id').'/resolve', $payload)
+        ->assertOk();
+
+    $this->actingAs($reviewer)
+        ->postJson("/api/clients/{$client->id}/affiliation-observations/".ClientAffiliationObservation::where('client_id', $client->id)->value('id').'/resolve', $payload)
+        ->assertStatus(409)
+        ->assertJsonPath('code', 'already_answered');
+
+    expect(ClientAffiliation::where('client_id', $client->id)->count())->toBe(1);
+});
+
+it('refuses to answer with an entity of a different type', function (): void {
+    // §9.1 again, from the other side. An AFP gap answered with an EPS would be a fabricated
+    // affiliation, and the type is the one thing the observation actually knows.
+    $client = Client::factory()->create();
+
+    $observation = ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-03'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$client->document_number.':unknown',
+    ]);
+
+    $wrongType = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Eps]);
+    $reviewer = userWithPermissions(['clients.view', 'affiliations.view', 'affiliations.manage']);
+
+    $this->actingAs($reviewer)
+        ->postJson("/api/clients/{$client->id}/affiliation-observations/{$observation->id}/resolve", [
+            'social_security_entity_id' => $wrongType->id,
+            'type' => 'AFP',
+        ])
+        ->assertStatus(422)
+        ->assertJsonPath('code', 'entity_type_mismatch');
+
+    expect(ClientAffiliation::count())->toBe(0);
+});
+
+it('refuses to change the start date while identifying the entity', function (): void {
+    // The two questions stay separate. "Which fund?" and "since when?" are different answers, and
+    // accepting both in one request would let somebody answer the first and quietly decide the
+    // second.
+    $client = Client::factory()->create();
+    $observation = ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-03'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$client->document_number.':unknown',
+    ]);
+
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Afp]);
+    $reviewer = userWithPermissions(['clients.view', 'affiliations.view', 'affiliations.manage']);
+
+    $this->actingAs($reviewer)
+        ->postJson("/api/clients/{$client->id}/affiliation-observations/{$observation->id}/resolve", [
+            'social_security_entity_id' => $entity->id,
+            'type' => 'AFP',
+            'started_on' => '2020-01-01',
+        ])
+        ->assertStatus(422);
+
+    expect(ClientAffiliation::count())->toBe(0);
+});
+
+it('does not let one client resolve another client\'s observation', function (): void {
+    // The route carries the client and the observation id. Without this check a request for
+    // `/clients/1/…/99` would resolve an observation belonging to somebody else, because the model
+    // is bound by id alone.
+    $owner = Client::factory()->create();
+    $other = Client::factory()->create();
+
+    $observation = ClientAffiliationObservation::create([
+        'client_id' => $owner->id,
+        'type' => 'AFP',
+        'months' => ['2026-03'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$owner->document_number.':unknown',
+    ]);
+
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Afp]);
+    $reviewer = userWithPermissions(['clients.view', 'affiliations.view', 'affiliations.manage']);
+
+    $this->actingAs($reviewer)
+        ->postJson("/api/clients/{$other->id}/affiliation-observations/{$observation->id}/resolve", [
+            'social_security_entity_id' => $entity->id,
+            'type' => 'AFP',
+        ])
+        ->assertNotFound();
+
+    expect(ClientAffiliation::count())->toBe(0);
+});
+
+it('does not let a read-only role identify anything', function (): void {
+    $client = Client::factory()->create();
+    $observation = ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-03'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$client->document_number.':unknown',
+    ]);
+
+    $entity = SocialSecurityEntity::factory()->create(['type' => SocialSecurityEntityType::Afp]);
+    $reader = userWithPermissions(['clients.view', 'affiliations.view']);
+
+    $this->actingAs($reader)
+        ->postJson("/api/clients/{$client->id}/affiliation-observations/{$observation->id}/resolve", [
+            'social_security_entity_id' => $entity->id,
+            'type' => 'AFP',
+        ])
+        ->assertForbidden();
+
+    expect(ClientAffiliation::count())->toBe(0);
 });

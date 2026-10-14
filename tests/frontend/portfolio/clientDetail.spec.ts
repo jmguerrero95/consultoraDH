@@ -9,7 +9,7 @@ import ClientDetailPage from '@/pages/clients/ClientDetailPage.vue';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
 
-import type { AuthUser, ClientDetailPayload } from '@/types/api';
+import type { AffiliationObservation, AuthUser, ClientDetailPayload } from '@/types/api';
 
 /**
  * The client detail screen, focusing on the two rules that are easiest to get
@@ -143,6 +143,26 @@ function button(
     }
 
     return match;
+}
+
+/**
+ * The dialog whose heading names it.
+ *
+ * Every `AppModal` is a native `<dialog>` with the same `cdh-modal` class, and they are all
+ * mounted whether or not they are open — which is why `permission controlled actions` cannot
+ * search the whole page for a confirm button. Selecting by title is the only way to say *which*
+ * dialog a button belongs to.
+ */
+function dialogTitled(wrapper: VueWrapper, title: string): DOMWrapper<Element> {
+    const match = wrapper
+        .findAll('.cdh-modal')
+        .find((candidate) => candidate.find('.cdh-modal__title').text() === title);
+
+    if (match === undefined) {
+        throw new Error(`No dialog titled "${title}".`);
+    }
+
+    return match as DOMWrapper<Element>;
 }
 
 /** Every button currently rendered. */
@@ -595,5 +615,199 @@ describe('failures', () => {
         // Whatever the transport said, the screen shows an error rather than an
         // empty record that reads like a client with nothing on it.
         expect(alert.text()).not.toContain('Sin empresas abiertas');
+    });
+});
+// -------------------------------------------------------------------------
+// FIX-IMPORT-02 — an affiliation the file asserted and did not name.
+// -------------------------------------------------------------------------
+
+/** One §9.1 bare `SI`: affiliated, entity unknown, two months of evidence. */
+function afpObservation(overrides: Partial<AffiliationObservation> = {}): AffiliationObservation {
+    return {
+        id: 9,
+        client_id: 1,
+        type: 'AFP',
+        type_label: 'AFP',
+        type_full_label: 'Administradora de Fondo de Pensiones',
+        // Explicitly null, and asserted below: the difference between "no entity" and "this API
+        // has no such field" is the difference between a readable gap and a bug.
+        social_security_entity_id: null,
+        entity: null,
+        reason: 'entity_unknown',
+        reason_label: 'El archivo afirma que sí había afiliación, pero no indica a qué entidad.',
+        started_on: null,
+        started_on_precision: 'unknown',
+        ended_on: null,
+        ended_on_precision: null,
+        is_active: true,
+        months: ['2026-03', '2026-04'],
+        is_answered: false,
+        legacy_import_id: 3,
+        created_at: '2026-10-14T00:00:00+00:00',
+        ...overrides,
+    };
+}
+
+function respondWithObservations(
+    observations: AffiliationObservation[],
+    overrides: Partial<ClientDetailPayload> = {},
+): void {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+        const url = String(input);
+
+        if (url.includes('/api/social-security-entities')) {
+            return jsonResponse({
+                entities: [
+                    {
+                        id: 7,
+                        type: 'AFP',
+                        type_label: 'AFP',
+                        name: 'PORVENIR',
+                        code: null,
+                        status: 'active',
+                        status_label: 'Activo',
+                    },
+                    {
+                        id: 8,
+                        type: 'EPS',
+                        type_label: 'EPS',
+                        name: 'SALUD TOTAL',
+                        code: null,
+                        status: 'active',
+                        status_label: 'Activo',
+                    },
+                ],
+            });
+        }
+
+        if (url.includes('/api/company-options')) {
+            return jsonResponse({ companies: [] });
+        }
+
+        if (url.includes('/affiliation-observations')) {
+            return jsonResponse({ affiliation_observations: observations });
+        }
+
+        return jsonResponse(detail(overrides));
+    });
+}
+
+describe('an affiliation the file did not name', () => {
+    it('shows it beside the real ones, as a gap and not as a coverage', async () => {
+        respondWithObservations([afpObservation()], {
+            // A real EPS at the same time, so the two are on screen together and the
+            // difference between them has to be readable.
+            affiliations: {
+                visible: true,
+                active: [],
+                history: [],
+            },
+        });
+
+        const { wrapper } = mountPage();
+
+        await flushPromises();
+        await wrapper.get('#tab-afiliaciones').trigger('click');
+        await flushPromises();
+
+        const card = wrapper.find('[data-testid="affiliation-observations"]');
+
+        expect(card.exists()).toBe(true);
+        expect(card.text()).toContain('Entidad pendiente de identificar');
+        expect(card.text()).toContain('Sin identificar');
+        // The months are the evidence, and §8.3 forbids showing a month as a day — so they are
+        // rendered as months.
+        expect(card.text()).toContain('2026-03, 2026-04');
+        // Provenance: which import saw it.
+        expect(card.text()).toContain('Importación #3');
+
+        // And it says plainly that this is not an affiliation, because a reader who does not know
+        // that would count it as coverage.
+        expect(card.text()).toContain('No son afiliaciones formales');
+        expect(card.text()).toContain('no se usan para facturar');
+    });
+
+    it('offers identifying the entity only to a role that may manage affiliations', async () => {
+        respondWithObservations([afpObservation()]);
+
+        const { wrapper } = mountPage(OPERATIONS);
+
+        await flushPromises();
+        await wrapper.get('#tab-afiliaciones').trigger('click');
+        await flushPromises();
+
+        const identify = button(buttons(wrapper), 'Identificar entidad');
+
+        expect(identify.exists()).toBe(true);
+
+        await identify.trigger('click');
+        await flushPromises();
+
+        // The dialog states what the click does — it creates a **formal** affiliation, which is
+        // what makes the confirmation a real one.
+        const modal = dialogTitled(wrapper, 'Identificar la entidad');
+
+        expect(modal.text()).toContain('afiliación formal');
+
+        // And offers no date field: "which fund?" and "since when?" are separate answers, and the
+        // request forbids changing the start.
+        expect(modal.find('input[type="date"]').exists()).toBe(false);
+
+        // Only the entity of the type the file asserted.
+        const options = modal.findAll('select[name="observation_entity"] option');
+
+        expect(options.map((option) => option.text())).toContain('PORVENIR');
+        expect(options.map((option) => option.text())).not.toContain('SALUD TOTAL');
+    });
+
+    it('hides the identification action from a read-only role', async () => {
+        respondWithObservations([afpObservation()]);
+
+        const { wrapper } = mountPage(['clients.view', 'affiliations.view']);
+
+        await flushPromises();
+        await wrapper.get('#tab-afiliaciones').trigger('click');
+        await flushPromises();
+
+        // The gap is still visible — it is the client's history, and `affiliations.view` covers
+        // it. Only the control is gone.
+        expect(wrapper.find('[data-testid="affiliation-observations"]').exists()).toBe(true);
+        expect(buttons(wrapper).some((candidate) => candidate.text().includes('Identificar entidad'))).toBe(
+            false,
+        );
+    });
+
+    it('shows no card at all when the file named every entity', async () => {
+        respondWithObservations([]);
+
+        const { wrapper } = mountPage();
+
+        await flushPromises();
+        await wrapper.get('#tab-afiliaciones').trigger('click');
+        await flushPromises();
+
+        // Nothing to say, so nothing is said. An empty card titled "Entidad pendiente de
+        // identificar" over a complete file would be noise that trains people to ignore it.
+        expect(wrapper.find('[data-testid="affiliation-observations"]').exists()).toBe(false);
+    });
+
+    it('marks an observation identified and keeps it visible, greyed', async () => {
+        respondWithObservations([afpObservation({ is_answered: true })]);
+
+        const { wrapper } = mountPage();
+
+        await flushPromises();
+        await wrapper.get('#tab-afiliaciones').trigger('click');
+        await flushPromises();
+
+        const card = wrapper.find('[data-testid="affiliation-observations"]');
+
+        expect(card.text()).toContain('Entidad identificada');
+        // Still there. It records what the file said, and the file still says `SI` — removing it
+        // would erase the provenance and make the history look cleaner than it was.
+        expect(card.exists()).toBe(true);
+        expect(buttons(wrapper).some((candidate) => candidate.text().includes('Identificar entidad'))).toBe(
+            false,
+        );
     });
 });

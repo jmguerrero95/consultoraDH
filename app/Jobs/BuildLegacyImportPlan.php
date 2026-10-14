@@ -820,6 +820,15 @@ final class BuildLegacyImportPlan implements ShouldQueue
             ->whereIn('code', [
                 LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value,
                 LegacyImportIssue::OverlappingCompanyHistory->value,
+                // §8.1's contradictory starts, raised by the same reconstruction and therefore
+                // reconciled by the same pass.
+                //
+                // Leaving it out here did not fail loudly. `$onFile` simply had no row for the
+                // fingerprint, so the "same finding, refreshed in place" branch was never taken
+                // and the rebuild tried to insert a second one — which the permanent
+                // `legacy_import_issues_fingerprint_unique` index rejected, killing the plan job
+                // and leaving Apply to answer 409 `wrong_state`.
+                LegacyImportIssue::ContradictoryRelationshipStarts->value,
             ])
             ->get() as $row
         ) {

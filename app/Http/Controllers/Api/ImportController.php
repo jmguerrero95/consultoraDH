@@ -102,6 +102,7 @@ final class ImportController extends Controller
         // History.
         'relationship_disappeared_without_retirement' => 'Relaciones sin evidencia de cierre',
         'overlapping_company_history' => 'Historial laboral con fechas incompatibles',
+        'contradictory_relationship_starts' => 'Fechas de inicio contradictorias en el mismo empleador',
 
         // What already exists in the system.
         'existing_client_conflict' => 'Clientes que ya existen',

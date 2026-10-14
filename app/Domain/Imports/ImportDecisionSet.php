@@ -206,7 +206,16 @@ final class ImportDecisionSet
 
             if ($subject !== ''
                 && ($code === LegacyImportIssue::RelationshipDisappearedWithoutRetirement
-                    || $code === LegacyImportIssue::OverlappingCompanyHistory)) {
+                    || $code === LegacyImportIssue::OverlappingCompanyHistory
+                    // §8.1's contradictory starts. Same shape as the two above — a question about
+                    // an interval, keyed by the subject the reconstruction names — so it belongs in
+                    // the same bucket.
+                    //
+                    // Leaving it out failed silently and is worth recording: the answer was stored,
+                    // the finding turned resolved, the plan rebuilt, and the episodes were not
+                    // merged. A resolution nobody reads is worse than not asking, which is the
+                    // failure §8.4's own note on this loop describes for A04-R1.
+                    || $code === LegacyImportIssue::ContradictoryRelationshipStarts)) {
                 $intervals[self::key($subject, $code)] = $resolution;
             }
 
@@ -443,6 +452,44 @@ final class ImportDecisionSet
         $resolution = $this->intervals[self::key($subject, LegacyImportIssue::OverlappingCompanyHistory)] ?? null;
 
         return $resolution?->decision;
+    }
+
+    /**
+     * The start date a person believed for one employment whose stated dates contradict.
+     *
+     * ## Why it resolves the choice here instead of returning the decision
+     *
+     * Both decisions name "earliest" or "latest" **of the dates the file stated**, so the only
+     * meaningful thing the reconstruction can be told is the resulting date. Handing back the
+     * decision would put a comparison against the stated dates in every caller, and the first
+     * caller that forgot it would honour a date nobody wrote.
+     *
+     * ## Why `$statedStarts` is a parameter
+     *
+     * Because this is the **only** place a stored value is checked against the file's own dates.
+     * `$statedStarts` is the group's ordered list; a value outside it yields null, which leaves the
+     * batch blocked — the correct outcome for a date nobody can account for, whether it arrived
+     * from a hand-edited row, a restore from backup, or a UI that grew a free-text field.
+     *
+     * @param  list<string>  $statedStarts  ascending, deduplicated
+     */
+    public function statedStartFor(string $subject, array $statedStarts): ?string
+    {
+        $resolution = $this->intervals[self::key($subject, LegacyImportIssue::ContradictoryRelationshipStarts)] ?? null;
+
+        if ($resolution === null || $statedStarts === []) {
+            return null;
+        }
+
+        $value = $resolution->value['start'] ?? null;
+
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return in_array($value, $statedStarts, true) ? $value : null;
     }
 
     /**

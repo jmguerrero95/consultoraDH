@@ -1363,6 +1363,38 @@ export interface ImportPlanPayload {
     data: ImportPlan;
 }
 
+/**
+ * An affiliation the source asserted and did not name — §9.1's bare `SI`.
+ *
+ * A record about the **file**, not about the person, and `reason` is what keeps that visible:
+ * rendered beside a real affiliation, it must not read as one. `social_security_entity_id` and
+ * `entity` are explicitly `null` rather than absent, so a client of this API can tell "we did not
+ * record the entity" from "this API has no such field" — the first is the truth, the second would
+ * be a bug in a reader.
+ */
+export interface AffiliationObservation {
+    id: number;
+    client_id: number;
+    type: string;
+    type_label: string;
+    type_full_label: string;
+    social_security_entity_id: null;
+    entity: null;
+    reason: string;
+    reason_label: string;
+    started_on: string | null;
+    started_on_precision: string;
+    ended_on: string | null;
+    ended_on_precision: string | null;
+    is_active: boolean;
+    /** The months the source actually asserted, `YYYY-MM`, ascending. */
+    months: string[];
+    /** True once a real affiliation of this type covers the observed months. */
+    is_answered: boolean;
+    legacy_import_id: number | null;
+    created_at: string | null;
+}
+
 /* -------------------------------------------------------------------------
  * A05 — integrated operations, planillas, documents, portal and reports.
  *

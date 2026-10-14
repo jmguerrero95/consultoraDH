@@ -80,6 +80,9 @@ const EXPECTED = [
 const EXPECTED_ISSUES = [
     'invalid_affiliation_date' => 17,
     'credential_like_cells' => 23,
+    // §8.1's contradictions in this file. See the note where it is checked for why "exactly two"
+    // is the claim and why the obvious, much broader test is wrong.
+    'contradictory_starts' => 2,
 ];
 
 /**
@@ -334,6 +337,22 @@ $ok = atLeast($counts, 'disappearances', 1) && $ok;
 // believes otherwise can see the number that disagrees.
 out(sprintf('  [INFO] overlaps (affirmative, per §8.5)         %d', $counts['overlaps'] ?? 0));
 out(sprintf('  [INFO] disappearances (§8.4)                     %d', $counts['disappearances'] ?? 0));
+
+// §8.1's contradictory start dates, and the one that has been refusing Apply since FIX-LOCAL-01.
+//
+// Asserted as **exactly two**, which is the load-bearing claim and the reason this line exists.
+// The number is small because the test is narrow: the stated starts have to *disagree with the
+// months they were seen in*, not merely differ. A cheaper test — "two starts, one employer" —
+// matches 168 pairs, of which 167 are ordinary re-hires that §8.1 separates correctly and that
+// §8.4 already answers. Reporting 168 here would look like 168 new questions about every
+// departure and return in the file, which is exactly the trade §8.4 refuses.
+//
+// Two is a fingerprint of this file, in the same sense §19's other figures are: a change that
+// broke the detection would show up here as 0, and a change that over-broadened it would show up
+// as 168.
+$contradictory = $counts['contradictory_starts'] ?? 0;
+
+$ok = check('start dates that contradict their months (§8.1)', $contradictory, EXPECTED_ISSUES['contradictory_starts']) && $ok;
 
 // §8.5's one hard rule: "Nunca marcar un paralelo automáticamente." A parallel is a decision
 // with A02's `parallel_reason`, so no reconstruction may contain one, and an import whose plan

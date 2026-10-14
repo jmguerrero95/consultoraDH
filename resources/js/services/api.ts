@@ -12,6 +12,7 @@ function comoMesDeVigencia(mes: string): string {
     return /-\d{2}$/.test(mes) ? `${mes}-01` : mes;
 }
 
+import type { AffiliationObservation } from '@/types/api';
 import type {
     ImportDetailPayload,
     ImportIssuesPayload,
@@ -120,6 +121,14 @@ interface ApiClient {
             create(clientId: number, payload: { social_security_entity_id: number; type: string; started_on?: string | null; arl_risk_class?: number | null; client_company_assignment_id?: number | null; notes?: string | null; replace_current?: boolean; effective_date?: string | null }): Promise<{ message: string; affiliation: Affiliation }>;
             close(affiliationId: number, payload: { ended_on: string; reason?: string | null }): Promise<{ message: string; affiliation: Affiliation }>;
             changeEntity(affiliationId: number, payload: { social_security_entity_id: number; type: string; effective_date: string; arl_risk_class?: number | null; notes?: string | null }): Promise<{ message: string; closed_affiliation: Affiliation; affiliation: Affiliation }>;
+            // FIX-IMPORT-02: §9.1's bare `SI` — read and answered apart from the affiliations
+            // above, which are what A03 bills from.
+            //
+            // The resolve payload carries no dates on purpose: the request forbids them, because
+            // "which fund?" and "since when?" are separate answers. Declaring them here would invite
+            // a caller to send one and get a 422 explaining a rule the caller had already broken.
+            observations(clientId: number): Promise<{ affiliation_observations: AffiliationObservation[] }>;
+            resolveObservation(clientId: number, observationId: number, payload: { social_security_entity_id: number; type: string; notes?: string | null }): Promise<{ message: string; affiliation: Affiliation; observation: AffiliationObservation }>;
         };
         companies: {
             list(params?: ListParams): Promise<CompanyListPayload>;
@@ -476,6 +485,30 @@ export const api: ApiClient = {
                 },
             ): Promise<{ message: string; closed_affiliation: Affiliation; affiliation: Affiliation }> {
                 return request('POST', `/api/client-affiliations/${affiliationId}/change`, { body: payload });
+            },
+
+            // FIX-IMPORT-02: §9.1's bare `SI` — the file asserted an affiliation and did not
+            // name the entity. Read and answered separately from `create`/`close`, because an
+            // observation is a note about a gap and must never be read as one of the
+            // affiliations A03 bills from.
+            //
+            // `started_on` and `ended_on` are deliberately absent from the resolve payload: the
+            // request forbids them. Offering them here would invite the interface to send them and
+            // get a 422 explaining a rule the interface had already broken.
+            observations(clientId: number): Promise<{ affiliation_observations: AffiliationObservation[] }> {
+                return request('GET', `/api/clients/${clientId}/affiliation-observations`);
+            },
+
+            resolveObservation(
+                clientId: number,
+                observationId: number,
+                payload: { social_security_entity_id: number; type: string; notes?: string | null },
+            ): Promise<{ message: string; affiliation: Affiliation; observation: AffiliationObservation }> {
+                return request(
+                    'POST',
+                    `/api/clients/${clientId}/affiliation-observations/${observationId}/resolve`,
+                    { body: payload },
+                );
             },
         },
 

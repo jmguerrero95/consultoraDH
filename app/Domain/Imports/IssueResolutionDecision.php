@@ -81,6 +81,19 @@ enum IssueResolutionDecision: string
     /** §8.5's boundary between two overlapping episodes. Requires `boundary` + `precision`. */
     case SplitOverlapAt = 'split_overlap_at';
 
+    /**
+     * One employment, several contradicting starts: the earliest stated date is the real one.
+     *
+     * Requires `start`, and the value must be one of the dates the file itself wrote — the
+     * reconstructor ignores anything else. That is the whole safety property of this pair of
+     * decisions: the answer is a choice among what the source stated, never a date a person typed
+     * into a free field, so "pick the right date" cannot become "make one up".
+     */
+    case UseEarliestStatedStart = 'use_earliest_stated_start';
+
+    /** …and the latest. The mirror image, for the same reason and with the same validation. */
+    case UseLatestStatedStart = 'use_latest_stated_start';
+
     /** Keep what the database already holds. No value. */
     case AcceptExisting = 'accept_existing';
 
@@ -135,6 +148,13 @@ enum IssueResolutionDecision: string
             self::SplitOverlapAt => [
                 'boundary' => 'date',
                 'precision' => 'precision',
+            ],
+
+            // `start` is required and is checked against the file's own dates by the
+            // reconstructor, which ignores a value outside that set rather than honouring it.
+            // A `date` rule alone would let a reviewer type any date at all.
+            self::UseEarliestStatedStart, self::UseLatestStatedStart => [
+                'start' => 'date',
             ],
 
             self::MapEntity => [
@@ -222,6 +242,8 @@ enum IssueResolutionDecision: string
             self::CloseOnDisappearance => 'Cerrar en la fecha indicada',
             self::KeepOpen => 'Dejarla abierta',
             self::SplitOverlapAt => 'Cortar el solapamiento en esa fecha',
+            self::UseEarliestStatedStart => 'La fecha de inicio es la más antigua que declara el archivo',
+            self::UseLatestStatedStart => 'La fecha de inicio es la más reciente que declara el archivo',
             self::AcceptExisting => 'Mantener el dato existente',
             self::OverwriteWithSource => 'Reemplazar con el dato del archivo',
             self::AcceptSourceAmount => 'El valor del archivo es el correcto',
@@ -318,6 +340,13 @@ enum IssueResolutionDecision: string
 
             self::SplitOverlapAt => [
                 LegacyImportIssue::OverlappingCompanyHistory,
+            ],
+
+            // Offered for the contradictory-starts finding and nothing else. A question that
+            // cannot be asked must not be answerable, or the vocabulary would claim that a
+            // decision exists where there is no finding to apply it to.
+            self::UseEarliestStatedStart, self::UseLatestStatedStart => [
+                LegacyImportIssue::ContradictoryRelationshipStarts,
             ],
 
             self::AcceptExisting => [
@@ -452,6 +481,11 @@ enum IssueResolutionDecision: string
             // open.
             self::KeepOpen,
             self::SplitOverlapAt,
+            // Both name the one date the reviewer believed. The merge happens in
+            // `HistoryReconstructor::applyStartDecisions()` before the interval becomes a plan
+            // action, so by the time the plan is built the contradiction is already gone.
+            self::UseEarliestStatedStart,
+            self::UseLatestStatedStart,
             self::AcceptExisting,
             self::AcceptSourceAmount,
             self::LinkExistingClient,

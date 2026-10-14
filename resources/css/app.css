@@ -1468,6 +1468,27 @@ button.cdh-link {
 }
 
 /* -------------------------------------------------------------------------
+ | FIX-IMPORT-02 — an affiliation the file asserted and did not name.
+ |
+ | The whole visual job here is to make a **gap** unmistakable without making it
+ | an error. A red card would say "something is broken"; a normal card would say
+ | "this is a coverage" and billing would then read it as one. So: a dashed left
+ | edge (present, incomplete, not alarming), a tinted surface, and no colour
+ | borrowed from the danger palette.
+ |
+ | An answered row greys itself out rather than disappearing. It records what the
+ | file said, and the file still says `SI` — removing it after somebody fixed it
+ | would erase the provenance and make the history look cleaner than it was.
+ */
+.cdh-card--observation {
+    border-inline-start: 3px dashed var(--cdh-warning, #b7791f);
+}
+
+.cdh-observation--answered {
+    opacity: 0.6;
+}
+
+/* -------------------------------------------------------------------------
  | FIX-IMPORT-02 Correction J — the grouped review summary.
  |
  | The point of this block is to be read in one glance and then ignored, so it

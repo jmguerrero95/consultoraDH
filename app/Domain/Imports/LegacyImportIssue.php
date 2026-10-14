@@ -76,6 +76,29 @@ enum LegacyImportIssue: string
     case RelationshipDisappearedWithoutRetirement = 'relationship_disappeared_without_retirement';
     case OverlappingCompanyHistory = 'overlapping_company_history';
 
+    /**
+     * One employment, several mutually exclusive start dates — §8.1's grouping key is itself the
+     * contradiction.
+     *
+     * ## Why this had no code until now
+     *
+     * §8.1 groups by `person + employer + start date`, so a file stating three different starts
+     * for one person at one employer produces three episodes and nothing says so. §8.5 cannot ask
+     * — it skips two episodes at the *same* employer on purpose, correctly, because that shape is
+     * two episodes of one employment and not a parallel. §8.4 cannot ask either: it asks about an
+     * episode that stops appearing, and the contradictory episode is seen again in the file's last
+     * month.
+     *
+     * So the three episodes reached `apply` as two open relationships with one employer, A02
+     * refused the second with "ya tiene una relación abierta con esta empresa", and §12.3 rolled
+     * back the entire batch — a refusal naming a rule the reviewer had never been asked about.
+     *
+     * It blocks, because the only way to unblock it is a person choosing between dates the file
+     * wrote. Two of the 168 pairs in the delivered workbook have this shape; the other 166 are
+     * ordinary re-hires and are correctly silent.
+     */
+    case ContradictoryRelationshipStarts = 'contradictory_relationship_starts';
+
     // --- monthly amount ------------------------------------------------------
     case MissingMonthlyValue = 'missing_monthly_value';
     case InvalidMonthlyValue = 'invalid_monthly_value';
@@ -191,7 +214,7 @@ enum LegacyImportIssue: string
             self::CompanyIdentityConflict, self::InvalidCompanyTaxId, self::CompanyArlMetadataConflict => 'company',
             self::UnresolvedSocialEntity, self::AffiliationEntityUnknown => 'entity',
             self::DuplicateExactRow, self::DuplicateConflictingRow => 'duplicate',
-            self::RelationshipDisappearedWithoutRetirement, self::OverlappingCompanyHistory => 'relationship',
+            self::RelationshipDisappearedWithoutRetirement, self::OverlappingCompanyHistory, self::ContradictoryRelationshipStarts => 'relationship',
             self::ExistingClientConflict,
             self::ExistingCompanyConflict,
             self::ExistingRelationshipConflict,
@@ -224,6 +247,7 @@ enum LegacyImportIssue: string
             self::AffiliationEntityUnknown => 'Entidad de afiliación desconocida',
             self::RelationshipDisappearedWithoutRetirement => 'Relación que desaparece sin retiro',
             self::OverlappingCompanyHistory => 'Historial de empresas solapado',
+            self::ContradictoryRelationshipStarts => 'Fechas de inicio contradictorias en el mismo empleador',
             self::MissingMonthlyValue => 'Valor mensual ausente',
             self::InvalidMonthlyValue => 'Valor mensual inválido',
             self::ExistingClientConflict => 'Conflicto con cliente existente',

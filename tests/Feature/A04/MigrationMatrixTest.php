@@ -51,6 +51,10 @@ function a04Migrations(): array
         // what rejects an unknown action type, so rolling the table back first would leave the
         // constraint referencing a table that is gone.
         '2026_10_14_100000_allow_affiliation_observation_actions',
+        // …and this one for the same reason. `legacy_import_issues_code_check` is generated from
+        // `LegacyImportIssue::cases()` when the issues table was created, so a new code needs the
+        // constraint rebuilt before the plan can store it.
+        '2026_10_14_110000_allow_contradictory_starts_issues',
     ];
 }
 
