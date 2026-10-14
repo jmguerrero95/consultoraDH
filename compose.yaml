@@ -246,6 +246,17 @@ services:
       - "127.0.0.1:${VITE_PORT:-5173}:5173"
     environment:
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      # FIX-EXPORT-IMPORT-04. The default is 1, not 0, because this service can
+      # only ever run with the project bind-mounted, and on the documented stack
+      # (Docker Desktop over WSL, project on a Windows drive) that mount delivers
+      # no inotify events. With polling off the server starts, answers every
+      # request and reports healthy while its module graph never invalidates — so
+      # it keeps serving the transformation from its last start and the browser
+      # shows an interface that no longer matches the source, with nothing
+      # failing anywhere to say so. `vite.config.ts` reads this through `loadEnv`
+      # as well; it is declared here so the process environment and the file
+      # agree, and so `docker/node/start.sh` can report what is in force.
+      VITE_USE_POLLING: ${VITE_USE_POLLING:-1}
     healthcheck:
       test:
         - CMD
