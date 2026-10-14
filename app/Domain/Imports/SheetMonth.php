@@ -171,4 +171,24 @@ final readonly class SheetMonth
 
         return trim((string) preg_replace('/[^A-Z0-9]+/', ' ', mb_strtoupper($stripped)));
     }
+
+    /**
+     * The calendar year of a sheet-month key, or null when the key carries no year.
+     *
+     * `SheetMonth::key()` is already normalised to `YYYY-MM`, so this is a prefix read and
+     * nothing more. It exists because "the year of the sheet this row was listed on" is real
+     * evidence when a date was typed with a digit missing — see
+     * {@see SourceAffiliationDate::completeTruncatedYear()} — and a caller should not have to
+     * re-parse the key to get it.
+     */
+    public static function yearOf(string $monthKey): ?int
+    {
+        if (preg_match('/^(?<y>\d{4})-\d{2}$/', $monthKey, $matches) !== 1) {
+            return null;
+        }
+
+        $year = (int) $matches['y'];
+
+        return ($year >= 1900 && $year <= 2200) ? $year : null;
+    }
 }

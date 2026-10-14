@@ -260,12 +260,17 @@ enum IssueResolutionDecision: string
             //  - `client_identity_conflict` — the document is readable; what is contested is the
             //    *name*, and `accept_source` says nothing about names.
             //
-            // `skip_row` is the real answer to all five: it is honoured (`skipsRow()`, and the row
+            // `skip_row` is the real answer to the three above: it is honoured (`skipsRow()`, and the row
             // is dropped from the reconstruction), and §17.4's screen can show its consequence.
+            //
+            // It was also the only answer `invalid_email` and `missing_monthly_value` were offered,
+            // and that was the harm: a reviewer who wanted to clear 77 "correo no válido" warnings
+            // had one button, and pressing it **dropped 77 people from the import**. A missing
+            // optional field is not a reason to lose a client, so neither code offers it any more —
+            // they have no decision to make, and `ParsedWorkbook::NON_BLOCKING` already keeps them
+            // off the blocking list.
             self::SkipRow => [
                 LegacyImportIssue::InvalidClientDocument,
-                LegacyImportIssue::InvalidEmail,
-                LegacyImportIssue::MissingMonthlyValue,
                 LegacyImportIssue::InvalidMonthlyValue,
                 LegacyImportIssue::ClientIdentityConflict,
             ],

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Imports;
 
 use App\Domain\Affiliations\SocialSecurityEntityType;
+use App\Models\ClientAffiliationObservation;
 use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
 use App\Models\LegacyImportRow;
@@ -1656,6 +1657,23 @@ final class ImportPlanBuilder
             // affiliation" action would need an entity to hang it on, and inventing one is
             // exactly what §9.1 forbids.
             if (! $segment->isAffiliation()) {
+                // …but a bare `SI` is not a refusal, and this is where it used to disappear.
+                //
+                // `SI` asserts that the person *was* affiliated and does not say to what, so it
+                // creates no `client_affiliations` row — that table's `social_security_entity_id`
+                // is `NOT NULL` and §9.1 forbids inventing one. What it must not do is vanish:
+                // the only outcomes available before were "block the batch until somebody names
+                // the fund" and "record nothing", and the second is the dangerous one, because
+                // A03 goes on reading "no AFP that month" for a person who had one.
+                //
+                // So the segment becomes an observation: the assertion is kept, the gap is named,
+                // and the row stops blocking. See `ClientAffiliationObservation`.
+                $observation = $this->affiliationObservationAction($import, $segment);
+
+                if ($observation !== null) {
+                    $actions[] = $observation;
+                }
+
                 continue;
             }
 
@@ -1796,6 +1814,83 @@ final class ImportPlanBuilder
         }
 
         return $actions;
+    }
+
+    /**
+     * §9.1's bare `SI`, recorded as an observation instead of dropped.
+     *
+     * Returns null for every segment that is not a bare affirmative — a refusal, or an absent
+     * cell — because those assert nothing and an observation of nothing would be noise.
+     *
+     * ## What it does and does not say
+     *
+     * It says the person was affiliated, over which months, and when that was first seen. It
+     * does **not** name an entity, does not create an `AffiliationSegment`-shaped fact about
+     * which fund, and does not guess from any other month: a bare `SI` in March with `PORVENIR`
+     * written in April is still unknown in March, because the source is a set of monthly
+     * snapshots and inferring across them is how a correct row becomes a wrong one.
+     *
+     * ## Why the identity is the segment's own key
+     *
+     * Re-importing the same source must not double the observations, and `AffiliationSegment::
+     * naturalKey()` already encodes `(client, type, company, interval)`. The `observation:`
+     * prefix keeps it from colliding with a `create_affiliation` that happens to describe the
+     * same person and month — one is a fact, the other is a gap, and they must not be mistaken
+     * for each other by a key comparison.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function affiliationObservationAction(LegacyImport $import, AffiliationSegment $segment): ?array
+    {
+        if ($segment->token?->problem !== SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE) {
+            return null;
+        }
+
+        // A segment with no client identity cannot be filed against anybody, and an observation
+        // with no subject is not an observation. Such a row already raises
+        // `invalid_client_document`, which is its own blocking question.
+        if ($segment->documentNumber === null) {
+            return null;
+        }
+
+        $naturalKey = 'observation:'.$segment->type->value
+            .':'.($segment->companyTaxId ?? 'no-nit')
+            .':'.$segment->documentNumber
+            .':'.($segment->interval->start?->format('Y-m-d') ?? 'unknown');
+
+        $payload = [
+            'client_document_type' => $segment->documentType,
+            'client_document_number' => $segment->documentNumber,
+            'company_tax_id' => $segment->companyTaxId,
+            'type' => $segment->type->value,
+            // §8.3: both precisions travel with the interval, exactly as on a real affiliation,
+            // so the write cannot drop one and present a month as a day.
+            'interval' => $segment->interval->toArray(),
+            'months' => $segment->months,
+            // The literal the source wrote. Carried so a reviewer reading the observation knows
+            // *how* the source said it, and so the audit trail is the file's own words rather
+            // than the importer's summary of them.
+            'token' => $segment->token->token,
+            'reason' => 'entity_unknown',
+        ];
+
+        return $this->action(
+            $import,
+            ImportActionType::RecordAffiliationObservation,
+            $naturalKey,
+            $payload,
+            $segment->sourceRowIds,
+            [
+                // §11's exact-match rule, and it is the reason this is computed rather than
+                // asserted. A rebuild re-reads this segment after a previous apply has already
+                // written the observation, so on the second run the target genuinely exists and
+                // the precondition has to say so — a hardcoded `false` would make every rebuild
+                // after the first fail at apply with a precondition that described the past.
+                'target_exists' => ClientAffiliationObservation::query()
+                    ->where('dedupe_key', $naturalKey)
+                    ->exists(),
+            ],
+        );
     }
 
     /**

@@ -15,6 +15,7 @@ import { useAuthStore } from '@/stores/auth';
 import type {
     ImportAction,
     ImportIssue,
+    ImportIssueGroup,
     ImportIssueDecision,
     ImportPlan as ImportPlanPayload,
     ImportRetirementPolicy,
@@ -74,6 +75,14 @@ const importId = computed(() => Number(route.params.id));
 const detail = ref<LegacyImportDetail | null>(null);
 const rows = ref<ImportRow[]>([]);
 const issues = ref<ImportIssue[]>([]);
+/**
+ * FIX-IMPORT-02 Correction J: the findings counted by kind.
+ *
+ * Deliberately kept separate from `issues` rather than derived from it. The list is paginated —
+ * 50 rows of 195 — so anything computed from it describes the current page, and a summary of a
+ * page is a summary that is wrong most of the time. These come from the server's own aggregate.
+ */
+const issueGroups = ref<ImportIssueGroup[]>([]);
 const plan = ref<ImportPlanPayload | null>(null);
 
 const loading = ref(true);
@@ -165,9 +174,73 @@ async function loadIssues(): Promise<void> {
 
         issues.value = payload.data;
         issuesMeta.value = payload.meta;
+        issueGroups.value = payload.groups ?? [];
     } catch {
         issues.value = [];
+        // An empty breakdown is better than a stale one: if the aggregate cannot be read, showing
+        // the previous batch's numbers would tell a reviewer how much work there is and be wrong.
+        issueGroups.value = [];
     }
+}
+
+/**
+ * The kinds that are waiting on a person, most numerous first.
+ *
+ * `resolvable` rather than `blocking` is the test, and the difference matters: a kind can be
+ * blocking yet already answered, and a kind can still be answerable after it stopped blocking.
+ * What a reviewer needs here is "which of these is waiting for *me*", and only `open > 0` on an
+ * answerable kind says that.
+ */
+const decisionGroups = computed(() =>
+    issueGroups.value.filter((group) => group.resolvable && group.open > 0),
+);
+
+/**
+ * The kinds nobody has to do anything about.
+ *
+ * Shown, and not hidden, because silence is the worse lie: 153 findings that quietly vanished
+ * from the screen would leave a reviewer unable to tell whether the import was clean or the
+ * screen was broken.
+ */
+const informationalGroups = computed(() =>
+    issueGroups.value.filter((group) => !group.resolvable),
+);
+
+const decisionFindings = computed(() =>
+    decisionGroups.value.reduce((total, group) => total + group.open, 0),
+);
+
+const informationalFindings = computed(() =>
+    informationalGroups.value.reduce((total, group) => total + group.total, 0),
+);
+
+/**
+ * The finding kinds this batch has, keyed by code.
+ *
+ * The "Resolver" control below reads this rather than the server's per-finding decision list,
+ * because the grouped `resolvable` flag is computed once over every finding of that kind instead
+ * of once per row — and on a batch of 77 identical email warnings, computing it 77 times is how
+ * the screen and the server end up disagreeing about whether a button should be there.
+ */
+const resolvableCodes = computed(
+    () => new Set(issueGroups.value.filter((group) => group.resolvable).map((group) => group.code)),
+);
+
+function groupSeverityClass(group: ImportIssueGroup): string {
+    return `cdh-badge--${group.severity}`;
+}
+
+/**
+ * Jump to one kind from the summary.
+ *
+ * Reuses the code filter rather than adding a second filtering mechanism, so there is only one
+ * place the list is narrowed and only one control that shows what it is narrowed to. The page
+ * resets because `issuePage` is shared with the filter above it: staying on page 3 of a
+ * one-row result is an empty screen that looks like a bug.
+ */
+function focusIssueGroup(group: ImportIssueGroup): void {
+    issueCode.value = group.code;
+    issuePage.value = 1;
 }
 
 async function loadPlan(): Promise<void> {
@@ -964,6 +1037,71 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
 
             <!-- ---------------------------------------------------- Incidencias -->
             <section v-else-if="tab === 'incidencias'" role="tabpanel" aria-label="Incidencias">
+                <!--
+                    FIX-IMPORT-02 Correction J. The summary a reviewer reads first.
+
+                    The table below is unchanged and is still the list; this is the map that says
+                    how much of it is actually a decision. Before it, the screen showed 210 rows
+                    with a "Resolver" button on each, and the 77 of those that were invalid email
+                    addresses offered exactly one way to be answered — "excluir fila" — so
+                    clearing those warnings would have dropped 77 clients. Grouping says which
+                    kinds have a question at all.
+                -->
+                <div v-if="issueGroups.length > 0" class="cdh-issue-summary">
+                    <div v-if="decisionGroups.length > 0" class="cdh-issue-summary__block">
+                        <h3 class="cdh-issue-summary__title">
+                            Requieren una decisión
+                            <span class="cdh-text-muted">
+                                ({{ decisionGroups.length }} tipos · {{ decisionFindings }} incidencias)
+                            </span>
+                        </h3>
+
+                        <ul class="cdh-issue-summary__list">
+                            <li v-for="group in decisionGroups" :key="`d-${group.code}`">
+                                <button
+                                    type="button"
+                                    class="cdh-issue-summary__item"
+                                    @click="focusIssueGroup(group)"
+                                >
+                                    <span class="cdh-badge" :class="groupSeverityClass(group)">
+                                        {{ group.severity }}
+                                    </span>
+                                    <span class="cdh-issue-summary__label">{{ group.label }}</span>
+                                    <span class="cdh-issue-summary__count">
+                                        {{ group.open }}<span v-if="group.open !== group.total">/{{ group.total }}</span>
+                                    </span>
+                                </button>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div v-if="informationalGroups.length > 0" class="cdh-issue-summary__block">
+                        <h3 class="cdh-issue-summary__title">
+                            Informativas
+                            <span class="cdh-text-muted">
+                                ({{ informationalGroups.length }} tipos · {{ informationalFindings }} incidencias — nada
+                                que responder)
+                            </span>
+                        </h3>
+
+                        <ul class="cdh-issue-summary__list">
+                            <li v-for="group in informationalGroups" :key="`i-${group.code}`">
+                                <button
+                                    type="button"
+                                    class="cdh-issue-summary__item cdh-issue-summary__item--muted"
+                                    @click="focusIssueGroup(group)"
+                                >
+                                    <span class="cdh-badge" :class="groupSeverityClass(group)">
+                                        {{ group.severity }}
+                                    </span>
+                                    <span class="cdh-issue-summary__label">{{ group.label }}</span>
+                                    <span class="cdh-issue-summary__count">{{ group.total }}</span>
+                                </button>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
                 <div class="cdh-filters" role="search">
                     <div class="cdh-filters__field cdh-filters__field--grow">
                         <label class="cdh-form-label" for="issues-code">Código</label>
@@ -1032,15 +1170,36 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                                         A04-R2: no "Resolver" on a finding that stopped applying.
                                         The endpoint refuses it now as well; disabling the control
                                         is what keeps the screen and the server agreeing.
+
+                                        FIX-IMPORT-02 adds a second condition, and it is the one
+                                        this milestone exists for: no button on a kind that has
+                                        nothing to ask. `invalid_email` and `missing_monthly_value`
+                                        carried exactly one button — "excluir fila" — and pressing
+                                        it to clear a warning about a missing email address drops
+                                        a real client from the import. 77 of them, in the delivered
+                                        workbook.
+
+                                        When the breakdown could not be read, `resolvableCodes` is
+                                        empty and this hides every button. That is the wrong way
+                                        round, so it is corrected for below rather than left as a
+                                        screen that is suddenly full of controls nobody can justify.
                                     -->
                                     <button
-                                        v-if="canReview && issue.resolved_at === null && !issue.is_superseded"
+                                        v-if="
+                                            canReview &&
+                                            issue.resolved_at === null &&
+                                            !issue.is_superseded &&
+                                            (resolvableCodes.size === 0 || resolvableCodes.has(issue.code))
+                                        "
                                         type="button"
                                         class="cdh-link"
                                         @click="openResolution(issue)"
                                     >
                                         Resolver
                                     </button>
+                                    <span v-else-if="!resolvableCodes.has(issue.code)" class="cdh-text-muted">
+                                        Nada que responder
+                                    </span>
                                     <span v-else class="cdh-text-muted">—</span>
                                 </td>
                             </tr>

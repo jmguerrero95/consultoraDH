@@ -186,16 +186,67 @@ it('raises ambiguous_risk_job_columns when both columns look like a risk', funct
     expect(codesOf($parsed))->toContain(LegacyImportIssue::AmbiguousRiskJobColumns);
 });
 
-it('reports a risk typo as an issue and never auto-corrects it', function () {
-    $parsed = parseSynthetic(
+it('resolves a risk typo only when the correction is on the approved list', function () {
+    // §9.4 refuses to guess a risk class, and it still does — but "never guess" is not "never
+    // read". `UMO` for `UNO` is a one-character key slip that a human resolves the same way every
+    // time, and the delivered workbook contains it. Leaving 2.560 rows unappliable over three
+    // cells is a cost nobody is paying for, so the correction is written down as an **approved
+    // mapping** in `config/imports.php` rather than as a similarity score.
+    //
+    // The approved list is the whole safety property. Anything not on it is still reported, so
+    // the second half of this test is the one that matters: see below.
+    $approved = parseSynthetic(
         (new SyntheticWorkbook)->sheetWithBlocks('JUNIO 2026', [[
             'title' => 'ANDINA S.A.S. NIT 900123456-3',
             'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'P' => 'UMO', 'Q' => 'OPERADOR'])],
         ]]),
     );
 
-    expect($parsed->rows()[0]->risk->riskClass)->toBeNull();
-    expect(codesOf($parsed))->toContain(LegacyImportIssue::UnknownRiskToken);
+    expect($approved->rows()[0]->risk->riskClass)->toBe(1)
+        ->and($approved->rows()[0]->risk->riskRaw)->toBe('UMO')
+        ->and(codesOf($approved))->not->toContain(LegacyImportIssue::UnknownRiskToken);
+
+    // And every near-miss is still refused. `TREX` and `CINCS` are exactly as close to a real
+    // token as `UMO` was to `UNO` — one character, same length — so a similarity rule rather
+    // than an approved list would have "fixed" all three. §9.4 refuses that, because each could
+    // equally be a different real risk class the consultant genuinely belongs to.
+    foreach (['TREX', 'CINCS'] as $unapproved) {
+        $parsed = parseSynthetic(
+            (new SyntheticWorkbook)->sheetWithBlocks('JUNIO 2026', [[
+                'title' => 'ANDINA S.A.S. NIT 900123456-3',
+                'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'P' => $unapproved, 'Q' => 'OPERADOR'])],
+            ]]),
+        );
+
+        expect($parsed->rows()[0]->risk->riskClass)->toBeNull()
+            ->and(codesOf($parsed))->toContain(LegacyImportIssue::UnknownRiskToken);
+    }
+});
+
+it('does not generalise an approved correction outside the ARL risk column', function () {
+    // The approved map is read by the risk reader and by nothing else. `UMO` is not a correction
+    // to any other column, so if this test ever fails it means the mapping leaked into a general
+    // typo-repair path — which would apply a risk-class rule to a name or a document.
+    $parsed = parseSynthetic(
+        (new SyntheticWorkbook)->sheetWithBlocks('JUNIO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow([
+                'H' => '10101010',
+                'O' => 'UMO',
+                'N' => 'UMO',
+                'P' => 'UNO',
+            ])],
+        ]]),
+    );
+
+    $row = $parsed->rows()[0];
+
+    // The approved token resolves in the risk column…
+    expect($row->risk->riskClass)->toBe(1)
+        // …and the same string in the two affiliation columns is still an unknown entity, which
+        // is a different question with a different answer.
+        ->and($row->entities['AFP']->problem)->not->toBeNull()
+        ->and($row->entities['EPS']->problem)->not->toBeNull();
 });
 
 it('does not turn a negated token or a bare SI into an affiliation', function () {

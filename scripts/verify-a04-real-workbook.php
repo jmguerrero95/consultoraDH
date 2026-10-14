@@ -65,10 +65,34 @@ const EXPECTED = [
     'company_names' => 14,
 ];
 
-/** §8.1 and §4.3 also state counts, and both were checked against this file. */
+/**
+ * §8.1 and §4.3 also state counts, and both were checked against this file.
+ *
+ * `invalid_affiliation_date` here is what the **file** contains, not what the importer reports.
+ * Those were the same number until FIX-IMPORT-02 added two normalisations, and conflating them
+ * turns a regression guard into a ratchet: lowering the number to whatever the importer now
+ * produces would mean a change that *broke* the normalisations still passed.
+ *
+ * So the fingerprint stays at what the file holds, and the importer's behaviour is asserted
+ * separately below — 17 unreadable, 15 deterministically corrected, 2 genuinely undecidable.
+ * Three numbers where there was one, and the guard is stronger than before.
+ */
 const EXPECTED_ISSUES = [
     'invalid_affiliation_date' => 17,
     'credential_like_cells' => 23,
+];
+
+/**
+ * FIX-IMPORT-02 Correction D: the two date normalisations, and what they cannot fix.
+ *
+ * `corrected` are the cells the importer now reads as dates it can defend — `29/122025` as
+ * `2025-12-29`, and `01/02/206` as `2026-02-01` because the sheet settles the missing digit.
+ * `residual` is the two the source declined to state: one cell reads `NO` (a fact, not a defect)
+ * and one is empty (an unknown). Neither is a question a person can answer, and neither blocks.
+ */
+const EXPECTED_DATE_CORRECTION = [
+    'corrected' => 15,
+    'residual' => 2,
 ];
 
 /**
@@ -151,6 +175,27 @@ foreach ($redactor->findings() as $finding) {
 
 $sourceRows = $fingerprint['rows'] + ($issueCounts[LegacyImportIssue::DuplicateExactRow->value] ?? 0);
 
+// FIX-IMPORT-02 Correction D. The file holds 17 cells whose affiliation date is not already a
+// date. Fifteen of them are now read, and two are not — so this counts both sides and asserts
+// each, because asserting only the survivor would pass just as happily if the normalisations
+// stopped working and every cell went back to unreadable.
+$correctedDates = 0;
+
+foreach ($parsed->rows() as $row) {
+    if ($row->affiliationDate->hasProblem()) {
+        continue;
+    }
+
+    // A date that reads cleanly only because it was never in doubt does not count as a
+    // correction. The two normalisations each leave the raw text in `raw`, so the corrected
+    // cells are exactly the ones whose typed form differs from what was stored.
+    if ($row->affiliationDate->raw !== $row->affiliationDate->isoDate) {
+        $correctedDates++;
+    }
+}
+
+$residualDates = $issueCounts[LegacyImportIssue::InvalidAffiliationDate->value] ?? 0;
+
 out('Fingerprint');
 $ok = true;
 $ok = check('monthly sheets', $fingerprint['monthly_sheets'], EXPECTED['monthly_sheets']) && $ok;
@@ -163,9 +208,19 @@ out('');
 out('§4.3 / §8.1 counts');
 $ok = check('cells that look like a credential', count($credentialCells), EXPECTED_ISSUES['credential_like_cells']) && $ok;
 $ok = check(
-    'invalid affiliation dates (not corrected)',
-    $issueCounts[LegacyImportIssue::InvalidAffiliationDate->value] ?? 0,
+    'affiliation dates the file does not state as dates',
+    EXPECTED_DATE_CORRECTION['corrected'] + $residualDates,
     EXPECTED_ISSUES['invalid_affiliation_date'],
+) && $ok;
+$ok = check(
+    '…corrected by a normalisation (Correction D)',
+    $correctedDates,
+    EXPECTED_DATE_CORRECTION['corrected'],
+) && $ok;
+$ok = check(
+    '…still undecided, and not blocking',
+    $residualDates,
+    EXPECTED_DATE_CORRECTION['residual'],
 ) && $ok;
 
 out('');

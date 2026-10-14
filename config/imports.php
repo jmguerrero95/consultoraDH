@@ -122,6 +122,34 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Approved corrections to risk words
+    |--------------------------------------------------------------------------
+    |
+    | §9.4: a misspelled risk word is *reported*, never corrected, "sin un mapeo aprobado". This
+    | is that mapping, and it is a closed list of spellings somebody has looked at and approved.
+    |
+    | `UMO` is confirmed by the project owner to be a mistyping of `UNO` in this workbook, which
+    | is level I. Without the entry it arrives as `unknown_risk_token` and a person has to answer
+    | the same question every time the file is imported.
+    |
+    | It is a list and not a rule. "Any word one edit from `UNO`/`DOS`/`TRES` is that word"
+    | would rewrite somebody's risk class from a value nobody approved, which is the error
+    | §9.4 exists to prevent. Each entry here is one approved spelling, and anything absent
+    | still reaches the reviewer.
+    |
+    | The original text is always kept — `legacy_import_rows.risk_raw` still reads `UMO` beside
+    | `arl_risk_class = 1` — so a normalization is visible on the record rather than silent.
+    |
+    | Keys and values are folded comparison forms, so `umo` and `UMO` are the same entry.
+    |
+    */
+
+    'approved_risk_tokens' => [
+        'UMO' => 'UNO',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Queue
     |--------------------------------------------------------------------------
     |

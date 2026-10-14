@@ -1467,6 +1467,83 @@ button.cdh-link {
     font-variant-numeric: tabular-nums;
 }
 
+/* -------------------------------------------------------------------------
+ | FIX-IMPORT-02 Correction J — the grouped review summary.
+ |
+ | The point of this block is to be read in one glance and then ignored, so it
+ | is deliberately quiet: no card borders, no colour of its own, and the
+ | informational half greyed rather than hidden. Hiding it would save a
+ | reviewer 153 lines to scroll past, and would also leave them unable to tell
+ | a clean import from a broken screen.
+ |
+ | The counts are tabular so a column of them lines up and can be compared
+ | down the page instead of one at a time.
+ */
+.cdh-issue-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem 3rem;
+    margin-block-end: 1.25rem;
+}
+
+.cdh-issue-summary__block {
+    flex: 1 1 22rem;
+    min-inline-size: 0;
+}
+
+.cdh-issue-summary__title {
+    margin-block: 0 0.5rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+}
+
+.cdh-issue-summary__list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.cdh-issue-summary__item {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    inline-size: 100%;
+    padding: 0.25rem 0.35rem;
+    border: 0;
+    border-radius: 3px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+}
+
+.cdh-issue-summary__item:hover,
+.cdh-issue-summary__item:focus-visible {
+    background-color: var(--cdh-surface-hover, rgba(0, 0, 0, 0.04));
+}
+
+/*
+ * An informational kind is still a button — clicking it filters the list, which
+ * is the only way to inspect the 77 rows behind the number. Only its emphasis is
+ * lowered, so "nothing to answer here" reads as less work rather than as a
+ * control that does not work.
+ */
+.cdh-issue-summary__item--muted .cdh-issue-summary__label {
+    color: var(--cdh-text-muted, #6c757d);
+}
+
+.cdh-issue-summary__label {
+    flex: 1 1 auto;
+    min-inline-size: 0;
+}
+
+.cdh-issue-summary__count {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
 /*
  | Only short codes are held on one line. A document number or a NIT should never
  | break; a name must, because a company name has no natural length and forcing

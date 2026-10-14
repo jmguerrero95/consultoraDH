@@ -30,6 +30,7 @@ use App\Http\Requests\Clients\CreatePortalAccountRequest;
 use App\Http\Requests\Clients\ListClientsRequest;
 use App\Http\Requests\Clients\StoreClientRequest;
 use App\Http\Requests\Clients\UpdateClientRequest;
+use App\Http\Resources\AffiliationObservationResource;
 use App\Http\Resources\AffiliationResource;
 use App\Http\Resources\AssignmentResource;
 use App\Http\Resources\ClientListResource;
@@ -39,6 +40,7 @@ use App\Http\Resources\DataQualityResource;
 use App\Models\AuditEvent;
 use App\Models\Client;
 use App\Models\ClientAffiliation;
+use App\Models\ClientAffiliationObservation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
 use App\Models\SocialSecurityEntity;
@@ -509,6 +511,37 @@ final class ClientController extends Controller
 
         return response()->json([
             'affiliations' => AffiliationResource::collection($affiliations)->resolve(),
+        ]);
+    }
+
+    /**
+     * GET /api/clients/{client}/affiliation-observations
+     *
+     * FIX-IMPORT-02 Correction C. §9.1's bare `SI`: the file said the person was affiliated and
+     * did not say to what.
+     *
+     * ## Why this is not part of `affiliations()`
+     *
+     * Because that endpoint answers "which entities did this person have", and an observation
+     * has no entity. Adding it there would mean either a list of real affiliations with nulls in
+     * it, or a filter that drops them — and both destroy the record of a gap that was real. A03
+     * in particular reads `client_affiliations` to decide what may be billed; an observation must
+     * never reach that read, and the cheapest way to guarantee it is for the two to be different
+     * queries.
+     *
+     * So nothing that already read `client_affiliations` was changed. That is a deliberate
+     * constraint rather than an accident of scope: a record nobody can be surprised by cannot
+     * turn a working screen into a 500.
+     */
+    public function affiliationObservations(Client $client): JsonResponse
+    {
+        $observations = ClientAffiliationObservation::query()
+            ->where('client_id', $client->id)
+            ->orderByDesc('started_on')
+            ->get();
+
+        return response()->json([
+            'affiliation_observations' => AffiliationObservationResource::collection($observations)->resolve(),
         ]);
     }
 

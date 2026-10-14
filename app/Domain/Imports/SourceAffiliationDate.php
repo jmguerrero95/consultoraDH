@@ -84,6 +84,7 @@ final readonly class SourceAffiliationDate
         ?string $sheet = null,
         ?int $row = null,
         ?string $precision = null,
+        ?int $sheetYear = null,
     ): self {
         if ($value === null) {
             return new self(null, self::PRECISION_UNKNOWN, 'missing_date', null, '');
@@ -119,7 +120,7 @@ final readonly class SourceAffiliationDate
         // dropping a day, which is why only the time is stripped.
         $withoutTime = preg_replace('/\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp]\.?[Mm]\.?)?$/u', '', $raw) ?? $raw;
 
-        return self::fromText($withoutTime);
+        return self::fromText($withoutTime, $sheetYear);
     }
 
     private static function fromSerial(float $value, string $raw): self
@@ -146,7 +147,12 @@ final readonly class SourceAffiliationDate
         return new self($date->format('Y-m-d'), self::PRECISION_DAY, null, null, $raw);
     }
 
-    private static function fromText(string $raw): self
+    /**
+     * @param  int|null  $sheetYear  the year of the sheet this cell was read from, used only to
+     *                               complete a year typed with a digit missing. Null leaves
+     *                               every truncated year unresolved.
+     */
+    private static function fromText(string $raw, ?int $sheetYear = null): self
     {
         $folded = SheetMonth::fold($raw);
 
@@ -186,46 +192,36 @@ final readonly class SourceAffiliationDate
 
         // `d/m/y` — the dominant text form, and the only one read as day-first.
         if (preg_match('#^(?<d>\d{1,2})[/\-.](?<m>\d{1,2})[/\-.](?<y>\d{1,4})$#', $raw, $matches) === 1) {
-            $day = (int) $matches['d'];
-            $month = (int) $matches['m'];
-            $year = (int) $matches['y'];
-
-            // §8.1 names `206` → `2026` as a suggestion and not a write, and the danger is
-            // not the arithmetic but the padding: `(int) '206'` is `206`, and `sprintf('%04d')`
-            // would quietly turn it into the year 206 and checkdate would accept it. A year
-            // that is not exactly four digits never becomes a date here.
-            if ($year < 1000) {
-                return new self(
-                    null,
-                    self::PRECISION_UNKNOWN,
-                    'truncated_year',
-                    self::expandYear($year),
-                    $raw,
-                );
-            }
-
-            if (! checkdate($month, $day, $year)) {
-                return new self(null, self::PRECISION_UNKNOWN, 'impossible_date', null, $raw);
-            }
-
-            // Both halves are ≤ 12, so this cell reads differently under the two
-            // conventions and the reader cannot tell which the author meant.
-            if ($day <= 12 && $month <= 12 && $day !== $month) {
-                return new self(
-                    null,
-                    self::PRECISION_UNKNOWN,
-                    'ambiguous_date',
-                    sprintf('%04d-%02d-%02d', $year, $month, $day),
-                    $raw,
-                );
-            }
-
-            return new self(
-                sprintf('%04d-%02d-%02d', $year, $month, $day),
-                self::PRECISION_DAY,
-                null,
-                null,
+            return self::fromDayMonthYear(
+                (int) $matches['d'],
+                (int) $matches['m'],
+                (int) $matches['y'],
                 $raw,
+                $sheetYear,
+                ambiguousWhenBothLow: true,
+            );
+        }
+
+        // `d/mYYYY` — the separator before the year was not typed.
+        //
+        // `29/122025` and `01/032026` both appear in the delivered workbook, and both are
+        // unambiguous rather than merely guessable. The year group is the one that is four digits,
+        // so it cannot be the day or the month: the first group is the day, the second the month,
+        // and no rearrangement of the three groups produces a different date. The usual
+        // "both halves ≤ 12, so it could be either convention" refusal does not apply — that one
+        // exists because `d/m/y` allows the year to be small, and here it cannot be.
+        //
+        // A three-digit trailing group is **not** read this way: `29/12202` is far more likely to
+        // be a mistyped `29/12/202` than a truncated year, and guessing between them is a
+        // judgement. That case stays unreadable and reaches the reviewer.
+        if (preg_match('#^(?<d>\d{1,2})[/\-.](?<m>\d{1,2})(?<y>\d{4})$#', $raw, $matches) === 1) {
+            return self::fromDayMonthYear(
+                (int) $matches['d'],
+                (int) $matches['m'],
+                (int) $matches['y'],
+                $raw,
+                $sheetYear,
+                ambiguousWhenBothLow: false,
             );
         }
 
@@ -233,10 +229,146 @@ final readonly class SourceAffiliationDate
     }
 
     /**
+     * Resolve an already-separated day/month/year, or say precisely why it cannot.
+     *
+     * Shared by both text forms so `29/122025` and `29/12/2025` are decided by the same rules
+     * and cannot drift apart.
+     *
+     * @param  int  $year  as written, possibly not four digits
+     * @param  bool  $ambiguousWhenBothLow  whether a day and month both ≤ 12 leaves two readings.
+     *                                      False for the form whose year is provably four digits.
+     */
+    private static function fromDayMonthYear(
+        int $day,
+        int $month,
+        int $year,
+        string $raw,
+        ?int $sheetYear,
+        bool $ambiguousWhenBothLow,
+    ): self {
+        // §8.1 names `206` → `2026` as a suggestion and not a write, and the danger is not the
+        // arithmetic but the padding: `(int) '206'` is `206`, and `sprintf('%04d')` would quietly
+        // turn it into the year 206 and checkdate would accept it. A year that is not exactly four
+        // digits never becomes a date here unless the sheet's own year settles it below.
+        if ($year < 1000) {
+            $completed = self::completeTruncatedYear($year, $sheetYear);
+
+            if ($completed !== null && checkdate($month, $day, $completed)) {
+                // The sheet settles it, so this is a reading rather than a guess. `raw` still
+                // carries what the author typed, so the correction is visible on the record.
+                return new self(
+                    sprintf('%04d-%02d-%02d', $completed, $month, $day),
+                    self::PRECISION_DAY,
+                    null,
+                    null,
+                    $raw,
+                );
+            }
+
+            return new self(
+                null,
+                self::PRECISION_UNKNOWN,
+                'truncated_year',
+                self::expandYear($year),
+                $raw,
+            );
+        }
+
+        if (! checkdate($month, $day, $year)) {
+            return new self(null, self::PRECISION_UNKNOWN, 'impossible_date', null, $raw);
+        }
+
+        // Both halves are ≤ 12, so this cell reads differently under the two conventions and the
+        // reader cannot tell which the author meant. Only possible when the year could have been
+        // the small group.
+        if ($ambiguousWhenBothLow && $day <= 12 && $month <= 12 && $day !== $month) {
+            return new self(
+                null,
+                self::PRECISION_UNKNOWN,
+                'ambiguous_date',
+                sprintf('%04d-%02d-%02d', $year, $month, $day),
+                $raw,
+            );
+        }
+
+        return new self(
+            sprintf('%04d-%02d-%02d', $year, $month, $day),
+            self::PRECISION_DAY,
+            null,
+            null,
+            $raw,
+        );
+    }
+
+    /**
+     * Complete a year that was typed with a digit missing, when the sheet's own year settles it.
+     *
+     * §8.1 requires evidence rather than arithmetic, and the evidence used here is the one the
+     * source supplies: the year of the sheet the row was listed on. A payroll sheet for
+     * September 2026 is about employment in 2026, and `01/02/206` on it is `01/02/2026` or nothing
+     * sensible at all.
+     *
+     * ## Why this is not a global year substitution
+     *
+     * Expanding `206` to `2026` everywhere would rewrite any `206` in any file, with no way to
+     * notice when the same digits mean something else. Two conditions keep it evidence-bound:
+     *
+     *  - the candidate must be the sheet's year ±1, because an affiliation date can sit just
+     *    outside the month its row was listed in, but not years away from it;
+     *  - the truncated digits must be that year with **one digit removed**, so `206` fits `2026`
+     *    and fits neither `2025` nor `2027`.
+     *
+     * If exactly one year in that window fits, the reading is unique and is used. If none fits, or
+     * more than one does, the evidence does not settle it and the cell stays a `truncated_year`
+     * suggestion for a person. The answer is never invented.
+     */
+    private static function completeTruncatedYear(int $truncated, ?int $hint): ?int
+    {
+        if ($hint === null) {
+            return null;
+        }
+
+        $digits = (string) $truncated;
+        $candidates = [];
+
+        for ($year = $hint - 1; $year <= $hint + 1; $year++) {
+            if ($year < 1000 || $year > 9999) {
+                continue;
+            }
+
+            if (self::isYearWithOneDigitRemoved((string) $year, $digits)) {
+                $candidates[] = $year;
+            }
+        }
+
+        return count($candidates) === 1 ? $candidates[0] : null;
+    }
+
+    /** Whether `$full` becomes `$short` when any one of its digits is deleted. */
+    private static function isYearWithOneDigitRemoved(string $full, string $short): bool
+    {
+        if (strlen($short) >= strlen($full)) {
+            return false;
+        }
+
+        for ($skip = 0; $skip < strlen($full); $skip++) {
+            $candidate = substr($full, 0, $skip).substr($full, $skip + 1);
+
+            if ($candidate === $short) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * A short year expanded into this century, or null when nothing is defensible.
      *
-     * §8.1 names `206` → `2026`. Three digits has no defensible expansion — `206` is not
-     * `0206` and it is not `2006` — so it returns null and the operator types the year.
+     * Only reached once `completeTruncatedYear()` has declined — that is, when no sheet year
+     * settles the digits. A two-digit year can be a century (`85` → `1985`) and §8.1 allows
+     * offering that. Three digits has no defensible expansion at all: `206` is not `0206` and
+     * it is not `2006`, so it returns null and the operator types the year.
      */
     private static function expandYear(int $year): ?string
     {
@@ -317,6 +449,30 @@ final readonly class SourceAffiliationDate
     public function hasProblem(): bool
     {
         return $this->problem !== null;
+    }
+
+    /**
+     * Whether the problem is the source saying *nothing*, rather than saying something wrong.
+     *
+     * Two of this class's problems are not defects, and the difference matters because it decides
+     * whether a person is asked a question:
+     *
+     *  - `not_affiliated` — the cell reads `NO`. That is a **fact**, stated plainly: this person
+     *    had no affiliation of that type in this month. There is nothing to correct and nothing to
+     *    decide; the import records "not affiliated" instead of inventing a start date.
+     *  - `missing_date` — the cell is empty. That is an **unknown**, and §8's principle is that
+     *    uncertainty is preserved rather than resolved. `affiliations_dates_check` deliberately
+     *    accepts an unknown start with a known end, so the record is writable as it stands.
+     *
+     * Everything else this class reports is a defect or a contradiction — `ambiguous_date`,
+     * `impossible_date`, `truncated_year`, `unreadable_date` — and those do block, because
+     * proceeding would mean picking a date the source did not unambiguously assert.
+     *
+     * @see ParsedWorkbook::blocksFor()
+     */
+    public function isUncertainty(): bool
+    {
+        return in_array($this->problem, ['not_affiliated', 'missing_date'], true);
     }
 
     /** `2026-03-27`, `2026-03 (mes)`, or the blocker code. */

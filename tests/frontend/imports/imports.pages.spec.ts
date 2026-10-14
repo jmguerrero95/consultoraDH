@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils';
+import type { VueWrapper } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryHistory, createRouter } from 'vue-router';
@@ -7,8 +8,7 @@ import ImportDetailPage from '@/pages/imports/ImportDetailPage.vue';
 import ImportListPage from '@/pages/imports/ImportListPage.vue';
 import { resetCsrfState } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
-
-import type { AuthUser, ImportIssue, ImportPlan, ImportRow, LegacyImport, LegacyImportDetail } from '@/types/api';
+import type { AuthUser, ImportIssue, ImportIssueGroup, ImportPlan, ImportRow, LegacyImport, LegacyImportDetail } from '@/types/api';
 
 /**
  * The A04 screens.
@@ -592,11 +592,184 @@ describe('ImportDetailPage', () => {
         expect(wrapper.text()).toContain('ya se aplicó en la importación');
     });
 
+    // -------------------------------------------------------------------------
+    // FIX-IMPORT-02 Correction J — the grouped review summary.
+    //
+    // The numbers below are the delivered workbook's, and they are the point of the whole
+    // milestone: 195 findings, of which 153 are informational and 42 are questions. Before the
+    // grouping every one of the 195 carried a "Resolver" button, and the 77 invalid email
+    // addresses offered exactly one way to be answered — "excluir fila" — so clearing them
+    // would have dropped 77 clients from the import.
+    // -------------------------------------------------------------------------
+
+    const groupedHandlers = (groups: ImportIssueGroup[], findings: ImportIssue[]) => ({
+        ...baseHandlers(),
+        '/issues': () =>
+            json({
+                data: findings,
+                meta: { current_page: 1, last_page: 1, per_page: 50, total: findings.length },
+                groups,
+            }),
+    });
+
+    /**
+     * A role that can review.
+     *
+     * `mountDetail`'s default deliberately has no `imports.review` — it exists for the test that
+     * asserts the button is hidden from a role without it — so a test that needs the button has
+     * to ask for it. Without this the assertions below pass or fail for the wrong reason, which
+     * is how "0 Resolver buttons" can mean either "correctly suppressed" or "no permission".
+     */
+    const REVIEWER = ['imports.view', 'imports.apply', 'imports.review'];
+
+    const openIssuesTab = async (wrapper: VueWrapper) => {
+        await flushPromises();
+
+        await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes('Incidencias'))?.trigger('click');
+        await flushPromises();
+    };
+
+    it('separates the kinds that need a decision from the ones that do not', async () => {
+        const wrapper = await mountDetail(
+            groupedHandlers(
+                [
+                    {
+                        code: 'affiliation_entity_unknown',
+                        label: 'Entidad de afiliación pendiente de identificar',
+                        severity: 'warning',
+                        blocking: false,
+                        total: 36,
+                        open: 36,
+                        resolvable: true,
+                    },
+                    {
+                        code: 'invalid_email',
+                        label: 'Correos omitidos por formato inválido',
+                        severity: 'warning',
+                        blocking: false,
+                        total: 77,
+                        open: 77,
+                        resolvable: false,
+                    },
+                ],
+                [
+                    issue({ id: 1, code: 'affiliation_entity_unknown' }),
+                    issue({ id: 2, code: 'invalid_email' }),
+                ],
+            ),
+            REVIEWER,
+        );
+
+        await openIssuesTab(wrapper);
+
+        // Both kinds are named, and the counts say how much of each is open.
+        expect(wrapper.text()).toContain('Entidad de afiliación pendiente de identificar');
+        expect(wrapper.text()).toContain('Correos omitidos por formato inválido');
+        expect(wrapper.text()).toContain('Requieren una decisión');
+        expect(wrapper.text()).toContain('Informativas');
+        expect(wrapper.text()).toContain('36');
+        expect(wrapper.text()).toContain('77');
+    });
+
+    it('offers no Resolver on a kind that has nothing to answer', async () => {
+        // The button is the defect this milestone exists to remove: on the delivered workbook it
+        // invited somebody to press "excluir fila" 77 times and lose 77 clients.
+        const wrapper = await mountDetail(
+            groupedHandlers(
+                [
+                    {
+                        code: 'invalid_email',
+                        label: 'Correos omitidos por formato inválido',
+                        severity: 'warning',
+                        blocking: false,
+                        total: 77,
+                        open: 77,
+                        resolvable: false,
+                    },
+                    {
+                        code: 'company_identity_conflict',
+                        label: 'Conflictos de identidad empresarial',
+                        severity: 'error',
+                        blocking: true,
+                        total: 2,
+                        open: 2,
+                        resolvable: true,
+                    },
+                ],
+                [
+                    issue({ id: 2, code: 'invalid_email' }),
+                    issue({ id: 3, code: 'company_identity_conflict' }),
+                ],
+            ),
+            REVIEWER,
+        );
+
+        await openIssuesTab(wrapper);
+
+        const resolveButtons = wrapper.findAll('button').filter((element) => element.text() === 'Resolver');
+
+        // Exactly one, for the one kind that can be answered.
+        expect(resolveButtons).toHaveLength(1);
+
+        // And the row that cannot be answered says so, rather than showing an empty cell that
+        // reads like a control that failed to load.
+        expect(wrapper.text()).toContain('Nada que responder');
+    });
+
+    it('still shows every Resolver when the server sends no breakdown at all', async () => {
+        // `groups` is a new field, so an older server — or a failed request — leaves it absent. The
+        // screen must fall back to the old behaviour rather than quietly hiding every control,
+        // which would look like a batch with nothing to answer.
+        const wrapper = await mountDetail({
+            ...baseHandlers(),
+            '/issues': () => json({ data: [issue()], meta: { current_page: 1, last_page: 1, total: 1 } }),
+        }, REVIEWER);
+
+        await openIssuesTab(wrapper);
+
+        const resolveButtons = wrapper.findAll('button').filter((element) => element.text() === 'Resolver');
+
+        expect(resolveButtons.length).toBeGreaterThan(0);
+        expect(wrapper.text()).not.toContain('Nada que responder');
+    });
+
+    it('narrows the list to the kind that was clicked, and can be cleared', async () => {
+        const wrapper = await mountDetail(
+            groupedHandlers(
+                [
+                    {
+                        code: 'invalid_email',
+                        label: 'Correos omitidos por formato inválido',
+                        severity: 'warning',
+                        blocking: false,
+                        total: 77,
+                        open: 77,
+                        resolvable: false,
+                    },
+                ],
+                [issue({ id: 2, code: 'invalid_email' })],
+            ),
+            REVIEWER,
+        );
+
+        await openIssuesTab(wrapper);
+
+        const groupButton = wrapper
+            .findAll('button')
+            .find((element) => element.text().includes('Correos omitidos por formato inválido'));
+
+        await groupButton?.trigger('click');
+        await flushPromises();
+
+        // Reuses the existing code filter rather than adding a second narrowing mechanism, so
+        // there is one place the list is filtered and one control that shows what it is.
+        expect((wrapper.find('#issues-code').element as HTMLInputElement).value).toBe('invalid_email');
+    });
+
     it('marks the current step of the stepper and does not mark later ones', async () => {
         const wrapper = await mountDetail(baseHandlers({ status: 'review' }));
 
         await flushPromises();
-
         const steps = wrapper.findAll('.cdh-stepper__step');
         const current = steps.findIndex((step) => step.classes().includes('cdh-stepper__step--current'));
         const done = steps.filter((step) => step.classes().includes('cdh-stepper__step--done')).length;

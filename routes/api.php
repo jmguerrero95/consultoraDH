@@ -218,6 +218,19 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         ->get('/clients/{client}/affiliations', [ClientController::class, 'affiliations'])
         ->name('api.clients.affiliations');
 
+    // FIX-IMPORT-02 Correction C. The affiliations the source asserted **without naming the
+    // entity** (§9.1's bare `SI`), kept beside the real ones rather than mixed into them.
+    //
+    // The same two permissions as `affiliations`, because it is the same kind of question asked
+    // of the same person's history — the record only has no entity attached. Routing it under
+    // `affiliations.view` also means a role that can see somebody's health history automatically
+    // sees that part of it is unknown, which is the alternative this milestone was written
+    // against: a screen that shows a complete history because the gaps are in a table nobody
+    // asked for.
+    Route::middleware(['can:clients.view', 'can:affiliations.view'])
+        ->get('/clients/{client}/affiliation-observations', [ClientController::class, 'affiliationObservations'])
+        ->name('api.clients.affiliation-observations');
+
     Route::middleware('can:clients.create')->post('/clients', [ClientController::class, 'store'])
         ->name('api.clients.store');
 

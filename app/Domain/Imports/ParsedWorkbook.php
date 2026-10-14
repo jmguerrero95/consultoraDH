@@ -23,6 +23,32 @@ namespace App\Domain\Imports;
  */
 final class ParsedWorkbook
 {
+    /**
+     * Row-level codes that describe an **optional** or **already-recorded** value and never block.
+     *
+     * §7.1, §10 and FIX-IMPORT-02's Corrections A, B and C. The shared test is not "is it
+     * important" but "would proceeding lose a fact". In each of these cases it would not:
+     *
+     *  - `missing_monthly_value` — §10 produces no rate for that month and nothing else changes;
+     *  - `invalid_email` — §7.1 leaves the address off the master and the client stays;
+     *  - `affiliation_entity_unknown` — §9.1's bare `SI`, which is now written to
+     *    `client_affiliation_observations`. The assertion is kept, the gap is named, and A03 is
+     *    told the fund is missing rather than being left to infer that there was none.
+     *
+     * A code that blocks here is one where proceeding would **invent** a fact: an unusable
+     * document, two companies claiming one identity, two dates that cannot both be true.
+     *
+     * Read by {@see blocksFor()} for each finding on its own, and by
+     * {@see SourcePersonRow::isBlocked()} for the row as a whole, so the two cannot disagree.
+     *
+     * @var list<string>
+     */
+    public const NON_BLOCKING = [
+        'missing_monthly_value',
+        'invalid_email',
+        'affiliation_entity_unknown',
+    ];
+
     /** @var list<SourcePersonRow> */
     private array $rows = [];
 
@@ -323,8 +349,8 @@ final class ParsedWorkbook
                 $row->sourceRowNumber,
                 $row,
                 [
-                    'severity' => self::severityFor($code),
-                    'blocking' => $row->isBlocked(),
+                    'severity' => self::severityFor($code, $row),
+                    'blocking' => self::blocksFor($code, $row),
                     'message' => $message,
                     'context' => $context,
                 ],
@@ -496,14 +522,60 @@ final class ParsedWorkbook
         return LegacyImportIssue::from($code);
     }
 
-    private static function severityFor(string $code): LegacyIssueSeverity
+    private static function severityFor(string $code, ?SourcePersonRow $row = null): LegacyIssueSeverity
     {
         // §7.1 makes an invalid email a warning that is skipped rather than a blocker; the
         // rest of a row's problems are errors, and `missing_monthly_value` is the other
         // warning because §10 says it produces no rate rather than failing the import.
-        return in_array($code, ['missing_monthly_value', 'invalid_email'], true)
+        //
+        // A date the source declined to fill in is the third warning: `NO` and an empty cell
+        // are statements of absence, not mistakes in a value, and filing them as errors would
+        // say the operator got something wrong when they did not.
+        if (in_array($code, self::NON_BLOCKING, true)) {
+            return LegacyIssueSeverity::Warning;
+        }
+
+        return $code === 'invalid_affiliation_date' && $row?->affiliationDate->isUncertainty() === true
             ? LegacyIssueSeverity::Warning
             : LegacyIssueSeverity::Error;
+    }
+
+    /**
+     * Whether *this* finding stands between the row and the plan.
+     *
+     * ## Why this is not `$row->isBlocked()`
+     *
+     * It was, and it made every finding on a row inherit the row's verdict. A row with an
+     * unreadable email **and** an unreadable date filed both as `blocking: true`, because the row
+     * was blocked — by the date. The reviewer then saw "correo no válido — Resolver" presented
+     * with the same weight as a finding that genuinely stops the row, and answering the email
+     * question changed nothing about whether the row could be applied.
+     *
+     * The two are independent questions and are now answered independently: this finding is a
+     * warning about an optional field, and the date beside it is the one that blocks.
+     *
+     * ## The date is the one code whose answer depends on the row
+     *
+     * `invalid_affiliation_date` covers both a date the source got **wrong** (`31/02/2026`,
+     * `01/02/206` on a sheet that cannot settle it) and a date the source **declined to give**
+     * (`NO`, or an empty cell). Those are different facts and only the first is a question for a
+     * person: `NO` is an answer, and an empty cell is an unknown that
+     * `affiliations_dates_check` was widened to accept precisely so it could be preserved rather
+     * than invented. So the row is consulted, and the classification lives on the value itself
+     * rather than being re-derived here. See {@see SourceAffiliationDate::isUncertainty()}.
+     *
+     * ## The set
+     *
+     * `SourcePersonRow::isBlocked()` answers the same question for the row as a whole and reads
+     * from here, so there is one list rather than two that can disagree.
+     */
+    private static function blocksFor(string $code, ?SourcePersonRow $row = null): bool
+    {
+        if (in_array($code, self::NON_BLOCKING, true)) {
+            return false;
+        }
+
+        return ! ($code === 'invalid_affiliation_date' && $row?->affiliationDate->isUncertainty() === true);
     }
 
     /** @return list<SourcePersonRow> */

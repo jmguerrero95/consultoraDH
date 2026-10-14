@@ -10,6 +10,7 @@ use App\Domain\Shared\RecordStatus;
 use App\Models\AuditEvent;
 use App\Models\Client;
 use App\Models\ClientAffiliation;
+use App\Models\ClientAffiliationObservation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\Company;
 use App\Models\SocialSecurityEntity;
@@ -1093,4 +1094,106 @@ it('refuses to write over a closed row even when the replacement reaches it', fu
         ->toThrow(DomainException::class, 'La afiliación ya estaba cerrada');
 
     expect($affiliation->fresh()->ended_on?->format('Y-m-d'))->toBe('2026-02-01');
+});
+
+// =============================================================================
+// FIX-IMPORT-02 Correction C — the read surface for an unnamed affiliation
+// =============================================================================
+
+it('exposes an unnamed affiliation beside the real ones, and only there', function (): void {
+    // The delivered workbook writes `SI` for 36 people. §9.1 forbids inventing an entity, and
+    // before this the assertion was simply dropped — so a client's history read "no AFP that
+    // month" for somebody who had one.
+    //
+    // These three assertions are the read half of Correction C:
+    //
+    //  1. the gap is visible;
+    //  2. it is visible as a *gap*, not as an affiliation with a null entity — which is why it
+    //     is a separate endpoint rather than a member of the affiliations list;
+    //  3. the affiliations list is unchanged, because A03 reads it to decide what may be billed
+    //     and an observation must never reach that read.
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create([
+        'type' => SocialSecurityEntityType::Eps,
+        'name' => 'SALUD TOTAL',
+    ]);
+
+    $affiliations = app(ManageAffiliations::class);
+
+    $affiliations->create(
+        client: $client,
+        entity: $entity,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2026-01-01'),
+    );
+
+    ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-03', '2026-04'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$client->document_number.':unknown',
+    ]);
+
+    $reader = userWithPermissions(['clients.view', 'affiliations.view']);
+
+    $this->actingAs($reader)
+        ->getJson("/api/clients/{$client->id}/affiliation-observations")
+        ->assertOk()
+        ->assertJsonPath('affiliation_observations.0.type', 'AFP')
+        // Explicitly null, and asserted: a client of this API must be able to tell "we did not
+        // record the entity" from "this API has no such field".
+        ->assertJsonPath('affiliation_observations.0.social_security_entity_id', null)
+        ->assertJsonPath('affiliation_observations.0.entity', null)
+        ->assertJsonPath('affiliation_observations.0.months', ['2026-03', '2026-04'])
+        ->assertJsonPath('affiliation_observations.0.is_answered', false)
+        ->assertJsonPath('affiliation_observations.0.is_active', true);
+
+    // And the existing list is untouched: one real affiliation, no observation in it.
+    $this->actingAs($reader)
+        ->getJson("/api/clients/{$client->id}/affiliations")
+        ->assertOk()
+        ->assertJsonCount(1, 'affiliations')
+        ->assertJsonPath('affiliations.0.social_security_entity_id', $entity->id);
+});
+
+it('marks an observation answered once somebody names the fund', function (): void {
+    // An answered observation is still returned — it records what the file said, and the file
+    // still says `SI` — but it must not read as an outstanding question, or a reviewer would
+    // keep being asked about a fund that has since been identified.
+    $client = Client::factory()->create();
+    $entity = SocialSecurityEntity::factory()->create([
+        'type' => SocialSecurityEntityType::Afp,
+        'name' => 'PORVENIR',
+    ]);
+
+    $observation = ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-03'],
+        'reason' => 'entity_unknown',
+        'dedupe_key' => 'observation:AFP:900123456:'.$client->document_number.':unknown',
+    ]);
+
+    $reader = userWithPermissions(['clients.view', 'affiliations.view']);
+
+    $this->actingAs($reader)
+        ->getJson("/api/clients/{$client->id}/affiliation-observations")
+        ->assertOk()
+        ->assertJsonPath('affiliation_observations.0.is_answered', false);
+
+    app(ManageAffiliations::class)->create(
+        client: $client,
+        entity: $entity,
+        actor: actingAsRole(),
+        startedOn: new DateTimeImmutable('2026-03-01'),
+    );
+
+    $this->actingAs($reader)
+        ->getJson("/api/clients/{$client->id}/affiliation-observations")
+        ->assertOk()
+        ->assertJsonPath('affiliation_observations.0.is_answered', true)
+        // Still there. The record of what the file said does not disappear because somebody
+        // later fixed it — an import's provenance is not a to-do list.
+        ->assertJsonCount(1, 'affiliation_observations');
 });

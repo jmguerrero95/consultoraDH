@@ -44,8 +44,10 @@ use App\Domain\Imports\IssueResolutionDecision;
 use App\Domain\Imports\IssueSubject;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
+use App\Domain\Imports\LegacyIssueSeverity;
 use App\Models\Client;
 use App\Models\ClientAffiliation;
+use App\Models\ClientAffiliationObservation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\ClientCompanyRate;
 use App\Models\Company;
@@ -54,6 +56,7 @@ use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
 use App\Models\LegacyImportIssue as LegacyImportIssueModel;
 use App\Models\SocialSecurityEntity;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
@@ -179,16 +182,18 @@ it('lets a reviewer answer every finding that can block an import', function () 
     // disabled by §17.5, the endpoint refuses with a 409, and the dialog has nothing to offer.
     // The reviewer reloads, and reloads, and there is no version of the screen that unblocks it.
     //
-    // Six codes are deliberately unanswerable, and they are listed here by name rather than left
-    // to a comment — they are refusals, not questions:
+    // Every unanswerable code is listed here by name rather than left to a comment — they are
+    // refusals, not questions:
     //
     //  - the four structural ones fail the batch outright (`StageLegacyImport::markFailed`), so a
     //    reviewer is never asked about them;
     //  - `credential_like_content` is redacted whatever the answer is, so it does not block;
-    //  - `source_already_applied` is refused at upload with a 409 and never becomes a batch.
-    //
-    // If a future finding is both blocking and unlisted, this fails and the decision has to be
-    // written before the finding is allowed to ship.
+    //  - `source_already_applied` is refused at upload with a 409 and never becomes a batch;
+    //  - FIX-IMPORT-02 added `invalid_email` and `missing_monthly_value`. Both describe an
+    //    **optional** value whose outcome §7.1 and §10 already fixed, and both stopped blocking,
+    //    so there is nothing left for a person to decide and nothing for them to be able to
+    //    decide wrongly. Before that they were the *only* answer offered — "excluir fila" — and
+    //    pressing it to clear a warning about a missing email address dropped the client.
     $refusals = [
         'unsupported_workbook_profile',
         'invalid_sheet_name',
@@ -196,6 +201,8 @@ it('lets a reviewer answer every finding that can block an import', function () 
         'missing_company_block_header',
         'credential_like_content',
         'source_already_applied',
+        'invalid_email',
+        'missing_monthly_value',
     ];
 
     $answerable = [];
@@ -222,10 +229,20 @@ it('agrees with the refusal list about which findings block', function () {
     // does not name does block. Both are claims about `LegacyImportIssue::isBlocking()`, asserted
     // here so the list cannot drift into being true for the wrong reasons.
     //
-    // Exactly two codes do not block, and the reasons are in `isBlocking()`'s own docblock:
     // `duplicate_exact_row` (collapsing it loses nothing) and `credential_like_content` (the cell
-    // is redacted whatever the answer is). The first is answerable anyway, which is why it is not
-    // on the refusal list.
+    // is redacted whatever the answer is) were the original two.
+    //
+    // FIX-IMPORT-02 added three more, and the reasons are in `isBlocking()`'s own docblock:
+    // `invalid_email` and `missing_monthly_value` describe **optional** values, and their outcome
+    // is already decided by §7.1 and §10 respectively. While they blocked, a batch whose consultant
+    // had no email address — 77 findings in the delivered workbook — and 56 months with no
+    // configured amount could not be applied at all, which is the opposite of what the finding is
+    // for.
+    //
+    // `affiliation_entity_unknown` stopped blocking for the same underlying reason: §9.1's bare
+    // `SI` used to be dropped, and dropping it is losing a fact. Correction C records it in
+    // `client_affiliation_observations` instead, so nothing is lost by letting the batch through.
+    // The list is asserted here so it cannot drift into being true for the wrong reasons.
     $nonBlocking = array_map(
         static fn (LegacyImportIssue $issue): string => $issue->value,
         array_values(array_filter(
@@ -234,7 +251,25 @@ it('agrees with the refusal list about which findings block', function () {
         )),
     );
 
-    expect($nonBlocking)->toEqualCanonicalizing(['duplicate_exact_row', 'credential_like_content']);
+    expect($nonBlocking)->toEqualCanonicalizing([
+        'duplicate_exact_row',
+        'credential_like_content',
+        'invalid_email',
+        'missing_monthly_value',
+        'affiliation_entity_unknown',
+    ]);
+
+    // And the two added in FIX-IMPORT-02 offer no resolution, because there is nothing to
+    // answer. A button that invites a person to "exclude the row" to clear an absent email is how
+    // a client gets lost from an import.
+    foreach ([LegacyImportIssue::InvalidEmail, LegacyImportIssue::MissingMonthlyValue] as $informational) {
+        $allowed = array_filter(
+            IssueResolutionDecision::cases(),
+            static fn (IssueResolutionDecision $decision): bool => $decision->accepts($informational),
+        );
+
+        expect($allowed)->toBe([], $informational->value.' must offer no resolution');
+    }
 });
 
 // =============================================================================
@@ -561,10 +596,15 @@ it('offers a decision that can actually be read for every finding that offers on
     // Asserted on the two specific pairs rather than by scanning for the pattern, because a test
     // that hunts for "every reader covers every code" needs a machine-readable inventory of both
     // halves, and that inventory is the drift. These two are the ones that were wrong.
+    //
+    // FIX-IMPORT-02 split this list. `skip_row` is the right answer when the **row** is unusable —
+    // there is nothing to import without a document, or without a readable amount — and it is
+    // offered for those. It is the wrong answer for an **optional** value that is merely absent or
+    // unreadable, because answering it drops a real person from the import: the delivered
+    // workbook offers it for 77 missing email addresses, and clearing those warnings with it
+    // would have lost 77 clients.
     foreach ([
         LegacyImportIssue::InvalidClientDocument,
-        LegacyImportIssue::InvalidEmail,
-        LegacyImportIssue::MissingMonthlyValue,
         LegacyImportIssue::InvalidMonthlyValue,
         LegacyImportIssue::ClientIdentityConflict,
     ] as $code) {
@@ -572,6 +612,24 @@ it('offers a decision that can actually be read for every finding that offers on
             ->toBeFalse('«Usar el valor del archivo» no puede responder a '.$code->value)
             ->and(IssueResolutionDecision::SkipRow->accepts($code))
             ->toBeTrue($code->value.' sí tiene una respuesta real: exclude la fila');
+    }
+
+    // The optional-value pair, the other way round: no resolution at all, because §7.1 and §10
+    // already decided the outcome and the row is still importable.
+    foreach ([
+        LegacyImportIssue::InvalidEmail,
+        LegacyImportIssue::MissingMonthlyValue,
+    ] as $code) {
+        $offered = array_map(
+            static fn (IssueResolutionDecision $decision): string => $decision->value,
+            array_values(array_filter(
+                IssueResolutionDecision::cases(),
+                static fn (IssueResolutionDecision $decision): bool => $decision->accepts($code),
+            )),
+        );
+
+        expect($offered)
+            ->toBe([], $code->value.' no debe ofrecer ninguna decisión: no hay nada que decidir');
     }
 
     // §10's own vocabulary, and nothing else: a rate in force is corrected through A03's
@@ -1528,4 +1586,184 @@ it('re-raises the unusable transfer blocker once, and lets the replacement answe
 
     expect($boundaries)->not->toBeEmpty('§8.5\'s boundary reached the plan')
         ->and($planned->status)->not->toBe(LegacyImportStatus::Review);
+});
+
+// =============================================================================
+// FIX-IMPORT-02 Correction C — §9.1's bare `SI`
+// =============================================================================
+
+it('records an affiliation the file did not name instead of dropping it', function () {
+    // The delivered workbook writes `SI` in the AFP column for 36 rows. `SI` is an assertion —
+    // the person *was* affiliated — and §9.1 forbids inventing an entity for it.
+    //
+    // Before this, the two available outcomes were both wrong: block the batch until somebody
+    // named the fund, or create nothing and let A03 read "no AFP that month" for a person who
+    // had one. The second is the dangerous one, because it is silent.
+    //
+    // So the assertion is recorded and the gap is named. These four assertions are the whole of
+    // Correction C: an observation exists, no affiliation was invented, the fact survived, and
+    // the row is not standing in the way.
+    $import = reviewedImportFor((new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        'title' => 'ANDINA S.A.S. NIT 900123456-3',
+        'people' => [SyntheticWorkbook::personRow([
+            'H' => '10101010',
+            'O' => 'SI',
+            // The other two columns are absent, so the observation is unambiguously about AFP.
+        ])],
+    ]]));
+
+    // The plan writes an observation, and its payload names no entity — there is no field to
+    // name one in, which is the point.
+    $action = LegacyImportAction::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('action_type', ImportActionType::RecordAffiliationObservation->value)
+        ->sole();
+
+    expect($action->payload)->toHaveKeys(['type', 'months', 'token', 'reason'])
+        ->and($action->payload)->not->toHaveKeys(['entity_id', 'entity_name'])
+        ->and($action->payload['type'])->toBe('AFP')
+        ->and($action->payload['token'])->toBe('SI')
+        ->and($action->payload['months'])->toBe(['2026-01']);
+
+    // §9.1's refusal, held: no `client_affiliations` row and no `social_security_entities` row
+    // were created. An invented entity is the one outcome Correction C exists to prevent, so it
+    // is asserted rather than assumed.
+    expect(ClientAffiliation::where('type', 'AFP')->exists())->toBeFalse()
+        ->and(SocialSecurityEntity::where('name', 'SI')->exists())->toBeFalse();
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import->fresh()))
+        ->assertOk();
+
+    $client = Client::where('document_number', '10101010')->sole();
+
+    $observation = ClientAffiliationObservation::where('client_id', $client->id)->sole();
+
+    expect($observation->type->value)->toBe('AFP')
+        ->and($observation->reason)->toBe('entity_unknown')
+        ->and($observation->monthKeys())->toBe(['2026-01'])
+        ->and($observation->dedupe_key)->toBe($action->natural_key)
+        ->and($observation->legacy_import_id)->toBe($import->id);
+
+    // The fact survived: the client now has a relationship and a rate, and is recorded as having
+    // been in a pension fund without the fund being known. Before Correction C this left a person
+    // with a relationship and a rate and no trace of the AFP at all.
+    expect(ClientCompanyAssignment::where('client_id', $client->id)->exists())->toBeTrue()
+        ->and(ClientAffiliation::where('client_id', $client->id)->exists())->toBeFalse();
+});
+
+it('stops asking about a bare SI once the observation records it', function () {
+    // The finding still appears — §18 keeps `affiliation_entity_unknown` in its mandatory list,
+    // and dropping it would hide that the file was incomplete. What changed is that it no longer
+    // blocks: there is nothing left to answer before Apply, and the answer that *would* have
+    // been available (name the fund) is still offered for whoever wants to fix it properly.
+    $import = reviewedImportFor((new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        'title' => 'ANDINA S.A.S. NIT 900123456-3',
+        'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'O' => 'SI'])],
+    ]]));
+
+    $finding = $import->issues()
+        ->where('code', LegacyImportIssue::AffiliationEntityUnknown->value)
+        ->sole();
+
+    expect($finding->blocking)->toBeFalse()
+        ->and($finding->severity)->toBe(LegacyIssueSeverity::Warning)
+        // Read from the enum rather than from a hard-coded list, for the same reason the rest of
+        // this file reads decisions from the API: a test carrying its own copy of the whitelist
+        // keeps passing while the screen offers the wrong buttons.
+        ->and(array_filter(
+            IssueResolutionDecision::cases(),
+            static fn (IssueResolutionDecision $decision): bool => $decision->accepts(
+                LegacyImportIssue::AffiliationEntityUnknown,
+            ),
+        ))->not->toBeEmpty('naming the fund is still offered');
+
+    // And nothing is left standing between the batch and Apply.
+    expect($import->issues()->where('blocking', true)->whereNull('resolved_at')->count())
+        ->toBe(0);
+});
+
+it('does not let an observation stand in for an affiliation a reviewer did create', function () {
+    // §9.5's "no two open affiliations of the same type" is about `client_affiliations`, and it
+    // is deliberately **not** extended to observations: an observation is not a coverage, so two
+    // of them mean no more than one and forbidding them would delete evidence for nothing.
+    //
+    // What must not happen is the reverse — a real, named affiliation must not be *deduplicated
+    // against* an observation, or a person who has both would be recorded as having only the
+    // observation. So `isAnswered()` has to tell the two apart.
+    $import = reviewedImportFor((new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        'title' => 'ANDINA S.A.S. NIT 900123456-3',
+        'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'O' => 'SI'])],
+    ]]));
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import->fresh()))
+        ->assertOk();
+
+    $client = Client::where('document_number', '10101010')->sole();
+    $observation = ClientAffiliationObservation::where('client_id', $client->id)->sole();
+
+    expect($observation->isAnswered())->toBeFalse('nobody named the fund yet');
+
+    // Now somebody does.
+    $entity = SocialSecurityEntity::factory()->create(['type' => 'AFP', 'name' => 'PORVENIR']);
+
+    ClientAffiliation::create([
+        'client_id' => $client->id,
+        'social_security_entity_id' => $entity->id,
+        'type' => 'AFP',
+        'started_on' => '2026-01-01',
+        'started_on_precision' => 'month',
+    ]);
+
+    // The observation is still there — it is a record of what the file said, and the file still
+    // said `SI`. But it no longer claims the question is open.
+    expect($observation->fresh()->isAnswered())->toBeTrue()
+        ->and(ClientAffiliationObservation::where('client_id', $client->id)->count())->toBe(1)
+        ->and(ClientAffiliation::where('client_id', $client->id)->count())->toBe(1);
+});
+
+it('refuses a second observation for the same source fact', function () {
+    // Re-running an import is normal — every reviewer answer rebuilds the plan — so the writer
+    // keys its `updateOrCreate` on `dedupe_key`, which is the action's natural key. That key
+    // identifies the **fact** (`client`, `type`, `company`, `interval`), not the batch that
+    // observed it, and the database enforces it.
+    //
+    // Which is the half that matters. The writer could be changed to `create()` and the tests
+    // above would still pass on the first run; this one fails, because a second write of the
+    // same fact would then produce a row the database rejects — or, without the index, a person
+    // recorded as having been in two different unnamed funds.
+    $import = reviewedImportFor((new SyntheticWorkbook)->sheetWithBlocks('ENERO 2026', [[
+        'title' => 'ANDINA S.A.S. NIT 900123456-3',
+        'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'O' => 'SI'])],
+    ]]));
+
+    $action = LegacyImportAction::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('action_type', ImportActionType::RecordAffiliationObservation->value)
+        ->sole();
+
+    $this->actingAs($this->user)
+        ->postJson("/api/imports/{$import->id}/apply", planConfirmation($import->fresh()))
+        ->assertOk();
+
+    $written = ClientAffiliationObservation::sole();
+
+    expect($written->dedupe_key)->toBe($action->natural_key);
+
+    $client = Client::where('document_number', '10101010')->sole();
+
+    // Nothing is asserted about the database after this point, and that is not an oversight.
+    // A failed statement poisons the surrounding PostgreSQL transaction — every later command
+    // is refused with `25P02: current transaction is aborted` until the rollback — so a trailing
+    // `count()` here would fail for a reason that has nothing to do with this milestone. The
+    // refusal itself is the assertion.
+    expect(fn () => ClientAffiliationObservation::create([
+        'client_id' => $client->id,
+        'type' => 'AFP',
+        'months' => ['2026-01'],
+        'reason' => 'entity_unknown',
+        // The same fact, under the same key.
+        'dedupe_key' => $action->natural_key,
+    ]))->toThrow(QueryException::class, 'client_affiliation_observations');
 });

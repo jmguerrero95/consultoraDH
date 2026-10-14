@@ -58,6 +58,70 @@ use Illuminate\Validation\Rule;
 final class ImportController extends Controller
 {
     /**
+     * Finding codes, as the person reviewing the batch reads them.
+     *
+     * §17.4's screen is where a consultant decides whether to stop an import over a question, so
+     * it has to say what the question is. The codes are the system's stable identity and stay in
+     * the payload; this is the sentence beside them.
+     *
+     * Ordered so the groups read as the kinds of thing a reviewer is choosing between — an
+     * omitted optional value, a normalization, a pending identification, a real conflict — rather
+     * than as a flat list of identifiers.
+     *
+     * @var array<string, string>
+     */
+    private const FINDING_LABELS = [
+        // Optional values absent or unreadable. Nothing to decide.
+        'invalid_email' => 'Correos omitidos por formato inválido',
+        'missing_monthly_value' => 'Valores mensuales desconocidos',
+        'invalid_monthly_value' => 'Valores mensuales con formato inválido',
+
+        // The source asserted something whose detail is missing.
+        'affiliation_entity_unknown' => 'Entidad de afiliación pendiente de identificar',
+        'unresolved_social_entity' => 'Entidades de seguridad social por confirmar',
+
+        // Readings of the source.
+        'invalid_affiliation_date' => 'Fechas de afiliación a revisar',
+        'unknown_risk_token' => 'Niveles de riesgo no reconocidos',
+        'ambiguous_risk_job_columns' => 'Columnas de riesgo y cargo ambiguas',
+
+        // Duplicates.
+        'duplicate_exact_row' => 'Filas repetidas, consolidadas',
+        'duplicate_conflicting_row' => 'Filas repetidas con datos distintos',
+
+        // Company identity and metadata.
+        'invalid_company_tax_id' => 'NIT de empresa con formato inválido',
+        'company_identity_conflict' => 'Conflictos de identidad empresarial',
+        'company_verification_digit_conflict' => 'Dígito de verificación en conflicto',
+        'company_arl_metadata_conflict' => 'Conflicto de ARL en la empresa',
+
+        // Client identity.
+        'invalid_client_document' => 'Documentos de cliente no utilizables',
+        'client_identity_conflict' => 'Conflictos de identidad de cliente',
+
+        // History.
+        'relationship_disappeared_without_retirement' => 'Relaciones sin evidencia de cierre',
+        'overlapping_company_history' => 'Historial laboral con fechas incompatibles',
+
+        // What already exists in the system.
+        'existing_client_conflict' => 'Clientes que ya existen',
+        'existing_company_conflict' => 'Empresas que ya existen',
+        'existing_relationship_conflict' => 'Relaciones que ya existen',
+        'existing_affiliation_conflict' => 'Afiliaciones que ya existen',
+        'existing_rate_conflict' => 'Valores mensuales que ya existen',
+
+        // The source itself.
+        'credential_like_content' => 'Posibles credenciales protegidas',
+
+        // The container, not the data. These stop a batch before it is parsed at all.
+        'invalid_sheet_name' => 'Hojas que no son meses',
+        'duplicate_month_sheet' => 'Hojas de un mismo mes repetidas',
+        'missing_company_block_header' => 'Bloques de empresa sin encabezado legible',
+        'unsupported_workbook_profile' => 'Formato de libro no reconocido',
+        'source_already_applied' => 'Este archivo ya fue aplicado',
+    ];
+
+    /**
      * GET /api/imports
      *
      * Server-side pagination, search and filters, per §15. The search covers the file name, the
@@ -372,11 +436,53 @@ final class ImportController extends Controller
 
         $issues = $query->paginate((int) ($filters['per_page'] ?? 50));
 
+        // §5.3's "una fila por hallazgo" has a mirror problem: one *kind* of finding repeated 77
+        // times is not 77 questions. The real workbook produces 77 invalid-email warnings and 56
+        // missing-monthly-value warnings, every one of them answered with the same "nothing to
+        // decide", and the screen listed them as 133 rows with a "Resolver" button each.
+        //
+        // This is the breakdown the review screen needs to group them. It is computed from the
+        // same query **minus the `code` filter**, so the summary stays stable while the reviewer
+        // drills into one kind and does not disappear as soon as they do — and it is a single
+        // grouped query rather than a count per code.
+        //
+        // `limit()` and `offset()` are cleared as well as the ordering, and that is not
+        // tidiness. `paginate()` writes the page onto the builder it was called on — `forPage()`
+        // sets `$limit` and `$offset` as properties — so a clone taken afterwards inherits them.
+        // `reorder()` alone is not enough: without the two calls below the breakdown silently
+        // returned a single row, the one the page was showing, which reads as "this batch has one
+        // kind of finding" on a batch that has eight.
+        $groups = (clone $query)
+            ->reorder()
+            ->limit(null)
+            ->offset(null)
+            ->select('code', 'severity', 'blocking')
+            ->selectRaw('COUNT(*) AS total')
+            ->selectRaw('COUNT(*) FILTER (WHERE resolved_at IS NULL AND superseded_at IS NULL) AS open')
+            ->groupBy('code', 'severity', 'blocking')
+            ->orderByDesc('total')
+            ->get()
+            ->map(fn ($row): array => [
+                'code' => $row->code,
+                'label' => $this->labelFor($row->code),
+                'severity' => $row->severity,
+                'blocking' => (bool) $row->blocking,
+                'total' => (int) $row->total,
+                'open' => (int) $row->open,
+                // Whether this kind of finding can be answered at all. `invalid_email` and
+                // `missing_monthly_value` cannot: §7.1 and §10 already decided their outcome, and
+                // offering a resolution would only invite somebody to press the wrong one.
+                'resolvable' => $this->decisionsFor($row->code, []) !== [],
+            ])
+            ->values();
+
         return response()->json([
+            'groups' => $groups,
             'data' => $issues->getCollection()->map(fn (LegacyImportIssue $issue): array => [
                 'id' => $issue->id,
                 'row_id' => $issue->row_id,
                 'code' => $issue->code,
+                'label' => $this->labelFor($issue->code),
                 'severity' => $issue->severity,
                 'blocking' => $issue->blocking,
                 'field' => $issue->field,
@@ -414,6 +520,24 @@ final class ImportController extends Controller
                 'total' => $issues->total(),
             ],
         ]);
+    }
+
+    /**
+     * A finding code as an administrative user reads it.
+     *
+     * §17.4 shows one dialog per code, and the screen was showing `affiliation_entity_unknown`
+     * as the dialog's title. The code stays in the payload for support and for the filters — it
+     * is the stable identity a reviewer's decision is recorded against — but a person deciding
+     * whether to block an import is not choosing between English identifiers.
+     *
+     * An unmapped code returns itself rather than an empty string, so a newly added finding is
+     * still legible enough to act on instead of blank.
+     */
+    private function labelFor(string|LegacyImportIssueCode $code): string
+    {
+        $value = $code instanceof LegacyImportIssueCode ? $code->value : $code;
+
+        return self::FINDING_LABELS[$value] ?? $value;
     }
 
     /**

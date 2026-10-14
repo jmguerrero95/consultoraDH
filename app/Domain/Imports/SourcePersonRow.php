@@ -131,7 +131,16 @@ final readonly class SourcePersonRow
             SourceDocument::resolve($cell('document'), $redactor, $sheetName, $rowNumber),
             self::cleanName($cell('first_names')),
             self::cleanName($cell('last_names')),
-            SourceAffiliationDate::read($cells[$header->column('affiliation_date') ?? ''] ?? null, $redactor, $sheetName, $rowNumber),
+            // The sheet's year travels with the cell so a year typed with a digit missing
+            // (`01/02/206` on the September 2026 sheet) can be completed from evidence rather
+            // than by substitution. `SheetMonth::key()` is already normalised to `YYYY-MM`.
+            SourceAffiliationDate::read(
+                $cells[$header->column('affiliation_date') ?? ''] ?? null,
+                $redactor,
+                $sheetName,
+                $rowNumber,
+                sheetYear: SheetMonth::yearOf($sheet->key()),
+            ),
             $amount,
             $amountProblem,
             [
@@ -415,8 +424,11 @@ final readonly class SourcePersonRow
     /** Whether a blocking problem stands between this row and the plan. */
     public function isBlocked(): bool
     {
+        // One list, shared with `ParsedWorkbook::blocksFor()`. The row is blocked when *any*
+        // finding on it blocks; each finding is classified on its own, so an optional-value
+        // warning beside a real conflict no longer inherits the conflict's verdict.
         foreach (array_keys($this->problems()) as $code) {
-            if (! in_array($code, ['missing_monthly_value', 'invalid_email'], true)) {
+            if (! in_array($code, ParsedWorkbook::NON_BLOCKING, true)) {
                 return true;
             }
         }
@@ -459,6 +471,25 @@ final readonly class SourcePersonRow
         }
 
         if ($title === null || $header === null) {
+            return null;
+        }
+
+        // A job title is not a risk class and not an ARL.
+        //
+        // The delivered file puts risk and job title in two adjacent columns whose headings
+        // are not consistent between blocks, so the *content* decides which is which — see
+        // {@see RiskColumns}. When the ARL-named column actually carries the job title, this
+        // comparison read `POSITIVA` against `AUXILIAR` and filed a
+        // `company_arl_metadata_conflict` against the employer: ten rows in the real file, one
+        // dialog each, about a disagreement that does not exist between two administradoras.
+        //
+        // The rule is evidence-based rather than a list of job titles, which would need a
+        // vocabulary nobody maintains. `RiskColumns` already decided, from the row's own two
+        // cells, which cell holds the risk and which holds the job; if the ARL cell is the one
+        // it identified as the job title, there is no second opinion on the ARL to disagree
+        // with. A real conflict between two ARL names is untouched — neither side can be the
+        // job title of the same row.
+        if ($this->risk->isJobTitle($header)) {
             return null;
         }
 

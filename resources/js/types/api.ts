@@ -1329,6 +1329,34 @@ export interface ImportRowsPayload {
 export interface ImportIssuesPayload {
     data: ImportIssue[];
     meta: { current_page: number; last_page: number; per_page: number; total: number };
+    /**
+     * FIX-IMPORT-02: the same findings, counted by kind.
+     *
+     * On the delivered workbook this is the difference between a reviewer facing 210 rows with
+     * 210 "Resolver" buttons and a reviewer facing 8 kinds, of which 3 need nothing from them at
+     * all. The list below is not a filter — the table is still the list — it is the map that says
+     * how much of the work is actually a decision.
+     */
+    groups: ImportIssueGroup[];
+}
+
+/**
+ * One kind of finding, with how many there are and how many are still open.
+ *
+ * `resolvable` is the load-bearing field. It is false for the kinds whose outcome §7.1, §8.3,
+ * §9.1 or §10 has **already** decided, so offering a "Resolver" button on one of those invites
+ * somebody to press the only available control — "excluir fila" — to clear a warning about a
+ * missing email address, which drops a real client from the import.
+ */
+export interface ImportIssueGroup {
+    code: string;
+    /** Server-owned Spanish label. The enum code alone is not something to show a person. */
+    label: string;
+    severity: 'info' | 'warning' | 'error';
+    blocking: boolean;
+    total: number;
+    open: number;
+    resolvable: boolean;
 }
 
 export interface ImportPlanPayload {

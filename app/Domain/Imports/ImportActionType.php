@@ -6,6 +6,7 @@ namespace App\Domain\Imports;
 
 use App\Models\Client;
 use App\Models\ClientAffiliation;
+use App\Models\ClientAffiliationObservation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\ClientCompanyRate;
 use App\Models\Company;
@@ -50,6 +51,19 @@ enum ImportActionType: string
     case CreateAffiliation = 'create_affiliation';
     case CloseAffiliation = 'close_affiliation';
 
+    /**
+     * A04: record that an affiliation existed, without saying which entity.
+     *
+     * §9.1's bare `SI` — "affiliated, entity unknown". This is the only action that writes
+     * something the source *omitted* rather than something it stated, and it exists because
+     * the two honest alternatives are both wrong: block the batch over a gap in a spreadsheet,
+     * or drop the affiliation and let A03 read "no AFP that month" for a person who had one.
+     *
+     * It is in the `affiliation` group rather than a new one because that is where a reviewer
+     * will look for it, and the review screen groups by what changed, not by what is missing.
+     */
+    case RecordAffiliationObservation = 'record_affiliation_observation';
+
     // --- configuration -------------------------------------------------------
     case CreateRate = 'create_rate';
 
@@ -60,7 +74,7 @@ enum ImportActionType: string
             self::CreateClient, self::UpdateClient => 'client',
             self::CreateCompany, self::UpdateCompany, self::CreateSocialEntity => 'company',
             self::CreateRelationship, self::CloseRelationship => 'relationship',
-            self::CreateAffiliation, self::CloseAffiliation => 'affiliation',
+            self::CreateAffiliation, self::CloseAffiliation, self::RecordAffiliationObservation => 'affiliation',
             self::CreateRate => 'rate',
         };
     }
@@ -83,6 +97,19 @@ enum ImportActionType: string
         return ! in_array($this, [self::UpdateClient, self::UpdateCompany, self::CloseRelationship, self::CloseAffiliation], true);
     }
 
+    /**
+     * Whether this action records an **absence** of information rather than a fact.
+     *
+     * The review screen has to tell these apart, because they read identically otherwise: a row
+     * that says "the person was in an AFP, we were not told which" and a row that says "the
+     * person was in PORVENIR" both show up as an affiliation. One is a fact about the person and
+     * one is a fact about the file, and only the second should invite an answer afterwards.
+     */
+    public function isObservation(): bool
+    {
+        return $this === self::RecordAffiliationObservation;
+    }
+
     /** The table the applied row lands in, for the provenance link. */
     public function targetModelClass(): string
     {
@@ -92,6 +119,7 @@ enum ImportActionType: string
             self::CreateSocialEntity => SocialSecurityEntity::class,
             self::CreateRelationship, self::CloseRelationship => ClientCompanyAssignment::class,
             self::CreateAffiliation, self::CloseAffiliation => ClientAffiliation::class,
+            self::RecordAffiliationObservation => ClientAffiliationObservation::class,
             self::CreateRate => ClientCompanyRate::class,
         };
     }
@@ -103,7 +131,7 @@ enum ImportActionType: string
             'client' => [self::CreateClient->value, self::UpdateClient->value],
             'company' => [self::CreateCompany->value, self::UpdateCompany->value, self::CreateSocialEntity->value],
             'relationship' => [self::CreateRelationship->value, self::CloseRelationship->value],
-            'affiliation' => [self::CreateAffiliation->value, self::CloseAffiliation->value],
+            'affiliation' => [self::CreateAffiliation->value, self::CloseAffiliation->value, self::RecordAffiliationObservation->value],
             'rate' => [self::CreateRate->value],
         ];
     }

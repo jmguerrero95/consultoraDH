@@ -114,23 +114,54 @@ enum LegacyImportIssue: string
     /**
      * Whether `apply` must refuse while this is unresolved.
      *
-     * Two of the warning-severity issues do not block, and the reasons are worth stating
-     * because they are the only two places where a person is not asked anything:
+     * Five of the warning-severity issues do not block, and the reasons are worth stating
+     * because they are the only places where a person is not asked anything. The shared test is
+     * not "is it important" but "**would proceeding lose a fact**" — in each of these it would
+     * not:
      *
      * - `duplicate_exact_row`: the two rows say the same thing, so collapsing them loses
-     *   nothing. Blocking would make 2.560 rows unappliable because a spreadsheet repeated
+     *   nothing. Blocking would make 2 560 rows unappliable because a spreadsheet repeated
      *   itself, which teaches the operator that the review screen is an obstacle.
      * - `credential_like_content`: the credential is redacted whatever the operator decides,
      *   and nothing about the row's business facts depends on it. It is reported so the
      *   person knows the file contains a password, not so they can approve it.
+     * - `invalid_email`: §7.1's outcome is fixed — the address is not usable, so it is left off
+     *   the master. A person who wants that client imported has nothing to decide here, and
+     *   blocking made "this consultant has no email address" stop the whole batch.
+     * - `missing_monthly_value`: §10's outcome is equally fixed — no rate is generated for a
+     *   month whose amount is unreadable. The consequence is scoped: the *rate* is pending, and
+     *   the client's identity, relationship and affiliations are not.
+     * - `affiliation_entity_unknown`: §9.1's bare `SI`. FIX-IMPORT-02 Correction C stopped this
+     *   blocking because the assertion is no longer thrown away — it is written to
+     *   `client_affiliation_observations`, so the person is recorded as affiliated and the fund
+     *   as unnamed. What it would have lost is the fact itself, which is why it blocked.
      *
-     * The rest block. `missing_monthly_value` blocks only once the relationship needs a
-     * rate to be generated, which the planner decides, not the issue.
+     * The rest block. A finding that blocks here is one where proceeding would **invent** a
+     * fact: an unusable document, two companies claiming one identity, two dates that cannot
+     * both be true.
      */
     public function isBlocking(): bool
     {
-        return ! in_array($this, [self::DuplicateExactRow, self::CredentialLikeContent], true);
+        return ! in_array($this, self::NON_BLOCKING, true);
     }
+
+    /**
+     * The findings that describe an **optional** or **already-recorded** value.
+     *
+     * A parallel to `ParsedWorkbook::NON_BLOCKING`, which answers the same question for a row
+     * before it becomes a finding. The two are kept deliberately separate: one is about a line of
+     * a spreadsheet, the other about a stored finding, and a row-level warning and its stored
+     * finding must agree about whether they block.
+     *
+     * @var list<self>
+     */
+    private const NON_BLOCKING = [
+        self::DuplicateExactRow,
+        self::CredentialLikeContent,
+        self::InvalidEmail,
+        self::MissingMonthlyValue,
+        self::AffiliationEntityUnknown,
+    ];
 
     /**
      * Whether this issue is about a whole company block rather than one person.

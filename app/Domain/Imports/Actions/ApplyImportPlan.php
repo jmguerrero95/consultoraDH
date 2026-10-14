@@ -31,6 +31,7 @@ use App\Domain\Imports\ImportProfile;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Models\Client;
 use App\Models\ClientAffiliation;
+use App\Models\ClientAffiliationObservation;
 use App\Models\ClientCompanyAssignment;
 use App\Models\ClientCompanyRate;
 use App\Models\Company;
@@ -493,7 +494,7 @@ final class ApplyImportPlan
 
         if (array_key_exists('target_exists', $preconditions)) {
             $expected = (bool) $preconditions['target_exists'];
-            $actual = $this->targetExists($action->action_type, $payload);
+            $actual = $this->targetExists($action->action_type, $payload, $key);
 
             // `null` is "this action type has no single record to look up", and a check that
             // cannot run is not a check that passed. §11's `target_exists` is an assertion about a
@@ -556,8 +557,11 @@ final class ApplyImportPlan
      * Tolerant lookups throughout: `first()` rather than the writers' `firstOrFail()`, because a
      * precondition check must be able to answer "no, it is gone" without throwing the way a write
      * refuses to.
+     *
+     * @param  string  $naturalKey  the action's own key, for the one type whose record is
+     *                               identified by it rather than by its payload
      */
-    private function targetExists(?ImportActionType $type, ImportActionPayload $payload): ?bool
+    private function targetExists(?ImportActionType $type, ImportActionPayload $payload, string $naturalKey = ''): ?bool
     {
         $client = $this->peekClient($type, $payload);
         $company = $this->peekCompany($type, $payload);
@@ -606,7 +610,24 @@ final class ApplyImportPlan
             // is worth more than the convenience. Naming every case means a new
             // `ImportActionType` has to be classified here or the match throws, which is the
             // behaviour we want for a precondition nobody thought about.
+            //
+            // It earned its keep on this very case: adding `RecordAffiliationObservation` without
+            // it produced an `UnhandledMatchError` inside the apply transaction, which surfaced
+            // to the reviewer as a bare 500.
             ImportActionType::CreateSocialEntity => null,
+
+            // FIX-IMPORT-02 Correction C. The observation is identified by `dedupe_key`, which is
+            // the action's natural key — not reconstructible from the payload, because a bare
+            // `SI` segment has no `interval.start` to key on and that null is the common case,
+            // not an edge one.
+            //
+            // It is a real existence check: false on the first run, true on every rebuild after
+            // it, which is what makes §11's "an exact match is a no-op" observable rather than
+            // merely intended.
+            ImportActionType::RecordAffiliationObservation => $client !== null
+                && ClientAffiliationObservation::query()
+                    ->where('dedupe_key', $naturalKey)
+                    ->exists(),
         };
     }
 
@@ -692,6 +713,15 @@ final class ApplyImportPlan
             ImportActionType::CreateAffiliation,
             ImportActionType::CloseAffiliation,
             ImportActionType::CreateRate,
+            // FIX-IMPORT-02 Correction C. Its payload names the client exactly as the other
+            // history actions do — `client_document_type` / `client_document_number` — so it
+            // belongs in this list.
+            //
+            // Leaving it out was not a crash, which is what makes it worth writing down: the
+            // lookup returned null, `targetExists()` answered "the client is not there", and the
+            // precondition failed on a plan that was perfectly correct. A silent wrong answer
+            // from a "tolerant lookup" is worse than a loud one.
+            ImportActionType::RecordAffiliationObservation,
         ], true)) {
             return null;
         }
@@ -820,12 +850,14 @@ final class ApplyImportPlan
                 'email' => 'email',
             ],
 
-            // §8.3 and §9.5: two boundaries, two precisions, for both history rows.
+            // §8.3 and §9.5: two boundaries, two precisions, for both history rows — and for the
+            // observation, which carries the same interval for the same reason.
             in_array($type, [
                 ImportActionType::CreateRelationship,
                 ImportActionType::CloseRelationship,
                 ImportActionType::CreateAffiliation,
                 ImportActionType::CloseAffiliation,
+                ImportActionType::RecordAffiliationObservation,
             ], true) => [
                 'started_on' => 'started_on',
                 'ended_on' => 'ended_on',
@@ -962,6 +994,15 @@ final class ApplyImportPlan
                 'type', 'entity_id', 'entity_name', 'ended_on', 'ended_on_precision', 'reason',
             ],
 
+            // No `entity_id` and no `entity_name`, and that absence is the point: §9.1 forbids
+            // naming an entity the source did not name, and this action is the record of exactly
+            // that gap. Listing a field here that the writer never reads would be a claim the
+            // payload does not make.
+            ImportActionType::RecordAffiliationObservation => [
+                'client_document_type', 'client_document_number', 'company_tax_id',
+                'type', 'interval', 'months', 'token', 'reason',
+            ],
+
             ImportActionType::CreateRate => [
                 'client_document_type', 'client_document_number', 'company_tax_id',
                 'effective_month', 'amount', 'months',
@@ -994,6 +1035,7 @@ final class ApplyImportPlan
             ImportActionType::CloseRelationship => $this->writeRelationshipClose($import, $action, $payload),
             ImportActionType::CreateAffiliation => $this->writeAffiliation($import, $action, $payload),
             ImportActionType::CloseAffiliation => $this->writeAffiliationClose($import, $action, $payload),
+            ImportActionType::RecordAffiliationObservation => $this->writeAffiliationObservation($import, $action, $payload),
             ImportActionType::CreateRate => $this->writeRate($import, $action, $payload),
 
             // §12.3 and `ImportActionType`'s own docblock: every case has a writer, and an
@@ -1626,6 +1668,60 @@ final class ApplyImportPlan
         }
 
         return ['type' => ClientAffiliation::class, 'id' => (int) $affiliation->id];
+    }
+
+    /**
+     * §9.1's bare `SI`: record that an affiliation existed, without naming the entity.
+     *
+     * ## Why this writes directly rather than through A02
+     *
+     * Every A02 affiliation entry point requires a `SocialSecurityEntity`, because every one of
+     * them maintains "no two open affiliations of the same type" and that rule is about
+     * entities. An observation is not an affiliation and must not take part in it, so it does
+     * not go through `ManageAffiliations` — going through it would mean either inventing an
+     * entity or loosening a rule that is load-bearing for A03's billing reads.
+     *
+     * ## Idempotency
+     *
+     * `dedupe_key` is the action's natural key, so re-applying the same import updates the same
+     * row instead of inserting a second one. That matters because an import is re-run whenever a
+     * reviewer answers a question, and 36 duplicated observations per re-run would be its own
+     * kind of invented history.
+     *
+     * @return array{type: string, id: int}
+     */
+    private function writeAffiliationObservation(
+        LegacyImport $import,
+        LegacyImportAction $action,
+        ImportActionPayload $payload,
+    ): array {
+        $client = $this->clientFor($action, $payload);
+        $interval = $payload->interval('interval');
+        $type = $payload->entityType('type');
+        $provenance = $this->provenance($import, $action);
+
+        $observation = ClientAffiliationObservation::query()->updateOrCreate(
+            ['dedupe_key' => $action->natural_key],
+            [
+                'client_id' => $client->id,
+                'type' => $type->value,
+                'started_on' => $interval->start?->toDateString(),
+                'ended_on' => $interval->end?->toDateString(),
+                // §8.3: the precisions travel exactly as they do for a real affiliation, so a
+                // month derived from a snapshot is never written as a day.
+                'started_on_precision' => $interval->startPrecision,
+                'ended_on_precision' => $interval->endPrecision,
+                // The months are the source's own evidence; the interval is a reading of them.
+                // `months()` rather than a bare read because it validates each key as `YYYY-MM`,
+                // and a month that is not one cannot be stored as if it were.
+                'months' => $payload->months('months'),
+                'reason' => $payload->string('reason'),
+                'legacy_import_id' => $import->id,
+                'source_row_ids' => $provenance['source_row_ids'] ?? null,
+            ],
+        );
+
+        return ['type' => ClientAffiliationObservation::class, 'id' => (int) $observation->id];
     }
 
     /**

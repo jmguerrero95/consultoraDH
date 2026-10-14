@@ -41,6 +41,16 @@ function a04Migrations(): array
         '2026_10_04_130000_create_legacy_import_issues_table',
         '2026_10_04_140000_create_legacy_import_actions_table',
         '2026_10_04_150000_create_import_source_mappings_table',
+        // FIX-IMPORT-02 Correction C. Listed here, and last, because it is the newest A04
+        // migration and `rollbackA04()` reverses the list — so it is rolled back **first**, which
+        // is the only order that works. It holds a foreign key to `legacy_imports`, and a
+        // rollback that dropped `legacy_imports` while this table still existed died with
+        // "dependent objects still exist", taking all three matrix tests with it.
+        '2026_10_14_090000_create_client_affiliation_observations_table',
+        // …and this one right after it, for the same reason: the check constraint it replaces is
+        // what rejects an unknown action type, so rolling the table back first would leave the
+        // constraint referencing a table that is gone.
+        '2026_10_14_100000_allow_affiliation_observation_actions',
     ];
 }
 
@@ -96,6 +106,8 @@ it('reaches the expected schema on a fresh database', function (): void {
         'legacy_import_issues',
         'legacy_import_actions',
         'import_source_mappings',
+        // FIX-IMPORT-02 Correction C: the observation table is A04's as much as the others are.
+        'client_affiliation_observations',
     ] as $table) {
         expect(Schema::hasTable($table))->toBeTrue("{$table} is missing after a fresh migrate");
     }

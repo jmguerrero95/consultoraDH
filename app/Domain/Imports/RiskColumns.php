@@ -115,6 +115,55 @@ final readonly class RiskColumns
     ];
 
     /**
+     * §9.4's "approved mapping": risk words the source misspells, and the word it meant.
+     *
+     * §9.4 requires an approved mapping before a typo becomes a write, and until one existed
+     * `looksLikeTypo()` could only *report* `UMO`. The project owner has confirmed for this
+     * workbook that `UMO` is a mistyping of `UNO`, which is the approval §9.4 asks for.
+     *
+     * ## Why the table is closed and not a rule
+     *
+     * The tempting generalisation is "any word one edit away from a risk word is that risk
+     * word", and `looksLikeTypo()` already computes exactly that distance. Acting on it would
+     * silently rewrite somebody's risk class from a value nobody approved — `DOS` → `D05`,
+     * `TRES` → `TRES2`, or any name that happens to sit one edit from a risk word. §9.4's whole
+     * point is that the correction has to be *approved*, and approval is per spelling, not per
+     * edit distance.
+     *
+     * So the table is consulted explicitly, holds one confirmed entry, and is configurable so an
+     * administrator can approve another spelling with the same visibility. Anything not in it
+     * still arrives as `unknown_risk_token` for a person to decide.
+     *
+     * ## Where the provenance is
+     *
+     * `riskRaw` keeps the cell's original text, so a row normalized through this table still
+     * stages `risk_raw = 'UMO'` beside `arl_risk_class = 1`. The correction is therefore visible
+     * on the review screen and in the record without a second column: the raw value *is* the
+     * evidence that a normalization happened.
+     *
+     * @return array<string, int>|null the risk class the approved word means
+     */
+    private static function approvedRiskToken(string $folded): ?int
+    {
+        $mapping = config('imports.approved_risk_tokens', []);
+
+        if (! is_array($mapping)) {
+            return null;
+        }
+
+        $canonical = $mapping[$folded] ?? null;
+
+        if (! is_string($canonical)) {
+            return null;
+        }
+
+        // Resolved through the same table as the source's own words, so an approved mapping can
+        // only ever point at a real risk level. A configuration pointing at something else is
+        // ignored rather than trusted.
+        return self::RISK_WORDS[SheetMonth::fold($canonical)] ?? null;
+    }
+
+    /**
      * Decide from the two values.
      *
      * @param  string  $p  the `P` cell, whatever its heading said
@@ -172,6 +221,32 @@ final readonly class RiskColumns
         return $this->riskClass !== null;
     }
 
+    /**
+     * Whether this exact text is the row's job title, per the row's own P/Q content.
+     *
+     * Used by the §9.4 provider comparison, which must not treat a cargo as an administradora.
+     * See `SourcePersonRow::arlProviderConflict()` for why that matters and why asking this
+     * question is narrower and more durable than carrying a list of job titles.
+     *
+     * Comparison is folded, so `Auxiliar` and `AUXILIAR ` are the same text. The risk cell is
+     * excluded, so a cell holding a risk word is never mistaken for a job title.
+     */
+    public function isJobTitle(string $value): bool
+    {
+        if ($this->jobTitle === null) {
+            return false;
+        }
+
+        $candidate = SheetMonth::fold($value);
+        $title = SheetMonth::fold($this->jobTitle);
+
+        if ($candidate === '' || $title === '') {
+            return false;
+        }
+
+        return $candidate === $title;
+    }
+
     public function hasProblem(): bool
     {
         return $this->problem !== null;
@@ -193,6 +268,15 @@ final readonly class RiskColumns
 
         if (isset(self::RISK_WORDS[$folded])) {
             return self::RISK_WORDS[$folded];
+        }
+
+        // An approved misspelling of a risk word. Checked before the digit and roman forms so
+        // `UMO` resolves the same way `UNO` does, and checked as an exact folded match — never by
+        // edit distance. See `approvedRiskToken()` for why the table exists.
+        $approved = self::approvedRiskToken($folded);
+
+        if ($approved !== null) {
+            return $approved;
         }
 
         if (ctype_digit($folded) && $folded >= '1' && $folded <= '5') {
