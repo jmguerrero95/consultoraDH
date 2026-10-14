@@ -37,6 +37,7 @@ use App\Http\Controllers\Api\SupportConversationController;
 use App\Http\Controllers\Api\SupportInboundEmailController;
 use App\Http\Controllers\Api\SupportInboxController;
 use App\Http\Controllers\Api\SupportPresenceController;
+use App\Http\Controllers\Api\SupportAgentController;
 use App\Http\Controllers\Api\SupportQueueController;
 use App\Http\Controllers\Api\TaskController;
 use App\Http\Controllers\Api\TelegramController;
@@ -723,6 +724,15 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:support.reply')->group(function (): void {
         Route::post('/support/conversations/{conversation}/messages', [SupportConversationController::class, 'sendMessage'])
             ->name('api.support.conversations.messages.store');
+
+        /*
+         * Uploading an attachment is part of replying, so it sits in the reply group beside
+         * the message it will be attached to. The conversation screen posted here for both its
+         * file picker and its audio recorder and got a 404: the route only existed under
+         * `/api/portal/…`, which is the client's side.
+         */
+        Route::post('/support/conversations/{conversation}/attachments', [SupportConversationController::class, 'uploadAttachment'])
+            ->name('api.support.conversations.attachments.store');
         Route::post('/support/conversations/{conversation}/notes', [SupportConversationController::class, 'addNote'])
             ->name('api.support.conversations.notes.store');
         Route::post('/support/conversations/{conversation}/read', [SupportConversationController::class, 'markRead'])
@@ -730,6 +740,19 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     });
 
     Route::middleware('can:support.assign')->group(function (): void {
+        /*
+         * Who can be assigned. `support.assign` is the same permission that lets somebody
+         * change a conversation's assignee, so it is the authority this list needs: the
+         * screens use it to fill that dropdown, and a caller who could not assign should not
+         * be enumerating the staff roll.
+         *
+         * The route is `/support/agents` and not `/users` on purpose — see the controller's
+         * docblock. The screens called `/api/users`, which does not exist, and the SPA
+         * catch-all answered it with HTML.
+         */
+        Route::get('/support/agents', [SupportAgentController::class, 'index'])
+            ->name('api.support.agents.index');
+
         Route::post('/support/conversations/{conversation}/assign', [SupportConversationController::class, 'assign'])
             ->name('api.support.conversations.assign');
         Route::post('/support/conversations/{conversation}/queue', [SupportConversationController::class, 'changeQueue'])

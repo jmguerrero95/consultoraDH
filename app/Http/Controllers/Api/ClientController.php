@@ -686,11 +686,19 @@ final class ClientController extends Controller
             ->concat($affiliationEntries)
             ->sortByDesc('created_at')
             ->take(50)
-            ->map(fn ($event): array => [
+            ->map(fn (AuditEvent $event): array => [
                 'action' => $event->action,
                 'subject' => $event->subjectLabel(),
                 'at' => $event->created_at->toIso8601String(),
                 'metadata' => $event->metadata,
+                // Who did it. §17.4 asks a reviewer who changed a client's record, and the
+                // answer was already one eager-load away — the timeline read as a list of
+                // anonymous verbs without it.
+                //
+                // `null` rather than omitted when there is no user, because the interface asks
+                // "quién" and has to be able to say "el sistema" rather than show nothing.
+                'actor' => $event->user?->name,
+                'actor_kind' => $event->user_id === null ? 'system' : 'user',
             ])
             ->values()
             ->all();

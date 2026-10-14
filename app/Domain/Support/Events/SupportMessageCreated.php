@@ -60,11 +60,48 @@ class SupportMessageCreated implements AuditableEvent, ShouldBroadcast, SubjectA
         ];
     }
 
+    /**
+     * The name Echo listens on.
+     *
+     * ## Why this exists
+     *
+     * Without it, Laravel broadcasts a `ShouldBroadcast` event under its fully qualified class
+     * name — `App.Domain.Support.Events.SupportMessageCreated` — and Echo delivers it to a
+     * listener registered for that string. The frontend registers `message.created` and
+     * `note.created`, so **nothing** was ever delivered: the conversation worked over HTTP and
+     * appeared to work in realtime only because the sender's own tab already had the message
+     * from the POST response. A second session subscribed to the same authorised conversation
+     * received the event and dropped it on the floor.
+     *
+     * `broadcastWith()` also carried `'event' => 'message.created'` in the payload, which is
+     * what made this look wired: the name was present in the body, just not as the thing Echo
+     * dispatches on.
+     *
+     * ## Why the name differs for a note
+     *
+     * Notes are broadcast **only** to `support.staff.conversation.{id}`, and the staff
+     * subscription listens for `note.created`. Broadcasting a note as `message.created` would
+     * deliver it to a channel nobody is listening on, so a note would silently stop appearing.
+     * With this method, a note is published on the staff channel under the name that channel's
+     * listener actually handles.
+     *
+     * The separation of channels is unchanged and is the point: a note never reaches
+     * `support.conversation.{id}`, so a client session cannot receive one.
+     */
+    public function broadcastAs(): string
+    {
+        return $this->message->message_kind->value === 'note'
+            ? 'note.created'
+            : 'message.created';
+    }
+
     public function broadcastWith(): array
     {
         return [
             'message' => $this->message->load(['author', 'attachments']),
-            'event' => 'message.created',
+            // Kept so a consumer that reads the envelope rather than the event name still finds
+            // it. `broadcastAs()` is what Echo dispatches on; this is only the body.
+            'event' => $this->broadcastAs(),
         ];
     }
 

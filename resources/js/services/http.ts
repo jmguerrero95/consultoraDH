@@ -244,7 +244,17 @@ async function toApiError(response: Response): Promise<ApiError> {
     const retryAfterHeader = response.headers.get('Retry-After');
 
     return new ApiError({
-        message: typeof body.message === 'string' ? body.message : defaultMessage(response.status),
+        // An **empty** `message` is treated as no message at all.
+        //
+        // `typeof body.message === 'string'` accepted `""`, so a failure that carried an empty
+        // string replaced a readable sentence with nothing: the planilla preview screen showed
+        // a red alert with no text in it, which tells an operator nothing about what to do
+        // next. `defaultMessage()` is the fallback for exactly this, and it should win for an
+        // empty value as much as for a missing one.
+        message:
+            typeof body.message === 'string' && body.message.trim() !== ''
+                ? body.message
+                : defaultMessage(response.status),
         status: response.status,
         code: typeof body.code === 'string' ? body.code : null,
         errors: (body.errors as FieldErrors | undefined) ?? {},

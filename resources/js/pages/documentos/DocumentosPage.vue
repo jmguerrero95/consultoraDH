@@ -5,6 +5,7 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
+import ClientPicker from '@/components/clients/ClientPicker.vue';
 import { fecha } from '@/composables/useFormatters';
 import { useAuthStore } from '@/stores/auth';
 import { a05 } from '@/services/a05';
@@ -25,6 +26,10 @@ const auth = useAuthStore();
 const pestana = ref<'documentos' | 'solicitudes'>('solicitudes');
 
 const types = ref<ClientDocumentType[]>([]);
+
+/** Ids behind the two pickers in "Adjuntar documento". Kept as ids for the API, chosen by name. */
+const documentoCliente = ref<number | null>(null);
+const documentoTipo = ref<number | null>(null);
 const documents = ref<ClientDocument[]>([]);
 const requests = ref<ClientDocumentRequest[]>([]);
 
@@ -100,7 +105,11 @@ async function crearTipo(): Promise<void> {
     try {
         await a05.documents.storeType({
             name: nuevoTipo.value.name,
-            slug: nuevoTipo.value.slug,
+            // The slug is derived server-side when it is empty, so an absent one is sent as `null`
+            // rather than `''` — the latter is a value, and `filled('')` is false, so it would
+            // also derive, but sending the field's real "unset" state is clearer than relying
+            // on that coincidence.
+            slug: nuevoTipo.value.slug === '' ? null : nuevoTipo.value.slug,
             description: nuevoTipo.value.description || null,
             retention_days: nuevoTipo.value.retention_days ? Number(nuevoTipo.value.retention_days) : null,
         });
@@ -144,6 +153,19 @@ async function revisar(request: ClientDocumentRequest, decision: 'approve' | 're
     }
 }
 
+/**
+ * Register the chosen file against a client.
+ *
+ * ## What changed
+ *
+ * This asked for the client with `prompt('Id del cliente:')` and the type with
+ * `prompt('Id del tipo de documento:')` — two modal text boxes, both asking for an internal id
+ * nobody outside the database has, before the upload could even be attempted. The client is
+ * now chosen with {@see ClientPicker} and the type with the configured list, so the operator
+ * selects a person by name and a type by name, and the ids are filled in behind the form.
+ *
+ * The backend contract is untouched: it still receives `client_id` and `document_type_id`.
+ */
 async function subirDocumento(): Promise<void> {
     errorMessage.value = null;
     actionMessage.value = null;
@@ -156,16 +178,30 @@ async function subirDocumento(): Promise<void> {
         return;
     }
 
+    if (!documentoCliente.value) {
+        errorMessage.value = 'Seleccione el cliente al que pertenece el documento.';
+
+        return;
+    }
+
+    if (!documentoTipo.value) {
+        errorMessage.value = 'Seleccione el tipo de documento. Si la lista está vacía, cree uno en «Tipos de documento».';
+
+        return;
+    }
+
     try {
         await a05.documents.upload({
-            client_id: Number(prompt('Id del cliente:') ?? '0'),
-            document_type_id: Number(prompt('Id del tipo de documento:') ?? '0'),
+            client_id: documentoCliente.value,
+            document_type_id: documentoTipo.value,
             title: archivo.name,
             visibility: 'internal',
             file: archivo,
         });
 
         archivos.value = [];
+        documentoCliente.value = '';
+        documentoTipo.value = '';
         actionMessage.value = 'Documento guardado.';
         await recargar();
     } catch (e) {
@@ -214,24 +250,33 @@ async function subirDocumento(): Promise<void> {
                     </div>
                     <div class="card-body d-grid gap-2">
                         <div>
-                            <label class="form-label" for="cliente-doc">Cliente (id)</label>
-                            <input
+                            <ClientPicker
                                 id="cliente-doc"
                                 v-model="nuevaSolicitud.client_id"
-                                type="number"
-                                class="form-control"
+                                label="Cliente"
                             />
                         </div>
                         <div>
                             <label class="form-label" for="tipo-doc">Tipo de documento</label>
+                            <!--
+                                F.3: an empty list is not a broken selector. Nothing was
+                                configured, so the screen says so and points at the form that
+                                creates one, rather than showing a disabled dropdown that looks
+                                like a fault.
+                            -->
                             <select
                                 id="tipo-doc"
                                 v-model="nuevaSolicitud.document_type_id"
                                 class="form-select"
+                                :disabled="types.length === 0"
                             >
                                 <option value="">Seleccione…</option>
                                 <option v-for="t in types" :key="t.id" :value="t.id">{{ t.name }}</option>
                             </select>
+                            <p v-if="types.length === 0" class="small text-muted mt-1 mb-0">
+                                Todavía no hay tipos de documento configurados. Críe uno en «Tipos
+                                de documento» y vuelve a esta pantalla.
+                            </p>
                         </div>
                         <div>
                             <label class="form-label" for="titulo-doc">Título</label>
@@ -271,7 +316,17 @@ async function subirDocumento(): Promise<void> {
                     </div>
                     <div class="card-body d-grid gap-2">
                         <input v-model="nuevoTipo.name" class="form-control" placeholder="Nombre" />
-                        <input v-model="nuevoTipo.slug" class="form-control" placeholder="slug" />
+                        <!--
+                            Optional. The backend derives a slug from the name when this is
+                            empty, so the form is not blocked on a machine key an operator
+                            cannot know. It stays editable for an administrator who needs a
+                            specific identifier.
+                        -->
+                        <input
+                            v-model="nuevoTipo.slug"
+                            class="form-control"
+                            placeholder="Identificador (opcional — se deriva del nombre)"
+                        />
                         <input
                             v-model="nuevoTipo.retention_days"
                             class="form-control"
@@ -279,7 +334,7 @@ async function subirDocumento(): Promise<void> {
                         />
                         <AppButton
                             variant="secondary"
-                            :disabled="nuevoTipo.name === '' || nuevoTipo.slug === ''"
+                            :disabled="nuevoTipo.name === ''"
                             @click="crearTipo"
                         >
                             Crear tipo
@@ -370,14 +425,52 @@ async function subirDocumento(): Promise<void> {
                         <div class="card-header">
                             <h2 class="h6 mb-0">Adjuntar documento</h2>
                         </div>
-                        <div class="card-body">
-                            <input
-                                type="file"
-                                class="form-control"
-                                accept=".pdf,.jpg,.jpeg,.png,.docx,.xlsx,.csv"
-                                @change="archivos = ($event.target as HTMLInputElement).files ? Array.from(($event.target as HTMLInputElement).files!) : []"
+                        <div class="card-body d-grid gap-2">
+                            <!--
+                                The client and the type are chosen here rather than through
+                                `prompt()`, which asked for two internal ids before the upload
+                                could be attempted. The ids still go to the API; they are just
+                                picked by name now.
+                            -->
+                            <ClientPicker
+                                id="cliente-adjuntar"
+                                v-model="documentoCliente"
+                                label="Cliente"
                             />
-                            <AppButton variant="primary" class="mt-2" @click="subirDocumento">
+
+                            <div>
+                                <label class="form-label" for="tipo-adjuntar">Tipo de documento</label>
+                                <select
+                                    id="tipo-adjuntar"
+                                    v-model="documentoTipo"
+                                    class="form-select"
+                                    :disabled="types.length === 0"
+                                >
+                                    <option :value="null">Seleccione…</option>
+                                    <option v-for="t in types" :key="t.id" :value="t.id">{{ t.name }}</option>
+                                </select>
+                                <p v-if="types.length === 0" class="small text-muted mt-1 mb-0">
+                                    Todavía no hay tipos de documento configurados. Críe uno en «Nuevo
+                                    tipo de documento» y vuelva a esta pantalla.
+                                </p>
+                            </div>
+
+                            <div>
+                                <label class="form-label" for="archivo-adjuntar">Archivo</label>
+                                <input
+                                    id="archivo-adjuntar"
+                                    type="file"
+                                    class="form-control"
+                                    accept=".pdf,.jpg,.jpeg,.png,.docx,.xlsx,.csv"
+                                    @change="archivos = ($event.target as HTMLInputElement).files ? Array.from(($event.target as HTMLInputElement).files!) : []"
+                                />
+                            </div>
+
+                            <AppButton
+                                variant="primary"
+                                :disabled="archivos.length === 0 || documentoCliente === null || documentoTipo === null"
+                                @click="subirDocumento"
+                            >
                                 Guardar
                             </AppButton>
                         </div>

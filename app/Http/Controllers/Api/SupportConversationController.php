@@ -13,6 +13,7 @@ use App\Domain\Support\Actions\CloseConversation;
 use App\Domain\Support\Actions\MarkConversationRead;
 use App\Domain\Support\Actions\ReopenConversation;
 use App\Domain\Support\Actions\ResolveConversation;
+use App\Domain\Support\Actions\StoreSupportAttachment;
 use App\Domain\Support\SupportConversationPriority;
 use App\Http\Controllers\Controller;
 use App\Models\SupportConversation;
@@ -225,6 +226,48 @@ class SupportConversationController extends Controller
      * serve a file. Declaring only `StreamedResponse` simply moved the same
      * error onto every refusal.
      */
+    /**
+     * POST /api/support/conversations/{conversation}/attachments
+     *
+     * Upload a file or a recorded voice note to a conversation.
+     *
+     * ## Why this existed only on the portal side
+     *
+     * The conversation screen posts here — for its file picker and for the audio recorder — and
+     * the route was never declared on this side, so both returned **404**. The client's portal
+     * upload worked because it posted to `/api/portal/support/conversations/{id}/attachments`.
+     * The frontend call was not wrong; the staff route was missing.
+     *
+     * Authority is `support.reply`, which is the same permission that lets somebody post into
+     * this conversation: uploading an attachment is part of replying. The per-conversation check
+     * is the same one every other method here uses — queue membership or assignment — so a
+     * supervisor with `support.reply` who is not on the queue is still refused.
+     *
+     * Storage, validation and the extension rule are **not** repeated here: they live in
+     * {@see StoreSupportAttachment}, which the portal controller calls too, so the two sides
+     * cannot drift on the parts that matter.
+     */
+    public function uploadAttachment(Request $request, SupportConversation $conversation, StoreSupportAttachment $store): JsonResponse
+    {
+        $user = $request->user();
+
+        $this->authorizeConversationAccess($user, $conversation);
+
+        $validated = $request->validate([
+            'file' => [
+                'required',
+                'file',
+                'max:'.StoreSupportAttachment::MAX_KILOBYTES,
+                'mimetypes:'.StoreSupportAttachment::MIMES,
+            ],
+        ], [], ['file' => 'archivo']);
+
+        return response()->json(
+            $store->store($validated['file'], $conversation, $user, 'staff'),
+            201,
+        );
+    }
+
     public function downloadAttachment(Request $request, SupportConversation $conversation, SupportMessageAttachment $attachment): JsonResponse|StreamedResponse
     {
         $this->authorizeConversationAccess($request->user(), $conversation);

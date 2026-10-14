@@ -79,11 +79,19 @@ return [
         /**
          * Relationships that would make the reader fetch something.
          *
-         * External links are refused rather than ignored: a workbook that points at
-         * `file:///etc/passwd` or a UNC share is asking the reader to leave the disk, and
-         * a reader that "helpfully" resolves it is a server-side request forgery with a
-         * spreadsheet attached. OpenSpout does not resolve them; this states it so a future
-         * change that does has to confront the decision.
+         * External **links** — a reference to another workbook whose values a spreadsheet
+         * application substitutes into cells — are refused rather than ignored: that is data
+         * this module would be reading from somewhere else, and it is the genuine
+         * server-side-request / local-read vector. OpenSpout does not resolve them; this
+         * states it so a future change that does has to confront the decision.
+         *
+         * Matched against the relationship **type**, not against the whole part, so an
+         * ordinary `mailto:` contact hyperlink is not caught by it. The delivered workbook
+         * has 401 `TargetMode="External"` relationships and every one is a `mailto:`
+         * hyperlink on a contact cell; refusing those refused the one file this module
+         * exists to read. `WorkbookGuard` classifies each relationship individually and
+         * still refuses `file:`, UNC targets, `oleObject`/`activeX`/`frame`, and any other
+         * external target — see the method's docblock for the full rule.
          */
         'forbidden_relationships' => [
             'externalLink',

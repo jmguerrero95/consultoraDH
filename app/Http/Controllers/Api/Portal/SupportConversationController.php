@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api\Portal;
 use App\Domain\Support\Actions\AppendClientMessage;
 use App\Domain\Support\Actions\CreateSupportConversation;
 use App\Domain\Support\Actions\MarkConversationRead;
+use App\Domain\Support\Actions\StoreSupportAttachment;
 use App\Domain\Support\SupportConversationPriority;
 use App\Domain\Support\SupportMessageChannel;
 use App\Domain\Support\SupportMessageSenderKind;
@@ -17,7 +18,6 @@ use App\Models\SupportMessageAttachment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SupportConversationController extends Controller
@@ -157,7 +157,7 @@ class SupportConversationController extends Controller
         return response()->json($message->load('attachments'), 201);
     }
 
-    public function uploadAttachment(Request $request, SupportConversation $conversation): JsonResponse
+    public function uploadAttachment(Request $request, SupportConversation $conversation, StoreSupportAttachment $store): JsonResponse
     {
         $user = $request->user();
 
@@ -169,83 +169,21 @@ class SupportConversationController extends Controller
             'file' => [
                 'required',
                 'file',
-                'max:10240',
-                'mimetypes:application/pdf,image/jpeg,image/png,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,audio/webm,audio/ogg,audio/mpeg,audio/mp4',
+                'max:'.StoreSupportAttachment::MAX_KILOBYTES,
+                'mimetypes:'.StoreSupportAttachment::MIMES,
             ],
-        ]);
-
-        $file = $validated['file'];
+        ], [], ['file' => 'archivo']);
 
         /*
-         * The stored extension comes from the type this server accepts, never
-         * from the name the client sent.
-         *
-         * `getClientOriginalExtension()` reflects whatever the uploading browser
-         * claimed. A file called `payload.php` — or `x.php.pdf` with the real
-         * type omitted — would otherwise be written to disk under an extension
-         * the sender chose. The bytes are already restricted to a list of inert
-         * types by the `mimetypes` rule above; this keeps the *name* consistent
-         * with them rather than trusting the label.
+         * Validation, the extension rule, storage and the row are {@see StoreSupportAttachment}'s,
+         * shared with the staff upload. It used to be inline here, and the staff endpoint was
+         * then written separately — which is how the two could disagree about the extension a
+         * file is stored under.
          */
-        $extensions = [
-            'application/pdf' => 'pdf',
-            'image/jpeg' => 'jpg',
-            'image/png' => 'png',
-            'text/csv' => 'csv',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
-            'audio/webm' => 'webm',
-            'audio/ogg' => 'ogg',
-            'audio/mpeg' => 'mp3',
-            'audio/mp4' => 'm4a',
-        ];
-
-        $mimeType = $file->getMimeType();
-        $extension = $extensions[$mimeType] ?? 'bin';
-
-        $storedPath = sprintf('support-attachments/%s.%s', Str::uuid()->toString(), $extension);
-
-        $bytes = $file->get();
-        $sha256 = hash('sha256', $bytes);
-
-        /*
-         * Bytes first, row second.
-         *
-         * `put()` reports failure rather than throwing, so its return value is
-         * checked: ignoring it left metadata rows pointing at files that were
-         * never written whenever the disk refused the write.
-         */
-        if (Storage::disk('local')->put($storedPath, $bytes) === false) {
-            throw new RuntimeException('The attachment could not be stored.');
-        }
-
-        try {
-            $attachment = SupportMessageAttachment::create([
-                // The conversation is known at upload time and is recorded here,
-                // so ownership never depends on a message existing first.
-                'conversation_id' => $conversation->id,
-                // The message is linked when the attachment is actually sent.
-                'support_message_id' => null,
-                'kind' => str_starts_with($mimeType, 'audio/') ? 'audio' : 'file',
-                // The client's name is kept for display only; it is reduced to a
-                // basename so a path in it cannot be replayed anywhere.
-                'original_name' => basename($file->getClientOriginalName()),
-                'stored_path' => $storedPath,
-                'mime_type' => $mimeType,
-                'size_bytes' => strlen($bytes),
-                'sha256' => $sha256,
-                'uploaded_by_user_id' => $user->id,
-                'source_channel' => 'portal',
-            ]);
-        } catch (Throwable $e) {
-            // Compensating cleanup, so a failure leaves neither an orphan file
-            // nor a row pointing at nothing.
-            Storage::disk('local')->delete($storedPath);
-
-            throw $e;
-        }
-
-        return response()->json($attachment, 201);
+        return response()->json(
+            $store->store($validated['file'], $conversation, $user, 'portal'),
+            201,
+        );
     }
 
     /**

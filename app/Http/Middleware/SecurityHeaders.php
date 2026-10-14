@@ -31,9 +31,17 @@ final class SecurityHeaders
             'X-Content-Type-Options' => 'nosniff',
             'X-Frame-Options' => 'DENY',
             'Referrer-Policy' => 'strict-origin-when-cross-origin',
+            // `microphone=(self)` rather than `microphone=()`: the support conversation screen
+            // records voice notes with `MediaRecorder`, and a blanket refusal made Edge refuse
+            // at `getUserMedia` with "Permissions policy violation: microphone is not allowed in
+            // this document" — before any prompt, so the operator could not grant it either.
+            //
+            // `(self)` allows this origin only. Every other feature stays denied exactly as
+            // before, including `camera=()`: nothing here records video, and granting it would
+            // be a wider capability than the one feature that is broken.
             'Permissions-Policy' => 'accelerometer=(), autoplay=(), camera=(), display-capture=(), '
                 .'encrypted-media=(), fullscreen=(self), geolocation=(), gyroscope=(), magnetometer=(), '
-                .'microphone=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), '
+                .'microphone=(self), payment=(), picture-in-picture=(), publickey-credentials-get=(), '
                 .'screen-wake-lock=(), usb=(), xr-spatial-tracking=()',
             'Cross-Origin-Opener-Policy' => 'same-origin',
         ];

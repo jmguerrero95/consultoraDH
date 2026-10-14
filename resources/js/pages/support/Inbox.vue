@@ -104,8 +104,8 @@ async function loadQueues() {
 
 async function loadAssignees() {
   try {
-    const response = await api.get('/users', { query: { account_type: 'staff', status: 'active' } });
-    assignees.value = (response.data as any).data.map((u: any) => ({ id: u.id, name: u.name }));
+    const response = await api.support.agents();
+    assignees.value = (response as any).data.map((u: any) => ({ id: u.id, name: u.name }));
   } catch (e) {
     console.error('Error loading assignees:', e);
   }
@@ -160,7 +160,7 @@ function openConversation(conversation: Conversation) {
   router.push(`/soporte/${conversation.id}`);
 }
 
-const statusLabel = (status: string) => {
+const statusLabel = (status?: string | null) => {
   const labels: Record<string, string> = {
     open: 'Abierta',
     waiting_staff: 'Esperando staff',
@@ -168,16 +168,21 @@ const statusLabel = (status: string) => {
     resolved: 'Resuelta',
     closed: 'Cerrada',
   };
-  return labels[status] || status;
+
+  // `labels[status] || status` rendered an **empty badge** whenever `status` was missing or
+  // unmapped: an absent value produced nothing at all rather than something readable. The
+  // fallback says what is true — the application does not know — instead of showing a blank.
+  return (status && labels[status]) || status || 'Sin estado';
 };
 
-const priorityLabel = (priority: string) => {
+const priorityLabel = (priority?: string | null) => {
   const labels: Record<string, string> = {
     normal: 'Normal',
     high: 'Alta',
     urgent: 'Urgente',
   };
-  return labels[priority] || priority;
+
+  return (priority && labels[priority]) || priority || 'Sin prioridad';
 };
 
 const statusBadgeClass = (status: string) => {
@@ -200,8 +205,21 @@ const priorityBadgeClass = (priority: string) => {
   return classes[priority] || 'bg-gray-100 text-gray-800';
 };
 
-const formatRelativeTime = (dateString: string) => {
+/**
+ * When the last message arrived, or a readable stand-in.
+ *
+ * `new Date(null)` is the Unix epoch, not "now" — the constructor coerces `null` to `0`, so a
+ * conversation with no messages rendered as `31/12/1969`, which is neither true nor obviously
+ * wrong to a reader. The absence is the useful information here: nobody has answered it yet.
+ */
+const formatRelativeTime = (dateString?: string | null) => {
+  if (!dateString) return 'Sin mensajes';
+
   const date = new Date(dateString);
+
+  // An unparseable stamp is not silently the epoch either.
+  if (Number.isNaN(date.getTime())) return 'Sin fecha';
+
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);

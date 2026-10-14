@@ -72,11 +72,8 @@ self.addEventListener('fetch', (event) => {
   // Never cache an authenticated API response. Not on the way in either: a
   // cached API body would be replayed to whoever opens the app next.
   if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
-    event.respondWith(
-      fetch(request).catch(
-        () => new Response('Offline', { status: 503, statusText: 'Service Unavailable' })
-      )
-    );
+    event.respondWith(fetch(request).catch(() => offlineResponse()));
+
     return;
   }
 
@@ -108,17 +105,40 @@ self.addEventListener('fetch', (event) => {
         })
         .catch(async () => {
           const cached = await caches.match(SHELL_URL);
-          return cached ?? new Response('Offline', { status: 503 });
+
+          // The shell may itself not be cached — an install that happened offline, or a
+          // storage eviction. Returning `undefined` here produced the same
+          // `Failed to convert value to 'Response'` on a navigation.
+          return cached ?? offlineResponse();
         })
     );
     return;
   }
 
   // Everything else: network, with the cache as an offline safety net.
+  //
+  // `caches.match()` resolves to `undefined` when nothing matched, and `respondWith()` must
+  // be given a `Response`. Resolving to `undefined` is the `Failed to convert value to
+  // 'Response'` error in the console — it rejected the promise the worker had already handed
+  // to the browser, so the request failed with no body and no status rather than with the
+  // offline answer the fallback was written to give.
+  //
+  // The `undefined` case is exactly "this resource was never cached", which for a
+  // non-navigation request means there is nothing offline to show: a 503 saying so is the
+  // honest answer, and it is the same answer the `/api/` branch above already gives.
   event.respondWith(
-    fetch(request).catch(() => caches.match(request))
+    fetch(request).catch(async () => (await caches.match(request)) ?? offlineResponse())
   );
 });
+
+/** A `Response`, never `undefined` — see the fallback above. */
+function offlineResponse() {
+  return new Response('Offline', {
+    status: 503,
+    statusText: 'Service Unavailable',
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  });
+}
 
 async function cacheFirst(request) {
   const cached = await caches.match(request);

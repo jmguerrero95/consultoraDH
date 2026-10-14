@@ -48,7 +48,7 @@ final class HistoryReconstructor
         $lastMonth = $this->lastMonth($ordered);
 
         $disappearances = $this->findDisappearances($episodes, $lastMonth);
-        $overlaps = $this->findOverlaps($episodes);
+        $overlaps = $this->findOverlaps($episodes, $lastMonth);
 
         // §8.4 and §8.5's answers, applied *before* the questions are handed on.
         //
@@ -87,7 +87,7 @@ final class HistoryReconstructor
         // the comment above this method describes for A04-R1, one level along. Overlaps are now
         // recomputed from the decided episodes before §8.5's answers are applied, so the decision is
         // applied to the episodes the reviewer was actually shown.
-        $overlaps = $this->findOverlaps($episodes);
+        $overlaps = $this->findOverlaps($episodes, $lastMonth);
 
         $episodes = $this->applyOverlapDecisions($episodes, $overlaps);
 
@@ -95,7 +95,7 @@ final class HistoryReconstructor
         // disappearance" has to be asked of the *decided* episodes, or an episode a person closed
         // is still reported as an open question on the next rebuild.
         $disappearances = $this->findDisappearances($episodes, $lastMonth);
-        $overlaps = $this->findOverlaps($episodes);
+        $overlaps = $this->findOverlaps($episodes, $lastMonth);
 
         return new HistoryReconstruction(
             $episodes,
@@ -372,6 +372,16 @@ final class HistoryReconstructor
         /** @var array<string, array<string, mixed>> $groups */
         $groups = [];
 
+        /**
+         * person|employer => the key of the episode currently open for them.
+         *
+         * Only ever set by a row that states a date, so it points at a *dated* episode — the one
+         * an undated repeat observation belongs to.
+         *
+         * @var array<string, string>
+         */
+        $lastGroupFor = [];
+
         foreach ($rows as $row) {
             // A row with no usable document cannot be attributed to a person, and §7.1 makes it
             // a blocker rather than a client identified by name. Grouping it would invent a
@@ -381,7 +391,48 @@ final class HistoryReconstructor
             }
 
             $start = $row->affiliationDate;
-            $key = implode('|', [$row->document->label(), $row->company->identityKey(), $start->isoDate ?? 'unknown']);
+
+            /*
+             * §8.1's grouping key, and what a row with **no start date** does.
+             *
+             * The key is person + employer + start date, and its purpose is stated above the
+             * method: "the same person at the same employer with the same start date, again next
+             * month" is one episode observed twice, and without the date every month would look
+             * like a re-hire.
+             *
+             * The delivered workbook breaks that. One sheet states a start date and the next
+             * sheet does not repeat it, so the repeat lands in a *different* group — one keyed
+             * `…|unknown` — and a single employment becomes two episodes. That is not a data
+             * question: the person is listed once per month at one employer, which is the
+             * definition of one employment. It became visible only at Apply, where A02 refused
+             * to open a second relationship with the same employer and reported
+             * "ya tiene una relación abierta con esta empresa" — a refusal that named a rule the
+             * reviewer had never been asked about.
+             *
+             * So a row with no usable start date is **the repeat observation** and joins the
+             * episode already open for that person and employer, rather than opening a new one.
+             * Rows are in chronological order, so "the episode already open" is the last one
+             * created for that pair.
+             *
+             * A row **with** a date is unchanged: a genuine return to the same employer carries
+             * a new start date and stays two episodes, which is what §8.1 means by not merging.
+             */
+            $identity = $row->document->label().'|'.$row->company->identityKey();
+            $key = $start->isoDate === null
+                ? ($lastGroupFor[$identity] ?? null)
+                : $identity.'|'.$start->isoDate;
+
+            if ($key === null) {
+                // No episode yet for this person at this employer, and this row states no date.
+                // It opens one, dated as unknown — exactly what the key alone did before.
+                $key = $identity.'|unknown';
+            }
+
+            // Recorded after the lookup above, so a dated row never becomes the "current" group
+            // for an undated row that arrives later in the same month.
+            if ($start->isoDate !== null) {
+                $lastGroupFor[$identity] = $identity.'|'.$start->isoDate;
+            }
 
             if (! isset($groups[$key])) {
                 $groups[$key] = [
@@ -505,7 +556,30 @@ final class HistoryReconstructor
         foreach ($episodes as $episode) {
             $seen = $episode->lastMonth();
 
-            if ($episode->hasClosureEvidence() || $seen === null || strcmp($seen, $lastMonth) >= 0) {
+            if ($seen === null || strcmp($seen, $lastMonth) >= 0) {
+                continue;
+            }
+
+            // The test is whether the interval is **closed**, not whether a note exists.
+            //
+            // `hasClosureEvidence()` is true as soon as the row carries a retirement note, but
+            // under `manual_only` — and that is the policy §8.2 mandates — `RetirementNote::
+            // endBoundary()` returns null, so the episode stays *open*. Skipping on the note
+            // rather than on the resulting boundary meant the two halves of the rule disagreed:
+            // the episode stopped appearing before the end of the file (a §8.4 question), yet
+            // §8.4 did not ask it.
+            //
+            // Nothing downstream could recover either. A02's `link()` refuses to open a second
+            // relationship while another is open at a different employer, so applying the real
+            // workbook failed **441 of 1 709 actions** with "the client already has 1 open
+            // relationship at another company" — against a batch whose only findings were 13
+            // disappearances and 0 overlaps. The review screen showed a clean plan, and the
+            // one place that could have explained the open episode never appeared.
+            //
+            // A person who stops showing up at an employer needs to be asked when it ended,
+            // whether or not the file also mentions a retirement. With a note, the question is
+            // sharper rather than absent — see `Disappearance::message()`.
+            if (! $episode->interval->isOpen()) {
                 continue;
             }
 
@@ -518,6 +592,10 @@ final class HistoryReconstructor
                 $seen,
                 $lastMonth,
                 $episode->sourceRowIds,
+                // Carried so the review screen can say "there is a retirement note, and nobody
+                // has decided the date" rather than "there is nothing at all".
+                $episode->retirement,
+                $this->retirementPolicy,
             );
         }
 
@@ -586,7 +664,7 @@ final class HistoryReconstructor
      * @param  list<RelationshipEpisode>  $episodes
      * @return list<CompanyOverlap>
      */
-    private function findOverlaps(array $episodes): array
+    private function findOverlaps(array $episodes, ?string $lastMonth = null): array
     {
         /** @var array<string, list<RelationshipEpisode>> $byClient */
         $byClient = [];
@@ -614,7 +692,7 @@ final class HistoryReconstructor
                         continue;
                     }
 
-                    if (! $this->genuineOverlap($first, $second)) {
+                    if (! $this->genuineOverlap($first, $second, $lastMonth)) {
                         continue;
                     }
 
@@ -639,12 +717,15 @@ final class HistoryReconstructor
      * depend on the evidence:
      *
      * 1. both closed and intersecting;
-     * 2. one closed, the other's dated start strictly inside it.
+     * 2. one closed, the other's dated start strictly inside it;
+     * 3. both open, both dated, both still listed in the file's final month, and dated
+     *    differently on the two sides.
      *
-     * Two open episodes are never an overlap on their own; see this method's docblock for the
-     * 427 blockers that cost before that was established.
+     * Case 3 is the narrow exception to "two open episodes are never an overlap on their own";
+     * its reasoning, and why it is not the 427 blockers that rule was written for, is at the
+     * branch itself.
      */
-    private function genuineOverlap(RelationshipEpisode $a, RelationshipEpisode $b): bool
+    private function genuineOverlap(RelationshipEpisode $a, RelationshipEpisode $b, ?string $lastMonth = null): bool
     {
         $first = $a->interval;
         $second = $b->interval;
@@ -656,6 +737,26 @@ final class HistoryReconstructor
         // 1. Both closed. The boundaries are known and they intersect, so the overlap cannot be
         //    an artefact of a missing end date.
         if (! $first->isOpen() && ! $second->isOpen()) {
+            // …but "intersecting" has to mean an intersection the *dates* affirm.
+            //
+            // `HistoricalInterval::overlaps()` answers true whenever either start is unknown,
+            // because two spans that cannot be placed on a timeline cannot be proven disjoint.
+            // That is the right answer for intersection logic and the wrong one for a finding:
+            // an episode the file never dated is not evidence that it overlapped anything, and
+            // asserting it invents a parallel employment out of a missing date.
+            //
+            // This became reachable when §8.4's check was corrected to look at whether the
+            // interval is *closed* rather than at whether a retirement note exists. Closing an
+            // undated-start episode on the month after its last sighting — which is what a
+            // reviewer's `close_on_disappearance` does — turned episodes that were correctly
+            // ignored as "both open" into closed ones, and this branch started asserting
+            // overlaps between an undated episode and every episode that followed it.
+            //
+            // Same principle as case 3 below, applied to the other end of the interval.
+            if ($first->start === null || $second->start === null) {
+                return false;
+            }
+
             return $first->overlaps($second);
         }
 
@@ -673,6 +774,52 @@ final class HistoryReconstructor
         //    retirements and transfers rather than evidence of a parallel. The disappearance
         //    that a real sequential move leaves behind is raised by `findDisappearances()`, which
         //    is the question a reviewer actually needs to answer.
+        //
+        //    …with one exception, and it is the exception the file makes impossible to ignore.
+        //
+        //    Two open episodes at two employers, **both still listed in the file's final month**,
+        //    both with a stated start date, **and different start dates**.
+        //
+        //    Every one of those facts has to hold:
+        //
+        //    - *both in the last month* means the file asserts the person is on both payrolls as
+        //      of the last thing it describes, and it is not an old employer it stopped
+        //      reporting;
+        //    - *no disappearance can ever close them*, because §8.4 only raises an episode that
+        //      stops appearing before the end of the file — so no answer to any other question
+        //      will bound either one, and the batch stays unappliable: A02 refuses the second
+        //      relationship with "el cliente ya tiene 1 relación abierta en otra empresa" and
+        //      rolls the whole thing back, with no question anywhere on the review screen;
+        //    - *both dated*, so nothing has to be invented;
+        //    - *different dates*, which is what makes the question **answerable**. This is
+        //      `transferIsExecutable()`'s own rule, and it is the discriminator between a useful
+        //      finding and a useless one: when the starts differ, "they moved" is a coherent
+        //      answer and A02 can carry it out (`recognize_transfer` closes the open one at the
+        //      destination's `started_on`). When they are equal — the shape §8.5 names, a payroll
+        //      file that never carries a start date giving every block the same one — no answer
+        //      is executable, and raising the question would move an unanswerable block from
+        //      Apply to the review screen without making it answerable. That case stays refused,
+        //      as `transferIsExecutable()` intends.
+        //
+        //    Measured against the delivered workbook: of the 766 episodes, 219 are still listed
+        //    in the final month, and exactly **one** cross-employer pair among them is dated on
+        //    both sides with the dates differing.
+        //
+        //    This is not a new finding: it is the existing `overlapping_company_history`, with
+        //    the existing §8.5 vocabulary. A reviewer who picks `split_overlap_at` with a date
+        //    that cannot work is still refused by `transferIsExecutable()`, so the batch stays
+        //    blocked rather than guessing.
+        if ($lastMonth !== null
+            && $first->isOpen()
+            && $second->isOpen()
+            && $a->lastMonth() === $lastMonth
+            && $b->lastMonth() === $lastMonth
+            && $a->interval->start !== null
+            && $b->interval->start !== null
+            && strcmp($a->interval->start->toDateString(), $b->interval->start->toDateString()) !== 0) {
+            return true;
+        }
+
         return false;
     }
 

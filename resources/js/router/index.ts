@@ -376,12 +376,15 @@ const routes: RouteRecordRaw[] = [
                     permission: 'documents.view',
                 },
             },
-            {
-                path: 'documentos',
-                name: 'documentos',
-                component: () => import('@/pages/documentos/DocumentosPage.vue'),
-                meta: { title: 'Documentos', nav: { label: 'Documentos', icon: 'bi-folder2-open', order: 35 }, permission: 'documents.view' },
-            },
+            /*
+             * A byte-identical copy of the route above used to follow it: same path, same
+             * `name`, same component, same `nav`, same permission. Two entries that resolve to
+             * one page rendered "Documentos" twice in the menu, and both pointed at the same
+             * screen — so the second was noise that looked like a missing feature.
+             *
+             * Only the duplicate is gone. The path, the name, the permission and the internal
+             * Solicitudes/Documentos tabs are untouched, so every existing link still resolves.
+             */
             {
                 path: 'soporte',
                 name: 'support',

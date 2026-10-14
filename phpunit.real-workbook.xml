@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+    FIX-LOCAL-01 — a phpunit configuration for exactly one test.
+
+    `RealWorkbookFlowTest` applies the delivered workbook's 2 560 real payroll rows, so it
+    cannot run on `consultora_dh_test` (the suite's rolled-back database) or on the
+    development database (a person's manual-validation data). It runs against the E2E
+    stack's own database, `consultora_dh_e2e`, which is a separate PostgreSQL database used
+    by nothing else.
+
+    Two things differ from `phpunit.xml` and both are deliberate:
+
+      * `DB_TEST_DATABASE` is `consultora_dh_e2e`, not `consultora_dh_test`.
+      * `RefreshDatabase` is not used by the test, and `tests/Pest.php`'s database guard is
+        not invoked, because migrating and rolling back a database that holds real rows is
+        not something this configuration should be able to do.
+
+    It is invoked as:
+
+        docker exec -e REAL_WORKBOOK_PATH=/var/www/html/.local-fixtures/'…xlsx' \
+            consultora-dh-app-e2e vendor/bin/phpunit -c phpunit.real-workbook.xml
+
+    and the test refuses to start against any other database — see the test's `setUp()`.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="RealWorkbook">
+            <file>tests/Feature/A04/RealWorkbookFlowTest.php</file>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file" force="true"/>
+        <env name="BCRYPT_ROUNDS" value="4" force="true"/>
+
+        <env name="DB_CONNECTION" value="testing" force="true"/>
+        <env name="DB_TEST_DATABASE" value="consultora_dh_e2e" force="true"/>
+
+        <!-- The import queue must be a real queue: §15 asks for the work to be enqueued, and a
+             `sync` connection would make the test pass without proving the job chain works. -->
+        <env name="QUEUE_CONNECTION" value="redis" force="true"/>
+        <env name="BROADCAST_CONNECTION" value="null" force="true"/>
+        <env name="CACHE_STORE" value="array" force="true"/>
+        <env name="MAIL_MAILER" value="array" force="true"/>
+        <env name="SESSION_DRIVER" value="array" force="true"/>
+        <env name="TELESCOPE_ENABLED" value="false" force="true"/>
+        <env name="NIGHTWATCH_ENABLED" value="false" force="true"/>
+    </php>
+</phpunit>

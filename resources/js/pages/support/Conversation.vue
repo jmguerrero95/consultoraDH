@@ -160,10 +160,10 @@ async function loadMetadata() {
   try {
     const [queuesRes, staffRes] = await Promise.all([
       api.support.queues(),
-      api.get('/users', { query: { account_type: 'staff', status: 'active' } })
+      api.support.agents()
     ]);
     queues.value = queuesRes.data;
-    staffUsers.value = (staffRes.data as any).data.map((u: any) => ({ id: u.id, name: u.name }));
+    staffUsers.value = (staffRes as any).data.map((u: any) => ({ id: u.id, name: u.name }));
   } catch (e) {
     console.error('Error loading metadata:', e);
   }
@@ -380,18 +380,61 @@ function scrollToBottom() {
   }
 }
 
+/**
+ * Append a message that arrived over the socket, keeping the transcript in order.
+ *
+ * ## Why this exists rather than `messages.value.push(...)`
+ *
+ * Three things went wrong with a bare `push`:
+ *
+ * 1. **Duplicates.** The sender's own POST returns the message, and the broadcast then delivers
+ *    the same row to the same tab. Pushing both shows it twice. Messages are keyed by `id` and
+ *    an id already in the list means this is the same row we have.
+ * 2. **Order.** A broadcast can arrive while an older page of history is being appended, and a
+ *    new arrival pushed onto the end lands *after* messages that were loaded later. The list is
+ *    re-sorted by `created_at` so "most recent at the bottom" holds however the rows arrived.
+ * 3. **A 1970 date.** A row whose `created_at` failed to parse sorted to the epoch and jumped
+ *    to the top of the thread. An unparseable stamp is treated as "now" instead, so it can
+ *    never displace a real message.
+ */
+interface IncomingMessage {
+  id?: number | null;
+  created_at?: string | null;
+}
+
+function appendIncoming(message: IncomingMessage | null | undefined) {
+  if (!message || message.id === undefined || message.id === null) return;
+
+  if (messages.value.some((existing: IncomingMessage) => existing.id === message.id)) return;
+
+  messages.value = [...messages.value, message].sort((a: IncomingMessage, b: IncomingMessage) => {
+    const left = Date.parse(a?.created_at ?? '');
+    const right = Date.parse(b?.created_at ?? '');
+
+    // `NaN` means the timestamp is missing or malformed; sorting it as "now" keeps it in the
+    // conversation instead of throwing it to 1970, which is what an empty date rendered as.
+    const l = Number.isNaN(left) ? Date.now() : left;
+    const r = Number.isNaN(right) ? Date.now() : right;
+
+    return l - r;
+  });
+
+  scrollToBottom();
+}
+
 onMounted(() => {
   loadConversation();
   
   const conversationId = parseInt(route.params.id as string);
   
-  // Subscribe to realtime
+  // Subscribe to realtime.
+  //
+  // `useRealtime()` hands the page the **message object**, not the broadcast envelope — it has
+  // always done so. This handler used to unwrap `data.message` a second time, so even once the
+  // event was delivered the property it read was `undefined` and nothing was appended.
   const unsubscribe = realtime.subscribeToConversation(conversationId, {
-    onMessage: (data) => {
-      if (data.message) {
-        messages.value.push(data.message);
-        scrollToBottom();
-      }
+    onMessage: (message) => {
+      appendIncoming(message);
     },
     onReadUpdate: (_data) => {
       // Update unread counts
@@ -400,6 +443,25 @@ onMounted(() => {
       if (conversation.value) {
         conversation.value = { ...conversation.value, ...data.conversation };
       }
+    },
+  });
+
+  /*
+   * Internal notes travel on their own channel.
+   *
+   * `SupportMessageCreated::broadcastOn()` sends a note **only** to
+   * `support.staff.conversation.{id}`, never to `support.conversation.{id}`, so the client can
+   * never receive one — and that channel refused a client account in `channels.php` too. Two
+   * barriers, both kept.
+   *
+   * Nothing subscribed to it, though: `subscribeToStaffConversation` existed and had no caller,
+   * so an internal note posted by a colleague never appeared in another operator's open thread.
+   * This is that caller, and only staff reach it — a portal account is refused by the channel
+   * callback before the subscription is granted.
+   */
+  const unsubscribeStaff = realtime.subscribeToStaffConversation(conversationId, {
+    onNote: (message) => {
+      appendIncoming(message);
     },
   });
   
@@ -419,7 +481,10 @@ onMounted(() => {
   }, { deep: true });
   
   // Store cleanup function
-  (window as any).__unsubscribeRealtime = unsubscribe;
+  (window as any).__unsubscribeRealtime = () => {
+    unsubscribe();
+    unsubscribeStaff();
+  };
 });
 
 onUnmounted(() => {

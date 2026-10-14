@@ -374,7 +374,7 @@ final class ApplyImportPlan
                 ];
 
                 continue;
-            } catch (\RuntimeException $refusal) {
+            } catch (\RuntimeException | \DomainException $refusal) {
                 // A02's and A03's own invariants, reached through their actions.
                 //
                 // `DuplicateOpenRelationship` is a `RuntimeException`, and A04-R1 let it escape
@@ -383,6 +383,15 @@ final class ApplyImportPlan
                 // "server error" with no action name, no reason code and no way to learn which row
                 // was the problem; the batch's own summary said nothing, because the transaction
                 // rolled back before it could be written.
+                //
+                // `\DomainException` is caught here for the same reason and was missed for the
+                // same length of time. `ManageClientCompanies::link()` raises it when a parallel
+                // is authorised with nothing open to be parallel to — and every other writer in
+                // this class already caught it (`writeRelationshipClose()`, the affiliation
+                // writers), which is what makes the omission here an oversight rather than a
+                // decision. It is a sibling of `\RuntimeException`, not a subclass: PHP's two
+                // branches of `\Exception` do not meet, so catching only one of them leaves the
+                // other escaping.
                 //
                 // §12.3's answer to an action that cannot run is a *refusal*, and it has a reason
                 // code for exactly this. The domain's own message is what says which rule was

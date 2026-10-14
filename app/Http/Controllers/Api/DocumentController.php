@@ -18,6 +18,8 @@ use App\Models\ClientDocumentRequest;
 use App\Models\DocumentType;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class DocumentController extends Controller
@@ -47,23 +49,56 @@ final class DocumentController extends Controller
         ]);
     }
 
-    public function storeType(Request $request): JsonResponse
-    {
-        $data = $request->validate([
-            'name' => ['required', 'string', 'max:120'],
-            'slug' => ['required', 'string', 'max:120', 'unique:document_types,slug'],
-            'description' => ['nullable', 'string'],
-            'retention_days' => ['nullable', 'integer', 'min:1'],
-            'client_visible_default' => ['boolean'],
-            'active' => ['boolean'],
+    /**
+ * Create a document type.
+ *
+ * ## Why `slug` is derived rather than demanded
+ *
+ * The form asked for a `slug` next to the name, and the button was disabled until both were
+ * filled. A slug is a machine key, so making a person invent one is asking them for something
+ * they cannot know: `Cédula de Ciudadanía` becomes `cedula-de-ciudadania` or
+ * `cedula_ciudadania` or `c-c`, and whichever they guess becomes the permanent identifier in
+ * URLs and stored records. The screen looked broken instead of merely fussy.
+ *
+ * So the slug is derived from the name — accent-stripped, lowercased, non-alphanumerics to
+ * hyphens — and remains **overridable**: an administrator who needs a specific key still sends
+ * one. Derivation happens server-side so it does not depend on which client is asking, and
+ * `Str::slug()` with the `es` transliteration already exists in the project for exactly this.
+ *
+ * Uniqueness is still enforced, and a derived slug that collides is a 422 naming the field,
+ * rather than a silent suffix.
+ */
+public function storeType(Request $request): JsonResponse
+{
+    $data = $request->validate([
+        'name' => ['required', 'string', 'max:120'],
+        // No longer `required`: derived from the name when it is absent.
+        'slug' => ['nullable', 'string', 'max:120', 'unique:document_types,slug'],
+        'description' => ['nullable', 'string'],
+        'retention_days' => ['nullable', 'integer', 'min:1'],
+        'client_visible_default' => ['boolean'],
+        'active' => ['boolean'],
+    ]);
+
+    $data['slug'] = filled($data['slug'] ?? null)
+        ? $data['slug']
+        : Str::slug($data['name']);
+
+    // The derived value is not covered by the rule above, because the validator ran before it
+    // existed. Checking it here keeps the same 422 rather than surfacing a unique-constraint
+    // violation as a 500.
+    if (DocumentType::query()->where('slug', $data['slug'])->exists()) {
+        throw ValidationException::withMessages([
+            'slug' => 'Ese identificador ya existe. Escriba uno distinto o cambie el nombre.',
         ]);
-
-        $type = DocumentType::query()->create($data);
-
-        $this->audit->record(AuditAction::DocumentTypeCreated, $request->user(), ['name' => $type->name], null, $type);
-
-        return response()->json(['id' => (int) $type->id], 201);
     }
+
+    $type = DocumentType::query()->create($data);
+
+    $this->audit->record(AuditAction::DocumentTypeCreated, $request->user(), ['name' => $type->name], null, $type);
+
+    return response()->json(['id' => (int) $type->id, 'slug' => $type->slug], 201);
+}
 
     public function indexRequests(Request $request): JsonResponse
     {

@@ -82,11 +82,22 @@ return [
                     'scheme' => env('REVERB_SCHEME', 'http'),
                     'useTLS' => env('REVERB_SCHEME', 'https') === 'https',
                 ],
-                // Allowed origins should be specific, not wildcard
-                'allowed_origins' => [
-                    env('APP_URL', 'http://localhost:8080'),
-                    'http://localhost:5173',
-                ],
+                // Allowed origins should be specific, not wildcard.
+                //
+                // Reverb compares only the HOST of the browser's `Origin`
+                // header against this list, so these are host names and not
+                // URLs: an entry of `http://localhost:8080` never matches the
+                // origin `http://localhost:8080` and every connection is
+                // refused with "Origin not allowed".
+                //
+                // Locally the document is served from localhost:8080 and the
+                // Vite development server from localhost:5173. Both are the
+                // `localhost` host, so one entry covers them. Comma separated,
+                // to add a host without editing this file.
+                'allowed_origins' => array_values(array_filter(array_map(
+                    'trim',
+                    explode(',', env('REVERB_ALLOWED_ORIGIN_HOSTS', 'localhost')),
+                ))),
                 'ping_interval' => env('REVERB_APP_PING_INTERVAL', 60),
                 'activity_timeout' => env('REVERB_APP_ACTIVITY_TIMEOUT', 30),
                 'max_connections' => env('REVERB_APP_MAX_CONNECTIONS'),

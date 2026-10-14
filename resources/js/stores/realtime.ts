@@ -59,7 +59,11 @@ export const useRealtimeStore = defineStore('realtime', () => {
               forceTLS: import.meta.env.VITE_REVERB_SCHEME === 'https',
               disableStats: true,
               enabledTransports: ['ws', 'wss'],
-              authEndpoint: '/api/broadcasting/auth',
+              // The framework's own endpoint (registered by `channels:` in
+              // bootstrap/app.php). It lives under the `web` group, so it has the
+              // session and the CSRF protection that channel authorization
+              // depends on. It must not be replaced by a permissive stub.
+              authEndpoint: '/broadcasting/auth',
               auth: {
                 headers: {
                   'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',

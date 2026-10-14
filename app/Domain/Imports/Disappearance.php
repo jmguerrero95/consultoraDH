@@ -33,7 +33,29 @@ final readonly class Disappearance implements \JsonSerializable
         /** The last month the workbook covers, so the gap is visible. */
         public ?string $fileLastMonth,
         public array $sourceRowIds,
+        /**
+         * The retirement note the row carried, when it carried one.
+         *
+         * ## Why this is here
+         *
+         * An episode can stop appearing before the end of the file *and* carry a retirement note.
+         * Under `manual_only` that note yields no boundary — §8.2 forbids deriving one — so the
+         * relationship stays open and the reviewer still has to say when it ended.
+         *
+         * Before this was carried, the review screen told such a reviewer "sin retiro ni otra
+         * evidencia de cierre" ("no retirement or other evidence of closure") about a row that
+         * plainly had a retirement written in it. A question phrased with a false premise gets
+         * answered without reading it, which is worse than not asking.
+         */
+        public ?RetirementNote $retirement = null,
+        public ?ImportRetirementPolicy $policy = null,
     ) {}
+
+    /** Whether the source recorded a retirement this episode could not be dated from. */
+    public function hasUndatedRetirement(): bool
+    {
+        return $this->retirement !== null;
+    }
 
     /** How many months pass between the last sighting and the end of the file. */
     public function missingMonths(): int
@@ -58,12 +80,22 @@ final readonly class Disappearance implements \JsonSerializable
 
     public function message(): string
     {
-        return sprintf(
-            'La relación con %s aparece hasta %s y el archivo llega hasta %s, sin retiro ni otra evidencia de cierre.',
+        $where = sprintf(
+            'La relación con %s aparece hasta %s y el archivo llega hasta %s',
             $this->companyName ?? ('NIT '.$this->companyTaxId),
             $this->lastSeenMonth ?? '?',
             $this->fileLastMonth ?? '?',
         );
+
+        // Two different questions, and they must not be phrased the same way. See the
+        // constructor's note on `$retirement`.
+        if ($this->hasUndatedRetirement()) {
+            return $where
+                .'. El archivo anota un retiro, pero ninguna regla lo convierte en una fecha, '
+                .'así que hace falta decidir en qué día termina la relación.';
+        }
+
+        return $where.', sin retiro ni otra evidencia de cierre.';
     }
 
     /** @return array<string, mixed> */
@@ -76,6 +108,10 @@ final readonly class Disappearance implements \JsonSerializable
             'last_seen_month' => $this->lastSeenMonth,
             'file_last_month' => $this->fileLastMonth,
             'missing_months' => $this->missingMonths(),
+            'undated_retirement' => $this->hasUndatedRetirement(),
+            'retirement_summary' => $this->retirement === null || $this->policy === null
+                ? null
+                : $this->retirement->summary($this->policy),
             'source_row_ids' => $this->sourceRowIds,
         ];
     }

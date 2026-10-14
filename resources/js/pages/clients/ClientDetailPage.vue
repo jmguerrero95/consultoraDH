@@ -10,7 +10,7 @@ import AppFormField from '@/components/ui/AppFormField.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
 import AppModal from '@/components/ui/AppModal.vue';
 import { useDebouncedRef } from '@/composables/useDebouncedRef';
-import { pesos } from '@/composables/useFormatters';
+import { fecha, pesos } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
@@ -71,17 +71,20 @@ type TabId = (typeof TABS)[number]['id'];
 
 const tab = ref<TabId>('resumen');
 
-/** ISO dates as yyyy-mm-dd; anything else is shown as it was received. */
+/**
+ * A **calendar date**, for display.
+ *
+ * This was a local `new Date(value)` + `toLocaleDateString`, which is the trap
+ * `useFormatters.fecha()` exists to avoid: a bare `YYYY-MM-DD` is parsed at **UTC midnight**
+ * and then rendered in the browser's own zone, so in Colombia (UTC-05) a `started_on` of
+ * `2026-10-14` displayed as 13/10/2026 — on the screen that records when the employment began.
+ *
+ * The shared formatter reads the components as text and formats them as text, so no
+ * calendar-only value can be shifted by a day. A value that is not a date is returned
+ * unchanged, so a broken record stays visible as what it is.
+ */
 function formatDate(value: string | null): string {
-    if (value === null || value === '') {
-        return '—';
-    }
-
-    const parsed = new Date(value);
-
-    return Number.isNaN(parsed.getTime())
-        ? value
-        : parsed.toLocaleDateString('es-CO', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    return fecha(value);
 }
 
 function formatMoment(value: string): string {
@@ -119,6 +122,75 @@ function humanAction(action: string): string {
             'social_security_entity.deactivated': 'Entidad desactivada',
         }[action] ?? action
     );
+}
+
+/**
+ * The facts an audit entry carries about *which* record and *when*.
+ *
+ * §17.4 asks for a history a reviewer can act on, and "Afiliación registrada" is not one: it
+ * names neither the entity, the date, nor the person who did it, so every line reads the same
+ * and none of them says what changed.
+ *
+ * Everything here is read from fields the audit already writes — `metadata`, `subject` and
+ * `actor` — and nothing is inferred. A key that is absent is left out rather than filled in,
+ * so a line never claims something the record does not say. §17.4's "no inventar información
+ * ausente" is the whole constraint.
+ */
+/**
+ * One entry of the client's history, as the API sends it.
+ *
+ * Typed rather than `any` because the facts below are read by name: a typo in `ended_on` would
+ * be invisible to the compiler and would simply drop a column off the description.
+ */
+interface HistoryEntry {
+    action: string;
+    subject?: string | null;
+    at: string;
+    metadata?: Record<string, unknown> | null;
+    actor?: string | null;
+    actor_kind?: string | null;
+}
+
+function describeEntry(entry: HistoryEntry): string {
+    const metadata = (entry?.metadata ?? {}) as Record<string, unknown>;
+    const facts: string[] = [];
+
+    // The entity an affiliation is about, by its closed-set type rather than a number a
+    // reader would have to look up.
+    if (metadata.type) facts.push(String(metadata.type));
+
+    if (metadata.name) facts.push(String(metadata.name));
+
+    if (metadata.legal_name) facts.push(String(metadata.legal_name));
+
+    if (metadata.tax_id) facts.push(`NIT ${metadata.tax_id}`);
+
+    // Effective date first: "when this took effect" is the question a reader has of a dated
+    // record, and `started_on`/`effective_month` are where the audit states it.
+    const effective = metadata.effective_month ?? metadata.started_on ?? metadata.ended_on;
+
+    if (effective) facts.push(`desde ${String(effective).slice(0, 10)}`);
+
+    if (metadata.ended_on && metadata.started_on) {
+        facts.push(`hasta ${String(metadata.ended_on).slice(0, 10)}`);
+    }
+
+    if (metadata.arl_risk_class != null) facts.push(`riesgo ${metadata.arl_risk_class}`);
+
+    if (metadata.reason) facts.push(String(metadata.reason));
+
+    if (Array.isArray(metadata.changed_fields) && metadata.changed_fields.length > 0) {
+        facts.push(`campos: ${metadata.changed_fields.join(', ')}`);
+    }
+
+    return facts.join(' · ');
+}
+
+/** Who did it, or plainly that nobody did — a system job is a real answer, not a blank. */
+function describeActor(entry: HistoryEntry): string {
+    if (entry?.actor_kind === 'system' || !entry?.actor) return 'Sistema';
+
+    return String(entry.actor);
 }
 
 async function load(): Promise<void> {
@@ -584,7 +656,22 @@ async function loadFinancials(): Promise<void> {
     financialsError.value = null;
 
     try {
-        const payload = await businessApi.receivables.clientAccount(Number(id));
+        // `id.value`, not `Number(id)`.
+        //
+        // `Number(id)` coerces the *ComputedRef object* to a number: `valueOf()` on a ref
+        // yields NaN, so the request went to `GET /api/clients/NaN/account` and the Cuenta tab
+        // came up empty. The reactivity is kept — reading `.value` inside the function is what
+        // makes the tab reload when the route's id changes.
+        const clientId = id.value;
+
+        if (!Number.isFinite(clientId) || clientId <= 0) {
+            financials.value = null;
+            loadingFinancials.value = false;
+
+            return;
+        }
+
+        const payload = await businessApi.receivables.clientAccount(clientId);
 
         if (current !== financialsRequest) {
             return;
@@ -826,18 +913,22 @@ Editar
                             </li>
                         </ul>
                     </div>
+
+                    <!--
+                        A05-R1 §3: proposals the client made about their own data. It lives
+                        in Resumen because a proposal is about one client, and a separate
+                        screen would make a reviewer open two pages to answer one question.
+
+                        Inside this panel rather than after it: it used to sit outside every
+                        tab, so the same list rendered under Cuenta, Empresas, Afiliaciones
+                        and Historial at once, and switching tabs appeared to change nothing.
+                    -->
+                    <ClientUpdateRequestsPanel
+                        v-if="payload.client"
+                        :client-id="payload.client.id"
+                    />
                 </article>
             </div>
-
-            <!--
-                A05-R1 §3: proposals the client made about their own data. It lives here
-                because a proposal is about one client, and a separate screen would make a
-                reviewer open two pages to answer one question.
-            -->
-            <ClientUpdateRequestsPanel
-                v-if="payload.client"
-                :client-id="payload.client.id"
-            />
 
             <!--
                 Cuenta: what this client owes. A summary rather than the whole
@@ -1211,7 +1302,17 @@ Editar
                                 <span v-if="entry.subject" class="cdh-badge cdh-badge--neutral">
                                     {{ entry.subject }}
                                 </span>
+                                <!--
+                                    The facts behind the verb. Absent rather than guessed: a
+                                    line with no detail keeps its original appearance, so
+                                    nothing looks padded out.
+                                -->
+                                <span
+                                    v-if="describeEntry(entry)"
+                                    class="cdh-timeline__detail"
+                                >{{ describeEntry(entry) }}</span>
                                 <span class="cdh-timeline__meta">{{ formatMoment(entry.at) }}</span>
+                                <span class="cdh-timeline__actor">por {{ describeActor(entry) }}</span>
                             </li>
                         </ul>
                     </div>

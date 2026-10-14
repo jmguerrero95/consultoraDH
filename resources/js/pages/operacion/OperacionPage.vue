@@ -5,6 +5,7 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
+import ClientPicker from '@/components/clients/ClientPicker.vue';
 import { fecha } from '@/composables/useFormatters';
 import { useAuthStore } from '@/stores/auth';
 import { a05 } from '@/services/a05';
@@ -32,6 +33,23 @@ const tasks = ref<OperationalTask[]>([]);
 const eventos = ref<CalendarEvent[]>([]);
 const categorias = ref<VocabularyOption[]>([]);
 const prioridades = ref<VocabularyOption[]>([]);
+
+/** Active staff a task may be assigned to. Names, not ids — an id is not an answer. */
+const responsables = ref<{ id: number; name: string }[]>([]);
+
+/**
+ * "Now", in the `YYYY-MM-DDTHH:mm` shape a `datetime-local` input compares against.
+ *
+ * Built from local components rather than `toISOString()`, which is UTC: in Colombia (UTC-05)
+ * that is five hours ahead, so the control would refuse a reminder for the next two hours.
+ */
+function ahoraLocal(): string {
+    const now = new Date();
+    const pad = (value: number): string => String(value).padStart(2, '0');
+
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+        + `T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
 
 const cargando = ref(true);
 const errorMessage = ref<string | null>(null);
@@ -98,6 +116,15 @@ onMounted(async () => {
 
         categorias.value = vocabNovedades.categories;
         prioridades.value = vocabTareas.priorities;
+
+        // The assignee list replaces a number field that asked for `Responsable (id)`.
+        responsables.value = vocabTareas.assignees ?? [];
+
+        // §E.2: propose the signed-in operator as the initial responsible party. Only a
+        // default — the assignment rules are unchanged and anybody may be chosen.
+        if (nuevaTarea.value.assigned_to === '' && vocabTareas.current_user_id) {
+            nuevaTarea.value.assigned_to = vocabTareas.current_user_id;
+        }
     } catch {
         errorMessage.value = 'No se pudo cargar el vocabulario.';
     }
@@ -238,12 +265,10 @@ function moverMes(delta: number): void {
                         </div>
                         <div class="card-body d-grid gap-2">
                             <div>
-                                <label class="form-label" for="cliente-novedad">Cliente (id)</label>
-                                <input
+                                <ClientPicker
                                     id="cliente-novedad"
                                     v-model="nuevaNovedad.client_id"
-                                    type="number"
-                                    class="form-control"
+                                    label="Cliente"
                                 />
                             </div>
                             <div>
@@ -349,12 +374,11 @@ function moverMes(delta: number): void {
                         </div>
                         <div class="card-body d-grid gap-2">
                             <div>
-                                <label class="form-label" for="cliente-tarea">Cliente (id, opcional)</label>
-                                <input
+                                <ClientPicker
                                     id="cliente-tarea"
                                     v-model="nuevaTarea.client_id"
-                                    type="number"
-                                    class="form-control"
+                                    label="Cliente (opcional)"
+                                    optional
                                 />
                             </div>
                             <div>
@@ -371,13 +395,13 @@ function moverMes(delta: number): void {
                                 />
                             </div>
                             <div>
-                                <label class="form-label" for="responsable">Responsable (id)</label>
-                                <input
-                                    id="responsable"
-                                    v-model="nuevaTarea.assigned_to"
-                                    type="number"
-                                    class="form-control"
-                                />
+                                <label class="form-label" for="responsable">Responsable</label>
+                                <select id="responsable" v-model="nuevaTarea.assigned_to" class="form-select">
+                                    <option value="">Seleccione…</option>
+                                    <option v-for="u in responsables" :key="u.id" :value="u.id">
+                                        {{ u.name }}
+                                    </option>
+                                </select>
                             </div>
                             <div class="row g-2">
                                 <div class="col-6">
@@ -400,10 +424,21 @@ function moverMes(delta: number): void {
                             </div>
                             <div>
                                 <label class="form-label" for="recordatorio">Recordatorio</label>
+                                <!--
+                                    `min` is the browser's own picker, set to now.
+
+                                    The field starts empty, so the form does not create a
+                                    reminder by opening it. What it did allow was picking a date
+                                    that had already passed, which produces a reminder that can
+                                    never fire. The rule is a guard on the control rather than a
+                                    new validation: the backend still decides, and an operator
+                                    who genuinely means an earlier timestamp can still type one.
+                                -->
                                 <input
                                     id="recordatorio"
                                     v-model="nuevaTarea.reminder_at"
                                     type="datetime-local"
+                                    :min="ahoraLocal()"
                                     class="form-control"
                                 />
                             </div>

@@ -1005,6 +1005,18 @@ export const api: ApiClient = {
             return request('POST', `/api/support/conversations/${conversationId}/notes`, { body: payload });
         },
 
+        /**
+         * Active staff, for the assignment dropdown.
+         *
+         * Both support screens used to call `api.get('/users', …)`. No such route exists, the
+         * SPA catch-all answered it with `index.html`, and the browser reported
+         * `Unexpected token '<' … is not valid JSON`. This is the endpoint that answers the
+         * question they were actually asking.
+         */
+        agents(): Promise<{ data: { id: number; name: string; email: string }[] }> {
+            return request('GET', '/api/support/agents');
+        },
+
         uploadAttachment(conversationId: number, file: File): Promise<{ data: any }> {
             const formData = new FormData();
             formData.append('file', file);

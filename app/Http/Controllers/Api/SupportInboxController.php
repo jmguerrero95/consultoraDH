@@ -76,7 +76,22 @@ class SupportInboxController extends Controller
             });
         }
 
-        $conversations = $query->orderByDesc('last_message_at')
+        /*
+         * Most recent activity first — and a conversation with no messages goes to the
+         * **bottom**, not the top.
+         *
+         * PostgreSQL sorts NULLs first under `DESC` (and last under `ASC`), which is the
+         * opposite of what an inbox wants: three conversations that had never been answered
+         * outranked the one with a message from a minute ago. `NULLS LAST` states the intent
+         * that the default was hiding.
+         *
+         * The tie-break on `id` is not cosmetic. Two conversations can share a
+         * `last_message_at` to the microsecond, and without a deterministic second key
+         * PostgreSQL is free to return them in a different order on every page load, so
+         * paging through the inbox could show the same row twice and skip another.
+         */
+        $conversations = $query->orderByRaw('last_message_at DESC NULLS LAST')
+            ->orderByDesc('id')
             ->paginate($request->integer('per_page', 25));
 
         return response()->json($conversations);

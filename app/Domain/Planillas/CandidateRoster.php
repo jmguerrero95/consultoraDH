@@ -149,7 +149,21 @@ final class CandidateRoster
                 $candidate->relationshipEndedOn ?? '-',
                 (string) ($candidate->evidence['assignment_updated_at'] ?? ''),
                 implode(',', array_map(
-                    static fn (array $a): string => $a['id'].':'.$a['type'],
+                    // `ClientAffiliation::$type` is cast to `SocialSecurityEntityType`, and an
+                    // enum has no string conversion: `POST /api/planillas/preview` answered 500
+                    // with "Object of class App\Domain\Affiliations\SocialSecurityEntityType could
+                    // not be converted to string" the first time a candidate had an affiliation.
+                    //
+                    // `->value` is the right serialisation rather than `->name`: it is the same
+                    // `EPS` / `AFP` / `ARL` / `CCF` the column stores and the CHECK constraint
+                    // allows, so the digest keeps describing the same fact it described before
+                    // the cast. `->name` would spell them `Eps`, `Afp`, … and silently change
+                    // every stored digest.
+                    //
+                    // The `is_object` branch keeps this working for evidence handed in by a
+                    // caller that has not been through the cast — a string stays a string, so
+                    // the digest is unchanged either way.
+                    static fn (array $a): string => $a['id'].':'.(is_object($a['type']) ? $a['type']->value : $a['type']),
                     $candidate->evidence['affiliation_ids'] ?? [],
                 )),
             ]);
