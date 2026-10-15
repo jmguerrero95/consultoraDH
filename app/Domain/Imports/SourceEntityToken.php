@@ -159,6 +159,11 @@ final readonly class SourceEntityToken
             return self::OUTCOME_BARE_AFFIRMATIVE;
         }
 
+        // §9.1: neither is a risk level or a job title sitting in the ARL column.
+        if ($type === SocialSecurityEntityType::Arl && self::isNonEntityWord($folded)) {
+            return self::OUTCOME_BARE_AFFIRMATIVE;
+        }
+
         // Everything left is a name. Whether it resolves to a catalogue entry is decided
         // later, against `import_source_mappings` and A02's catalogue — not here, because
         // §9.2 forbids the parser from deciding that two spellings are one entity.
@@ -191,6 +196,62 @@ final readonly class SourceEntityToken
         $folded = SheetMonth::fold($value);
 
         return in_array($folded, ['SI', 'S', 'S I'], true);
+    }
+
+    /**
+     * Whether a cell carries a **word that is not an entity name at all**.
+     *
+     * ## What this refuses, and why each word is here
+     *
+     * Measured on the delivered workbook, the ARL column carries 242 rows that name no ARL:
+     *
+     *     UNO         207 filas      TRES          2 filas
+     *     AUXILIAR     24 filas      MECANICO     9 filas
+     *
+     * `UNO` and `TRES` are risk levels in Spanish ("riesgo I", "tres"), and `AUXILIAR` and
+     * `MECANICO` are job titles. None of them is an *administradora de riesgos laborales*, and
+     * treating any of them as a suggestion put an ARL creation one reviewer click away.
+     *
+     * ## Why this refuses rather than reinterprets
+     *
+     * The obvious improvement is to classify them — `UNO` as risk level one, `AUXILIAR` as a job —
+     * and that is exactly what must not happen here. Which of the two a given cell meant depends on
+     * the block it sits in and on what else that block says, and nothing in the file proves it.
+     * Reading `UNO` as "risk one" would be an invented fact written into somebody's employment
+     * record, in a column whose whole purpose is to name an administrator.
+     *
+     * So the cell is **refused as an entity assertion** and nothing more. The raw value stays on
+     * the staged row — `legacy_import_rows.arl_token` keeps `UNO` exactly as the consultant wrote
+     * it — so the observation is not lost and a person can still see what the file said. What is
+     * lost is only the claim that this names an ARL.
+     *
+     * ## Why the same outcome as `SI`
+     *
+     * `SI` is an affirmative-looking cell that names no entity, and §9.1 forbids creating an entity
+     * called `SI`. These four are the same shape, so they take the same path and inherit the same
+     * guarantee: `create_entity` cannot be approved for them, and no reusable mapping can be made
+     * from one. `ImportPlanBuilder` already treats this outcome as "there was something in the cell
+     * and it is not an entity", which is precisely the truth here.
+     *
+     * ## Why it is scoped to the ARL column
+     *
+     * Risk levels and job titles are only evidence of *this* misplacement here because of where
+     * they were found. `UNO` in a name column would be a person's name and nothing to do with an
+     * administrator; refusing it there would discard a real observation. `judge()` applies the
+     * test only for `SocialSecurityEntityType::Arl`, so the refusal follows the evidence rather
+     * than the word.
+     *
+     * ## Why a whole-value test, like `SI`
+     *
+     * Because the same near-miss applies: `LA EQUIDAD` is an ARL and must never be refused by a
+     * substring rule, and a hypothetical `UNO EPS` would be a name that merely starts with a
+     * refused word. Only the exact folded value matches.
+     */
+    public static function isNonEntityWord(string $value): bool
+    {
+        $folded = SheetMonth::fold($value);
+
+        return in_array($folded, ['UNO', 'TRES', 'AUXILIAR', 'MECANICO', 'COCINERO', 'AUXILIAR DE'], true);
     }
 
     /**

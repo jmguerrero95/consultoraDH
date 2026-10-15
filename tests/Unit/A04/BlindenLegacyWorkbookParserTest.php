@@ -7,6 +7,7 @@ use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\ParsedWorkbook;
 use App\Domain\Imports\SensitiveSourceRedactor;
+use App\Domain\Imports\SourceEntityToken;
 use Tests\Support\SyntheticWorkbook;
 
 beforeEach(function () {
@@ -267,6 +268,132 @@ it('does not turn a negated token or a bare SI into an affiliation', function ()
     expect($row->entities['AFP']->problem)->toBe('bare_affirmative');
     expect($row->entities['EPS']->isNegative())->toBeTrue();
     expect($row->entities['CCF']->isNegative())->toBeTrue();
+    expect(codesOf($parsed))->toContain(LegacyImportIssue::AffiliationEntityUnknown);
+});
+
+/**
+ * §9.1's second half, for the words the delivered workbook actually carries.
+ *
+ * ## The measured fact
+ *
+ * The ARL column of the delivered file holds 242 rows naming no administrator:
+ *
+ *     UNO 207 · AUXILIAR 24 · MECANICO 9 · TRES 2
+ *
+ * `UNO` and `TRES` are risk levels and `AUXILIAR` and `MECANICO` are job titles. §9.1's rule for
+ * a bare `SI` is that it is never an entity name and that no entity called `SI` may ever be
+ * created — and that is the same shape these four are in.
+ *
+ * These tests pin both halves of that guarantee: the cell is not an affiliation, **and** the value
+ * cannot become a catalogue entity by being approved.
+ */
+it('refuses a risk level or a job title read from the ARL column as an entity', function () {
+    foreach (['UNO', 'TRES', 'AUXILIAR', 'MECANICO'] as $word) {
+        $parsed = parseSynthetic(
+            (new SyntheticWorkbook)->sheetWithBlocks('JULIO 2026', [[
+                'title' => 'ANDINA S.A.S. NIT 900123456-3',
+                'header' => ['P' => 'ARL'],
+                'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'P' => $word])],
+            ]]),
+        );
+
+        $row = $parsed->rows()[0];
+
+        expect($row->entities['ARL']->problem)
+            ->toBe(SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE, "«{$word}» no es una ARL");
+        expect($row->entities['ARL']->raw)->toBe($word, 'el valor original se conserva intacto');
+        expect($row->entities['ARL']->isUsable())->toBeFalse();
+
+        // And it is never offered as something to map.
+        expect(SourceEntityToken::isNonEntityWord($word))->toBeTrue();
+        expect(SourceEntityToken::isBareAffirmativeEntityToken($word))->toBeFalse();
+    }
+});
+
+it('refuses the non-entity words however they are written, but only the whole value', function () {
+    // Folding — case and accents — cannot smuggle one past the guard. `SÍ` and `SÍ` fold the same
+    // way `isBareAffirmativeEntityToken()` relies on.
+    foreach (['uno', 'Uno', 'UNO', 'auxiliar', 'AUXILIAR', 'mecánico', 'MECANICO', 'Tres'] as $spelling) {
+        expect(SourceEntityToken::isNonEntityWord($spelling))->toBeTrue();
+    }
+
+    // A real ARL, and names that merely start with a refused word, must be untouched. A substring
+    // rule would refuse all of these and discard real observations.
+    foreach (['LA EQUIDAD', 'POSITIVA', 'UNIDAD', 'TRESHER', 'AUXILIADORA', 'MECANICA', 'UNO EPS'] as $real) {
+        expect(SourceEntityToken::isNonEntityWord($real))->toBeFalse();
+    }
+
+    // Spaced letters are deliberately **not** folded into the word. `A U N O` is a different
+    // token, and guessing that it was meant as `UNO` is exactly the fuzzy merge §9.2 forbids — so
+    // it stays a suggestion a person confirms.
+    expect(SourceEntityToken::isNonEntityWord('A U N O'))->toBeFalse();
+
+    // A real ARL in the ARL column is untouched: never refused, whatever the catalogue holds.
+    $parsed = parseSynthetic(
+        (new SyntheticWorkbook)->sheetWithBlocks('JULIO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'header' => ['P' => 'ARL'],
+            'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'P' => 'LA EQUIDAD'])],
+        ]]),
+    );
+
+    $arl = $parsed->rows()[0]->entities['ARL'];
+
+    expect($arl->problem)->not->toBe(SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE);
+    expect($arl->raw)->toBe('LA EQUIDAD');
+});
+
+it('does not refuse the same word where it is not evidence of a misplacement', function () {
+    // The refusal is scoped to the ARL column, because that is where a risk level was found. In
+    // an entity-name column `UNO` is a name and nothing about it suggests an administrator — so it
+    // stays a suggestion for a person to confirm, which is §9.2's ordinary path.
+    $parsed = parseSynthetic(
+        (new SyntheticWorkbook)->sheetWithBlocks('JULIO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow([
+                'H' => '10101010',
+                'J' => 'UNO',
+                'N' => 'UNO',
+                'O' => 'UNO',
+                'M' => 'UNO',
+            ])],
+        ]]),
+    );
+
+    $row = $parsed->rows()[0];
+
+    foreach (['EPS', 'AFP', 'CCF'] as $type) {
+        expect($row->entities[$type]->problem)
+            ->toBe('suggestion', "«UNO» en {$type} sigue siendo un nombre por confirmar");
+        expect($row->entities[$type]->problem)
+            ->not->toBe(SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE);
+    }
+});
+
+it('keeps a valid ARL in the same block when a row beside it carries only a job title', function () {
+    // §9.1's evidence rules decide the block. Refusing one cell must not erase the administrator
+    // the block actually names — the 242 refused rows sit in blocks that also name a real ARL.
+    $block = ['title' => 'ANDINA S.A.S. NIT 900123456-3', 'header' => ['P' => 'ARL'], 'people' => [
+        SyntheticWorkbook::personRow(['H' => '10101010', 'P' => 'LA EQUIDAD']),
+        SyntheticWorkbook::personRow(['H' => '20202020', 'P' => 'UNO']),
+    ]];
+
+    $parsed = parseSynthetic((new SyntheticWorkbook)->sheetWithBlocks('JULIO 2026', [$block]));
+
+    $rows = $parsed->rows();
+
+    // The administrator the block names is untouched: it is not refused, it is the ordinary
+    // §9.2 suggestion (or already resolved, if the catalogue knows it).
+    expect($rows[0]->entities['ARL']->problem)
+        ->not->toBe(SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE);
+    expect($rows[0]->entities['ARL']->raw)->toBe('LA EQUIDAD');
+
+    // The job title beside it is refused, in the same block, without disturbing the first.
+    expect($rows[1]->entities['ARL']->problem)
+        ->toBe(SourceEntityToken::OUTCOME_BARE_AFFIRMATIVE);
+    expect($rows[1]->entities['ARL']->raw)->toBe('UNO');
+
+    // The refused row is still reported: something was written and it is not an entity.
     expect(codesOf($parsed))->toContain(LegacyImportIssue::AffiliationEntityUnknown);
 });
 
