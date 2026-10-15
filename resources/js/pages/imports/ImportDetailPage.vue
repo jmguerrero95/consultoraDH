@@ -823,6 +823,59 @@ async function cancelImport(): Promise<void> {
 const summary = computed(() => detail.value?.summary ?? {});
 
 /**
+ * FIX-IMPORT-REVIEW: the counts Summary shows, read from the same source as the Incidencias tab.
+ *
+ * ## The contradiction this removes
+ *
+ * Summary used to print `summary.blocking_issues` and `summary.warning_issues`. Those come from
+ * `ParsedWorkbook::fingerprint()`, which is computed while the workbook is being parsed — **before
+ * the plan exists**. They are not "how many findings this batch has"; they are "how many the parser
+ * emitted on its first pass, and never revised afterwards".
+ *
+ * On the delivered workbook the two tabs therefore contradicted each other and both were right
+ * about different things:
+ *
+ *     Resumen      3 bloqueos, 172 advertencias     ← parse-time, frozen at upload
+ *     Incidencias  16 bloqueantes, 63 opcionales, 154 informativas  ← post-plan, live
+ *
+ * A reviewer who read both had no way to tell which one governed Apply, and the one labelled
+ * "Bloqueos" was the one that did not. `applicable` and the Apply button are computed from the
+ * post-plan counts, so Summary was reporting a number the screen's own button contradicted.
+ *
+ * ## What these now read
+ *
+ * `blockingGroups` / `optionalGroups` are the same computed properties the Incidencias tab renders,
+ * filtered to findings that are still open. `informationalGroups` is everything with no settling
+ * decision — kept and counted, because hiding them is what makes a clean import look like a broken
+ * one, but never presented as work to do.
+ *
+ * `openOf()` and not `total`: a finding somebody already answered is not something outstanding.
+ * Counting totals would put 233 next to 16 and make the second look like a rounding error.
+ *
+ * The parser's own figures are still on `summary` and still worth reading — they describe what the
+ * file looked like before any history was reconstructed. They are kept, under their own labels, as
+ * the record of the parse rather than as the state of the batch.
+ */
+const summaryCounts = computed(() => ({
+    blocking: openOf(blockingGroups.value),
+    optional: openOf(optionalGroups.value),
+    informational: openOf(informationalGroups.value),
+    total: detail.value?.issues.total ?? 0,
+}));
+
+/**
+ * Findings the parse emitted that the plan has since withdrawn, answered or replaced.
+ *
+ * Shown so the two sets reconcile instead of merely contradicting: `total` is every finding this
+ * batch has ever recorded, while the three above are what is still outstanding. On the delivered
+ * workbook those differ a lot, and the difference is the history of the reconstruction, not a bug.
+ */
+const settledCount = computed(() =>
+    Math.max(0, summaryCounts.value.total - summaryCounts.value.blocking
+        - summaryCounts.value.optional - summaryCounts.value.informational),
+);
+
+/**
  * How a finding stands, in one word. A04-R2.
  *
  * Three states, because two of them used to look alike: answered by a person, withdrawn because
@@ -1026,19 +1079,80 @@ const hint = useContextualSuggestion('imports.show', () => detail.value?.id ?? n
                         <span class="cdh-stat__value">{{ summary.company_names ?? '—' }}</span>
                         <span class="cdh-stat__label">Empresas detectadas</span>
                     </div>
-                    <div class="cdh-stat">
-                        <span class="cdh-stat__value">{{ summary.blocking_issues ?? 0 }}</span>
-                        <span class="cdh-stat__label">Bloqueos</span>
+                </div>
+
+                <!--
+                    FIX-IMPORT-REVIEW: what is still outstanding, in the three buckets the
+                    Incidencias tab uses and computed from the same grouped findings.
+
+                    These replace `summary.blocking_issues` / `summary.warning_issues`, which are
+                    parse-time aggregates frozen at upload. See `summaryCounts` for the full
+                    account; the short version is that the number next to "Bloquean la importación"
+                    used to be the one figure on this screen that the Apply button did not obey.
+                -->
+                <div class="cdh-stat-grid mb-4">
+                    <div class="cdh-stat" :class="{ 'cdh-stat--blocking': summaryCounts.blocking > 0 }">
+                        <span class="cdh-stat__value">{{ summaryCounts.blocking }}</span>
+                        <span class="cdh-stat__label">Bloquean la importación</span>
                     </div>
                     <div class="cdh-stat">
-                        <span class="cdh-stat__value">{{ summary.warning_issues ?? 0 }}</span>
-                        <span class="cdh-stat__label">Advertencias</span>
+                        <span class="cdh-stat__value">{{ summaryCounts.optional }}</span>
+                        <span class="cdh-stat__label">Opcionales — puede continuar sin responderlas</span>
                     </div>
                     <div class="cdh-stat">
-                        <span class="cdh-stat__value">{{ summary.credential_like_cells ?? 0 }}</span>
-                        <span class="cdh-stat__label">Celdas con contraseñas</span>
+                        <span class="cdh-stat__value">{{ summaryCounts.informational }}</span>
+                        <span class="cdh-stat__label">Informativas</span>
+                    </div>
+                    <div class="cdh-stat">
+                        <span class="cdh-stat__value">{{ summaryCounts.total }}</span>
+                        <span class="cdh-stat__label">Incidencias registradas en total</span>
                     </div>
                 </div>
+
+                <!--
+                    The reconciliation, so the four numbers above can be checked against each
+                    other. `settledCount` is findings already answered, superseded or replaced by
+                    the reconstruction — the difference between everything ever recorded and what
+                    is still outstanding.
+                -->
+                <p
+                    v-if="settledCount > 0"
+                    class="cdh-text-muted d-block mb-4"
+                >
+                    {{ settledCount }} de {{ summaryCounts.total }} incidencias ya están respondidas o
+                    fueron retiradas al reconstruir el historial. Los contadores de arriba son sólo lo
+                    que queda pendiente.
+                </p>
+
+                <!--
+                    The parse's own aggregates, kept because they describe something the live
+                    counters do not: what the workbook looked like before any history was
+                    reconstructed. Labelled as historical so they are never read as the batch's
+                    current state — which is exactly the confusion they caused when they sat here
+                    unlabeled next to the buttons.
+                -->
+                <details class="cdh-text-muted d-block mb-4">
+                    <summary>Métricas del análisis inicial del archivo</summary>
+                    <dl class="cdh-stat-grid mt-2">
+                        <div class="cdh-stat">
+                            <dt class="cdh-stat__label">Bloqueos en el análisis inicial</dt>
+                            <dd class="cdh-stat__value">{{ summary.blocking_issues ?? 0 }}</dd>
+                        </div>
+                        <div class="cdh-stat">
+                            <dt class="cdh-stat__label">Advertencias en el análisis inicial</dt>
+                            <dd class="cdh-stat__value">{{ summary.warning_issues ?? 0 }}</dd>
+                        </div>
+                        <div class="cdh-stat">
+                            <dt class="cdh-stat__label">Celdas con contraseñas</dt>
+                            <dd class="cdh-stat__value">{{ summary.credential_like_cells ?? 0 }}</dd>
+                        </div>
+                    </dl>
+                    <p>
+                        Son las cifras del primer análisis, antes de reconstruir el historial. Se
+                        conservan como registro de lo que contenía el archivo; no son el estado del
+                        lote.
+                    </p>
+                </details>
 
                 <!--
                     §8.2's batch rule. It is a decision about this import, so it lives on the

@@ -1330,6 +1330,21 @@ pre {
     color: var(--cdh-text-muted);
 }
 
+/*
+ * FIX-IMPORT-REVIEW: the one figure on the review screen that changes whether a batch can be
+ * applied gets the attention colour, so it cannot be read as one more statistic among nine.
+ * Scoped to the stat block so it follows whatever `--cdh-` danger tokens the theme defines.
+ */
+.cdh-stat--blocking {
+    border-color: var(--cdh-danger, var(--cdh-border));
+    box-shadow: 0 0 0 1px var(--cdh-danger, var(--cdh-border));
+}
+
+.cdh-stat--blocking .cdh-stat__value,
+.cdh-stat--blocking .cdh-stat__label {
+    color: var(--cdh-danger);
+}
+
 /* --- Topbar page context ---------------------------------------------------- */
 .cdh-topbar__title {
     margin-left: var(--cdh-space-2);

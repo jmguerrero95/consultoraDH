@@ -744,6 +744,103 @@ describe('ImportDetailPage', () => {
             ],
         );
 
+    /**
+     * FIX-IMPORT-REVIEW: Summary, Incidencias and the Apply button must agree.
+     *
+     * ## The failure this pins
+     *
+     * Summary used to print `summary.blocking_issues` and `summary.warning_issues`, which
+     * `ParsedWorkbook::fingerprint()` computes **while parsing** — before the plan exists, and
+     * never revised. On the delivered workbook the two tabs disagreed and both were describing
+     * different things:
+     *
+     *     Resumen      3 bloqueos, 172 advertencias
+     *     Incidencias  16 bloqueantes, 63 opcionales, 154 informativas
+     *
+     * Apply is governed by the second set. So the figure labelled "Bloqueos" was the one number
+     * on the screen that the screen's own button did not obey, and a reviewer comparing the two
+     * tabs had no way to tell which one was real.
+     *
+     * The fixture below is those exact numbers, so the test fails if either side drifts back to
+     * the parse-time aggregate.
+     */
+    it('reports the outstanding findings in Summary, not the parse-time aggregates', async () => {
+        const wrapper = await mountDetail(
+            REAL_WORLD(),
+            ['imports.view', 'imports.apply'],
+        );
+
+        await flushPromises();
+
+        // The three buckets the Incidencias tab renders, read from the same grouped findings.
+        //
+        // The *second* grid: the first is the file's own metrics (sheets, rows, identities),
+        // which are about the workbook rather than about outstanding work.
+        const summary = wrapper.findAll('.cdh-stat-grid')[1] ?? wrapper.find('.cdh-stat-grid');
+
+        expect(summary.text()).toContain('Bloquean la importación');
+        expect(summary.text()).toContain('Opcionales');
+        expect(summary.text()).toContain('Informativas');
+
+        // 2 company identity + 1 duplicate, both blocking and resolvable.
+        // 36 affiliation mappings + 2 dates = 38 answerable but skippable.
+        // 77 + 56 + 20 + 1 = 154 with no settling decision.
+        expect(summary.text()).toContain('3');
+        expect(summary.text()).toContain('38');
+        expect(summary.text()).toContain('154');
+
+        // The parse-time figures must not be presented as the batch's state. They are still
+        // available, because they describe the file as first read — but only under a heading
+        // that says so.
+        expect(wrapper.text()).toContain('Métricas del análisis inicial del archivo');
+    });
+
+    it('keeps the parse-time aggregates out of the figures Apply obeys', async () => {
+        const wrapper = await mountDetail(
+            {
+                ...REAL_WORLD(),
+                '/api/imports/1': () =>
+                    json({
+                        data: detail({
+                            applicable: false,
+                            // The delivered workbook's `issues.total`, and the live blocker count
+                            // the server computes from `blocking AND resolved_at IS NULL`.
+                            issues: { total: 233, blocking: 16 },
+                            // `ParsedWorkbook::fingerprint()` on the same file: 3 parse-time
+                            // blockers and 172 parse-time warnings. The whole contradiction, and
+                            // the two sets have nothing in common — which is the point.
+                            summary: { blocking_issues: 3, warning_issues: 172, rows: 2559 },
+                        }),
+                    }),
+            },
+            ['imports.view', 'imports.apply'],
+        );
+
+        await flushPromises();
+
+        const button = wrapper.findAll('button').find((element) => element.text() === 'Aplicar plan');
+
+        // Apply is disabled, because the server says this batch has 16 open blockers.
+        expect(button?.attributes('disabled')).toBeDefined();
+
+        // Summary must not be reporting the parse's 3, nor the raw total of 233. It reports the
+        // three buckets from the grouped findings: 3 answerable blockers, 38 skippable
+        // questions, 154 informational.
+        const summary = wrapper.findAll('.cdh-stat-grid')[1] ?? wrapper.find('.cdh-stat-grid');
+        const text = summary.text();
+
+        expect(text).toContain('Bloquean la importación');
+        expect(text).toContain('3');
+        expect(text).toContain('38');
+        expect(text).toContain('154');
+
+        // 233 is the *total recorded*, shown in its own bucket — never as "what is blocking you".
+        expect(text).toContain('233');
+
+        // The reconciliation sentence, so the four numbers can be checked against each other.
+        expect(wrapper.text()).toContain('ya están respondidas o fueron retiradas');
+    });
+
     it('splits the findings into blockers, optional observations and informational', async () => {
         const wrapper = await mountDetail(REAL_WORLD(), REVIEWER);
 
