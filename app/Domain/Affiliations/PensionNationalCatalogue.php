@@ -54,6 +54,41 @@ final class PensionNationalCatalogue
      *
      * @var array<string, string>
      */
+    /** When somebody read the sources. Distinct from anything a source says about itself. */
+    public const VERIFIED_ON = '2026-10-15';
+
+    public const SUBTYPE_PRIVATE_AFP = 'afp_privada';
+
+    public const SUBTYPE_PUBLIC_RPM = 'administradora_publica_rpm';
+
+    public const SUBTYPE_ACCAI = 'accai';
+
+    /** The SIMEV entity registry. The individual detail page answered HTTP 200. */
+    public const SFC_DETAIL_PROTECCION = 'https://www.superfinanciera.gov.co/Superfinanciera-Simev/faces/generic/FinancialInstitutionSimev.xhtml?id=8783';
+
+    /** The indexed registry page. Answers HTTP 403 to a plain fetch; its data was read from the index. */
+    public const SFC_REGISTRY = 'https://www.superfinanciera.gov.co/SIMEV2/rnamv/resultadobusqueda';
+
+    /** Colpensiones' own notice, which publishes the legal name and the NIT. Answers HTTP 200. */
+    public const COLPENSIONES_SOURCE = 'https://www.colpensiones.gov.co/publicaciones/661/aviso-de-privacidad/';
+
+    /**
+     * What "verified status" means for each record, and what it does **not** mean.
+     *
+     * The SIMEV record for Protección carries `Estado RNVEI: Activa-Vigente (VIG)` and
+     * `Calidad Inscrito: EMISOR E INTERMEDIARIO DEL MERCADO DE VALORES`. Both are real and both are
+     * about the **securities market**: registration as an issuer is not a pension authorisation, and
+     * a registry status carries the date of the registry, not the standing of the institution today.
+     *
+     * So no record is recorded as "authorised as of now". Each says what its source says, and the
+     * distinction is named so it cannot be read as more than it is.
+     */
+    public const STATUS_REGISTRY = 'registry_status_as_published:SIMEV RNVEI «Activa-Vigente (VIG)» y «EMISOR E INTERMEDIARIO DEL MERCADO DE VALORES». Es estado registral y del mercado de valores, no autorización pensional vigente.';
+
+    public const STATUS_FROM_SFC_INDEX = 'registry_entry_as_published:presente en el índice del registro SFC el 15/10/2026. No es una certificación de autorización vigente.';
+
+    public const STATUS_PUBLISHED_SELF = 'published_by_the_entity:la entidad publica su nombre y NIT. No se consultó un registro regulatorio externo.';
+
     public const SUBTYPES = [
         'afp_privada' => 'Administradora privada de fondos de pensiones.',
         'administradora_publica_rpm' => 'Administradora del régimen público de prima media. No es un fondo privado.',
@@ -61,38 +96,109 @@ final class PensionNationalCatalogue
     ];
 
     /**
-     * Nothing is verified, so nothing is returned.
+     * The five institutional records.
      *
-     * @return list<array{registry: int, name: string, sigla: string, code: null, tax_id: null, flags?: list<string>}>
+     * Four private fund administrators and one public prima media administrator. The `type` column
+     * is `AFP` for all five because the workbook has an AFP column and renaming it would break every
+     * historical import — but {@see $records}[].`regulatory_class` is what says which kind of
+     * institution each one actually is, and the two are not the same claim.
+     *
+     * @return list<array{
+     *     registry: int, name: string, sigla: string, tax_id: string,
+     *     regulatory_class: string, sfc: ?array{namespace: string, type_code: string, entity_code: string},
+     *     roles: list<string>, verified_on: string, regulatory_status: string, source_url: string
+     * }>
      */
     public static function records(): array
     {
-        return [];
+        return [
+            [
+                'registry' => 1,
+                // The legal name, verbatim, including the ACCAI clause. It is the ACCAI role inside
+                // the name that makes this record the clearest proof that the role and the AFP
+                // identity are two separate things about one institution.
+                'name' => 'ADMINISTRADORA DE FONDOS DE PENSIONES, CESANTIA Y DEL COMPONENTE COMPLEMENTARIO DE AHORRO INDIVIDUAL PROTECCION S.A.',
+                'sigla' => 'PROTECCION',
+                'tax_id' => '8001381881',
+                'regulatory_class' => self::SUBTYPE_PRIVATE_AFP,
+                'sfc' => ['namespace' => 'RNVEI', 'type_code' => '023', 'entity_code' => '002'],
+                // Read from the SIMEV record, not inferred from the name.
+                'roles' => ['afp', 'accai'],
+                'verified_on' => self::VERIFIED_ON,
+                'regulatory_status' => self::STATUS_REGISTRY,
+                'source_url' => self::SFC_DETAIL_PROTECCION,
+            ],
+            [
+                'registry' => 2,
+                'name' => 'Administradora de Fondos de Pérsiones y Cesantías Porvenir S.A.',
+                'sigla' => 'PORVENIR',
+                'tax_id' => '8001443313',
+                'regulatory_class' => self::SUBTYPE_PRIVATE_AFP,
+                'sfc' => ['namespace' => 'RNVEI', 'type_code' => '023', 'entity_code' => '003'],
+                'roles' => ['afp'],
+                'verified_on' => self::VERIFIED_ON,
+                'regulatory_status' => self::STATUS_FROM_SFC_INDEX,
+                'source_url' => self::SFC_REGISTRY,
+            ],
+            [
+                'registry' => 3,
+                'name' => 'Skandia Administradora de Fondos de Pensiones y Cesantías S.A.',
+                'sigla' => 'SKANDIA',
+                'tax_id' => '8001485142',
+                'regulatory_class' => self::SUBTYPE_PRIVATE_AFP,
+                'sfc' => ['namespace' => 'RNVEI', 'type_code' => '023', 'entity_code' => '009'],
+                'roles' => ['afp'],
+                'verified_on' => self::VERIFIED_ON,
+                'regulatory_status' => self::STATUS_FROM_SFC_INDEX,
+                'source_url' => self::SFC_REGISTRY,
+            ],
+            [
+                'registry' => 4,
+                'name' => 'Administradora de Fondos de Pensiones y Cesantías Colfondos S.A.',
+                'sigla' => 'COLFONDOS',
+                'tax_id' => '8001494962',
+                'regulatory_class' => self::SUBTYPE_PRIVATE_AFP,
+                'sfc' => ['namespace' => 'RNVEI', 'type_code' => '023', 'entity_code' => '010'],
+                'roles' => ['afp'],
+                'verified_on' => self::VERIFIED_ON,
+                'regulatory_status' => self::STATUS_FROM_SFC_INDEX,
+                'source_url' => self::SFC_REGISTRY,
+            ],
+            [
+                'registry' => 5,
+                // No SFC code, and deliberately so: the RNVEI namespace codes an institution
+                // supervised as a financial entity, and Colpensiones is not one. Forcing
+                // 900.336.004-7 into that namespace would assert a supervision it does not have,
+                // and inventing a fourth kind of code would be worse.
+                'name' => 'Administradora Colombiana de Pensiones',
+                'sigla' => 'COLPENSIONES',
+                'tax_id' => '9003360047',
+                'regulatory_class' => self::SUBTYPE_PUBLIC_RPM,
+                'sfc' => null,
+                'roles' => ['administradora_publica_rpm'],
+                'verified_on' => self::VERIFIED_ON,
+                'regulatory_status' => self::STATUS_PUBLISHED_SELF,
+                'source_url' => self::COLPENSIONES_SOURCE,
+            ],
+        ];
     }
 
     /**
-     * Institutions named as candidates, with the reason each is still unverified.
+     * Institutions that were relevant and are not in the five above.
      *
-     * Not catalogue records. They are here so that whoever gets Superfinanciera's registry to answer
-     * starts from a list and a reason rather than from nothing.
+     * Kept apart on purpose. Folding a historical administrator into the confirmed five would put a
+     * name in the catalogue that no source here substantiates today.
      *
-     * @return list<array{name: string, expected_subtype: string, why_unverified: string}>
+     * @return list<array{name: string, why_separate: string}>
      */
-    public static function unverifiedCandidates(): array
+    public static function historicalCandidates(): array
     {
-        $registryBlocked = 'El registro SIMEV de la Superintendencia Financiera responde HTTP 403 a una '
-            .'petición ordinaria y construye sus resultados en JavaScript. No se pudo leer.';
-
         return [
-            ['name' => 'Protección', 'expected_subtype' => 'afp_privada', 'why_unverified' => $registryBlocked],
-            ['name' => 'Porvenir', 'expected_subtype' => 'afp_privada', 'why_unverified' => $registryBlocked],
-            ['name' => 'Colfondos', 'expected_subtype' => 'afp_privada', 'why_unverified' => $registryBlocked],
-            ['name' => 'Skandia', 'expected_subtype' => 'afp_privada', 'why_unverified' => $registryBlocked],
             [
-                'name' => 'Colpensiones',
-                'expected_subtype' => 'administradora_publica_rpm',
-                'why_unverified' => 'El sitio oficial responde HTTP 200 pero no publica NIT, razón social '
-                    .'ni código regulatorio en las páginas alcanzables.',
+                'name' => 'Positiva',
+                'why_separate' => 'Figura en material de la Superintendencia Financiera sobre ACCAI. '
+                    .'Ser administradora de ahorro individual no la convierte en administradora privada '
+                    .'de fondos de pensiones, y no se registra como tal sin una fuente que lo diga.',
             ],
         ];
     }

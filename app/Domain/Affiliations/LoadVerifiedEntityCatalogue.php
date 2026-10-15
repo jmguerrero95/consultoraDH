@@ -95,7 +95,15 @@ final class LoadVerifiedEntityCatalogue
                 // Null, and staying null, unless the manifest actually verified one.
                 'code' => $entry['code'],
                 'tax_id' => $entry['tax_id'],
-            ] + ($entry['regulatory_class'] ?? []), $actor);
+                // Carried on every manifest entry and passed explicitly.
+                //
+                // This line was once missing while the manifest already held the value, and the
+                // whole load produced 75 rows with a null subtype: no error, no warning, and the
+                // test that queried through the model could not see it. It was raw SQL that showed
+                // it. A catalogue whose subtypes are silently absent reads exactly like one that
+                // has none, which is the opposite of what a verified record says.
+                'regulatory_class' => $entry['regulatory_class'] ?? null,
+            ], $actor);
 
             $created[] = $type->value.':'.$name;
         }
@@ -114,7 +122,7 @@ final class LoadVerifiedEntityCatalogue
      * Kept as one method so the loader has a single place to read from and the dry run describes
      * exactly what a real run would do.
      *
-     * @return list<array{type: SocialSecurityEntityType, name: string, code: ?string, tax_id: ?string, regulatory_class?: array<string, string>}>
+     * @return list<array{type: SocialSecurityEntityType, name: string, code: ?string, tax_id: ?string, regulatory_class?: ?string}>
      */
     private function manifest(): array
     {
@@ -127,7 +135,7 @@ final class LoadVerifiedEntityCatalogue
                 'code' => $record['code'],
                 'tax_id' => $record['tax_id'],
                 // The subtype, so a caja or an entidad adaptada is not filed as an ordinary EPS.
-                'regulatory_class' => ['regulatory_class' => $record['regulatory_class']],
+                'regulatory_class' => $record['regulatory_class'],
             ];
         }
 
@@ -144,6 +152,27 @@ final class LoadVerifiedEntityCatalogue
                 'code' => $record['code'],
                 'tax_id' => $record['tax_id'],
                 'regulatory_class' => null,
+            ];
+        }
+
+        foreach (PensionNationalCatalogue::records() as $record) {
+            $entries[] = [
+                // `AFP` is the operational grouping the workbook column already uses. What kind of
+                // institution each one actually is lives in `regulatory_class`, and the two are not
+                // the same claim: Colpensiones shares the column and is a public prima media
+                // administrator, not a private fund.
+                'type' => SocialSecurityEntityType::Afp,
+                'name' => $record['name'],
+                // The SFC code is a **pair** — an institutional type code and an entity code — and
+                // neither half means anything alone. `002` on its own is not unique across issuers
+                // and would collide the moment another namespace used it, so the stored code is the
+                // pair with its namespace, and a test asserts no two records share a stored code.
+                //
+                // These are regulatory codes. They are **not** PILA codes, which live in a different
+                // namespace entirely, and they are not used as such.
+                'code' => $record['sfc'] === null ? null : $record['sfc']['namespace'].':'.$record['sfc']['type_code'].'-'.$record['sfc']['entity_code'],
+                'tax_id' => $record['tax_id'],
+                'regulatory_class' => $record['regulatory_class'],
             ];
         }
 

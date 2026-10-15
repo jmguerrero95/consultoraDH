@@ -182,9 +182,25 @@ it('loads the catalogue without duplicating anything, however many times it runs
         if ($entity->getRawOriginal('type') === SocialSecurityEntityType::Eps->value) {
             expect($entity->getRawOriginal('code'))->not->toBeNull();
             expect($entity->getRawOriginal('tax_id'))->toMatch('/^\d{9}$/');
-        } else {
+        } elseif ($entity->getRawOriginal('type') === SocialSecurityEntityType::Ccf->value) {
+            // The SSF directory publishes neither a code nor a NIT for its 42 cajas.
             expect($entity->getRawOriginal('code'))->toBeNull();
             expect($entity->getRawOriginal('tax_id'))->toBeNull();
+        } else {
+            // AFP. The four private funds carry the SFC code as a namespaced **pair**, because
+            // `002` alone is not unique across issuers. Colpensiones carries none, and that is the
+            // correct answer rather than a gap: the RNVEI namespace codes institutions the
+            // Superintendencia supervises as financial entities, and it is not one.
+            $code = $entity->getRawOriginal('code');
+            $isPublic = $entity->getRawOriginal('tax_id') === '9003360047';
+
+            if ($isPublic) {
+                expect($code)->toBeNull('una administradora pública no tiene código de AFP privada');
+            } else {
+                expect($code)->toStartWith('RNVEI:');
+            }
+
+            expect($entity->getRawOriginal('tax_id'))->not->toBeNull();
         }
     }
 });
@@ -237,8 +253,12 @@ it('keeps COMPENSAR as two entities, one per type', function (): void {
         ->orWhereRaw('lower(unaccent(name)) like ?', ['%compensar%'])
         ->get();
 
-    expect($compensar->pluck('type')->unique()->map(fn ($t) => $t->value)->toArray())
-        ->toBe([SocialSecurityEntityType::Eps->value, SocialSecurityEntityType::Ccf->value]);
+    // Sorted on both sides: the rows come back in whatever order the planner chooses, and a test
+    // that depends on that is a test that fails for no reason on a different day.
+    $types = $compensar->pluck('type')->unique()->map(fn ($t) => $t->value)->toArray();
+    sort($types);
+
+    expect($types)->toBe([SocialSecurityEntityType::Ccf->value, SocialSecurityEntityType::Eps->value]);
 });
 
 it('reports what it would do without writing, which is the default', function (): void {
