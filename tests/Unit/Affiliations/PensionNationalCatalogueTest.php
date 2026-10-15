@@ -14,7 +14,9 @@ uses(RefreshDatabase::class);
 
 beforeEach(function (): void {
     seedPortfolioRoles();
-    userWithRole('Operations');
+    // The actor must actually hold the catalogue and review permissions now that the loader
+    // checks them; 'Operations' holds neither .
+    userWithRole('Administrator');
 });
 
 function loadAll(): void

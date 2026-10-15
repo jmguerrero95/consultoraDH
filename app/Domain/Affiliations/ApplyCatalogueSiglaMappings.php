@@ -36,22 +36,22 @@ use Illuminate\Support\Facades\DB;
 final class ApplyCatalogueSiglaMappings
 {
     /**
-     * @return array{created: list<string>, already_present: list<string>, would_create: list<string>, missing_target: list<string>}
+     * @return array{created: list<string>, already_present: list<string>, would_create: list<string>, missing_target: list<string>, conflicts: list<array<string, mixed>>}
      */
     public function run(bool $apply = false, ?User $actor = null): array
     {
-        if ($apply && $actor === null) {
-            throw new \RuntimeException(
-                'Escribir mapeos de sigla requiere un actor explícito, autenticado y autorizado. '
-                .'Un mapeo aprobado se reutiliza para todos los libros futuros, así que la aprobación '
-                .'debe ser de una persona. El ensayo en seco no lo necesita porque no escribe nada.',
-            );
+        // A mapping is a reusable decision about how a future workbook resolves, so it needs the
+        // reviewer's permission on top of the catalogue one. See `CatalogueActivationAuthorisation`
+        // for why this is checked here as well as at the route.
+        if ($apply) {
+            CatalogueActivationAuthorisation::guard($actor, writesMappings: true);
         }
 
         $created = [];
         $alreadyPresent = [];
         $wouldCreate = [];
         $missingTarget = [];
+        $conflicts = [];
 
         foreach (CatalogueSiglaMappings::proposals() as $proposal) {
             $key = $proposal['type']->value.'|'.$proposal['token'];
@@ -68,14 +68,30 @@ final class ApplyCatalogueSiglaMappings
                 continue;
             }
 
-            $exists = DB::table('import_source_mappings')
+            // An existing mapping is **not** "already done" merely because (profile, type, token)
+            // collides. Somebody may have pointed that same token at a **different** entity, and
+            // treating that as agreement would leave the load reporting success while the importer
+            // still resolves to the other row. So the destination is compared too, and a
+            // disagreement is reported as a conflict for a person to settle — never overwritten.
+            $existing = DB::table('import_source_mappings')
                 ->where('profile', ImportProfile::BlindenLegacyMonthlyV1->value)
                 ->where('type', $proposal['type']->value)
                 ->where('source_key', SheetMonth::fold($proposal['token']))
-                ->exists();
+                ->first();
 
-            if ($exists) {
-                $alreadyPresent[] = $key;
+            if ($existing !== null) {
+                if ((int) $existing->social_security_entity_id === (int) $target->getKey()) {
+                    $alreadyPresent[] = $key;
+
+                    continue;
+                }
+
+                $conflicts[] = [
+                    'token' => $key,
+                    'existing_entity_id' => (int) $existing->social_security_entity_id,
+                    'proposed_entity_id' => (int) $target->getKey(),
+                    'existing_verified' => $existing->verified_at !== null,
+                ];
 
                 continue;
             }
@@ -110,6 +126,7 @@ final class ApplyCatalogueSiglaMappings
             'already_present' => $alreadyPresent,
             'would_create' => $wouldCreate,
             'missing_target' => $missingTarget,
+            'conflicts' => $conflicts,
         ];
     }
 }

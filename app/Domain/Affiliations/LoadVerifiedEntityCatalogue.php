@@ -49,15 +49,11 @@ final class LoadVerifiedEntityCatalogue
 
     public function run(bool $apply = false, ?User $actor = null): array
     {
-        if ($apply && $actor === null) {
-            // §4.1 reserves a decision for a person who made one. A catalogue load that picked the
-            // first row of `users` would attribute an authorisation to whoever registered first,
-            // which is not evidence of anything and is worse than no attribution because it looks
-            // like one.
-            throw new \RuntimeException(
-                'Una carga de catálogo requiere un actor explícito, autenticado y autorizado. '
-                .'El ensayo en seco no lo necesita porque no escribe nada.',
-            );
+        // A dry run writes nothing and therefore needs nothing: refusing to even preview the change
+        // to someone who cannot yet approve it would make the preview useless. The **write** is what
+        // is guarded, and it is guarded by permission, not by the presence of an object.
+        if ($apply) {
+            CatalogueActivationAuthorisation::guard($actor, writesMappings: false);
         }
 
         $created = [];

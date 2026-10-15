@@ -11,12 +11,18 @@ use App\Domain\Imports\SourceEntityToken;
 use App\Models\SocialSecurityEntity;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Spatie\Permission\PermissionRegistrar;
 
 uses(RefreshDatabase::class);
 
 beforeEach(function (): void {
     seedPortfolioRoles();
-    userWithRole('Operations');
+    // The actor must actually hold the catalogue and review permissions now that the loader
+    // checks them; 'Operations' holds neither .
+    userWithRole('Administrator');
+    // The role was granted before this user existed; Spatie caches permissions, and the gate
+    // asks the Gate, which asks that cache.
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
 });
 
 function loadEverything(): void

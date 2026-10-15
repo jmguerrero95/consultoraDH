@@ -44,7 +44,10 @@ uses(RefreshDatabase::class);
 
 beforeEach(function (): void {
     seedPortfolioRoles();
-    userWithRole('Operations');
+    // The loaders now check permissions, so the actor has to actually hold them. 'Operations'
+    // holds neither the catalogue permission nor the review one.
+    userWithRole('Administrator');
+    app(Spatie\Permission\PermissionRegistrar::class)->forgetCachedPermissions();
 });
 
 /** Load both catalogues into this test's database. */
