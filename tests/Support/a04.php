@@ -95,11 +95,27 @@ function stagedImport(User $user, ?SyntheticWorkbook $workbook = null): LegacyIm
         'file' => syntheticUpload($workbook ?? defaultWorkbook()),
     ]);
 
-    $import = LegacyImport::query()->findOrFail($response->json('data.id'));
-
-    app(StageLegacyImport::class)->stage($import, $import->absolutePath());
-
-    return $import->refresh();
+    // FIX-IMPORT-HISTORY-04 §4: the upload runs the whole chain — parse, stage, **and build the
+    // plan** — so there is nothing left for this helper to stage.
+    //
+    // It used to call `StageLegacyImport::stage()` explicitly, on the assumption that the endpoint
+    // only queued the parse. That assumption died when the parse job started dispatching
+    // `BuildLegacyImportPlan`. Measured, with one row and a three-finding workbook:
+    //
+    //     tras POST /api/imports      status=ready   rev=1  filas=1  incidencias=3  acciones=4
+    //     tras el segundo stage()     status=review  rev=1  filas=1  incidencias=0  acciones=4
+    //     tras plannedImport()        status=ready   rev=2  filas=1  incidencias=3  acciones=4
+    //
+    // The second staging **deletes every issue** — including the history findings the plan had
+    // just recorded — while leaving the four planned actions behind, because the cascade that
+    // `stage()`'s own comment describes does not reach them. For a moment the batch looks
+    // `ready` with nothing to review and a plan built from rows it no longer references, and its
+    // status falls back to `review`.
+    //
+    // `plannedImport()` rebuilt it, so most tests never noticed. The helper staged twice for
+    // nothing, and a batch's state between the two stagings was not a state any part of the
+    // system can be in legitimately.
+    return LegacyImport::query()->findOrFail($response->json('data.id'))->refresh();
 }
 
 /**

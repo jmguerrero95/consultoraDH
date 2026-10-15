@@ -116,7 +116,15 @@ it('refuses the whole module to a role without any import permission', function 
 it('stages rows and issues without touching the masters', function () {
     $import = stagedImport($this->user);
 
-    expect($import->status)->toBe(LegacyImportStatus::Review);
+    // FIX-IMPORT-HISTORY-04 §4: `review` **or** `ready`.
+    //
+    // The upload now runs the whole chain — parse, stage, build the plan — and a plan with nothing
+    // blocking leaves the batch `ready`. The previous expectation of `review` only held while
+    // nothing built a plan, which is the defect.
+    //
+    // What this test is actually named for is below and unchanged: rows were staged, normalised,
+    // and **no master record was written**.
+    expect($import->status)->toBeIn([LegacyImportStatus::Review, LegacyImportStatus::Ready]);
     expect($import->rows()->count())->toBe(4);
     expect($import->parsed_at)->not->toBeNull();
 
