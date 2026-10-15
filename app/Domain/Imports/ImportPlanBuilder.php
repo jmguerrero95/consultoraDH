@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Imports;
 
 use App\Domain\Affiliations\SocialSecurityEntityType;
+use App\Domain\Shared\RecordStatus;
 use App\Models\ClientAffiliationObservation;
 use App\Models\LegacyImport;
 use App\Models\LegacyImportAction;
@@ -1939,6 +1940,10 @@ final class ImportPlanBuilder
             ->where('import_source_mappings.source_key', $folded)
             ->whereNotNull('import_source_mappings.verified_at')
             ->join('social_security_entities', 'social_security_entities.id', '=', 'import_source_mappings.social_security_entity_id')
+            // …and the target must still be **active**. A mapping says which entity a token means;
+            // it does not get to un-retire one. Without this, deactivating Liberty would have been
+            // cosmetic: the token would resolve through the mapping anyway.
+            ->where('social_security_entities.status', RecordStatus::Active->value)
             ->select('social_security_entities.*')
             ->first();
 

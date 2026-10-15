@@ -36,7 +36,7 @@ use Illuminate\Support\Facades\DB;
 final class ApplyCatalogueSiglaMappings
 {
     /**
-     * @return array{created: list<string>, already_present: list<string>, would_create: list<string>, missing_target: list<string>, conflicts: list<array<string, mixed>>}
+     * @return array{created: list<string>, already_present: list<string>, would_create: list<string>, missing_target: list<string>, conflicts: list<array<string, mixed>>, pending_approval: list<string>}
      */
     public function run(bool $apply = false, ?User $actor = null): array
     {
@@ -52,6 +52,7 @@ final class ApplyCatalogueSiglaMappings
         $wouldCreate = [];
         $missingTarget = [];
         $conflicts = [];
+        $pendingApproval = [];
 
         foreach (CatalogueSiglaMappings::proposals() as $proposal) {
             $key = $proposal['type']->value.'|'.$proposal['token'];
@@ -81,7 +82,16 @@ final class ApplyCatalogueSiglaMappings
 
             if ($existing !== null) {
                 if ((int) $existing->social_security_entity_id === (int) $target->getKey()) {
-                    $alreadyPresent[] = $key;
+                    // Same destination. **That is not yet approval.** `verified_at` is what makes a
+                    // mapping reusable, and a row without it is a suggestion somebody opened and
+                    // nobody answered. Reporting it as `already_present` told the operator the
+                    // importer would resolve this token, which is false: `resolveEntity()` filters on
+                    // `verified_at`, so the token still raises a finding.
+                    if ($existing->verified_at !== null) {
+                        $alreadyPresent[] = $key;
+                    } else {
+                        $pendingApproval[] = $key;
+                    }
 
                     continue;
                 }
@@ -127,6 +137,7 @@ final class ApplyCatalogueSiglaMappings
             'would_create' => $wouldCreate,
             'missing_target' => $missingTarget,
             'conflicts' => $conflicts,
+            'pending_approval' => $pendingApproval,
         ];
     }
 }

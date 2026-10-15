@@ -144,9 +144,15 @@ final class CatalogueActivationAuthorisation
         // and a strict comparison against the enum rejects them all the other way.
         $status = $status instanceof \BackedEnum ? $status->value : $status;
 
-        // A user row without a status column value is treated as active: the column is nullable and
-        // inventing a default would lock every existing account out of the catalogue.
-        return $status === null || $status === UserStatus::Active->value;
+        // `null` means the column is empty for that row, which is not the same as "this account is
+        // enabled". Authentication is the thing that decides who may act, and it is what the rest of
+        // this check then confirms through the Gate and the permissions.
+        //
+        // Treating an empty status as active was a convenience that removed the only thing this
+        // function was for: a row with no explicit state is one nobody decided anything about, so it
+        // is not an authorisation. `User::first()` was removed from this codebase for the same
+        // reason — inferring a person's standing instead of reading it.
+        return $status === UserStatus::Active->value;
     }
 
     private static function hasPermission(User $actor, string $permission): bool
