@@ -170,19 +170,22 @@ it('persists the subtypes into PostgreSQL, which the earlier guarded bug skipped
     expect($public->getRawOriginal('tax_id'))->toBe('9003360047');
 });
 
-it('loads 75 records and then nothing, three times', function (): void {
+it('loads the pension share of the catalogue and then nothing, three times', function (): void {
     $loader = app(LoadVerifiedEntityCatalogue::class);
 
+    // 85, not 75: the ARL catalogue was added after this assertion was written. Asserting the
+    // per-type counts below is what actually protects the pension records; the total is stated so
+    // that a change in catalogue size has to be a deliberate edit here rather than a surprise.
     $first = $loader->run(apply: true, actor: User::query()->firstOrFail());
-    expect($first['created'])->toHaveCount(75);
-    expect(SocialSecurityEntity::query()->count())->toBe(75);
+    expect($first['created'])->toHaveCount(85);
+    expect(SocialSecurityEntity::query()->count())->toBe(85);
 
     $second = $loader->run(apply: true, actor: User::query()->firstOrFail());
     $third = $loader->run(apply: true, actor: User::query()->firstOrFail());
 
     expect($second['created'])->toBeEmpty();
     expect($third['created'])->toBeEmpty();
-    expect(SocialSecurityEntity::query()->count())->toBe(75);
+    expect(SocialSecurityEntity::query()->count())->toBe(85);
 
     expect(SocialSecurityEntity::query()->where('type', SocialSecurityEntityType::Eps->value)->count())->toBe(28);
     expect(SocialSecurityEntity::query()->where('type', SocialSecurityEntityType::Ccf->value)->count())->toBe(42);

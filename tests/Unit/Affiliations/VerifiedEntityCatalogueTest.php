@@ -186,6 +186,11 @@ it('loads the catalogue without duplicating anything, however many times it runs
             // The SSF directory publishes neither a code nor a NIT for its 42 cajas.
             expect($entity->getRawOriginal('code'))->toBeNull();
             expect($entity->getRawOriginal('tax_id'))->toBeNull();
+        } elseif ($entity->getRawOriginal('type') === SocialSecurityEntityType::Arl->value) {
+            // The Ministry's ARL directory publishes neither a code nor a NIT, and an ARL's
+            // authorisation code is a different instrument from an SFC code.
+            expect($entity->getRawOriginal('code'))->toBeNull();
+            expect($entity->getRawOriginal('tax_id'))->toBeNull();
         } else {
             // AFP. The four private funds carry the SFC code as a namespaced **pair**, because
             // `002` alone is not unique across issuers. Colpensiones carries none, and that is the

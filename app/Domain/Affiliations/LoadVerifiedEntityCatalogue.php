@@ -37,6 +37,16 @@ final class LoadVerifiedEntityCatalogue
      * @param  User|null  $actor  the authenticated, authorised person performing the load. Required
      *                            whenever `$apply` is true; never invented.
      */
+    /**
+     * The ARL's institutional nature.
+     *
+     * A new value, because the existing ones are EPS and pension subtypes and reusing one of those
+     * would file an ARL as something it is not. It says what the entity **is**, never whether it may
+     * currently write a policy — that distinction is the whole point of keeping this field apart from
+     * the authorisation state.
+     */
+    private const REGULATORY_CLASS_ARL = 'arl';
+
     public function run(bool $apply = false, ?User $actor = null): array
     {
         if ($apply && $actor === null) {
@@ -173,6 +183,23 @@ final class LoadVerifiedEntityCatalogue
                 'code' => $record['sfc'] === null ? null : $record['sfc']['namespace'].':'.$record['sfc']['type_code'].'-'.$record['sfc']['entity_code'],
                 'tax_id' => $record['tax_id'],
                 'regulatory_class' => $record['regulatory_class'],
+            ];
+        }
+
+        foreach (ArlNationalCatalogue::records() as $record) {
+            $entries[] = [
+                'type' => SocialSecurityEntityType::Arl,
+                'name' => $record['name'],
+                // Null on both, and that is the source's answer: this directory publishes no NIT and
+                // no authorisation code for an ARL. An ARL's authorisation is granted by the
+                // Ministry of Labour and lives in a different namespace from an SFC code, so filling
+                // either column from elsewhere would put one instrument in another's field.
+                'code' => $record['code'],
+                'tax_id' => $record['tax_id'],
+                // Institutional nature, deliberately NOT the authorisation. An entity can be an ARL
+                // and still be wound up, which is exactly the case Liberty is in, so the two cannot
+                // share a field.
+                'regulatory_class' => self::REGULATORY_CLASS_ARL,
             ];
         }
 

@@ -73,6 +73,20 @@ final class CatalogueSiglaMappings
                 continue;
             }
 
+            // An entity the sectoral study records as having left the market is **not** proposed.
+            // A reusable mapping outlives the question that justified it: approve `LIBERTY` today
+            // and every future workbook saying LIBERTY resolves to a body that cannot write a
+            // policy. That needs a person's decision with today's knowledge, not this manifest.
+            if (in_array('left_the_market', $row['flags'] ?? [], true)) {
+                continue;
+            }
+
+            // A sigla the workbook writes that is an employer paired with its administrator, not an
+            // ARL name. Mapping `POSITIVA CC` to POSITIVA would be inventing what «CC» means.
+            if (array_key_exists($row['sigla'], ArlNationalCatalogue::ambiguousTokens())) {
+                continue;
+            }
+
             $proposals[] = [
                 'type' => $row['type'],
                 'token' => $row['sigla'],
@@ -162,6 +176,15 @@ final class CatalogueSiglaMappings
         foreach (PensionNationalCatalogue::records() as $record) {
             $rows[] = [
                 'type' => SocialSecurityEntityType::Afp,
+                'sigla' => $record['sigla'],
+                'name' => $record['name'],
+                'flags' => $record['flags'] ?? [],
+            ];
+        }
+
+        foreach (ArlNationalCatalogue::records() as $record) {
+            $rows[] = [
+                'type' => SocialSecurityEntityType::Arl,
                 'sigla' => $record['sigla'],
                 'name' => $record['name'],
                 'flags' => $record['flags'] ?? [],
