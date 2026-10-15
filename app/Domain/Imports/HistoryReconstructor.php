@@ -1107,7 +1107,7 @@ final class HistoryReconstructor
                     //
                     // ## What the delivered file actually contains
                     //
-                    // Measured on `.local-fixtures/EMPRESA BLINDEN AÑO 2026.xlsx`, grouped without
+                    // Measured on the delivered workbook, grouped without
                     // printing documents, names or NITs. All 104 pairs, by shape:
                     //
                     //     both sides open, both listed in the final month .........   1
