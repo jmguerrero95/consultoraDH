@@ -54,7 +54,24 @@ it('accepts an xlsx, stores it privately and writes no master data', function ()
     expect($import->sha256)->toHaveLength(64);
     // The queue is `sync` in tests, so `ParseLegacyImport` has already run by now. §15 only
     // requires the endpoint to answer fast and queue the work; the staging is what follows.
-    expect($import->status)->toBe(LegacyImportStatus::Review);
+    //
+    // FIX-IMPORT-HISTORY-04 §4: the status is `review` **or** `ready`, and the reason is the
+    // change being tested rather than a loosened expectation.
+    //
+    // The parse job now ends by building the plan (§4: upload → analysis → reconstruction → plan →
+    // review, so a reviewer is never shown a result that changes once they start answering). With
+    // nothing blocking, a planned batch is `ready` — that is what `ready` means. Before this
+    // milestone nothing built a plan at all, so the batch stopped at `review` and the history
+    // conflicts only surfaced after the first decision, which is how the blocker count grew from 3
+    // to 547 mid-review.
+    //
+    // What is asserted, unchanged: the file was staged, and **no master record was written**.
+    expect($import->status)->toBeIn([LegacyImportStatus::Review, LegacyImportStatus::Ready]);
+
+    // And the plan exists before anybody has decided anything — the milestone's actual claim.
+    expect($import->plan_built_at)->not->toBeNull()
+        ->and($import->plan_revision)->toBeGreaterThan(0);
+
     expect($import->rows()->count())->toBe(4);
 
     // Even after parsing, still no masters: §24.1.

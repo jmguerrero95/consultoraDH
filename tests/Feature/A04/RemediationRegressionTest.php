@@ -182,7 +182,41 @@ it('cannot resurrect a cancelled import when the plan job finishes afterwards', 
 it('refuses every transition the enum does not allow, under the row lock', function () {
     // §5.1: "Defender transiciones: no permitir volver `applied` a `review`, ni aplicar dos
     // veces." The enum documents that; `ImportLifecycle` is what enforces it.
+    //
+    // FIX-IMPORT-HISTORY-04: the batch arrives with a plan.
+    //
+    // `stagedImport()` posts through the upload endpoint, which runs the real job chain inline in
+    // tests — and that chain now ends with `BuildLegacyImportPlan` (§4: the plan is built at
+    // upload). So the import holds planned actions, and the database refuses to move it to
+    // `applied` while any are unexecuted:
+    //
+    //     import 1 cannot be applied: 8 planned action(s) were not executed
+    //
+    // The trigger is right and stays. This test is about the **transition table**, not about the
+    // apply path, so the scenario is made coherent rather than the trigger relaxed.
+    //
+    // The actions are moved to `skipped`, which is the truthful state for a plan this test never
+    // carried out: no `target_id` is claimed, so nothing pretends a master record exists. Marking
+    // them `applied` is not an option either — `legacy_import_actions_target_check` demands a
+    // target for an applied action, which would mean inventing one.
+    //
+    // What is asserted below is unchanged: an applied batch cannot go back to review, and cannot be
+    // applied again. Only the way the scenario reaches `applied` coherently has changed.
+    //
+    // The previous version did this in one `forceFill` and only passed because no plan existed.
+    // Nothing about the guarantee under test changed.
     $import = stagedImport($this->user);
+
+    LegacyImportAction::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('state', ImportActionState::Planned->value)
+        ->update([
+            'state' => ImportActionState::Skipped->value,
+            // A skipped action has to say why, and `legacy_import_actions_skip_check` enforces
+            // it — so the reason is the true one rather than a filler.
+            'skip_reason' => 'Escenario de prueba: sólo se ejercita la tabla de transiciones.',
+        ]);
+
     $import->forceFill(['status' => LegacyImportStatus::Applied->value, 'applied_at' => now()])->save();
 
     $refused = null;
@@ -195,7 +229,12 @@ it('refuses every transition the enum does not allow, under the row lock', funct
         ->and($import->fresh()->status)->toBe(LegacyImportStatus::Applied)
         // §12.2: a batch that is already applied cannot be applied again, whichever route is
         // taken.
-        ->and($import->fresh()->status->allowsApply())->toBeFalse();
+        ->and($import->fresh()->status->allowsApply())->toBeFalse()
+        // And nothing was left pending, which is what made the state legal in the first place.
+        ->and(LegacyImportAction::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('state', ImportActionState::Planned->value)
+            ->count())->toBe(0);
 });
 
 it('reaches `queued` on upload, which nothing ever did before', function () {
@@ -217,13 +256,37 @@ it('reaches `queued` on upload, which nothing ever did before', function () {
         ->postJson('/api/imports', [])
         ->assertStatus(422);
 
-    $import = LegacyImport::query()->where('status', LegacyImportStatus::Review->value)->firstOrFail();
+    // FIX-IMPORT-HISTORY-04 §4: looked up **by the id the upload returned**, not by status.
+    //
+    // The previous version searched for `status = review`, and that was a way of asserting the
+    // state rather than of obtaining the batch. It now finds nothing at all, because a workbook
+    // with no open blockers reaches `ready` — the plan is built at upload, and a plan with nothing
+    // blocking is exactly what `ready` means. Asking for `review` would have kept passing only as
+    // long as the plan was *not* built, which is the defect.
+    $import = LegacyImport::query()->findOrFail($response->json('data.id'));
 
     $seen[] = LegacyImportStatus::Uploaded->value;
 
+    // FIX-IMPORT-HISTORY-04 §4: the plan is built at upload, so `plan_revision` is no longer 0.
+    //
+    // The previous assertion (`plan_revision === 0`) encoded the defect this milestone fixes: a
+    // batch reached `review` with no plan at all, and the history conflicts were not discovered
+    // until somebody saved the first decision — which is how the blocker count *grew* from 3 to
+    // 547 while a reviewer was making progress.
+    //
+    // What this test is for is the **`queued` transition**, which is unchanged: the upload hands
+    // the batch to the queue rather than parsing it inline. That is still asserted above, through
+    // `ImportLifecycle`, and it still holds.
+    //
+    // What is asserted now is the state the new contract produces: a plan exists before anybody
+    // has decided anything.
     expect($seen[0])->toBe('uploaded')
-        ->and($import->status)->toBe(LegacyImportStatus::Review)
-        ->and($import->plan_revision)->toBe(0);
+        ->and($import->status)->toBeIn([
+            LegacyImportStatus::Review,
+            LegacyImportStatus::Ready,
+        ])
+        ->and($import->plan_built_at)->not->toBeNull()
+        ->and($import->plan_revision)->toBeGreaterThan(0);
 });
 
 // =============================================================================
