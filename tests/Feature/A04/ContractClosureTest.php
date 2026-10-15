@@ -124,22 +124,10 @@ function answerAndReadBack(LegacyImport $import, LegacyImportIssueModel $finding
     return $import->fresh();
 }
 
-/**
- * Answer a finding through the endpoint the review screen calls.
- *
- * `$value` defaults to an empty object rather than `null` because `IssueResolution::normaliseValue()`
- * requires an array from any decision that declares a schema — even one whose only field is
- * optional. `use_source_verification_digit` is such a decision, so `null` is a 422 and `[]` is
- * the honest "no value to add" that the screen actually sends.
- */
-function answerFinding(LegacyImport $import, LegacyImportIssueModel $finding, string $decision, ?array $value = []): void
-{
-    test()->actingAs(test()->user)
-        ->postJson("/api/imports/{$import->id}/issues/{$finding->id}/resolve", [
-            'resolution' => ['decision' => $decision, 'value' => $value ?? []],
-        ])
-        ->assertOk();
-}
+// `answerFinding()` lives in `tests/Support/a04.php`. It used to live here, and
+// `ContradictoryStartsTest` called it across the file boundary — so that test could not run
+// without this file, and its behaviour "alone" was never observed. See the note in
+// `ContradictoryStartsTest.php`.
 
 // =============================================================================
 // Vocabulary: nothing offered that nothing reads, nothing blocking that cannot be answered

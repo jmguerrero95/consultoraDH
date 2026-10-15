@@ -20,6 +20,7 @@ use App\Jobs\BuildLegacyImportPlan;
 use App\Models\Client;
 use App\Models\Company;
 use App\Models\LegacyImport;
+use App\Models\LegacyImportIssue;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Tests\Support\SyntheticWorkbook;
@@ -311,6 +312,31 @@ function reviewedImportFor(SyntheticWorkbook $workbook): LegacyImport
     plannedImport($import);
 
     return $import->fresh();
+}
+
+/**
+ * Answer a finding through the endpoint the review screen calls.
+ *
+ * `$value` defaults to an empty object rather than `null` because `IssueResolution::normaliseValue()`
+ * requires an array from any decision that declares a schema — even one whose only field is
+ * optional. `use_source_verification_digit` is such a decision, so `null` is a 422 and `[]` is
+ * the honest "no value to add" that the screen actually sends.
+ *
+ * This lives here rather than in a test file because two test files need it. While it was defined
+ * in `ContractClosureTest.php`, `ContradictoryStartsTest` reached across the file boundary to call
+ * it, and that file carried a comment saying so. The consequence was not cosmetic: the test could
+ * not be run on its own at all — Pest reported `Call to undefined function answerFinding()` — so any
+ * claim about how it behaves alone had to be measured somewhere else, and a failure that only
+ * appeared in the full suite could not be checked for order dependence without dragging an unrelated
+ * file along to supply the function. A shared helper belongs where every caller can reach it.
+ */
+function answerFinding(LegacyImport $import, LegacyImportIssue $finding, string $decision, ?array $value = []): void
+{
+    test()->actingAs(test()->user)
+        ->postJson("/api/imports/{$import->id}/issues/{$finding->id}/resolve", [
+            'resolution' => ['decision' => $decision, 'value' => $value ?? []],
+        ])
+        ->assertOk();
 }
 
 /**

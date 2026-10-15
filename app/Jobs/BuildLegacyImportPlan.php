@@ -22,6 +22,7 @@ use App\Domain\Imports\ImportPlanIdentity;
 use App\Domain\Imports\ImportRetirementPolicy;
 use App\Domain\Imports\ImportRowState;
 use App\Domain\Imports\IssueResolutionDecision;
+use App\Domain\Imports\IssueSubject;
 use App\Domain\Imports\LegacyImportIssue;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Domain\Imports\LegacyIssueSeverity;
@@ -100,6 +101,18 @@ final class BuildLegacyImportPlan implements ShouldQueue
     private const UNUSABLE_TRANSFER_MESSAGE = 'Este solapamiento sigue sin resolver. Se pidió reconocer una '
         .'transferencia, pero ambos episodios empiezan el mismo día y no hay una fuente y un destino '
         .'que los distingan. Indique la fecha de corte o autorice un paralelo.';
+
+    /**
+     * §8.1's answer, accepted by the endpoint and refused by the reconstruction.
+     *
+     * `ImportDecisionSet::statedStartFor()` only honours a start **among the dates the file wrote**,
+     * so an answer naming any other date is not a decision — it is a well-formed value with nothing
+     * behind it. The endpoint cannot tell the two apart: the only place that knows the file's own
+     * dates is the reconstruction, and it never sees the request.
+     */
+    private const UNUSABLE_START_MESSAGE = 'Estas fechas de inicio siguen en contradicción. La respuesta '
+        .'indicó una fecha de inicio que el archivo no declara, así que no se aplicó ninguna decisión. '
+        .'Elija una de las fechas que el archivo sí escribió.';
 
     use Dispatchable;
     use InteractsWithQueue;
@@ -808,6 +821,11 @@ final class BuildLegacyImportPlan implements ShouldQueue
      */
     private function reconcileIssues(LegacyImport $import, HistoryReconstruction $reconstruction): array
     {
+        // Loaded once for the whole pass, and read by `startAnswerIsUnusable()` to ask
+        // `ImportDecisionSet` the same question the reconstruction asked: was this stored answer
+        // among the dates the file wrote?
+        $decisions = ImportDecisionSet::for($import);
+
         /**
          * The interval findings currently on file, keyed by fingerprint.
          *
@@ -885,6 +903,69 @@ final class BuildLegacyImportPlan implements ShouldQueue
                 // **kept**, because §4.1's record of what a person answered is history and this is
                 // not the place to erase it. What changes is that the answer no longer counts as
                 // having settled the question.
+                // §8.1's answer, stored but not applied.
+                //
+                // This is the same defect class as the `recognize_transfer` case below, and it is
+                // handled the same way: supersede the answered row, re-raise the question on a
+                // stable fingerprint. It cannot be reopened in place, because
+                // `legacy_import_issues_resolution_check` requires `resolved_at`, `resolved_by` and
+                // `resolution` to be complete or absent together — "a decision but no person" and
+                // "a person but no decision" are both refused. An answer that cannot be applied
+                // therefore has to keep its timestamp, and the only honest place for the question
+                // is a row of its own.
+                //
+                // The re-raised row asks exactly what the first one asked, and carries the same
+                // `stated_starts`, so it is answerable the second time.
+                if ($this->startAnswerIsUnusable($current, $decisions)) {
+                    if ($current->superseded_at === null) {
+                        $current->forceFill([
+                            'blocking' => false,
+                            'severity' => LegacyIssueSeverity::Info->value,
+                            'superseded_at' => now(),
+                            'message' => self::UNUSABLE_START_MESSAGE,
+                        ])->save();
+                    }
+
+                    // Derived from the fingerprint it replaces, because
+                    // `legacy_import_issues` has a permanent UNIQUE index over
+                    // `(legacy_import_id, fingerprint)` that counts superseded rows. Answering this
+                    // question causes a second rebuild, so this row is looked up before it is
+                    // written — the same reason the transfer retry below is.
+                    $startFingerprint = hash('sha256', $fingerprint.'|start-not-stated');
+
+                    $retry = LegacyImportIssueModel::query()
+                        ->where('legacy_import_id', $import->id)
+                        ->where('fingerprint', $startFingerprint)
+                        ->first();
+
+                    if ($retry === null) {
+                        LegacyImportIssueModel::query()->create([
+                            'legacy_import_id' => $import->id,
+                            'row_id' => null,
+                            'code' => $issue->code->value,
+                            'severity' => $issue->severity->value,
+                            'blocking' => true,
+                            'field' => $issue->field(),
+                            'message' => self::UNUSABLE_START_MESSAGE,
+                            'context' => array_merge($issue->context(), [
+                                'retry_reason' => 'start_not_stated',
+                            ]),
+                            'fingerprint' => $startFingerprint,
+                        ]);
+                    } elseif ($retry->resolved_at === null) {
+                        $retry->forceFill([
+                            'message' => self::UNUSABLE_START_MESSAGE,
+                            'severity' => $issue->severity->value,
+                            'blocking' => true,
+                            'superseded_at' => null,
+                        ])->save();
+                    }
+
+                    unset($onFile[$fingerprint], $onFile[$startFingerprint]);
+
+                    continue;
+                }
+
                 if ($this->transferAnswerIsUnusable($current)) {
                     // Supersede, do not rewrite. §4.1's record of the answer stays intact, and
                     // `legacy_import_issues_resolution_check` requires it to: `resolved_at` and
@@ -1026,6 +1107,62 @@ final class BuildLegacyImportPlan implements ShouldQueue
         $destination = $context['start_b'] ?? null;
 
         return ! is_string($source) || ! is_string($destination) || $source === $destination;
+    }
+
+    /**
+     * §8.1: an answer that was stored but not applied, because it names a date the file never wrote.
+     *
+     * ## Why this is a separate check and not a general one
+     *
+     * The refresh branch below clears `blocking` on any finding with `resolved_at` set, because its
+     * premise is that the reconstruction applied the answer and the question is therefore settled.
+     * That premise holds for every answer whose meaning is carried forward — §8.4's boundary and
+     * §8.5's parallel are read and applied. It does **not** hold here: `statedStartFor()` is
+     * documented as the one place a stored date is compared against the file's own dates, and it
+     * returns null for anything else. A null there means the episodes were left contradicting each
+     * other, the plan went out with two `create_relationship` actions for one employment, and
+     * nothing had settled anything.
+     *
+     * So the finding had been answered but not honoured, and the batch looked applicable. Apply
+     * then handed both relationships to A02, which refuses two conflicting ones, and the batch came
+     * back `apply_failed` — a word about the *plan*, reported for a *plan* that was never wrong and
+     * an *answer* that was never valid.
+     *
+     * `ContradictoryStartsTest > it ignores an answer naming a date the file never wrote` is the test
+     * for exactly this line, and it could not be run: the helper it needed lived in another test
+     * file, so Pest could only execute it inside a suite, where the failure looked like an
+     * order-dependent flake rather than the reproducible defect it was.
+     *
+     * ## Why the comparison is not repeated here
+     *
+     * `statedStartFor()`'s own docblock says it is the only place a stored value is checked against
+     * the file's dates, precisely so that "the first caller that forgot it would honour a date
+     * nobody wrote" cannot happen. Writing `in_array($start, $statedStarts)` here would put a
+     * second copy of that rule in the codebase, where the two could drift. So this asks the same
+     * question of the same code.
+     */
+    private function startAnswerIsUnusable(LegacyImportIssueModel $issue, ImportDecisionSet $decisions): bool
+    {
+        $resolution = is_array($issue->resolution) ? $issue->resolution : [];
+        $decision = $resolution['decision'] ?? null;
+
+        if ($decision !== IssueResolutionDecision::UseEarliestStatedStart->value
+            && $decision !== IssueResolutionDecision::UseLatestStatedStart->value) {
+            return false;
+        }
+
+        $context = is_array($issue->context) ? $issue->context : [];
+        $statedStarts = $context['stated_starts'] ?? null;
+        $subject = IssueSubject::subjectFrom($context);
+
+        // A finding that names no dates and no subject cannot be checked, and so cannot be
+        // honoured either. Treating it as unusable keeps the question open rather than silently
+        // dropping a decision nobody can account for.
+        if (! is_array($statedStarts) || $statedStarts === [] || $subject === '') {
+            return true;
+        }
+
+        return $decisions->statedStartFor($subject, $statedStarts) === null;
     }
 
     public function failed(?\Throwable $exception): void

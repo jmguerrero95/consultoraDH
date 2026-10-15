@@ -76,9 +76,15 @@ function findingsFor(LegacyImport $import): Collection
         ->get();
 }
 
-// `answerFinding()` and `planConfirmation()` come from `ContractClosureTest`, which Pest loads
-// into the same process. They are defined there rather than in `tests/Support/a04.php` — so a
-// second copy here would be a redeclaration, not a safe local fallback.
+// `answerFinding()` and `planConfirmation()` both come from `tests/Support/a04.php`.
+//
+// `answerFinding()` used to be defined in `ContractClosureTest.php`, so this file could only run
+// when Pest happened to load that one too: run alone, Pest died with `Call to undefined function
+// answerFinding()`. That is worth recording, because it is what made the defect this file guards
+// against invisible for so long. The test could not be run on its own, so it could not be checked
+// for order dependence without dragging an unrelated file along, and a failure that appeared only
+// inside the suite was read as a flake rather than as what it was — a defect that reproduced every
+// time, in every context. Shared helpers belong in shared support.
 
 it('asks which stated start is the real one, and names every date it offers', function () {
     $import = reviewedImportFor(theContradiction());
