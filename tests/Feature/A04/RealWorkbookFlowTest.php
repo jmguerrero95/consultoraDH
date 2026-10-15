@@ -2,8 +2,8 @@
 
 declare(strict_types=1);
 
-use App\Domain\Imports\IssueResolutionDecision;
 use App\Domain\Imports\ImportActionState;
+use App\Domain\Imports\IssueResolutionDecision;
 use App\Domain\Imports\LegacyImportStatus;
 use App\Models\Company;
 use App\Models\LegacyImport;
@@ -447,7 +447,7 @@ final class RealWorkbookFlowTest extends TestCase
             DB::table('client_company_assignments')
                 ->where('ended_on_precision', 'month')
                 ->whereNotNull('ended_on')
-                ->whereRaw("EXTRACT(DAY FROM ended_on) <> 1")
+                ->whereRaw('EXTRACT(DAY FROM ended_on) <> 1')
                 ->count(),
             'a month-precision boundary is the first day of the following month, never a day inside it',
         );

@@ -1308,14 +1308,17 @@ it('executes a transfer the file dates, and writes the closed and the opened rel
 
     $planned = plannedImport($import);
 
-    $disappearance = $planned->issues()
-        ->where('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value)
-        ->firstOrFail();
-
-    $planned = answerAndReadBack($planned, $disappearance, IssueResolutionDecision::CloseOnDisappearance->value, [
-        'date' => '2026-02-01',
-        'precision' => 'month',
-    ]);
+    // FIX-IMPORT-HISTORY-04: the §8.4 step that used to come first is gone.
+    //
+    // These fixtures used to answer "close GLOBAL on 2026-02-01" first, *because* that bounded
+    // GLOBAL and bounding it is what made the two intervals intersect — the overlap only existed
+    // after that answer. A monthly workbook now closes GLOBAL on its own, from the month it was
+    // last listed, so the overlap is there on the first plan and there is no disappearance to
+    // answer first.
+    //
+    // What these tests are for is unchanged and still asserted below: a transfer the file dates is
+    // executed, and the answer is applied to the episodes the reviewer was shown. Only the
+    // bookkeeping that manufactured the overlap has moved.
 
     // The overlap only exists now, because bounding GLOBAL made it intersect ANDINA.
     $overlap = $planned->issues()
@@ -1408,14 +1411,17 @@ it('refuses to invent a transfer boundary when both episodes start on the same d
 
     $planned = plannedImport($import);
 
-    $disappearance = $planned->issues()
-        ->where('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value)
-        ->firstOrFail();
-
-    $planned = answerAndReadBack($planned, $disappearance, IssueResolutionDecision::CloseOnDisappearance->value, [
-        'date' => '2026-02-01',
-        'precision' => 'month',
-    ]);
+    // FIX-IMPORT-HISTORY-04: the §8.4 step that used to come first is gone.
+    //
+    // These fixtures used to answer "close GLOBAL on 2026-02-01" first, *because* that bounded
+    // GLOBAL and bounding it is what made the two intervals intersect — the overlap only existed
+    // after that answer. A monthly workbook now closes GLOBAL on its own, from the month it was
+    // last listed, so the overlap is there on the first plan and there is no disappearance to
+    // answer first.
+    //
+    // What these tests are for is unchanged and still asserted below: a transfer the file dates is
+    // executed, and the answer is applied to the episodes the reviewer was shown. Only the
+    // bookkeeping that manufactured the overlap has moved.
 
     $overlap = $planned->issues()
         ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
@@ -1485,14 +1491,17 @@ it('re-raises the unusable transfer blocker once, and lets the replacement answe
 
     $planned = plannedImport($import);
 
-    $disappearance = $planned->issues()
-        ->where('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value)
-        ->firstOrFail();
-
-    $planned = answerAndReadBack($planned, $disappearance, IssueResolutionDecision::CloseOnDisappearance->value, [
-        'date' => '2026-02-01',
-        'precision' => 'month',
-    ]);
+    // FIX-IMPORT-HISTORY-04: the §8.4 step that used to come first is gone.
+    //
+    // These fixtures used to answer "close GLOBAL on 2026-02-01" first, *because* that bounded
+    // GLOBAL and bounding it is what made the two intervals intersect — the overlap only existed
+    // after that answer. A monthly workbook now closes GLOBAL on its own, from the month it was
+    // last listed, so the overlap is there on the first plan and there is no disappearance to
+    // answer first.
+    //
+    // What these tests are for is unchanged and still asserted below: a transfer the file dates is
+    // executed, and the answer is applied to the episodes the reviewer was shown. Only the
+    // bookkeeping that manufactured the overlap has moved.
 
     $unusable = $planned->issues()
         ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)

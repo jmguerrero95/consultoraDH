@@ -13,8 +13,8 @@ use App\Domain\Imports\EffectiveCompanyIdentity;
 use App\Domain\Imports\HistoricalInterval;
 use App\Domain\Imports\HistoryReconstruction;
 use App\Domain\Imports\HistoryReconstructor;
-use App\Domain\Imports\ImportHistoryInterpretation;
 use App\Domain\Imports\ImportDecisionSet;
+use App\Domain\Imports\ImportHistoryInterpretation;
 use App\Domain\Imports\ImportLifecycle;
 use App\Domain\Imports\ImportPlan;
 use App\Domain\Imports\ImportPlanBuilder;
@@ -207,6 +207,15 @@ final class BuildLegacyImportPlan implements ShouldQueue
                 $lifecycle->import()->forceFill([
                     'summary' => array_merge($import->summary ?? [], [
                         'reconstruction' => $reconstruction->counts(),
+                        // FIX-IMPORT-HISTORY-04 §8: the automatic closures are shown to the
+                        // reviewer as part of the summary, with the criterion stated in the
+                        // administrative language the milestone specifies.
+                        //
+                        // They are stored rather than derived on demand because they are a
+                        // *conclusion* — a boundary the rule inferred from an absence — and a
+                        // screen that cannot show them would be asking a person to trust the plan
+                        // silently. `counts()` already carries the number; this carries the list.
+                        'monthly_closures' => $reconstruction->monthlyClosureEvidence(),
                         'plan' => $plan->counts(),
                         'unresolved_blockers' => $unresolved,
                         'retirement_policy' => $policy->value,

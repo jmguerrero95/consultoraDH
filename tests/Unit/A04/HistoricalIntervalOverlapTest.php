@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Domain\Imports\HistoricalInterval;
+use Illuminate\Support\Carbon;
 
 /**
  * FIX-IMPORT-HISTORY-04 §C: `HistoricalInterval::overlaps()` on its own.
@@ -38,9 +39,9 @@ use App\Domain\Imports\HistoricalInterval;
 function intervalFrom(?string $start, ?string $end, string $precision = HistoricalInterval::DAY): HistoricalInterval
 {
     $interval = HistoricalInterval::fromUnknownStart()
-        ->startingAt($start === null ? null : Illuminate\Support\Carbon::parse($start), $precision);
+        ->startingAt($start === null ? null : Carbon::parse($start), $precision);
 
-    return $end === null ? $interval : $interval->endingOn(Illuminate\Support\Carbon::parse($end), $precision);
+    return $end === null ? $interval : $interval->endingOn(Carbon::parse($end), $precision);
 }
 
 it('reports no overlap between closed intervals that share nothing', function (): void {
@@ -151,7 +152,7 @@ it('agrees with contains(), which is the definition the interval already used', 
 
             // Walk the days either side of the boundaries, where the answers differ.
             $shared = false;
-            $moment = Illuminate\Support\Carbon::parse('2026-01-01');
+            $moment = Carbon::parse('2026-01-01');
 
             // Walked with date arithmetic, not string increments: `'2026-01-32'` is not a date,
             // and a loop that throws halfway through proves nothing about the intervals.

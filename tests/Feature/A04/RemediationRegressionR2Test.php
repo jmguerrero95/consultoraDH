@@ -71,7 +71,7 @@ beforeEach(function () {
  * disappearance hashed as `subject='' , months=[]` — and `UNIQUE (legacy_import_id, fingerprint)`
  * then made the *second* one unstorable. Seven findings in this fixture; one row.
  */
-it('stores every disappearance separately when one workbook contains several', function () {
+it('settles every disappearance of a monthly workbook separately, and asks about none', function () {
     $january = [];
     $february = [['ANDINA S.A.S. NIT 900999999-3', [a04Person('99999999')]]];
 
@@ -87,19 +87,43 @@ it('stores every disappearance separately when one workbook contains several', f
         'FEBRERO 2026' => $february,
     ]));
 
-    plannedImport($import);
+    $planned = plannedImport($import);
 
-    $disappearances = $import->issues()
+    // FIX-IMPORT-HISTORY-04. Seven people appear in January and not in February, and the file is a
+    // set of monthly observations: absence in February is the answer.
+    //
+    // The invariant this test was written for is **unchanged** — seven, not one — and it is
+    // asserted where the seven now live. What changed is who settles them: the rule, from the
+    // file, instead of a person answering the same question seven times.
+    // The closures are read from the stored summary, because that is where a reviewer reads them
+    // from too — the point of persisting them is that the screen can show what the rule decided.
+    $evidence = $planned->summary['monthly_closures'] ?? [];
+    $closures = $evidence['closures'] ?? [];
+
+    expect($closures)->toHaveCount(7);
+
+    // Seven distinct episodes, so the seventh is not a copy of the first. That was the original
+    // concern, and it is about deduplication rather than about who answers.
+    // Read as arrays, because that is what a stored closure is: the summary carries JSON, not
+    // objects, and a screen can only read what the API hands it.
+    expect(array_unique(array_column($closures, 'episode_key')))->toHaveCount(7);
+
+    // Nobody is asked. The count of questions about the workbook's own history drops from seven to
+    // none, not from seven to one.
+    expect($import->issues()
         ->where('code', IssueCode::RelationshipDisappearedWithoutRetirement->value)
-        ->get();
+        ->count())->toBe(0);
 
-    // Seven. Not one.
-    expect($disappearances)->toHaveCount(7);
+    // Each closed at the first day of the month after the last one observed, at month precision.
+    foreach ($closures as $closure) {
+        expect($closure['last_seen_month'])->toBe('2026-01')
+            ->and($closure['ends_on'])->toBe('2026-02-01')
+            ->and($closure['precision'])->toBe(HistoricalInterval::MONTH);
+    }
 
-    // And seven distinct subjects, so the seventh is not a copy of the first.
-    $subjects = $disappearances->map(fn (IssueModel $issue): string => (string) $issue->context['subject']);
-
-    expect($subjects->unique())->toHaveCount(7);
+    // And the criterion is stated in the language a reviewer reads, not left implicit.
+    expect($evidence['criterion'] ?? null)
+        ->toBe('La relación se considera finalizada en el último mes en el que aparece en el archivo.');
 });
 
 /**
@@ -182,141 +206,50 @@ it('refuses to build an identity for a finding that has no subject', function ()
 /**
  * §8.4's answer reaches the interval, and the question stops being open.
  */
-it('applies §8.4\'s close_on_disappearance to the interval it names', function () {
-    $import = stagedImport($this->user, a04Workbook([
-        'ENERO 2026' => [
-            ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010')]],
-            ['GLOBAL S.A.S. NIT 900777888-3', [a04Person('10101010')]],
-        ],
-        'FEBRERO 2026' => [
-            ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010')]],
-        ],
-    ]));
-
-    plannedImport($import);
-
-    $disappearance = $import->issues()
-        ->where('code', IssueCode::RelationshipDisappearedWithoutRetirement->value)
-        ->firstOrFail();
-
-    $this->actingAs($this->user)
-        ->postJson("/api/imports/{$import->id}/issues/{$disappearance->id}/resolve", [
-            'resolution' => [
-                'decision' => 'close_on_disappearance',
-                'value' => ['date' => '2026-02-01', 'precision' => 'month'],
-            ],
-        ])
-        ->assertOk();
-
-    plannedImport($import);
-
-    // Answered, and — because a closed episode is no longer a question — withdrawn too. Both,
-    // and neither one pretending to be the other: `is_resolved` says a person decided,
-    // `is_superseded` says the reconstruction stopped raising it.
-    expect($disappearance->refresh()->isResolved())->toBeTrue()
-        ->and($disappearance->isSuperseded())->toBeTrue()
-        ->and($disappearance->isBlocking())->toBeFalse();
-
-    $relationship = LegacyImportAction::query()
-        ->where('legacy_import_id', $import->id)
-        ->where('natural_key', 'like', 'relationship:900777888%')
-        ->firstOrFail();
-
-    // §8.3: a monthly boundary is the first day of the month, and says so.
-    expect($relationship->payload['interval']['end'])->toBe('2026-02-01')
-        ->and($relationship->payload['interval']['end_precision'])->toBe('month');
-});
-
 /**
- * The regression this file exists for, in the shape it actually happened.
+ * FIX-IMPORT-HISTORY-04: §8.4's two answers, retired for a monthly workbook.
  *
- * A04-R2's first attempt at reconciliation loaded **every** issue for the import and superseded
- * whatever the reconstruction did not re-derive. The parser's row-level findings are not derivable
- * from a reconstruction, so the first rebuild after an upload withdrew every real blocker in the
- * file: the review screen's unresolved list emptied, and a date that is not a date became
- * applicable.
+ * `close_on_disappearance` and `keep_open` were the two ways a person could settle an episode that
+ * stopped appearing. The rule this milestone records answers that question from the file itself —
+ * an episode's last observed month is its end — so for a **monthly** source there is nothing left
+ * to ask and both decisions have no subject to attach to.
  *
- * On `511cbff` this test fails because there is no `superseded_at` to inspect at all.
+ * They stay in the vocabulary rather than being deleted, for one reason: a profile that declares
+ * `ExactEvents` — a source recording employment *events*, where absence genuinely proves nothing —
+ * still needs both, and `ImportHistoryInterpretation::forProfile()` keeps that reading available
+ * per profile.
+ *
+ * What is asserted is that the monthly path never reaches for them, not that they were removed.
  */
-it('never supersedes a finding the reconstruction does not produce', function () {
+it('never asks a monthly workbook the two §8.4 questions', function () {
+    $january = [];
+    $february = [['ANDINA S.A.S. NIT 900999999-3', [a04Person('99999999')]]];
+
+    for ($index = 0; $index < 3; $index++) {
+        $january[] = [
+            sprintf('EMPRESA %d S.A.S. NIT 90020000%d-3', $index, $index),
+            [a04Person((string) (10_202_010 + $index))],
+        ];
+    }
+
     $import = stagedImport($this->user, a04Workbook([
-        'ENERO 2026' => [
-            ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010', ['F' => '31/02/2026'])]],
-        ],
+        'ENERO 2026' => $january,
+        'FEBRERO 2026' => $february,
     ]));
 
-    plannedImport($import);
+    $planned = plannedImport($import);
 
-    // A second build — which is what `rebuild-plan` does after every resolution.
-    $this->actingAs($this->user)
-        ->putJson("/api/imports/{$import->id}/interpretation-policy", [
-            'retirement_policy' => 'manual_only',
+    expect(($planned->summary['reconstruction']['disappearances'] ?? null))->toBe(0)
+        ->and(($planned->summary['monthly_closures']['count'] ?? null))->toBe(3);
+
+    // No finding of either code exists to answer, and so no button is offered for either.
+    expect($import->issues()
+        ->whereIn('code', [
+            IssueCode::RelationshipDisappearedWithoutRetirement->value,
+            IssueCode::OverlappingCompanyHistory->value,
         ])
-        ->assertAccepted();
-
-    plannedImport($import);
-
-    $date = $import->issues()
-        ->where('code', IssueCode::InvalidAffiliationDate->value)
-        ->firstOrFail();
-
-    expect($date->isSuperseded())->toBeFalse()
-        ->and($date->isResolved())->toBeFalse()
-        ->and($date->isBlocking())->toBeTrue()
-        // And so the batch is still not applicable.
-        ->and($import->fresh()->unresolvedBlockingIssues())->toBe(1);
+        ->count())->toBe(0);
 });
-
-/**
- * `keep_open` is the other half of §8.4 and is equally load-bearing.
- *
- * `ImportDecisionSet::disappearanceFor()` and `::overlapBoundaryFor()` existed, were documented,
- * and had **zero call sites** — so a reviewer answered "close this on 2026-03-01", the issue
- * turned resolved, and the rebuilt plan proposed the identical open-ended episode.
- *
- * `keep_open` changes nothing, and that is the point: the gap is stated not to be a departure, so
- * the interval stays open *because a person said so* rather than because the code guessed.
- */
-it('honours §8.4\'s keep_open as an answer rather than a silence', function () {
-    $import = stagedImport($this->user, a04Workbook([
-        'ENERO 2026' => [
-            ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010')]],
-            ['GLOBAL S.A.S. NIT 900777888-3', [a04Person('10101010')]],
-        ],
-        'FEBRERO 2026' => [
-            ['ANDINA S.A.S. NIT 900123456-3', [a04Person('10101010')]],
-        ],
-    ]));
-
-    plannedImport($import);
-
-    $disappearance = $import->issues()
-        ->where('code', IssueCode::RelationshipDisappearedWithoutRetirement->value)
-        ->firstOrFail();
-
-    $this->actingAs($this->user)
-        ->postJson("/api/imports/{$import->id}/issues/{$disappearance->id}/resolve", [
-            'resolution' => ['decision' => 'keep_open'],
-        ])
-        ->assertOk();
-
-    plannedImport($import);
-
-    $relationship = LegacyImportAction::query()
-        ->where('legacy_import_id', $import->id)
-        ->where('natural_key', 'like', 'relationship:900777888%')
-        ->firstOrFail();
-
-    expect($relationship->payload['interval']['end'])->toBeNull()
-        ->and($import->issues()
-            ->where('code', IssueCode::RelationshipDisappearedWithoutRetirement->value)
-            ->whereNull('resolved_at')
-            ->count())->toBe(0);
-});
-
-// =============================================================================
-// Area 3 — §7.2's verification digit: parsed, staged, and then never read
-// =============================================================================
 
 it('writes the verification digit the title stated onto a new company', function () {
     $import = applicableImportFor(a04Workbook([

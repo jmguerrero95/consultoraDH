@@ -31,11 +31,11 @@ final class HistoryReconstructor
      *                                             NULL for §19's verifier, which runs the *untransformed* reconstruction on purpose:
      *                                             it reports what the file says, not what a reviewer decided.
      * @param  ImportHistoryInterpretation  $interpretation  what one appearance of this source
-     *                                             *means*. FIX-IMPORT-HISTORY-04. Defaults to
-     *                                             `ExactEvents`, which is §8.4's original behaviour
-     *                                             and the only safe default: a caller that has not
-     *                                             said what its file means gets the reading that
-     *                                             never invents a closure.
+     *                                                       *means*. FIX-IMPORT-HISTORY-04. Defaults to
+     *                                                       `ExactEvents`, which is §8.4's original behaviour
+     *                                                       and the only safe default: a caller that has not
+     *                                                       said what its file means gets the reading that
+     *                                                       never invents a closure.
      */
     public function __construct(
         private readonly ImportRetirementPolicy $retirementPolicy = ImportRetirementPolicy::ManualOnly,
@@ -1081,9 +1081,25 @@ final class HistoryReconstructor
                         continue;
                     }
 
-                    // The pair genuinely intersects, but only because a rule supplied an end date
-                    // the file never stated. Recorded nowhere as a finding — see the docblock.
-                    if (isset($inferred[$first->key()]) || isset($inferred[$second->key()])) {
+                    // FIX-IMPORT-HISTORY-04: a boundary the rule produced cannot be a contradiction.
+                    //
+                    // **Both** sides must be monthly closures. That restriction is load-bearing and
+                    // the first version of this check got it wrong: suppressing a pair whenever
+                    // *either* episode was monthly-closed silently discarded the transfers §8.5
+                    // exists to detect, where GLOBAL is listed in January and ANDINA in February —
+                    // no shared month, genuinely concurrent by their stated dates, and a real
+                    // question.
+                    //
+                    // When both ends are inferred from absence, though, the intersection is the
+                    // rule's own doing and not a fact in the file. §8 asks a person to correct a
+                    // date, recognise a transfer, or authorise a parallel; for the delivered
+                    // workbook that is hundreds of questions about handovers the monthly rule itself
+                    // produced, which is the artificial queue this milestone removes.
+                    //
+                    // A pair with one side still open is **not** suppressed: an episode still
+                    // listed in the file's final month is evidence, and §8.5 is right to ask about
+                    // it.
+                    if (isset($inferred[$first->key()]) && isset($inferred[$second->key()])) {
                         continue;
                     }
 
