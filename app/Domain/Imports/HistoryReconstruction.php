@@ -41,7 +41,29 @@ final class HistoryReconstruction
         private readonly array $disappearances = [],
         private readonly array $overlaps = [],
         private readonly array $contradictoryStarts = [],
+        /**
+         * FIX-IMPORT-HISTORY-04: relationships the monthly rule closed by itself.
+         *
+         * Carried rather than dropped, because §8 of the milestone requires the review screen to
+         * show them as part of the summary. A closure the user did not make is still a decision
+         * somebody has to be able to see — it just is not a question they have to answer.
+         *
+         * @var list<MonthlyObservationClosure>
+         */
+        private readonly array $monthlyClosures = [],
+        private readonly ImportHistoryInterpretation $interpretation = ImportHistoryInterpretation::ExactEvents,
     ) {}
+
+    /** @return list<MonthlyObservationClosure> */
+    public function monthlyClosures(): array
+    {
+        return $this->monthlyClosures;
+    }
+
+    public function interpretation(): ImportHistoryInterpretation
+    {
+        return $this->interpretation;
+    }
 
     /** @return list<RelationshipEpisode> */
     public function episodes(): array
@@ -209,7 +231,31 @@ final class HistoryReconstruction
             'disappearances' => count($this->disappearances),
             'overlaps' => count($this->overlaps),
             'contradictory_starts' => count($this->contradictoryStarts),
+            // FIX-IMPORT-HISTORY-04. Reported next to `disappearances` on purpose: they are the
+            // same observation — an episode that stopped appearing — settled two ways depending on
+            // what the source means. A reviewer comparing the two numbers can see immediately
+            // that this file needed no questions about departures.
+            'monthly_closures' => count($this->monthlyClosures),
+            'history_interpretation' => $this->interpretation->value,
             'blocking' => $this->blockingCount(),
+        ];
+    }
+
+    /**
+     * The monthly closures, for the review screen.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function monthlyClosureEvidence(): array
+    {
+        return [
+            'criterion' => $this->interpretation->criterion(),
+            'interpretation' => $this->interpretation->label(),
+            'count' => count($this->monthlyClosures),
+            'closures' => array_map(
+                static fn (MonthlyObservationClosure $c): array => $c->toArray(),
+                $this->monthlyClosures,
+            ),
         ];
     }
 }

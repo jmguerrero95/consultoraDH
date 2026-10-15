@@ -212,21 +212,34 @@ final readonly class HistoricalInterval implements \JsonSerializable
      */
     public function overlaps(self $other): bool
     {
-        if ($this->end !== null && $other->start !== null && $other->start->lt($this->end)) {
+        // An unknown **start** cannot be placed on a timeline, so nothing can disprove an
+        // overlap. The pessimistic answer is also the one this class's docblock promises.
+        if ($this->start === null || $other->start === null) {
             return true;
         }
 
-        if ($other->end !== null && $this->start !== null && $this->start->lt($other->end)) {
-            return true;
-        }
-
-        // Neither comparison could be made from dates, so the spans must overlap unless one
-        // starts after the other definitively ends.
-        if ($this->end === null || $other->end === null || $this->start === null || $other->start === null) {
-            return true;
-        }
-
-        return $this->start->lt($other->end) && $other->start->lt($this->end);
+        // Both spans are `[start, end)`, with a null end meaning "still running".
+        //
+        // ## The two tests are **conjoined**, and that is the fix
+        //
+        // The previous version returned true as soon as *either* one-sided test held. That is not
+        // a conservative reading of an overlap, it is a different question: it asks whether each
+        // span reaches the other, not whether they share a point. A = `[01/04, 01/06)` and
+        // B = `[28/07, 01/10)` satisfies "A starts before B ends" — which is true of most pairs
+        // one would never call concurrent — and was reported as an overlap even though B begins
+        // two months after A ended and they share no day at all.
+        //
+        // §8.5's finding is built directly on this answer, so the error was not cosmetic: it
+        // invented parallel employment. It stayed hidden while nearly every interval was open,
+        // because §8.5 refused open-and-open pairs before consulting this method.
+        // FIX-IMPORT-HISTORY-04's monthly closures made most intervals closed, which is what
+        // finally exposed it: 656 "overlaps" against the delivered workbook, of which the first
+        // examined pair shared **no months**.
+        //
+        // Overlap is now: this span reaches past the other's start, *and* the other reaches past
+        // this one's. A null end reaches past everything.
+        return ($this->end === null || $other->start->lt($this->end))
+            && ($other->end === null || $this->start->lt($other->end));
     }
 
     /**

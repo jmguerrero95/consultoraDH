@@ -238,10 +238,57 @@ final class RealWorkbookFlowTest extends TestCase
 
         $this->assertGreaterThan(0, $openBlockers, 'the delivered file is expected to carry blockers');
 
+        // FIX-IMPORT-HISTORY-04 §3: the blocker queue is a queue a person can work through.
+        //
+        // Before this milestone the delivered file raised **547** open blockers, 542 of them
+        // `relationship_disappeared_without_retirement` — one question per episode that stopped
+        // being listed, for a workbook whose author never recorded a single employment end date.
+        // The monthly rule settles those from the file itself.
+        //
+        // The ceiling is 7 and it is asserted rather than hoped for: the seven are the
+        // contradictions the file genuinely contains (two company identities, two contradictory
+        // start dates, one conflicting duplicate, one existing-relationship conflict, one
+        // overlap). A regression that reintroduced the mass would fail here rather than show up
+        // as a slow afternoon for whoever opened the batch.
+        $this->assertLessThanOrEqual(
+            7,
+            $openBlockers,
+            'the delivered file must not raise a queue of questions about its own monthly history',
+        );
+
+        $this->assertSame(
+            0,
+            LegacyImportIssue::query()
+                ->where('legacy_import_id', $import->id)
+                ->where('code', 'relationship_disappeared_without_retirement')
+                ->whereNull('resolved_at')
+                ->whereNull('superseded_at')
+                ->count(),
+            'a monthly source settles its own disappearances; none is asked of a person',
+        );
+
+        // The plan exists already — §4: upload → analysis → reconstruction → plan → review.
+        $this->assertNotNull(
+            $import->plan_revision,
+            'the plan is built at upload, so a reviewer is not shown a result that changes later',
+        );
+
         // §5.4: the useful answer to "apply a batch with unresolved blockers" is
         // `409 unresolved_blockers` — not a validation error about a missing field.
+        //
+        // FIX-IMPORT-HISTORY-04: the plan identity is now sent here too, and it has to be.
+        //
+        // Before this milestone the plan was built only when a person saved a decision, so at
+        // this point `plan_revision` was 0 and the endpoint's `requiredIf($plan_revision > 0)`
+        // let the request through to the blocker check. §4 asks for the opposite: the whole plan
+        // is built at upload, so by the time the reviewer sees the batch there *is* a revision,
+        // and "apply" means "apply the plan I was shown" — which the endpoint now insists on
+        // stating. Sending it is not a workaround; it is the new contract.
         $refused = $this->actingAs($this->operator)
-            ->postJson('/api/imports/'.$import->id.'/apply')
+            ->postJson('/api/imports/'.$import->id.'/apply', [
+                'plan_revision' => $import->plan_revision,
+                'plan_digest' => $import->plan_digest,
+            ])
             ->assertStatus(409);
 
         $this->assertSame(
@@ -355,6 +402,78 @@ final class RealWorkbookFlowTest extends TestCase
                 ->get()
                 ->count(),
             '§9.5: no client holds two open relationships with one employer',
+        );
+
+        // ---------------------------------------------------------------------------
+        // FIX-IMPORT-HISTORY-04: what the monthly rule actually wrote.
+        //
+        // These are the milestone's claims, checked against the database the apply produced
+        // rather than against the plan that produced it. §7 asks for the closed intervals, the
+        // preserved observations and the absent duplicated billing; this is where they are
+        // counted.
+        // ---------------------------------------------------------------------------
+
+        $monthlyClosed = DB::table('client_company_assignments')
+            ->where('ended_on_precision', 'month')
+            ->count();
+
+        $this->assertGreaterThan(
+            400,
+            $monthlyClosed,
+            'the monthly rule closed the episodes the file stopped listing',
+        );
+
+        // §7: "ausencia de fechas exactas inventadas".
+        //
+        // Every boundary the rule wrote is the first day of a month after the last observed one,
+        // and the precision says `month`. A closure carrying `day` would mean the system chose a
+        // calendar day the file never stated.
+        $this->assertSame(
+            0,
+            DB::table('client_company_assignments')
+                ->whereNotNull('ended_on')
+                ->whereNotNull('ended_on_precision')
+                ->where('ended_on_precision', 'day')
+                ->whereNotNull('notes')
+                ->where('notes', 'like', '%mensual%')
+                ->count(),
+            'no relationship was closed with an invented exact date by the monthly rule',
+        );
+
+        // Every monthly boundary is the first of a month, which is what "the month after the last
+        // one observed" means as a date.
+        $this->assertSame(
+            0,
+            DB::table('client_company_assignments')
+                ->where('ended_on_precision', 'month')
+                ->whereNotNull('ended_on')
+                ->whereRaw("EXTRACT(DAY FROM ended_on) <> 1")
+                ->count(),
+            'a month-precision boundary is the first day of the following month, never a day inside it',
+        );
+
+        // §5: one master client per document, whatever the name says.
+        $this->assertSame(
+            0,
+            DB::table('clients')
+                ->selectRaw('document_type, document_number')
+                ->groupBy('document_type', 'document_number')
+                ->havingRaw('COUNT(*) > 1')
+                ->get()
+                ->count(),
+            '§2: two rows with one name and one document do not become two master clients',
+        );
+
+        // §7: "ausencia de obligaciones duplicadas".
+        $this->assertSame(
+            0,
+            DB::table('monthly_obligations')
+                ->selectRaw('period_id, client_id, company_id')
+                ->groupBy('period_id', 'client_id', 'company_id')
+                ->havingRaw('COUNT(*) > 1')
+                ->get()
+                ->count(),
+            '§7: no obligation is written twice for one client, month and employer',
         );
     }
 

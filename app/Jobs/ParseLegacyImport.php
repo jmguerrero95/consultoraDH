@@ -139,6 +139,33 @@ final class ParseLegacyImport implements ShouldQueue
 
             throw $exception;
         }
+
+        // FIX-IMPORT-HISTORY-04 §4: the whole plan is built here, at upload time.
+        //
+        // ## What was wrong
+        //
+        // The parse job staged the rows and stopped. Nothing reconstructed the employment
+        // intervals, so the batch reached `review` carrying only the row-level findings — and the
+        // history conflicts (disappearances, overlaps, contradictory starts) were not discovered
+        // until something *else* dispatched `BuildLegacyImportPlan`, which happened to be the first
+        // decision a person saved.
+        //
+        // The visible consequence was that the count of blockers **grew** when the reviewer made
+        // progress: three on upload, then 547 after answering the first question, 542 of which were
+        // `relationship_disappeared_without_retirement`. Every one of those was visible from the
+        // staged rows at upload and none of them needed asking.
+        //
+        // ## Why a dispatch and not an inline build
+        //
+        // Reconstruction plus planning on the delivered workbook is minutes of work (1 787
+        // assertions in the acceptance run). Doing it inline would hold a worker for the whole of
+        // it and make an upload's duration depend on the size of the file. The queue already runs
+        // this work; the fix is that the chain now *includes* it.
+        //
+        // Dispatched on the same queue so it lands behind this job rather than racing it, and
+        // `BuildLegacyImportPlan` takes the row lock and declines from a state that may not be
+        // rebuilt, so a second dispatch is harmless.
+        BuildLegacyImportPlan::dispatch($this->importId);
     }
 
     private static function safeMessage(\Throwable $exception): string

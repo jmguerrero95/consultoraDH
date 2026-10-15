@@ -13,6 +13,7 @@ use App\Domain\Imports\EffectiveCompanyIdentity;
 use App\Domain\Imports\HistoricalInterval;
 use App\Domain\Imports\HistoryReconstruction;
 use App\Domain\Imports\HistoryReconstructor;
+use App\Domain\Imports\ImportHistoryInterpretation;
 use App\Domain\Imports\ImportDecisionSet;
 use App\Domain\Imports\ImportLifecycle;
 use App\Domain\Imports\ImportPlan;
@@ -175,7 +176,17 @@ final class BuildLegacyImportPlan implements ShouldQueue
                 }
 
                 $policy = $this->policyFor($import);
-                $reconstruction = (new HistoryReconstructor($policy, $decisions))->reconstruct($rows);
+
+                // FIX-IMPORT-HISTORY-04. What one appearance of this file *means* is declared by
+                // the profile, so the reconstruction cannot silently change meaning between runs.
+                // The monthly rule closes a relationship on the month after the last one observed;
+                // a source that records events keeps §8.4's question. `forProfile()` throws for a
+                // profile nobody has classified, which is the point: a new file has to be
+                // understood before it is read.
+                $interpretation = ImportHistoryInterpretation::forProfile($import->profile);
+
+                $reconstruction = (new HistoryReconstructor($policy, $decisions, $interpretation))
+                    ->reconstruct($rows);
 
                 // The reconstruction's own questions — a disappearance, an overlap — are
                 // interval-level, so they cannot have come from the parse.

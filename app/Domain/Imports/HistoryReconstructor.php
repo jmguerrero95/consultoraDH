@@ -30,10 +30,17 @@ final class HistoryReconstructor
      * @param  ImportDecisionSet|null  $decisions  the human answers in force for this import.
      *                                             NULL for §19's verifier, which runs the *untransformed* reconstruction on purpose:
      *                                             it reports what the file says, not what a reviewer decided.
+     * @param  ImportHistoryInterpretation  $interpretation  what one appearance of this source
+     *                                             *means*. FIX-IMPORT-HISTORY-04. Defaults to
+     *                                             `ExactEvents`, which is §8.4's original behaviour
+     *                                             and the only safe default: a caller that has not
+     *                                             said what its file means gets the reading that
+     *                                             never invents a closure.
      */
     public function __construct(
         private readonly ImportRetirementPolicy $retirementPolicy = ImportRetirementPolicy::ManualOnly,
         private readonly ?ImportDecisionSet $decisions = null,
+        private readonly ImportHistoryInterpretation $interpretation = ImportHistoryInterpretation::ExactEvents,
     ) {}
 
     /**
@@ -47,8 +54,25 @@ final class HistoryReconstructor
 
         $lastMonth = $this->lastMonth($ordered);
 
+        // FIX-IMPORT-HISTORY-04, applied before anything is asked of anybody.
+        //
+        // A monthly source settles its own history: a person who is absent in April is not
+        // employed there in April, and the file says so by omission. Applying it here — before
+        // `findDisappearances()` and before any interval becomes a plan action — is what makes
+        // §8.4's question disappear rather than merely get answered later: the episodes are closed,
+        // so the open-and-abandoned test finds nothing left to ask about.
+        [$episodes, $monthlyClosures] = $this->applyMonthlyClosures($episodes, $lastMonth);
+
+        // Which episodes ended by *inference* rather than by evidence. §8.5 consults this, and the
+        // reason is in `genuineOverlap()`: a boundary the rule produced cannot contradict the file,
+        // because the file never stated it.
+        $inferredEnds = array_column(
+            array_map(static fn (MonthlyObservationClosure $c): array => ['key' => $c->episodeKey], $monthlyClosures),
+            'key',
+        );
+
         $disappearances = $this->findDisappearances($episodes, $lastMonth);
-        $overlaps = $this->findOverlaps($episodes, $lastMonth);
+        $overlaps = $this->findOverlaps($episodes, $lastMonth, $inferredEnds);
 
         // One employment whose start dates contradict its own months. Asked before §8.4 and §8.5
         // because neither of them can: §8.4 asks about an episode that stops appearing, and §8.5
@@ -97,7 +121,7 @@ final class HistoryReconstructor
         // the comment above this method describes for A04-R1, one level along. Overlaps are now
         // recomputed from the decided episodes before §8.5's answers are applied, so the decision is
         // applied to the episodes the reviewer was actually shown.
-        $overlaps = $this->findOverlaps($episodes, $lastMonth);
+        $overlaps = $this->findOverlaps($episodes, $lastMonth, $inferredEnds);
 
         $episodes = $this->applyOverlapDecisions($episodes, $overlaps);
 
@@ -105,7 +129,7 @@ final class HistoryReconstructor
         // disappearance" has to be asked of the *decided* episodes, or an episode a person closed
         // is still reported as an open question on the next rebuild.
         $disappearances = $this->findDisappearances($episodes, $lastMonth);
-        $overlaps = $this->findOverlaps($episodes, $lastMonth);
+        $overlaps = $this->findOverlaps($episodes, $lastMonth, $inferredEnds);
 
         return new HistoryReconstruction(
             $episodes,
@@ -116,7 +140,105 @@ final class HistoryReconstructor
             $disappearances,
             $overlaps,
             $contradictoryStarts,
+            $monthlyClosures,
+            $this->interpretation,
         );
+    }
+
+    // -------------------------------------------- FIX-IMPORT-HISTORY-04: monthly history
+
+    /**
+     * Close every episode the file stopped listing, when the source is a monthly one.
+     *
+     * ## The rule
+     *
+     * > La relación se considera finalizada en el último mes en el que aparece en el archivo.
+     *
+     * Applied as an interval, that means the **first day of the month after** the last one
+     * observed, at precision `month`. Half-open intervals are the reason: `[start, end)` expresses
+     * "through March" as "not in April", and `2026-04-01` is the only date that says it without
+     * inventing a day inside March.
+     *
+     * ## What is deliberately *not* closed
+     *
+     *  - an episode seen in the **last month of the file** (Caso E). Absence after the file ends
+     *    says nothing, and inferring a future end would be inventing an event. It stays open, and
+     *    `findDisappearances()` does not ask about it either — an episode still being listed is
+     *    not an unexplained departure.
+     *  - an episode that already has a closure. A **registered exact date** wins over the rule
+     *    (Caso F), because the file stated it and a rule must not overwrite a fact; and
+     *    `manual_only` still derives nothing from a retirement *note*, so an undated note leaves
+     *    the episode open and it is closed by this rule instead — with the note still carried, so
+     *    the review screen can still say the person retired.
+     *  - an episode with **no months at all**. There is nothing to take a last month from, and a
+     *    boundary derived from nothing is not a boundary.
+     *
+     * @param  list<RelationshipEpisode>  $episodes
+     * @return array{0: list<RelationshipEpisode>, 1: list<MonthlyObservationClosure>}
+     */
+    private function applyMonthlyClosures(array $episodes, ?string $lastMonth): array
+    {
+        if (! $this->interpretation->closesOnLastObservedMonth() || $lastMonth === null) {
+            return [$episodes, []];
+        }
+
+        $closures = [];
+        $rebuilt = [];
+
+        foreach ($episodes as $episode) {
+            $seen = $episode->lastMonth();
+
+            // Kept, not filtered out.
+            //
+            // The first version of this method appended only the episodes it closed and returned
+            // that list, which silently **dropped every episode still open** — 761 in, 542 out on
+            // the delivered workbook. The remaining 542 were all closed, so no pair of them was
+            // open, and §8.5's genuine-overlap test compared intervals that had stopped overlapping
+            // anything: the overlap count went from 1 to 552 and the blockers got worse rather than
+            // better. A closure rule that deletes the relationships it did not touch is not a rule.
+            if ($seen === null
+                || strcmp($seen, $lastMonth) >= 0
+                || ! $episode->interval->isOpen()) {
+                $rebuilt[] = $episode;
+
+                continue;
+            }
+
+            $boundary = self::exclusiveBoundaryAfter($seen);
+
+            $rebuilt[] = $episode->withInterval(
+                $episode->interval->endingOn($boundary, HistoricalInterval::MONTH),
+            );
+
+            $closures[] = new MonthlyObservationClosure(
+                $episode->key(),
+                $episode->clientKey,
+                $episode->documentType,
+                $episode->documentNumber,
+                $episode->clientDisplayName,
+                $episode->companyTaxId,
+                $episode->companyName,
+                $seen,
+                $boundary->format('Y-m-d'),
+                $episode->retirement !== null,
+            );
+        }
+
+        return [$rebuilt, $closures];
+    }
+
+    /**
+     * The first day of the month after `$month`.
+     *
+     * Done by adding a month to the first of the month rather than by taking the last day of
+     * `$month` and adding a day: that is the same date, computed in a way that cannot be off by
+     * one on a thirty-day month, and it reads as what it is.
+     */
+    private static function exclusiveBoundaryAfter(string $month): Carbon
+    {
+        $first = Carbon::createFromFormat('Y-m-d', $month.'-01')->startOfDay();
+
+        return $first->copy()->addMonthNoOverflow()->startOfDay();
     }
 
     // --------------------------------------------------- contradictory start dates
@@ -901,11 +1023,34 @@ final class HistoryReconstructor
      * `relationship_disappeared_without_retirement`. So case 3 is gone, and `sharedMonths` is
      * carried on {@see CompanyOverlap} as evidence for whoever answers that question.
      *
+     * ## FIX-IMPORT-HISTORY-04: a boundary the rule produced cannot be a contradiction
+     *
+     * `$inferredEnds` names the episodes whose end date came from the monthly rule rather than from
+     * something the file wrote. Case 1 below is the only branch that reaches `overlaps()`, and it
+     * asserts "the boundaries are known" — which stopped being true the moment a rule started
+     * producing them.
+     *
+     * With the delivered workbook that turned 434 pairs into blocking questions. Every one of them
+     * needs at least one *inferred* end to overlap at all: the person is listed at one employer
+     * until March, at another from late March, and the rule closed the first at `2026-04-01`, so
+     * the two spans intersect for a few days. Nothing in the file says those months were concurrent
+     * — the rule did, from an absence. Asking somebody to correct, transfer-recognise or authorise
+     * 434 of them is the same artificial queue the milestone exists to remove, wearing a different
+     * code.
+     *
+     * So an overlap is only raised when **no inferred end is needed to produce it**: either both
+     * sides' boundaries are the file's own, or the open side demonstrably began inside a closed
+     * side that the file closed. A genuine contradiction — two employers, two stated dates, the
+     * file disagreeing with itself — has no inferred end and is still asked.
+     *
      * @param  list<RelationshipEpisode>  $episodes
+     * @param  list<string>  $inferredEnds  episode keys whose end the monthly rule produced
      * @return list<CompanyOverlap>
      */
-    private function findOverlaps(array $episodes, ?string $lastMonth = null): array
+    private function findOverlaps(array $episodes, ?string $lastMonth = null, array $inferredEnds = []): array
     {
+        $inferred = array_flip($inferredEnds);
+
         /** @var array<string, list<RelationshipEpisode>> $byClient */
         $byClient = [];
 
@@ -933,6 +1078,12 @@ final class HistoryReconstructor
                     }
 
                     if (! $this->genuineOverlap($first, $second, $lastMonth)) {
+                        continue;
+                    }
+
+                    // The pair genuinely intersects, but only because a rule supplied an end date
+                    // the file never stated. Recorded nowhere as a finding — see the docblock.
+                    if (isset($inferred[$first->key()]) || isset($inferred[$second->key()])) {
                         continue;
                     }
 
