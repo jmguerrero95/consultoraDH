@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Affiliations;
 
 use App\Domain\Affiliations\Actions\ManageCatalogueEntities;
+use App\Domain\Shared\RecordStatus;
 use App\Models\SocialSecurityEntity;
 use App\Models\User;
 
@@ -33,18 +34,28 @@ use App\Models\User;
 final class LoadVerifiedEntityCatalogue
 {
     /**
-     * What a load did, for the caller to print or assert on.
-     *
-     * @return array{created: list<string>, already_present: list<string>, skipped_inactive: list<string>, would_create: list<string>}
+     * @param  User|null  $actor  the authenticated, authorised person performing the load. Required
+     *                            whenever `$apply` is true; never invented.
      */
-    public function run(bool $apply = false): array
+    public function run(bool $apply = false, ?User $actor = null): array
     {
+        if ($apply && $actor === null) {
+            // §4.1 reserves a decision for a person who made one. A catalogue load that picked the
+            // first row of `users` would attribute an authorisation to whoever registered first,
+            // which is not evidence of anything and is worse than no attribution because it looks
+            // like one.
+            throw new \RuntimeException(
+                'Una carga de catálogo requiere un actor explícito, autenticado y autorizado. '
+                .'El ensayo en seco no lo necesita porque no escribe nada.',
+            );
+        }
+
         $created = [];
         $alreadyPresent = [];
         $skippedInactive = [];
         $wouldCreate = [];
 
-        foreach (VerifiedEntityCatalogue::entities() as $entry) {
+        foreach ($this->manifest() as $entry) {
             $type = $entry['type'];
             $name = $entry['name'];
 
@@ -55,7 +66,15 @@ final class LoadVerifiedEntityCatalogue
 
             if ($existing !== null) {
                 // Deliberately no writes. See the class docblock.
-                $alreadyPresent[] = $type->value.':'.$name;
+                //
+                // `skipped_inactive` is separate from `already_present` on purpose: an entity a
+                // person deactivated is not the same as one that is simply there, and reactivating
+                // the first because the second matches would undo a decision.
+                if (($existing->getRawOriginal('status') ?? null) !== RecordStatus::Active->value) {
+                    $skippedInactive[] = $type->value.':'.$name;
+                } else {
+                    $alreadyPresent[] = $type->value.':'.$name;
+                }
 
                 continue;
             }
@@ -69,11 +88,10 @@ final class LoadVerifiedEntityCatalogue
             app(ManageCatalogueEntities::class)->create([
                 'type' => $type->value,
                 'name' => $name,
-                // Null, and staying null. The manifest has no verified codes, so there is nothing
-                // to write; `ManageCatalogueEntities::nullIfBlank()` would store null anyway.
+                // Null, and staying null, unless the manifest actually verified one.
                 'code' => $entry['code'],
                 'tax_id' => $entry['tax_id'],
-            ], $this->actor());
+            ] + ($entry['regulatory_class'] ?? []), $actor);
 
             $created[] = $type->value.':'.$name;
         }
@@ -87,24 +105,28 @@ final class LoadVerifiedEntityCatalogue
     }
 
     /**
-     * A catalogue load is not a person acting on a payroll record, so it must not borrow the audit
-     * trail of one that is.
+     * Everything this loader knows, national catalogue first.
      *
-     * The service requires an actor because every catalogue change is somebody's decision. Loading
-     * verified evidence is the operator activating a catalogue, and the actor recorded is exactly
-     * that — never a fabricated user id.
+     * Kept as one method so the loader has a single place to read from and the dry run describes
+     * exactly what a real run would do.
+     *
+     * @return list<array{type: SocialSecurityEntityType, name: string, code: ?string, tax_id: ?string, regulatory_class?: array<string, string>}>
      */
-    private function actor(): User
+    private function manifest(): array
     {
-        $actor = User::query()->orderBy('id')->first();
+        $entries = [];
 
-        if ($actor !== null) {
-            return $actor;
+        foreach (EpsNationalCatalogue::records() as $record) {
+            $entries[] = [
+                'type' => SocialSecurityEntityType::Eps,
+                'name' => $record['name'],
+                'code' => $record['code'],
+                'tax_id' => $record['tax_id'],
+                // The subtype, so a caja or an entidad adaptada is not filed as an ordinary EPS.
+                'regulatory_class' => ['regulatory_class' => $record['regulatory_class']],
+            ];
         }
 
-        throw new \RuntimeException(
-            'No hay ningún usuario para registrar la carga del catálogo. Una carga de catálogo es una '
-            .'decisión de una persona y la auditoría necesita un autor real.',
-        );
+        return $entries;
     }
 }

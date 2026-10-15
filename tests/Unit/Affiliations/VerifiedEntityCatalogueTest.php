@@ -6,6 +6,7 @@ use App\Domain\Affiliations\Actions\ManageCatalogueEntities;
 use App\Domain\Affiliations\LoadVerifiedEntityCatalogue;
 use App\Domain\Affiliations\SocialSecurityEntityType;
 use App\Domain\Affiliations\VerifiedEntityCatalogue;
+use App\Domain\Shared\RecordStatus;
 use App\Models\SocialSecurityEntity;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -144,7 +145,7 @@ it('loads the catalogue without duplicating anything, however many times it runs
     $before = SocialSecurityEntity::query()->count();
 
     $loader = app(LoadVerifiedEntityCatalogue::class);
-    $first = $loader->run(apply: true);
+    $first = $loader->run(apply: true, actor: User::query()->firstOrFail());
 
     expect($first['created'])->not->toBeEmpty();
     expect($first['already_present'])->toBeEmpty();
@@ -154,7 +155,7 @@ it('loads the catalogue without duplicating anything, however many times it runs
 
     // Second and third run: nothing new, nothing touched.
     foreach ([2, 3] as $run) {
-        $again = $loader->run(apply: true);
+        $again = $loader->run(apply: true, actor: User::query()->firstOrFail());
 
         expect($again['created'])->toBeEmpty("la corrida {$run} creó entidades nuevas");
         expect($again['already_present'])->toHaveCount(count($first['created']));
@@ -173,7 +174,14 @@ it('loads the catalogue without duplicating anything, however many times it runs
         ->get();
 
     expect($created)->toHaveCount(count($first['created']));
-    expect($created->pluck('code')->filter()->toArray())->toBe([]);
+
+    // Every created row carries the code and NIT the Ministry's table gave for it. The earlier
+    // ten-name manifest could not: that source publishes names only, and this assertion is what
+    // distinguishes "verified from the full table" from "a list of plausible names".
+    foreach ($created as $entity) {
+        expect($entity->getRawOriginal('code'))->not->toBeNull();
+        expect($entity->getRawOriginal('tax_id'))->toMatch('/^\d{9}$/');
+    }
 });
 
 it('leaves an existing row completely alone, including a code added by hand', function (): void {
@@ -181,23 +189,23 @@ it('leaves an existing row completely alone, including a code added by hand', fu
     // load must not null that code, rename the entity, or touch the row at all.
     $existing = app(ManageCatalogueEntities::class)->create([
         'type' => SocialSecurityEntityType::Eps->value,
-        'name' => 'sanitas',
-        'code' => 'EPS-00123',
-        'tax_id' => '890.103.196-1',
+        'name' => 'eps sanitas',
+        'code' => 'EPS005',
+        'tax_id' => '800251440',
     ], User::query()->firstOrFail());
 
     $before = $existing->fresh()?->toArray();
     $touchedAt = $existing->updated_at->toDateTimeString();
 
-    $result = app(LoadVerifiedEntityCatalogue::class)->run(apply: true);
+    $result = app(LoadVerifiedEntityCatalogue::class)->run(apply: true, actor: User::query()->firstOrFail());
 
-    expect($result['already_present'])->toContain(SocialSecurityEntityType::Eps->value.':SANITAS');
-    expect($result['created'])->not->toContain(SocialSecurityEntityType::Eps->value.':SANITAS');
+    expect($result['already_present'])->toContain(SocialSecurityEntityType::Eps->value.':EPS SANITAS');
+    expect($result['created'])->not->toContain(SocialSecurityEntityType::Eps->value.':EPS SANITAS');
 
     // Case and accents are folded for matching, and nothing else moved.
     $after = $existing->fresh()?->toArray();
-    expect($after['code'])->toBe('EPS-00123');
-    expect($after['tax_id'])->toBe('890.103.196-1');
+    expect($after['code'])->toBe('EPS005');
+    expect($after['tax_id'])->toBe('800251440');
     expect($after['name'])->toBe($before['name']);
     expect($after['status'])->toBe($before['status']);
 
@@ -211,9 +219,9 @@ it('leaves an existing row completely alone, including a code added by hand', fu
 
 it('keeps COMPENSAR as two entities, one per type', function (): void {
     $loader = app(LoadVerifiedEntityCatalogue::class);
-    $loader->run(apply: true);
+    $loader->run(apply: true, actor: User::query()->firstOrFail());
 
-    $compensar = SocialSecurityEntity::query()->whereRaw('lower(unaccent(name)) = ?', ['compensar'])->get();
+    $compensar = SocialSecurityEntity::query()->whereRaw('lower(unaccent(name)) = ?', ['compensar eps'])->get();
 
     // The manifest verifies COMPENSAR as an EPS and the workbook also writes it in the CCF column.
     // Loading the EPS must not create or collapse a CCF of the same name.
@@ -229,4 +237,43 @@ it('reports what it would do without writing, which is the default', function ()
     expect($dry['created'])->toBeEmpty();
     expect($dry['would_create'])->not->toBeEmpty();
     expect(SocialSecurityEntity::query()->count())->toBe($before);
+});
+
+it('refuses to write without an explicit actor, and says why', function (): void {
+    $before = SocialSecurityEntity::query()->count();
+
+    // The defect this pins: `actor()` used to pick the first row of `users`, which attributes an
+    // authorisation to whoever registered first. That is not evidence of anything and it looks
+    // like evidence, which is worse than none.
+    expect(fn () => app(LoadVerifiedEntityCatalogue::class)->run(apply: true))
+        ->toThrow(RuntimeException::class, 'actor explícito');
+
+    expect(SocialSecurityEntity::query()->count())->toBe($before);
+
+    // The dry run writes nothing, so it needs no author and must not be blocked for lack of one.
+    $dry = app(LoadVerifiedEntityCatalogue::class)->run();
+
+    expect($dry['created'])->toBeEmpty();
+    expect($dry['would_create'])->not->toBeEmpty();
+    expect(SocialSecurityEntity::query()->count())->toBe($before);
+});
+
+it('leaves a deactivated entity deactivated rather than reactivating it', function (): void {
+    $existing = app(ManageCatalogueEntities::class)->create([
+        'type' => SocialSecurityEntityType::Eps->value,
+        'name' => 'FAMISANAR',
+    ], User::query()->firstOrFail());
+
+    app(ManageCatalogueEntities::class)
+        ->deactivate($existing, User::query()->firstOrFail());
+
+    $result = app(LoadVerifiedEntityCatalogue::class)
+        ->run(apply: true, actor: User::query()->firstOrFail());
+
+    // Reactivating would undo a person's decision because a later list happens to contain the name.
+    expect($result['skipped_inactive'])->toContain(SocialSecurityEntityType::Eps->value.':FAMISANAR');
+    expect($result['created'])->not->toContain(SocialSecurityEntityType::Eps->value.':FAMISANAR');
+    expect($result['already_present'])->not->toContain(SocialSecurityEntityType::Eps->value.':FAMISANAR');
+
+    expect($existing->fresh()?->getRawOriginal('status'))->not->toBe(RecordStatus::Active->value);
 });

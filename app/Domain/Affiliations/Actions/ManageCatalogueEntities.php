@@ -42,6 +42,20 @@ final class ManageCatalogueEntities
                 'status' => RecordStatus::Active->value,
             ]);
 
+            // The institutional subtype, when a source established one. Null for a row an
+            // administrator typed by hand: there is no document behind it and inventing a class
+            // would be a fabricated provenance.
+            //
+            // Written with `forceFill()` rather than inside the `create()` above on purpose. The
+            // model guards mass assignment, and a column that only some code paths set through the
+            // guarded array is a column that silently stays null — which is what happened the first
+            // time: all 28 rows were created and the subtype was missing from every one of them,
+            // with nothing failing.
+            $entity->forceFill(array_filter([
+                'regulatory_class' => $attributes['regulatory_class'] ?? null,
+                'regulatory_class_source' => $this->nullIfBlank($attributes['regulatory_class_source'] ?? null),
+            ], static fn (mixed $value): bool => $value !== null))->save();
+
             event(SocialSecurityEntityChanged::created($entity, $actor));
 
             return $entity;
