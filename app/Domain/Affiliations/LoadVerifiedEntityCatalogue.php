@@ -55,6 +55,10 @@ final class LoadVerifiedEntityCatalogue
         $skippedInactive = [];
         $wouldCreate = [];
 
+        // One manifest, one type per row. `type` travels with every entry and is what
+        // `ManageCatalogueEntities` writes, so a CCF row can never satisfy an EPS lookup even
+        // when the two catalogues name the same organisation — which they do, for the four cajas
+        // that provide subsidised health services under their own CCF codes.
         foreach ($this->manifest() as $entry) {
             $type = $entry['type'];
             $name = $entry['name'];
@@ -124,6 +128,22 @@ final class LoadVerifiedEntityCatalogue
                 'tax_id' => $record['tax_id'],
                 // The subtype, so a caja or an entidad adaptada is not filed as an ordinary EPS.
                 'regulatory_class' => ['regulatory_class' => $record['regulatory_class']],
+            ];
+        }
+
+        foreach (CcfNationalCatalogue::records() as $record) {
+            $entries[] = [
+                'type' => SocialSecurityEntityType::Ccf,
+                // The qualified name when the directory gave a bare "Caja de Compensación Familiar";
+                // the institutional name otherwise. Either way the sigla is carried alongside, and
+                // it is the sigla that identifies the three cajas that all answer to COMFAMILIAR.
+                'name' => $record['name'],
+                // No code and no NIT: the SSF directory publishes neither, and filling those
+                // columns from anywhere else would put a CCF code space into a row the source
+                // never described that way.
+                'code' => $record['code'],
+                'tax_id' => $record['tax_id'],
+                'regulatory_class' => null,
             ];
         }
 

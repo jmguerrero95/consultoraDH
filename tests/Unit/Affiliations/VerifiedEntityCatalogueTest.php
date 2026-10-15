@@ -175,12 +175,17 @@ it('loads the catalogue without duplicating anything, however many times it runs
 
     expect($created)->toHaveCount(count($first['created']));
 
-    // Every created row carries the code and NIT the Ministry's table gave for it. The earlier
-    // ten-name manifest could not: that source publishes names only, and this assertion is what
-    // distinguishes "verified from the full table" from "a list of plausible names".
+    // The 28 EPS carry the code and NIT the Ministry's table gave for them. The 42 CCF carry
+    // neither, because the SSF directory publishes neither — and the distinction has to survive a
+    // loader that handles both, or one source's shape gets imposed on the other.
     foreach ($created as $entity) {
-        expect($entity->getRawOriginal('code'))->not->toBeNull();
-        expect($entity->getRawOriginal('tax_id'))->toMatch('/^\d{9}$/');
+        if ($entity->getRawOriginal('type') === SocialSecurityEntityType::Eps->value) {
+            expect($entity->getRawOriginal('code'))->not->toBeNull();
+            expect($entity->getRawOriginal('tax_id'))->toMatch('/^\d{9}$/');
+        } else {
+            expect($entity->getRawOriginal('code'))->toBeNull();
+            expect($entity->getRawOriginal('tax_id'))->toBeNull();
+        }
     }
 });
 
@@ -221,12 +226,19 @@ it('keeps COMPENSAR as two entities, one per type', function (): void {
     $loader = app(LoadVerifiedEntityCatalogue::class);
     $loader->run(apply: true, actor: User::query()->firstOrFail());
 
-    $compensar = SocialSecurityEntity::query()->whereRaw('lower(unaccent(name)) = ?', ['compensar eps'])->get();
+    // The EPS manifest verifies COMPENSAR as an EPS; the CCF manifest has its own COMPENSAR caja.
+    // Same organisation, two functions, two catalogue rows — and the loader must have created both
+    // rather than collapsing them into one.
+    $compensar = SocialSecurityEntity::query()
+        ->whereRaw('lower(unaccent(name)) = ?', ['compensar'])
+        ->orWhereRaw('lower(unaccent(name)) = ?', ['compensar eps'])
+        // The CCF row is sigla-qualified, because the directory publishes no distinguishing name
+        // for it beyond "Caja de Compensación Familiar".
+        ->orWhereRaw('lower(unaccent(name)) like ?', ['%compensar%'])
+        ->get();
 
-    // The manifest verifies COMPENSAR as an EPS and the workbook also writes it in the CCF column.
-    // Loading the EPS must not create or collapse a CCF of the same name.
     expect($compensar->pluck('type')->unique()->map(fn ($t) => $t->value)->toArray())
-        ->toBe([SocialSecurityEntityType::Eps->value]);
+        ->toBe([SocialSecurityEntityType::Eps->value, SocialSecurityEntityType::Ccf->value]);
 });
 
 it('reports what it would do without writing, which is the default', function (): void {
