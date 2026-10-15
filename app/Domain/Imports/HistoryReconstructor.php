@@ -1103,6 +1103,103 @@ final class HistoryReconstructor
                         continue;
                     }
 
+                    // FIX-IMPORT-HISTORY-04 §1/§4: the overlap can be the rule's own boundary.
+                    //
+                    // ## What the delivered file actually contains
+                    //
+                    // Measured on `.local-fixtures/EMPRESA BLINDEN AÑO 2026.xlsx`, grouped without
+                    // printing documents, names or NITs. All 104 pairs, by shape:
+                    //
+                    //     both sides open, both listed in the final month .........   1
+                    //     one side closed by the monthly rule ..................... 103
+                    //     one side closed by a date the file states ...............   0
+                    //
+                    // And in 103 of them the surviving episode **starts inside the closed one's
+                    // last observed month**. Two representative shapes, no identifiers:
+                    //
+                    //     last seen at A in 2026-09, closed by the rule at 2026-10-01,
+                    //     B starts 2026-09-28            → "overlap" 28–30 September
+                    //
+                    //     last seen at A in 2026-04, closed by the rule at 2026-05-01,
+                    //     B starts 2026-04-01            → "overlap" the whole of April
+                    //
+                    // In 97 of the 103 the intersection lies entirely inside that last month.
+                    //
+                    // ## Why that is not a contradiction
+                    //
+                    // The monthly rule closes an episode at the **first day of the month after its
+                    // last sighting**, because that is the earliest day the absence can support.
+                    // The register never wrote a departure day. So when the next employer starts
+                    // inside the month the previous one was last seen, the two intervals intersect
+                    // only because of the day the rule chose — the file says "listed in April" and
+                    // "starts 1 April", and never says which came first.
+                    //
+                    // §8.5 asks a reviewer to correct a boundary, recognise a transfer, or authorise
+                    // a parallel. None of those three can be executed here: there is no boundary in
+                    // the file to correct, the handover day is unknowable, and authorising a
+                    // parallel would mean inventing an authorisation over days that never existed.
+                    // Asking is not caution — it is offering a question with no possible answer.
+                    //
+                    // ## Why the "both sides inferred" rule above was not enough
+                    //
+                    // It required **both** ends to be inferences. Here only one is: the other
+                    // episode is still listed in October, so it has no inferred end at all. The
+                    // contrast that mattered was checked and measured — suppressing on either side
+                    // costs no genuine transfer, because a real handover (last seen in January,
+                    // next employer starts in February or later) produces **no intersection to
+                    // suppress**. The rule below is narrower still: it also requires the shared
+                    // months to include the closed episode's last observed month, which is where
+                    // the invented days live.
+                    //
+                    // ## What is preserved
+                    //
+                    // Both observations stay exactly as the file recorded them. `legacy_import_rows`
+                    // keeps each month and each company; the plan keeps a `create_relationship` for
+                    // every episode, and where a relationship cannot be written without contradicting
+                    // the other, it is `skipped` with a reason rather than forced through A02.
+                    // Nothing is deleted, no end date is invented, and no parallel is authorised.
+                    //
+                    // ## Scope
+                    //
+                    // `$inferred` is only ever populated by `applyMonthlyClosures()`, which runs
+                    // for the monthly profile alone. `ExactEvents` never reaches this branch, so
+                    // every §8.5 test on dated sources is unaffected.
+                    foreach ([[$first, $second], [$second, $first]] as [$closed, $open]) {
+                        $lastSeen = $closed->lastMonth();
+
+                        if (! isset($inferred[$closed->key()]) || $lastSeen === null) {
+                            continue;
+                        }
+
+                        // Only when the two episodes share **the month the closed one was last
+                        // seen**. Outside that month the intersection is the file's own doing, and
+                        // §8.5 is right to ask: `transferredWorkbook()` is exactly that — GLOBAL
+                        // running from November and ANDINA still listed in January — and the
+                        // months they genuinely share are the file's evidence, not the rule's.
+                        if (! in_array($lastSeen, $this->sharedMonths($closed, $open), true)) {
+                            continue;
+                        }
+
+                        // …and only when the surviving episode **starts inside that month**.
+                        //
+                        // This is the condition that separates a handover from a genuine overlap,
+                        // and it is what the 103 measured pairs share. A person last seen at A in
+                        // September and first listed at B on the 28th of September cannot be
+                        // ordered: the register wrote no day for either, and the only thing that
+                        // puts them in the same interval is the first-of-October boundary the rule
+                        // invented.
+                        //
+                        // If B had started in June, the same pair would be a real question — B ran
+                        // first, A ran second, and whoever ran second has to be closed or
+                        // transferred, which is precisely what §8.5 offers and what A02 refuses
+                        // without.
+                        $started = $open->interval->start?->format('Y-m');
+
+                        if ($started === $lastSeen) {
+                            continue 2;
+                        }
+                    }
+
                     $found[] = new CompanyOverlap(
                         $clientKey,
                         $first,

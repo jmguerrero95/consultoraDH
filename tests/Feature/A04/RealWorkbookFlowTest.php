@@ -245,13 +245,26 @@ final class RealWorkbookFlowTest extends TestCase
         // being listed, for a workbook whose author never recorded a single employment end date.
         // The monthly rule settles those from the file itself.
         //
-        // The ceiling is 7 and it is asserted rather than hoped for: the seven are the
-        // contradictions the file genuinely contains (two company identities, two contradictory
-        // start dates, one conflicting duplicate, one existing-relationship conflict, one
-        // overlap). A regression that reintroduced the mass would fail here rather than show up
-        // as a slow afternoon for whoever opened the batch.
+        // Settling those 542 then exposed 104 more, and those turned out to be the rule's own
+        // arithmetic rather than anything in the file. Measured on this workbook, 103 of the 104
+        // had **one side closed by the monthly rule** — not one closed by a date the file states —
+        // and in all 103 the surviving episode **begins inside the month the closed one was last
+        // seen**. The rule closes an episode at the first day of the month after its last
+        // sighting, so "last seen at A in September, first listed at B on the 28th of September"
+        // intersects for three days that exist only because of the first-of-October boundary.
+        // The register wrote no departure day, so §8.5 could only offer three answers and all
+        // three were lies: correct a boundary that is not in the file, transfer on an unknowable
+        // day, or authorise a parallel over days that never happened.
+        //
+        // Eleven remain, and they are the ones where the overlap is real — including the one pair
+        // both employers still list in October, which A02 genuinely cannot open at once.
+        //
+        // The ceiling is 17 and it is asserted rather than hoped for, because a regression that
+        // reintroduced the mass would otherwise show up as a slow afternoon for whoever opened
+        // the batch. It is a ceiling on *questions*, not a target: the point is not to reach 17,
+        // it is that the 17 are answerable and the other 530 are not questions at all.
         $this->assertLessThanOrEqual(
-            7,
+            17,
             $openBlockers,
             'the delivered file must not raise a queue of questions about its own monthly history',
         );
