@@ -39,7 +39,17 @@ final class ManageCatalogueEntities
                 'name' => $attributes['name'],
                 'code' => $this->nullIfBlank($attributes['code'] ?? null),
                 'tax_id' => $this->nullIfBlank($attributes['tax_id'] ?? null),
-                'status' => RecordStatus::Active->value,
+                // An entity whose own manifest says it left the market is created **inactive**.
+                //
+                // `create()` used to assume `active` for everything, which meant the catalogue
+                // loaded Liberty as a live administrator and only the importer's status filter
+                // stood between it and a new affiliation. The status belongs at creation: an ARL
+                // recorded as having exited is not a live option the moment it is written down.
+                //
+                // Only entities that declare it. The other nine have no such flag and are created
+                // active, because "nobody documented an exit" is not "this one exited" — and this
+                // manifest makes no claim about current authorisation for any of them.
+                'status' => ($attributes['status'] ?? RecordStatus::Active->value),
             ]);
 
             // The institutional subtype, when a source established one. Null for a row an

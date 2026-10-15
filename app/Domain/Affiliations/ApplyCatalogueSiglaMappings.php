@@ -38,7 +38,12 @@ final class ApplyCatalogueSiglaMappings
     /**
      * @return array{created: list<string>, already_present: list<string>, would_create: list<string>, missing_target: list<string>, conflicts: list<array<string, mixed>>, pending_approval: list<string>}
      */
-    public function run(bool $apply = false, ?User $actor = null): array
+    /**
+     * @param  list<array{type: string, name: string, status?: string}>|null  $simulateEntities
+     *                                                                                           Entities a dry run is about to create, so a proposal aimed at one counts as having a target
+     *                                                                                           rather than none. Never consulted on a write, where they already exist.
+     */
+    public function run(bool $apply = false, ?User $actor = null, ?array $simulateEntities = null): array
     {
         // A mapping is a reusable decision about how a future workbook resolves, so it needs the
         // reviewer's permission on top of the catalogue one. See `CatalogueActivationAuthorisation`
@@ -63,10 +68,20 @@ final class ApplyCatalogueSiglaMappings
                 ->first();
 
             if ($target === null) {
-                // Never create the entity to satisfy a mapping. Report it and move on.
-                $missingTarget[] = $key;
+                $simulated = collect($simulateEntities ?? [])->contains(
+                    fn (array $row): bool => $row['type'] === $proposal['type']->value
+                        && SheetMonth::fold($row['name']) === SheetMonth::fold($proposal['canonical_name']),
+                );
 
-                continue;
+                if ($simulated && ! $apply) {
+                    // A dry run says what the apply will do; it does not have to have done it yet.
+                    $target = (object) ['getKey' => fn (): int => 0];
+                } else {
+                    // Never create the entity to satisfy a mapping. Report it and move on.
+                    $missingTarget[] = $key;
+
+                    continue;
+                }
             }
 
             // An existing mapping is **not** "already done" merely because (profile, type, token)

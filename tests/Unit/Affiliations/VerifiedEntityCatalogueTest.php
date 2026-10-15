@@ -160,7 +160,11 @@ it('loads the catalogue without duplicating anything, however many times it runs
         $again = $loader->run(apply: true, actor: User::query()->firstOrFail());
 
         expect($again['created'])->toBeEmpty("la corrida {$run} creó entidades nuevas");
-        expect($again['already_present'])->toHaveCount(count($first['created']));
+        // Liberty is created inactive, so on the second run it is reported as `skipped_inactive`
+        // rather than `already_present`. Both together account for everything the first run made;
+        // asserting only `already_present` would have quietly stopped counting Liberty.
+        expect(count($again['already_present']) + count($again['skipped_inactive']))
+            ->toBe(count($first['created']));
         expect(SocialSecurityEntity::query()->count())->toBe($afterFirst);
     }
 

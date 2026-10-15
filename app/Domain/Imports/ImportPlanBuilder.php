@@ -1924,7 +1924,20 @@ final class ImportPlanBuilder
         $mappedId = $decisions?->mappedEntityId($type, $token);
 
         if ($mappedId !== null) {
-            $entity = DB::table('social_security_entities')->where('id', $mappedId)->first();
+            // **Active only**, like every other path here.
+            //
+            // A reviewer's `map_entity` answer is a decision about **which** entity a token means.
+            // It is not a decision to un-retire one. Without this filter a person who once answered
+            // `map_entity` for Liberty — before it was deactivated — would keep routing new
+            // affiliations there through the one path that skipped the status check, and the
+            // deactivation would be bypassable by a decision rather than by a token.
+            //
+            // Deactivated, it falls through to the mapping and then the name index, both of which
+            // also require `active`, so the token raises a finding and a person is asked again.
+            $entity = DB::table('social_security_entities')
+                ->where('id', $mappedId)
+                ->where('status', RecordStatus::Active->value)
+                ->first();
 
             if ($entity !== null) {
                 return $entity;

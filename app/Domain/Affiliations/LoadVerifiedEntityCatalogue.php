@@ -109,6 +109,10 @@ final class LoadVerifiedEntityCatalogue
                 // it. A catalogue whose subtypes are silently absent reads exactly like one that
                 // has none, which is the opposite of what a verified record says.
                 'regulatory_class' => $entry['regulatory_class'] ?? null,
+                // Forwarded so an entity the manifest marks as exited is created inactive rather
+                // than active. Absent from the manifest means active — the other sources describe
+                // institutions in service and make no claim about their current standing.
+                'status' => $entry['status'] ?? RecordStatus::Active->value,
             ], $actor);
 
             $created[] = $type->value.':'.$name;
@@ -128,7 +132,7 @@ final class LoadVerifiedEntityCatalogue
      * Kept as one method so the loader has a single place to read from and the dry run describes
      * exactly what a real run would do.
      *
-     * @return list<array{type: SocialSecurityEntityType, name: string, code: ?string, tax_id: ?string, regulatory_class?: ?string}>
+     * @return list<array{type: SocialSecurityEntityType, name: string, code: ?string, tax_id: ?string, regulatory_class?: ?string, status?: string}>
      */
     private function manifest(): array
     {
@@ -196,6 +200,15 @@ final class LoadVerifiedEntityCatalogue
                 // and still be wound up, which is exactly the case Liberty is in, so the two cannot
                 // share a field.
                 'regulatory_class' => self::REGULATORY_CLASS_ARL,
+                // Carried from the manifest's own flag. Liberty is created inactive so it can never
+                // become an option for a **new** affiliation, while its row, its identity and any
+                // historical affiliation stay exactly where they are.
+                //
+                // Re-running the load does not revive it: an existing row is left untouched by this
+                // loader, so an administrator's later decision survives too.
+                'status' => in_array('left_the_market', $record['flags'], true)
+                    ? RecordStatus::Inactive->value
+                    : RecordStatus::Active->value,
             ];
         }
 

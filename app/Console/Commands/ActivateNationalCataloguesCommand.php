@@ -144,6 +144,9 @@ final class ActivateNationalCataloguesCommand extends Command
 
     private function write(ActivateNationalCatalogues $activation, User $actor, string $fingerprint): int
     {
+        // Courtesy pre-check. The real protection is inside the transaction, where the fingerprint
+        // is recomputed on the rows that transaction has locked — a check out here is outside that
+        // lock and would leave a window open.
         $current = $activation->run($actor, apply: false);
 
         if ($current['fingerprint'] !== $fingerprint) {
@@ -158,7 +161,8 @@ final class ActivateNationalCataloguesCommand extends Command
         }
 
         try {
-            $result = $activation->run($actor, apply: true);
+            // The expected fingerprint is handed in so the orchestrator re-checks it under lock.
+            $result = $activation->run($actor, apply: true, expectedFingerprint: $fingerprint);
         } catch (CatalogueActivationRefused $refused) {
             $this->error($refused->getMessage());
 
