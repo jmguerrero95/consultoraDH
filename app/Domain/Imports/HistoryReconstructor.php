@@ -84,6 +84,60 @@ final class HistoryReconstructor
         // has to be part of the interval before the interval becomes a plan action.
         $episodes = $this->applyStartDecisions($episodes, $contradictoryStarts);
 
+        // §8.1's answer merges one employment's contradicting episodes into a single one, and the
+        // merged interval is **open** by construction — `mergeInto()` says which day the employment
+        // started, and nothing about the day it ended. So the merged episode has not passed the
+        // monthly-closure rule, which ran above, and on the delivered workbook it came back as a
+        // phantom §8.4 question: a person at CONSTRUVIAL last listed in August, in a file that runs
+        // to October, whose only new fact was that their start had been settled. The question was
+        // created by the merge, not by the file, and asking a reviewer to answer it would be asking
+        // them to close an episode the monthly rule had already settled for the two episodes it
+        // replaced.
+        //
+        // So the rule is re-applied to the decided episodes. It is idempotent by construction — an
+        // episode seen in the file's last month, one that already has a closure, and one with no
+        // observed months are all returned untouched — so this closes exactly the episodes the merge
+        // re-opened, and the closures it produces are added to the list §17.4 reports.
+        [$episodes, $reclosures] = $this->applyMonthlyClosures($episodes, $lastMonth);
+
+        if ($reclosures !== []) {
+            $monthlyClosures = array_merge($monthlyClosures, $reclosures);
+
+            // The new closures belong to the merged episodes, so their keys describe the decided
+            // episodes and have to be part of the list §8.5 reads.
+            $inferredEnds = array_merge($inferredEnds, array_map(
+                static fn (MonthlyObservationClosure $closure): string => $closure->episodeKey,
+                $reclosures,
+            ));
+        }
+
+        // …and the keys the merge *left behind* are dropped.
+        //
+        // `mergeInto()` gives the merged employment the **earliest stated start**, so it can carry
+        // the exact key of one of the episodes it replaced — and when the reviewer chose that same
+        // earliest date, `RelationshipEpisode::key()` is unchanged. The list above was collected
+        // before the merge, so it still lists an episode that no longer exists as monthly-closed.
+        //
+        // That is not cosmetic. `genuineOverlap()` suppresses a pair when **both** its ends came
+        // from the rule, and the merged episode is **open** by construction: on the delivered
+        // workbook the stale key made a genuinely open employment look rule-closed, the pair with
+        // the next employer was suppressed, and the plan wrote two ordinary opens where A02 allows
+        // one — so the batch was refused at Apply with
+        // "el cliente ya tiene 1 relación abierta en otra empresa" and no question anywhere on the
+        // review screen. The key is kept only while a **closed** episode still holds it.
+        $inferredEnds = array_values(array_filter(
+            $inferredEnds,
+            function (string $key) use ($episodes): bool {
+                foreach ($episodes as $episode) {
+                    if ($episode->key() === $key) {
+                        return ! $episode->interval->isOpen();
+                    }
+                }
+
+                return false;
+            },
+        ));
+
         // §8.4 and §8.5's answers, applied *before* the questions are handed on.
         //
         // ## Why this has to happen here

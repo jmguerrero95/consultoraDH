@@ -2119,6 +2119,13 @@ final class ImportPlanBuilder
     {
         $unresolved = [];
 
+        /**
+         * Tokens this pass **did** resolve, keyed the same way.
+         *
+         * @var array<string, string> $resolvedNow
+         */
+        $resolvedNow = [];
+
         foreach ($reconstruction->affiliationSegments() as $segment) {
             if (! $segment->isAffiliation()) {
                 continue;
@@ -2132,7 +2139,11 @@ final class ImportPlanBuilder
 
             // Already resolvable — by catalogue, by approved mapping, or by this import's
             // decisions — so nothing to ask.
-            if ($this->resolveEntity($segment->type, (string) $token->token, $this->activeDecisions) !== null) {
+            $resolved = $this->resolveEntity($segment->type, (string) $token->token, $this->activeDecisions);
+
+            if ($resolved !== null) {
+                $resolvedNow[$segment->type->value.'|'.$token->token] = (string) $resolved->name;
+
                 continue;
             }
 
@@ -2163,7 +2174,95 @@ final class ImportPlanBuilder
             $this->raiseUnresolvedEntity($import, $entry);
         }
 
+        $this->withdrawResolvedEntityIssues($import, $resolvedNow);
+
         return $unresolved;
+    }
+
+    /**
+     * §9.2's question about a token that **stops** being a question.
+     *
+     * ## The defect this closes
+     *
+     * `raiseUnresolvedEntity()` created and refreshed findings, and nothing ever withdrew one.
+     * The national catalogues were activated and 51 sigla mappings approved, after which tokens
+     * like `PORVENIR`, `CAJASAN`, `NUEVA EPS` and `SALUD MIA` resolve through the exact folded
+     * name or an approved mapping — so `collectUnresolvedEntities()` stopped asking about them.
+     * But their findings were still on file, still unanswered, and still listed by the review
+     * screen's "Sólo sin resolver" query, because that query filters on `resolved_at` and
+     * `superseded_at` and nothing had set either.
+     *
+     * The result was a review screen asking a person to approve a token the system had already
+     * approved. Answering was harmless; *not* answering blocked nothing and explained nothing.
+     *
+     * ## Why this is scoped to what actually resolved
+     *
+     * The set it is given is built from the same `resolveEntity()` call that decides whether to
+     * ask the question at all, so "supersede" and "did not ask" cannot disagree: a token is
+     * withdrawn exactly when the reconstruction resolved it, and only then.
+     *
+     * That rules out the failure a naive pass would cause. `reconcileIssues()` runs over §8.4 and
+     * §8.5's findings and supersedes everything the reconstruction no longer produces — correct
+     * there, because the reconstruction re-derives those codes itself. §9.2's findings are **not**
+     * re-derived by `reconcileIssues()`, so widening it would withdraw a token that is still
+     * genuinely pending (`COMFENALCO`, `UNO`) simply because this pass happened not to mention it.
+     *
+     * ## Superseded, not resolved
+     *
+     * `resolved_at` means "a person answered this" and §4.1 reserves it for a human. Nobody
+     * answered `NUEVA EPS`: the catalogue gained the entity. So `resolved_at` is left null and
+     * `superseded_at` carries the fact, which is exactly what `reconcileIssues()` does for an
+     * interval finding nobody re-derived. The finding, its fingerprint, its message and its
+     * occurrence count all stay on file — §5.3's promise is that an import keeps the record of
+     * having had a question, including the record of one that stopped applying.
+     *
+     * A finding a person **did** answer is left alone. Their answer is history, and the question
+     * it answered is not this code's to withdraw.
+     *
+     * @param  array<string, string>  $resolvedNow  `TYPE|token` => the entity it resolved to
+     */
+    private function withdrawResolvedEntityIssues(LegacyImport $import, array $resolvedNow): void
+    {
+        if ($resolvedNow === []) {
+            return;
+        }
+
+        $stored = \App\Models\LegacyImportIssue::query()
+            ->where('legacy_import_id', $import->id)
+            ->where('code', LegacyImportIssue::UnresolvedSocialEntity->value)
+            ->whereNull('resolved_at')
+            ->whereNull('superseded_at')
+            ->get();
+
+        foreach ($stored as $issue) {
+            $context = is_array($issue->context) ? $issue->context : [];
+            $type = $context['entity_type'] ?? null;
+            $token = $context['token'] ?? null;
+
+            if (! is_string($type) || ! is_string($token)) {
+                continue;
+            }
+
+            $target = $resolvedNow[$type.'|'.$token] ?? null;
+
+            if ($target === null) {
+                // Still genuinely unreadable, or still ambiguous: the question stands.
+                continue;
+            }
+
+            $issue->forceFill([
+                'blocking' => false,
+                'severity' => LegacyIssueSeverity::Info->value,
+                'superseded_at' => now(),
+                'message' => sprintf(
+                    'Esta pregunta ya no aplica: «%s» ahora resuelve a «%s» en el catálogo de %s, '
+                    .'y no necesita que una persona la apruebe.',
+                    $token,
+                    $target,
+                    $type,
+                ),
+            ])->save();
+        }
     }
 
     /**
@@ -2234,7 +2333,21 @@ final class ImportPlanBuilder
 
         if ($existing !== null) {
             // Refresh in place so a resolution stays attached to the question it answered.
-            $existing->forceFill($attributes)->save();
+            //
+            // `superseded_at` is cleared because a withdrawal is a statement about **now**. The
+            // token resolved when the catalogue was activated, and stopped resolving when that
+            // entity was deactivated; `withdrawResolvedEntityIssues()` does not touch a finding a
+            // person answered, so this is the only path that can reopen a withdrawn question, and
+            // it has to. Without the reset the finding would stay withdrawn and the review screen
+            // would go silent about a token that is unreadable again.
+            //
+            // `blocking` comes from the attributes above rather than from the row, because
+            // `unresolved_social_entity` is a warning and never blocks — see this method's
+            // docblock on why refusing to write is worse than asking.
+            $existing->forceFill([
+                ...$attributes,
+                'superseded_at' => null,
+            ])->save();
 
             return;
         }

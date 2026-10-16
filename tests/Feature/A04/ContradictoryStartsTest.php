@@ -288,3 +288,142 @@ it('rebuilds to the same plan when the same answer is replayed', function () {
 
     expect($planned->payload['interval']['start'])->toBe('2026-01-05');
 });
+
+/**
+ * §8.1's answer must not leave a phantom §8.4 question behind.
+ *
+ * `mergeInto()` builds the merged employment with an **open** interval: the reviewer said which day
+ * it started, and nothing about the day it ended. The monthly-closure rule runs before the answer is
+ * applied, so the merged episode never passed it — and on the delivered workbook that produced a
+ * finding nobody could act on: a person at CONSTRUVIAL last listed in August, in a file that runs to
+ * October, whose only new fact was that their start had been settled.
+ *
+ * The rule is re-applied after the merge, and this is the shape that proves it. The third month
+ * carries a different person, which is what puts the file's last month *after* the merged
+ * employment's last sighting and makes the rule applicable.
+ */
+it('closes the merged employment by the monthly rule instead of raising a phantom disappearance', function () {
+    $workbook = contradictoryWorkbook([
+        ['ENERO 2026', [['H' => '10101010', 'F' => '2026-01-05']]],
+        ['FEBRERO 2026', [['H' => '10101010', 'F' => '2025-11-01']]],
+        // Another person, present only so the file runs past February.
+        ['MARZO 2026', [['H' => '20202020', 'F' => '2026-03-01']]],
+    ]);
+
+    $import = reviewedImportFor($workbook);
+
+    answerFinding(
+        $import,
+        findingsFor($import)->sole(),
+        IssueResolutionDecision::UseLatestStatedStart->value,
+        ['start' => '2026-01-05'],
+    );
+
+    $import = plannedImport($import->fresh());
+
+    // The employment the answer created is bounded by the month rule, not left open. Scoped to the
+    // contradicting person: the third month's row produces its own, unrelated relationship.
+    $relationship = LegacyImportAction::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('action_type', ImportActionType::CreateRelationship->value)
+        ->where('payload->client_document_number', '10101010')
+        ->sole();
+
+    expect($relationship->payload['interval']['start'])->toBe('2026-01-05')
+        ->and($relationship->payload['interval']['end'])->toBe('2026-03-01')
+        ->and($relationship->payload['interval']['end_precision'])->toBe('month');
+
+    // …and no §8.4 question came with it. Before the rule was re-applied this finding existed, and
+    // it was a question with no answer: the file had already said where the employment ended.
+    expect(
+        $import->issues()
+            ->where('code', LegacyImportIssue::RelationshipDisappearedWithoutRetirement->value)
+            ->whereNull('superseded_at')
+            ->count()
+    )->toBe(0);
+});
+
+/**
+ * §8.5's overlap must survive the key §8.1's merge leaves behind.
+ *
+ * `mergeInto()` gives the merged employment the **earliest stated start**, so when the reviewer
+ * chooses that date the merged episode keeps the exact key of one of the episodes it replaced —
+ * `RelationshipEpisode::key()` is `client|company|start` and the start did not move. The list of
+ * ends the monthly rule inferred was collected *before* the merge and still names that episode.
+ *
+ * `genuineOverlap()` suppresses a pair when **both** its ends came from the rule, because a
+ * boundary the rule produced cannot contradict the file. The merged episode is open by
+ * construction, though, so the stale key made a live, open employment look rule-closed: on the
+ * delivered workbook the pair with the next employer was dropped, the plan wrote two ordinary
+ * opens where A02 allows one, and the refusal arrived at Apply — `el cliente ya tiene 1 relación
+ * abierta en otra empresa` — with no question anywhere on the review screen.
+ *
+ * The shape on synthetic data: a contradiction at the first employer whose earliest stated date
+ * was seen only early (so the rule closes that episode), and whose merge is still listed in the
+ * file's last month (so the merged episode stays open) while the second employer was left behind.
+ */
+it('reports the overlap the merge leaves behind instead of suppressing it on a stale key', function () {
+    $workbook = (new SyntheticWorkbook)
+        ->sheetWithBlocks('ENERO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '2026-01-05'])],
+        ]])
+        ->sheetWithBlocks('FEBRERO 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '2025-11-01'])],
+        ]])
+        ->sheetWithBlocks('MARZO 2026', [[
+            'title' => 'BOLIVAR S.A.S. NIT 900654321-8',
+            'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '2026-03-01'])],
+        ]])
+        // The same stated start as January, so §8.1 folds the repeat into January's episode. It is
+        // what keeps the merged employment listed in the file's last month — and therefore open —
+        // while the episode whose date the reviewer picked was left behind in February and so was
+        // closed by the monthly rule.
+        ->sheetWithBlocks('ABRIL 2026', [[
+            'title' => 'ANDINA S.A.S. NIT 900123456-3',
+            'people' => [SyntheticWorkbook::personRow(['H' => '10101010', 'F' => '2026-01-05'])],
+        ]]);
+
+    $import = reviewedImportFor($workbook);
+
+    answerFinding(
+        $import,
+        findingsFor($import)->sole(),
+        IssueResolutionDecision::UseEarliestStatedStart->value,
+        ['start' => '2025-11-01'],
+    );
+
+    $import = plannedImport($import->fresh());
+
+    $overlaps = $import->issues()
+        ->where('code', LegacyImportIssue::OverlappingCompanyHistory->value)
+        ->whereNull('superseded_at')
+        ->get();
+
+    // Without the fix this was 0: the pair was suppressed and the plan went to Apply unappliable.
+    expect($overlaps)->toHaveCount(1);
+
+    $overlap = $overlaps->sole();
+
+    $companies = ($overlap->context['first'] ?? '').' '.($overlap->context['second'] ?? '');
+
+    expect($overlap->blocking)->toBeTrue()
+        ->and($companies)->toContain('900123456')
+        ->and($companies)->toContain('900654321');
+
+    // The precondition of the whole defect: the merged employment is **open**, so it never was a
+    // boundary the rule produced.
+    $relationships = LegacyImportAction::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('action_type', ImportActionType::CreateRelationship->value)
+        ->where('payload->client_document_number', '10101010')
+        ->get();
+
+    $merged = $relationships->first(
+        static fn (LegacyImportAction $action): bool => ($action->payload['interval']['end'] ?? null) === null,
+    );
+
+    expect($merged)->not->toBeNull()
+        ->and($merged->payload['interval']['start'])->toBe('2025-11-01');
+});
