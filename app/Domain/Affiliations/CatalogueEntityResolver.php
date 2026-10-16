@@ -70,7 +70,21 @@ final class CatalogueEntityResolver
                 'reason' => 'La celda dice que no hay afiliación.'];
         }
 
-        if (SourceEntityToken::isNonEntityWord($token)) {
+        // §9.1's misplaced-word list is **ARL-scoped**, and this has to honour that scope.
+        //
+        // `SourceEntityToken::judge()` applies `isNonEntityWord()` only for
+        // `SocialSecurityEntityType::Arl`, for a reason stated in its own docblock: `UNO`,
+        // `TRES`, `AUXILIAR` and `MECANICO` are evidence of misplacement *because of the column
+        // they were found in*, and refusing the same word in a name column would discard a real
+        // observation. Applied unconditionally here, it answered a question the parser never asked:
+        // an EPS cell reading `UNO` was reported as `refused` — "nivel de riesgo o cargo, no una
+        // administradora", a sentence about the wrong column — while `ImportPlanBuilder` had judged
+        // the same cell `suggestion` and raised `unresolved_social_entity` for it.
+        //
+        // The report under-reports a question and states a wrong reason for it. The list itself is
+        // not widened: the evidence is 242 ARL-column rows and nothing outside that column.
+        if ($type === SocialSecurityEntityType::Arl->value
+            && SourceEntityToken::isNonEntityWord($token)) {
             return ['bucket' => self::BUCKET_REFUSED, 'target' => null,
                 'reason' => 'Nivel de riesgo o cargo, no una administradora.'];
         }

@@ -87,6 +87,20 @@ final class ImportPlanBuilder
      */
     private ?LegacyImport $activeImport = null;
 
+    /**
+     * The folded name index for the duration of one `build()`, or null.
+     *
+     * Scoped to a build and cleared with the rest of the per-build state, because a test — and a
+     * second job on the same container instance — can activate or deactivate an entity between two
+     * builds, and an index that outlived its build would answer from a catalogue that no longer
+     * exists. This is what makes `foldedCatalogueIndex()`'s own docblock true: it was called once
+     * per unresolvable token and re-read every entity each time, so a 2.559-observation workbook
+     * paid for the whole catalogue ~10.000 times.
+     *
+     * @var array<string, array<string, object>>|null
+     */
+    private ?array $catalogueIndex = null;
+
     public function __construct(
         private readonly ?ImportDecisionSet $decisions = null,
     ) {}
@@ -107,6 +121,7 @@ final class ImportPlanBuilder
         $decisions ??= $this->decisions;
         $this->activeDecisions = $decisions;
         $this->activeImport = $import;
+        $this->catalogueIndex = null;
 
         try {
             return DB::transaction(function () use ($import, $reconstruction, $decisions): ImportPlan {
@@ -195,6 +210,7 @@ final class ImportPlanBuilder
             // import, so a stale pair would scope them to the wrong import.
             $this->activeImport = null;
             $this->activeDecisions = null;
+            $this->catalogueIndex = null;
         }
     }
 
@@ -1949,6 +1965,7 @@ final class ImportPlanBuilder
         $approved = DB::table('import_source_mappings')
             // Qualified: `type` exists on both tables in this join, and an unqualified reference
             // is ambiguous in PostgreSQL rather than resolved to one of them.
+            ->where('import_source_mappings.profile', $this->activeProfile())
             ->where('import_source_mappings.type', $type->value)
             ->where('import_source_mappings.source_key', $folded)
             ->whereNotNull('import_source_mappings.verified_at')
@@ -1978,13 +1995,51 @@ final class ImportPlanBuilder
      */
     private function foldedCatalogueIndex(): array
     {
+        if ($this->catalogueIndex !== null) {
+            return $this->catalogueIndex;
+        }
+
         $index = [];
 
-        foreach (DB::table('social_security_entities')->get() as $entity) {
+        // **Active only**, like every other path in `resolveEntity()`.
+        //
+        // The two paths above it filtered `RecordStatus::Active` — a reviewer's `map_entity` answer
+        // and an approved mapping — and this one did not, so it silently undid both. Deactivating an
+        // entity was therefore bypassable by writing its **exact** name into an EPS/AFP/CCF/ARL cell:
+        // the token missed the decision and the mapping, fell through here, and was handed back as a
+        // usable entity. `CatalogueEntityResolver::byActiveName()` has filtered all along, so the
+        // report called the same token `inactive` while the plan wrote a live `client_affiliations`
+        // row against it — the importer was the one place a retired administrator stayed usable.
+        //
+        // The `??=` keeps the first entity per folded name, so an active and an inactive row that
+        // fold together cannot reintroduce the inactive one under a key the active one already set.
+        foreach (DB::table('social_security_entities')
+            ->where('status', RecordStatus::Active->value)
+            ->get() as $entity) {
             $index[(string) $entity->type][SheetMonth::fold((string) $entity->name)] ??= $entity;
         }
 
-        return $index;
+        return $this->catalogueIndex = $index;
+    }
+
+    /**
+     * §9.2's profile, for the mapping lookup.
+     *
+     * `import_source_mappings` is keyed `(profile, type, source_key)`, so an approved mapping
+     * answers a token **for the reader that was approved**. Reading it without the profile column
+     * lets a decision taken for one importer's file satisfy another's token.
+     *
+     * There is exactly one profile today and a CHECK constraint refuses any other, so this changes
+     * no result yet — which is exactly why it needs doing now: the bug is invisible until a second
+     * reader exists, and it is invisible for the wrong reason (a constraint, not the query).
+     */
+    private function activeProfile(): string
+    {
+        $profile = $this->activeImport?->profile;
+
+        return is_string($profile) && $profile !== ''
+            ? $profile
+            : ImportProfile::BlindenLegacyMonthlyV1->value;
     }
 
     /**
