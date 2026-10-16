@@ -29,8 +29,8 @@ use Illuminate\Support\Facades\DB;
  * ## The rule, in order
  *
  *     1. a refusal or a negation is answered, not asked  → `negative`, `refused`
- *     2. a sigla several entities answer to is a question → `ambiguous`
- *     3. an approved mapping whose target is **active**    → `resolved`
+ *     2. an approved mapping whose target is **active**    → `resolved`
+ *     3. a sigla several entities answer to is a question → `ambiguous`
  *     4. an active entity whose folded name is the token → `resolved`
  *     5. an entity that exists but is deactivated         → `inactive`
  *     6. everything else                                  → `pending`
@@ -38,11 +38,18 @@ use Illuminate\Support\Facades\DB;
  * Step 5 is separate from step 6 on purpose. A deactivated administrator is not an open question:
  * somebody already decided. Counting it as pending would ask a reviewer to decide a closed door.
  *
+ * Step 2 before step 3 for the same reason: an approved mapping is somebody having decided. The
+ * question step 3 asks — can this token name one entity by itself? — is exactly the one an answer
+ * removes, so the answer has to be read first. `ImportPlanBuilder::resolveEntity()` already reads
+ * them in this order, and the preview shadowing it was the whole reason `PORVENR` read as an open
+ * typo after its mapping had been approved.
+ *
  * ## What this deliberately cannot do
  *
- * It does not approve anything. An ambiguous sigla with no approved mapping is `ambiguous`, and
- * `PORVENR`, a bare `COMFENALCO` and a bare `COMFAMILIAR` stay there until a person decides — which
- * is the whole point of refusing to guess.
+ * It does not approve anything. An **unapproved** sigla that several entities answer to is
+ * `ambiguous`, and `PORVENR`, a bare `COMFENALCO` and a bare `COMFAMILIAR` stay there until a person
+ * decides — which is the whole point of refusing to guess. Deciding is what moves them: the moment
+ * the mapping exists, step 2 answers and the token is `resolved`.
  */
 final class CatalogueEntityResolver
 {
@@ -89,16 +96,29 @@ final class CatalogueEntityResolver
                 'reason' => 'Nivel de riesgo o cargo, no una administradora.'];
         }
 
-        $ambiguity = self::ambiguity($token, $type);
-
-        if ($ambiguity !== null) {
-            return ['bucket' => self::BUCKET_AMBIGUOUS, 'target' => null, 'reason' => $ambiguity];
-        }
-
+        // §9.2's order, and the order `ImportPlanBuilder::resolveEntity()` uses: the approved
+        // mapping comes **before** the ambiguity.
+        //
+        // `ambiguity()` is the answer to "does this token, on its own, name one entity?" — and an
+        // approved mapping is precisely the fact that it does not need to. A reviewer who answered
+        // `map_entity` supplied the missing region or resolved the typo, so the question is closed.
+        //
+        // With the two the other way round the report shadowed the decision: `PORVENR` is the
+        // single mapping in this file that also has a proposed alias, and the preview kept calling
+        // it ambiguous — "corrección tipográfica propuesta, **sin aprobar**" — while the importer
+        // read the approved row and wrote Porvenir. One token, two answers, and the preview was the
+        // wrong one. Genuinely ambiguous tokens are unaffected: `COMFENALCO` and `COMFAMILIAR` have
+        // no mapping to win with, so they stay questions.
         $byMapping = self::byApprovedMapping($token, $type);
 
         if ($byMapping !== null) {
             return ['bucket' => self::BUCKET_RESOLVED, 'target' => $byMapping->name, 'reason' => null];
+        }
+
+        $ambiguity = self::ambiguity($token, $type);
+
+        if ($ambiguity !== null) {
+            return ['bucket' => self::BUCKET_AMBIGUOUS, 'target' => null, 'reason' => $ambiguity];
         }
 
         $byName = self::byActiveName($token, $type);

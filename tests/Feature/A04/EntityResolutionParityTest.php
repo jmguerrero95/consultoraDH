@@ -467,3 +467,58 @@ it('refuses an approved mapping that belongs to another importer profile', funct
     // The report refuses it too, so the two agree — by both refusing.
     expect(reportBucket($import->fresh(), 'CCF', 'COMFENALCO'))->toBe('ambiguous');
 });
+
+/**
+ * A proposed typo is a question; an approved mapping is the answer to it.
+ *
+ * `PORVENR` is the one token in the delivered file that is **both**: the pension catalogue proposes
+ * it as a correction towards Porvenir, and a reviewer approved exactly that correction. The report
+ * read the proposal before the approval, so it kept announcing the correction as "sin aprobar"
+ * while `ImportPlanBuilder` read the approved row and the plan carried Porvenir. The importer and
+ * the preview gave two different answers about one token — the drift this class exists to make
+ * impossible, and the direction that hides, because the preview looked like it was still asking a
+ * question somebody had already answered.
+ */
+it('agrees that an approved mapping answers a token whose other reading is a proposed typo', function (): void {
+    app(ActivateNationalCatalogues::class)->run($this->actor, apply: true);
+
+    $import = stagedImport($this->actor, tokenWorkbook(['H' => '10101010', 'O' => 'PORVENR']));
+    $import = plannedImport($import);
+
+    // Unapproved, the two agree — on `ambiguous`. Nothing has been decided yet, and the typo is a
+    // suggestion, not a licence to guess.
+    expect(reportBucket($import, 'AFP', 'PORVENR'))->toBe('ambiguous');
+    expect(importerUnresolved($import))->toContain('PORVENR');
+
+    $finding = LegacyImportIssueModel::query()
+        ->where('legacy_import_id', $import->id)
+        ->where('code', LegacyImportIssue::UnresolvedSocialEntity->value)
+        ->whereNull('resolved_at')
+        ->firstOrFail();
+
+    $porvenir = SocialSecurityEntity::query()
+        ->where('type', 'AFP')
+        ->whereRaw('lower(unaccent(name)) like ?', ['%porvenir%'])
+        ->firstOrFail();
+
+    answerFinding($import, $finding, IssueResolutionDecision::MapEntity->value, [
+        'social_security_entity_id' => $porvenir->id,
+    ]);
+
+    $rebuilt = plannedImport($import->fresh());
+
+    // The plan carries the entity the answer named…
+    expect(importerResolution(importerTargets($rebuilt), 'AFP'))->toBe($porvenir->name);
+    expect(importerUnresolved($rebuilt))->not->toContain('PORVENR');
+
+    // …and the report now says the same thing, instead of re-proposing a correction that was
+    // approved. Without the reordered resolver this was `ambiguous`: a decided token reported as an
+    // open question.
+    expect(reportBucket($rebuilt, 'AFP', 'PORVENR'))->toBe('resolved');
+    expect(CatalogueEntityResolver::resolve('PORVENR', 'AFP')['target'])->toBe($porvenir->name);
+
+    // A token several entities answer to, with no mapping to win with, is still a question — the
+    // reorder must not have turned "ambiguous" into "resolved" by accident.
+    expect(CatalogueEntityResolver::resolve('COMFENALCO', 'CCF')['bucket'])
+        ->toBe(CatalogueEntityResolver::BUCKET_AMBIGUOUS);
+});
