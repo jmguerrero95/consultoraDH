@@ -235,35 +235,90 @@ it('previews what the apply will really insert, on an empty catalogue', function
     expect($applied['mappings'])->toBe(51);
 });
 
-it('leaves Liberty inactive and refuses a new affiliation immediately after loading', function (): void {
-    // No manual `deactivateLiberty()` here: the state has to be the one the load itself produced.
+it('leaves Liberty inactive and refuses a real new affiliation right after loading', function (): void {
+    // No manual `deactivateLiberty()`: the state has to be the one the load itself produced.
     app(ActivateNationalCatalogues::class)->run($this->actor, apply: true);
 
     $liberty = SocialSecurityEntity::query()->where('type', 'ARL')->whereRaw(
         'lower(unaccent(name)) like ?', ['%liberty%']
     )->firstOrFail();
 
-    expect($liberty->status)->toBe(RecordStatus::Inactive);
+    expect($liberty->status)->toBe(App\Domain\Shared\RecordStatus::Inactive);
 
     // The other nine are untouched: "nobody documented an exit" is not "this one exited".
     expect(SocialSecurityEntity::query()
-        ->where('type', 'ARL')->where('status', RecordStatus::Active->value)
+        ->where('type', 'ARL')->where('status', App\Domain\Shared\RecordStatus::Active->value)
         ->count())->toBe(9);
 
-    // A new operational affiliation is refused through every path a decision could take.
-    $manager = app(ManageAffiliations::class);
-    $client = Client::factory()->create();
+    // **The real signature.** The previous version passed a `SocialSecurityEntityType` where a
+    // `User` belongs, so PHP raised a `TypeError`, and a `catch (Throwable)` swallowed it and
+    // reported success. A test that cannot fail is worse than no test: it announced that Liberty
+    // was refused when nothing about Liberty had been exercised at all.
+    $manager = app(App\Domain\Affiliations\ManageAffiliations::class);
+    $client = App\Models\Client::factory()->create();
 
-    $refused = false;
+    expect(fn () => $manager->create(
+        $client,
+        $liberty,
+        $this->actor,
+        new DateTimeImmutable('2026-01-01'),
+    ))
+        ->toThrow(DomainException::class, 'está inactiva');
 
-    try {
-        $manager->create($client, $liberty, SocialSecurityEntityType::Arl, '2026-01-01');
-    } catch (Throwable) {
-        $refused = true;
-    }
+    // And the refusal is a refusal, not a type error wearing one.
+    expect(App\Models\ClientAffiliation::query()
+        ->where('social_security_entity_id', $liberty->getKey())->count())->toBe(0);
+});
 
-    expect($refused)->toBeTrue();
-    expect(ClientAffiliation::query()->where('social_security_entity_id', $liberty->getKey())->count())->toBe(0);
+it('still accepts an affiliation to an active administrator, so the guard is not blanket', function (): void {
+    // Without this, a guard that refused everything would pass every refusal test above.
+    app(ActivateNationalCatalogues::class)->run($this->actor, apply: true);
+
+    $activa = SocialSecurityEntity::query()->where('type', 'ARL')
+        ->where('status', App\Domain\Shared\RecordStatus::Active->value)
+        ->whereRaw('lower(unaccent(name)) like ?', ['%equidad%'])->firstOrFail();
+
+    $client = App\Models\Client::factory()->create();
+
+    $afiliacion = app(App\Domain\Affiliations\ManageAffiliations::class)->create(
+        $client,
+        $activa,
+        $this->actor,
+        new DateTimeImmutable('2026-01-01'),
+    );
+
+    expect($afiliacion)->toBeInstanceOf(App\Models\ClientAffiliation::class);
+    expect(App\Models\ClientAffiliation::query()
+        ->where('social_security_entity_id', $activa->getKey())->count())->toBe(1);
+});
+
+it('refuses moving an existing affiliation onto Liberty', function (): void {
+    // The other entrance. A guard on `create()` alone would leave `changeEntity()` open, which is
+    // the way a retired administrator comes back into a live record.
+    app(ActivateNationalCatalogues::class)->run($this->actor, apply: true);
+
+    $activa = SocialSecurityEntity::query()->where('type', 'ARL')
+        ->where('status', App\Domain\Shared\RecordStatus::Active->value)->firstOrFail();
+
+    $liberty = SocialSecurityEntity::query()->where('type', 'ARL')->whereRaw(
+        'lower(unaccent(name)) like ?', ['%liberty%']
+    )->firstOrFail();
+
+    $client = App\Models\Client::factory()->create();
+
+    $manager = app(App\Domain\Affiliations\ManageAffiliations::class);
+    $actual = $manager->create($client, $activa, $this->actor, new DateTimeImmutable('2024-01-01'));
+
+    expect(fn () => $manager->changeEntity(
+        $actual,
+        $liberty,
+        $this->actor,
+        new DateTimeImmutable('2026-01-01'),
+    ))
+        ->toThrow(DomainException::class, 'está inactiva');
+
+    // The record still points at where it was.
+    expect($actual->fresh()->social_security_entity_id)->toBe($activa->getKey());
 });
 
 it('does not revive Liberty when the catalogue is loaded again', function (): void {

@@ -62,10 +62,16 @@ final class ApplyCatalogueSiglaMappings
         foreach (CatalogueSiglaMappings::proposals() as $proposal) {
             $key = $proposal['type']->value.'|'.$proposal['token'];
 
-            $target = SocialSecurityEntity::query()
+            $existingTarget = SocialSecurityEntity::query()
                 ->where('type', $proposal['type']->value)
                 ->whereRaw('lower(unaccent(name)) = lower(unaccent(?))', [$proposal['canonical_name']])
                 ->first();
+
+            $target = $existingTarget === null
+                ? null
+                : ProjectedMappingTarget::of($existingTarget);
+
+            $projected = $target === null;
 
             if ($target === null) {
                 $simulated = collect($simulateEntities ?? [])->contains(
@@ -74,8 +80,9 @@ final class ApplyCatalogueSiglaMappings
                 );
 
                 if ($simulated && ! $apply) {
-                    // A dry run says what the apply will do; it does not have to have done it yet.
-                    $target = (object) ['getKey' => fn (): int => 0];
+                    // A dry run reports what the apply will do; it does not have to have done it.
+                    // The target is **named**, not faked — see `ProjectedMappingTarget`.
+                    $target = ProjectedMappingTarget::projected($proposal['canonical_name']);
                 } else {
                     // Never create the entity to satisfy a mapping. Report it and move on.
                     $missingTarget[] = $key;
@@ -96,7 +103,8 @@ final class ApplyCatalogueSiglaMappings
                 ->first();
 
             if ($existing !== null) {
-                if ((int) $existing->social_security_entity_id === (int) $target->getKey()) {
+                // A projected target has no key, so it cannot be "already present" at anything.
+                if ($target->exists && (int) $existing->social_security_entity_id === $target->key()) {
                     // Same destination. **That is not yet approval.** `verified_at` is what makes a
                     // mapping reusable, and a row without it is a suggestion somebody opened and
                     // nobody answered. Reporting it as `already_present` told the operator the
@@ -114,7 +122,7 @@ final class ApplyCatalogueSiglaMappings
                 $conflicts[] = [
                     'token' => $key,
                     'existing_entity_id' => (int) $existing->social_security_entity_id,
-                    'proposed_entity_id' => (int) $target->getKey(),
+                    'proposed_entity_id' => $target->exists ? $target->key() : null,
                     'existing_verified' => $existing->verified_at !== null,
                 ];
 
@@ -127,6 +135,12 @@ final class ApplyCatalogueSiglaMappings
                 continue;
             }
 
+            if (! $target->exists) {
+                // Unreachable on a write — the entities are really there by then — but a projected
+                // target reaching an insert would write `social_security_entity_id = 0`. Fail loudly.
+                throw new \LogicException('Se intentó escribir un mapeo contra un destino proyectado.');
+            }
+
             DB::table('import_source_mappings')->insert([
                 // `profile` is NOT NULL and is not decorative: a mapping only ever resolves inside
                 // the import profile that created it, so a sigla approved under one workbook's
@@ -135,7 +149,7 @@ final class ApplyCatalogueSiglaMappings
                 'profile' => ImportProfile::BlindenLegacyMonthlyV1->value,
                 'type' => $proposal['type']->value,
                 'source_key' => SheetMonth::fold($proposal['token']),
-                'social_security_entity_id' => $target->getKey(),
+                'social_security_entity_id' => $target->key(),
                 'verified_by' => $actor?->getKey(),
                 'verified_at' => $apply ? now() : null,
                 'note' => $proposal['reason'],
