@@ -243,8 +243,41 @@ final class ActivateNationalCatalogues
      */
     private function lockRelevantRows(): void
     {
+        // 1. A transaction-scoped **advisory lock** on the catalogue activation.
+        //
+        //    `lockForUpdate()` alone was not enough, and the reason is structural rather than a
+        //    matter of tuning: it locks rows **that exist**. On an empty catalogue there are none, so
+        //    two simultaneous activations both found nothing to lock and both proceeded. On a
+        //    partially-loaded catalogue the worst case is worse — they lock whatever rows happened to
+        //    be there, in whatever order each process reached them, and two activations can deadlock
+        //    or interleave writes between them.
+        //
+        //    `pg_advisory_xact_lock` is taken **before** the row locks and released automatically when
+        //    the transaction ends, including on rollback. So a second activation waits at the door
+        //    rather than at a row.
+        //
+        //    Scope, stated honestly: this serialises **activations that go through this service**.
+        //    It cannot stop a writer that never takes the lock — a hand-run `INSERT`, or another
+        //    tool. That is not a gap being papered over; it is the boundary of the guarantee. The
+        //    fingerprint re-check under the lock is what catches such a writer: if it changed
+        //    anything between the preview and the write, the transaction throws and rolls back.
+        DB::select('SELECT pg_advisory_xact_lock(?)', [$this->lockKey()]);
+
+        // 2. Row locks on top, so the fingerprint re-check reads a stable set even against a writer
+        //    that did not take the advisory lock.
         DB::table('social_security_entities')->lockForUpdate()->get();
         DB::table('import_source_mappings')->lockForUpdate()->get();
+    }
+
+    /**
+     * A fixed key, so every activation in every process contends for the same lock.
+     *
+     * Derived from a constant rather than a hash of a table name so it cannot drift with a
+     * configuration change: the two halves of Laravel's `hasher()->getHash()` for 'sha256'.
+     */
+    private function lockKey(): int
+    {
+        return (int) (hexdec(substr(hash('sha256', 'catalogues:activate'), 0, 8)) & 0x7FFFFFFF);
     }
 
     /**

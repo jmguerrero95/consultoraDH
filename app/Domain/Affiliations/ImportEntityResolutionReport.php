@@ -6,12 +6,9 @@ namespace App\Domain\Affiliations;
 
 use App\Domain\Imports\ImportPlanBuilder;
 use App\Domain\Imports\SheetMonth;
-use App\Domain\Imports\SourceEntityToken;
 use App\Models\LegacyImport;
 use App\Models\LegacyImportIssue;
 use App\Models\LegacyImportRow;
-use App\Models\SocialSecurityEntity;
-use Illuminate\Support\Facades\DB;
 
 /**
  * What the historical workbook actually resolved, per institutional type.
@@ -132,122 +129,19 @@ final class ImportEntityResolutionReport
     }
 
     /**
+     * Delegates to the shared resolver.
+     *
+     * There is no second copy of the rule here on purpose. While the preview judged for itself, the
+     * two answers drifted, and the drift only showed in the direction that hides: the preview
+     * reported tokens as resolved that the importer would have refused.
+     *
      * @return array{bucket: string, reason: string|null}
      */
     private static function classify(string $token, string $type): array
     {
-        // A cell that denies an affiliation is an answer, not a question. `NO APLICA` and `NO` are
-        // §9.1's refusals and were already being read as such by the parser.
-        if (SourceEntityToken::isNegativePhrase($token)) {
-            return ['bucket' => 'negative', 'reason' => 'La celda dice que no hay afiliación.'];
-        }
+        $verdict = CatalogueEntityResolver::resolve($token, $type);
 
-        // `UNO`, `TRES`, `AUXILIAR`, `MECANICO`: a risk level or a job title read from the ARL
-        // column. §9.1 refuses them as entity names and nothing may create one.
-        if (SourceEntityToken::isNonEntityWord($token)) {
-            return ['bucket' => 'refused', 'reason' => 'Nivel de riesgo o cargo, no una administradora.'];
-        }
-
-        $ambiguous = self::ambiguityReason($token, $type);
-
-        if ($ambiguous !== null) {
-            return ['bucket' => 'ambiguous', 'reason' => $ambiguous];
-        }
-
-        // Exactly what `ImportPlanBuilder::resolveEntity()` accepts: an approved mapping whose target
-        // is active, or an active entity whose folded name is the token.
-        $approved = self::approvedMappingFor($token, $type);
-
-        if ($approved !== null) {
-            return ['bucket' => 'resolved', 'reason' => null];
-        }
-
-        $byName = SocialSecurityEntity::query()
-            ->where('type', $type)
-            ->where('status', 'active')
-            ->get()
-            ->first(fn ($entity): bool => SheetMonth::fold((string) $entity->name) === $token);
-
-        if ($byName !== null) {
-            return ['bucket' => 'resolved', 'reason' => null];
-        }
-
-        // Present but deactivated: not an open question, a closed door.
-        $inactive = SocialSecurityEntity::query()
-            ->where('type', $type)
-            ->where('status', '!=', 'active')
-            ->get()
-            ->first(fn ($entity): bool => SheetMonth::fold((string) $entity->name) === $token);
-
-        if ($inactive !== null) {
-            return ['bucket' => 'inactive', 'reason' => sprintf(
-                '«%s» está en el catálogo pero inactiva: no admite afiliaciones nuevas.',
-                $inactive->name,
-            )];
-        }
-
-        return ['bucket' => 'pending', 'reason' => 'Ninguna entidad del catálogo corresponde a este token.'];
-    }
-
-    /**
-     * The catalogue's own record of a sigla several entities answer to, or one no source explains.
-     */
-    private static function ambiguityReason(string $token, string $type): ?string
-    {
-        if ($type === 'CCF') {
-            foreach (CcfNationalCatalogue::ambiguousSiglas() as $sigla) {
-                if (SheetMonth::fold($sigla) === $token) {
-                    return sprintf(
-                        '«%s» es la sigla de varias cajas distintas. Hace falta la región.',
-                        $sigla,
-                    );
-                }
-            }
-
-            foreach (CcfNationalCatalogue::records() as $record) {
-                if (in_array('source_artifact', $record['flags'] ?? [], true)
-                    && SheetMonth::fold($record['sigla']) === $token) {
-                    return 'La fuente publica esta sigla corrupta y no se puede adivinar la real.';
-                }
-            }
-        }
-
-        if ($type === 'ARL') {
-            foreach (ArlNationalCatalogue::ambiguousTokens() as $candidate => $why) {
-                if (SheetMonth::fold($candidate) === $token) {
-                    return $why;
-                }
-            }
-        }
-
-        if ($type === 'AFP') {
-            foreach (PensionNationalCatalogue::proposedAliases() as $alias) {
-                if (SheetMonth::fold($alias['token']) === $token) {
-                    return sprintf(
-                        'Corrección tipográfica propuesta hacia «%s», sin aprobar. No crea una entidad nueva.',
-                        $alias['target'],
-                    );
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * The same query `resolveEntity()` makes: an approved mapping whose target is still active.
-     */
-    private static function approvedMappingFor(string $token, string $type): ?SocialSecurityEntity
-    {
-        return SocialSecurityEntity::query()
-            ->whereIn('id', DB::table('import_source_mappings')
-                ->where('profile', 'blinden_legacy_monthly_v1')
-                ->where('type', $type)
-                ->where('source_key', $token)
-                ->whereNotNull('verified_at')
-                ->pluck('social_security_entity_id'))
-            ->where('status', 'active')
-            ->first();
+        return ['bucket' => $verdict['bucket'], 'reason' => $verdict['reason']];
     }
 
     /**
