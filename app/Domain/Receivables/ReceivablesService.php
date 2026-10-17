@@ -691,6 +691,45 @@ final class ReceivablesService
     }
 
     /**
+     * How many distinct clients owe something, and how many are part-way.
+     *
+     * ## Why this is here and not in the tool
+     *
+     * "Clients with debt" and "clients with a partial payment" are statements
+     * about obligations, and an obligation's balance is not a column: it is the
+     * base amount plus its adjustments minus its live allocations. That
+     * arithmetic is written once in `obligationsQuery()`, and a tool that
+     * recomputed it would disagree with the cartera screen the first time an
+     * adjustment or a reversal arrived.
+     *
+     * A partial payment is an obligation where something has been applied and a
+     * balance remains — `paid > 0 and balance > 0`. Counting clients rather than
+     * rows matters: one client with three half-paid months is one client, not
+     * three, and the question is always about people.
+     *
+     * @return array{clients_with_debt: int, clients_with_partial_payments: int, open_obligations: int, partially_paid_obligations: int, as_of: string}
+     */
+    public function clientBalanceCounts(?Carbon $asOf = null): array
+    {
+        $asOf = $this->agingReference($asOf);
+
+        $row = DB::query()->fromSub($this->obligationsQuery(), 'obligations')
+            ->selectRaw('count(distinct obligations.client_id) filter (where obligations.balance_cop > 0) as clients_with_debt')
+            ->selectRaw('count(distinct obligations.client_id) filter (where obligations.paid_amount_cop > 0 and obligations.balance_cop > 0) as clients_with_partial')
+            ->selectRaw('count(*) filter (where obligations.balance_cop > 0) as open_obligations')
+            ->selectRaw('count(*) filter (where obligations.paid_amount_cop > 0 and obligations.balance_cop > 0) as partially_paid_obligations')
+            ->first();
+
+        return [
+            'clients_with_debt' => (int) $row->clients_with_debt,
+            'clients_with_partial_payments' => (int) $row->clients_with_partial,
+            'open_obligations' => (int) $row->open_obligations,
+            'partially_paid_obligations' => (int) $row->partially_paid_obligations,
+            'as_of' => $asOf->toDateString(),
+        ];
+    }
+
+    /**
      * Money actually received: the sum of every payment that has not been voided.
      *
      * Deliberately simple. It is the top line of the ledger, not an allocation-aware figure,

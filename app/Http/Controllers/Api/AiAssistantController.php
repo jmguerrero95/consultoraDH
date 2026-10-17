@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api;
 
 use App\Models\AiActionProposal;
+use App\Models\AiArtifact;
 use App\Models\AiConversation;
 use App\Models\AiMessage;
 use App\Models\User;
@@ -172,6 +173,7 @@ final class AiAssistantController extends Controller
             'model' => $result['model'],
             'proposals' => $result['proposals'],
             'tools' => $result['tools'],
+            'artifacts' => $result['artifacts'] ?? [],
         ]);
     }
 
@@ -199,7 +201,34 @@ final class AiAssistantController extends Controller
         return response()->json([
             'conversation_id' => $conversation->id,
             'messages' => $messages,
+            // The files this thread produced. They are part of the conversation,
+            // not of a separate panel: after a reload the person sees the PDF
+            // they asked for where they asked for it.
+            'artifacts' => $this->artifactsFor($conversation),
         ]);
+    }
+
+    /**
+     * The artifacts belonging to a conversation, newest first.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function artifactsFor(AiConversation $conversation): array
+    {
+        return AiArtifact::query()
+            ->where('conversation_id', $conversation->id)
+            ->where('user_id', $conversation->user_id)
+            ->orderBy('id')
+            ->get()
+            ->map(fn (AiArtifact $artifact): array => [
+                'id' => $artifact->id,
+                'filename' => $artifact->display_filename,
+                'format' => $artifact->format,
+                'size_bytes' => (int) $artifact->size_bytes,
+                'download_url' => route('api.ai.artifacts.download', ['artifact' => $artifact->id]),
+                'expires_at' => $artifact->expires_at?->toDateTimeString(),
+            ])
+            ->all();
     }
 
     /**
@@ -226,6 +255,7 @@ final class AiAssistantController extends Controller
             'provider' => $result['provider'],
             'model' => $result['model'],
             'proposals' => $result['proposals'],
+            'artifacts' => $result['artifacts'] ?? [],
         ]);
     }
 

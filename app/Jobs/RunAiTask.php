@@ -6,6 +6,7 @@ namespace App\Jobs;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Events\AiTaskCompleted;
+use App\Models\AiMessage;
 use App\Models\AiTask;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -173,6 +174,20 @@ class RunAiTask implements ShouldQueue
                 'finished_at' => now(),
             ])->save();
 
+            // A research result is a member of the conversation that asked for
+            // it, not a row in a separate panel: the summary and its sources are
+            // written into the thread so the person finds the answer where they
+            // asked the question. Wrapped so a message that cannot be written
+            // does not turn finished work into a failed job.
+            try {
+                $this->publishToConversation($task, $result);
+            } catch (\Throwable $e) {
+                Log::warning('Task result could not be published to its conversation.', [
+                    'task_id' => $task->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
             // Announced after the row is written, and only on success.
             //
             // Wrapped because announcing is not part of doing the work. Without
@@ -224,6 +239,72 @@ class RunAiTask implements ShouldQueue
         }
 
         $this->fail($task, $this->readableReason($exception));
+    }
+
+    /**
+     * Write a finished research answer into its own conversation.
+     *
+     * ## Why the result is a message and not only a task row
+     *
+     * The requirement is that a person who asked for research finds the answer
+     * in the thread where they asked, not by opening a technical panel. A task
+     * row carries progress; the conversation carries the answer.
+     *
+     * Nothing is written when the task has no conversation, and nothing is
+     * invented: a run that found no sources says exactly that, and one whose
+     * synthesis was refused by the model's own citation check falls back to the
+     * sources themselves.
+     *
+     * @param  array<string, mixed>  $result
+     */
+    private function publishToConversation(AiTask $task, array $result): void
+    {
+        if ($task->kind !== AiTask::KIND_RESEARCH || $task->ai_conversation_id === null) {
+            return;
+        }
+
+        $summary = $result['summary'] ?? null;
+        $sources = is_array($result['sources'] ?? null) ? $result['sources'] : [];
+        $question = trim((string) ($task->input['question'] ?? ''));
+
+        $parts = [];
+
+        if (is_string($summary) && trim($summary) !== '') {
+            $parts[] = trim($summary);
+        }
+
+        if ($sources !== []) {
+            $lines = [$summary === null ? 'Encontré estas fuentes:' : 'Fuentes:'];
+
+            foreach ($sources as $index => $source) {
+                if (! is_array($source)) {
+                    continue;
+                }
+
+                $title = trim((string) ($source['title'] ?? '')) ?: 'Fuente';
+                $url = trim((string) ($source['url'] ?? ''));
+
+                $lines[] = $url === ''
+                    ? sprintf('%d. %s', $index + 1, $title)
+                    : sprintf('%d. [%s](%s)', $index + 1, $title, $url);
+            }
+
+            $parts[] = implode("\n", $lines);
+        }
+
+        if ($parts === []) {
+            $parts[] = $question === ''
+                ? 'No encontré fuentes para esta investigación.'
+                : 'No encontré fuentes para: '.$question;
+        }
+
+        AiMessage::query()->create([
+            'ai_conversation_id' => $task->ai_conversation_id,
+            'role' => AiMessage::ROLE_ASSISTANT,
+            'content' => implode("\n\n", $parts),
+            'provider' => null,
+            'model' => null,
+        ]);
     }
 
     private function fail(AiTask $task, string $reason): void

@@ -372,6 +372,26 @@ return [
     ],
 
     /*
+     * Weather configuration (Open-Meteo, free and key-less).
+     *
+     * The harmless specialisation of "what is true today": two fixed public
+     * endpoints — one to turn a place name into coordinates, one for the
+     * observation and forecast. No key, no payment, and the host is never taken
+     * from a tool argument.
+     *
+     * AI_WEATHER_ENABLED
+     * AI_WEATHER_GEOCODING_URL
+     * AI_WEATHER_FORECAST_URL
+     * AI_WEATHER_TIMEOUT_SECONDS
+     */
+    'weather' => [
+        'enabled' => (bool) env('AI_WEATHER_ENABLED', true),
+        'geocoding_url' => env('AI_WEATHER_GEOCODING_URL', 'https://geocoding-api.open-meteo.com/v1/search'),
+        'forecast_url' => env('AI_WEATHER_FORECAST_URL', 'https://api.open-meteo.com/v1/forecast'),
+        'timeout_seconds' => (int) env('AI_WEATHER_TIMEOUT_SECONDS', 10),
+    ],
+
+    /*
      * Artifact configuration.
      *
      * AI_ARTIFACT_TTL_DAYS

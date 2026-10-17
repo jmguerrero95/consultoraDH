@@ -43,7 +43,12 @@ final class AiWebArtifactTest extends TestCase
         $tools = $registry->all();
 
         $this->assertArrayHasKey('create_artifact', $tools);
-        $this->assertTrue($tools['create_artifact']->isWrite());
+
+        // A private file the person asked for is generated and returned, not
+        // proposed: making somebody confirm a PDF they just requested produced a
+        // proposal on screen and no file. The authorization that matters is
+        // `artifacts.create`, checked inside `execute()`.
+        $this->assertFalse($tools['create_artifact']->isWrite());
     }
 
     public function test_artifact_tool_requires_artifacts_create_permission()

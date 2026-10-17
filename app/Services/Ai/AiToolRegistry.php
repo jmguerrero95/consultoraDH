@@ -24,6 +24,8 @@ use App\Services\Ai\Tools\OperationalTasksTool;
 use App\Services\Ai\Tools\ReceivablesSummaryTool;
 use App\Services\Ai\Tools\ReportPreviewTool;
 use App\Services\Ai\Tools\SupportSummaryTool;
+use App\Services\Ai\Tools\SystemStatsTool;
+use App\Services\Ai\Tools\WeatherTool;
 use App\Services\Ai\Tools\WebFetchTool;
 use App\Services\Ai\Tools\WebSearchTool;
 
@@ -83,6 +85,7 @@ class AiToolRegistry
             app(ClientSummaryTool::class),
             app(ReceivablesSummaryTool::class),
             app(ClientAccountTool::class),
+            app(SystemStatsTool::class),
             app(OperationalTasksTool::class),
             app(ReportPreviewTool::class),
             app(SupportSummaryTool::class),
@@ -90,6 +93,7 @@ class AiToolRegistry
             app(CreateReportTool::class),
             app(WebSearchTool::class),
             app(WebFetchTool::class),
+            app(WeatherTool::class),
             app(CreateArtifactTool::class),
             app(DocumentSearchTool::class),
             app(DocumentReadTool::class),
