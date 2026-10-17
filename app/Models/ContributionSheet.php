@@ -46,6 +46,7 @@ class ContributionSheet extends Model
             'status' => ContributionSheetStatus::class,
             'submitted_on' => 'date',
             'paid_on' => 'date',
+            'cancelled_at' => 'datetime',
             'revision' => 'integer',
             'source_digest' => 'string',
         ];
@@ -74,6 +75,17 @@ class ContributionSheet extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    /**
+     * Who cancelled the planilla.
+     *
+     * A cancellation is terminal and the reason was recorded but never readable
+     * afterwards: the screen said "Cancelada" and stopped there.
+     */
+    public function canceller(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
     }
 
     /**

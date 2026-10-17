@@ -264,9 +264,22 @@ export interface Assignment {
     company_id: number;
     company: CompanySummary | null;
     /** Present only on the screens that are about the client, not the company. */
-    client: { id: number; full_name: string } | null;
+    client: {
+        id: number;
+        full_name: string;
+        document_type?: string | null;
+        document_number?: string | null;
+        document_label?: string | null;
+    } | null;
     started_on: string | null;
     ended_on: string | null;
+    /**
+     * How exact each end is: `day`, `month`, or `unknown` for an imported interval
+     * whose date the source never stated. The interface shows the month rather than
+     * inventing a day for it.
+     */
+    started_on_precision?: string | null;
+    ended_on_precision?: string | null;
     is_active: boolean;
     job_title: string | null;
     notes: string | null;
@@ -1492,6 +1505,10 @@ export interface PlanillaDetail {
     included_line_count: number;
     line_count: number;
     notes: string | null;
+    /** Only present once the planilla has been cancelled. */
+    cancellation_reason: string | null;
+    cancelled_at: string | null;
+    cancelled_by: { id: number; name: string } | null;
     source_digest: string;
     revision: number;
     files: PlanillaFile[];

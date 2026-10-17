@@ -27,6 +27,14 @@ const props = withDefaults(
         disabled?: boolean;
         /** A wider dialog, for a dialog whose content is a table. */
         wide?: boolean;
+        /**
+         * Hides the confirm button.
+         *
+         * For a dialog that only shows something — a payment's history, a list of
+         * pending periods — a "Confirmar" button does nothing when pressed. It is
+         * replaced by the single dismiss button, so the dialog has no dead control.
+         */
+        hideConfirm?: boolean;
     }>(),
     {
         confirmLabel: 'Confirmar',
@@ -35,10 +43,27 @@ const props = withDefaults(
         destructive: false,
         disabled: false,
         wide: false,
+        hideConfirm: false,
     },
 );
 
-const emit = defineEmits<{ confirm: []; cancel: [] }>();
+const emit = defineEmits<{
+    confirm: [];
+    cancel: [];
+    /**
+     * Alias of `cancel`.
+     *
+     * Two call sites listened for `@close`, an event this component never emitted,
+     * so their "Cancelar" button was inert. Emitting both keeps those callers — and
+     * any future one that guesses `close` — working instead of silently dead.
+     */
+    close: [];
+}>();
+
+function requestCancel(): void {
+    emit('cancel');
+    emit('close');
+}
 
 const titleId = useId();
 const bodyId = `${titleId}-body`;
@@ -72,7 +97,7 @@ watch(dialog, (element) => {
 function onNativeCancel(event: Event): void {
     // Escape pressed. Keep the native dismissal, then report it.
     event.preventDefault();
-    emit('cancel');
+    requestCancel();
 }
 
 onBeforeUnmount(() => {
@@ -102,11 +127,12 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="cdh-modal__footer">
-            <AppButton variant="secondary" :disabled="busy" @click="emit('cancel')">
+            <AppButton variant="secondary" :disabled="busy" @click="requestCancel">
                 {{ cancelLabel }}
             </AppButton>
 
             <AppButton
+                v-if="!hideConfirm"
                 :variant="destructive ? 'danger' : 'primary'"
                 :busy="busy"
                 :disabled="disabled"

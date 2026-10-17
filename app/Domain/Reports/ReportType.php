@@ -40,8 +40,12 @@ enum ReportType: string
     public function label(): string
     {
         return match ($this) {
-            self::Morosos => 'Morosos / cartera pendiente',
-            self::Vencidos => 'Vencidos',
+            // MEJ-008: the old name, "Morosos / cartera pendiente", read as "people who
+            // owe money late" while the report also lists clients whose instalment is
+            // not yet due. It is a pending-portfolio report, and it says so now, so it
+            // is not confused with the overdue-only one below.
+            self::Morosos => 'Cartera pendiente (todos los saldos)',
+            self::Vencidos => 'Cartera vencida (solo saldos vencidos)',
             self::PorEmpresa => 'Por empresa',
             self::PorEntidad => 'Por entidad de seguridad social',
             self::Planillas => 'Resumen de planillas',

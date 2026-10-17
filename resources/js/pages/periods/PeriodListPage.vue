@@ -368,7 +368,12 @@ const generationSummary = computed(() => {
                 <article class="cdh-stat">
                     <p class="cdh-stat__label">
                         <i class="bi bi-file-earmark-text" aria-hidden="true" />
-                        <span>Por facturar</span>
+                        <!--
+                            MEJ-004: "Por facturar" reads as electronic invoicing, and the
+                            figure is not that — these are obligations already generated
+                            whose money has not been collected.
+                        -->
+                        <span>Pendiente por cobrar</span>
                     </p>
                     <p class="cdh-stat__value">
                         {{ puedeVerDinero ? pesos(current?.total_balance_cop) : '—' }}
@@ -376,11 +381,11 @@ const generationSummary = computed(() => {
                     <p class="cdh-stat__hint">
                         <!--
                             No permission means no figure, and an em dash rather than a
-                            zero: "0 pesos por facturar" is a financial statement, and
+                            zero: "0 pesos pendientes" is a financial statement, and
                             `periods.view` alone does not entitle anybody to make one.
                         -->
                         <template v-if="puedeVerDinero">
-                            {{ current?.obligation_count ?? 0 }} obligaciones en el periodo
+                            {{ current?.obligation_count ?? 0 }} obligaciones generadas en el periodo
                         </template>
                         <template v-else>Requiere permiso para ver las obligaciones</template>
                     </p>

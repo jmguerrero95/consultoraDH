@@ -5,6 +5,7 @@ import AdminLayout from '@/layouts/AdminLayout.vue';
 import ClientPortalLayout from '@/layouts/ClientPortalLayout.vue';
 import { useAuthStore } from '@/stores/auth';
 import { puedeEntrar } from '@/router/permissions';
+import { finishNavigation, startNavigation } from '@/composables/useNavigationProgress';
 
 /**
  * Routes of the single page application.
@@ -472,12 +473,9 @@ const routes: RouteRecordRaw[] = [
                 meta: { title: 'Documentos' },
             },
             {
-                path: 'solicitudes',
-                name: 'portal.requests',
-                component: () => import('@/pages/portal/PortalDocumentsPage.vue'),
-                meta: { title: 'Solicitudes de documentos' },
-            },
-            {
+                // Declared once. It used to appear twice under the same name, which
+                // made vue-router warn "Duplicate route name" and silently keep only
+                // one of the two records.
                 path: 'solicitudes',
                 name: 'portal.requests',
                 component: () => import('@/pages/portal/PortalDocumentsPage.vue'),
@@ -549,6 +547,11 @@ export function createAppRouter(history: RouterHistory = createWebHistory()): Ro
     */
 
     router.beforeEach(async (to) => {
+        // Started here, and not in `beforeResolve`: resolving the lazily imported page
+        // component happens between the two, so this is the only hook early enough to
+        // report the wait the reader is actually experiencing.
+        startNavigation();
+
         const auth = useAuthStore();
 
         if (!auth.initialised) {
@@ -595,9 +598,43 @@ export function createAppRouter(history: RouterHistory = createWebHistory()): Ro
     });
 
     router.afterEach((to) => {
+        finishNavigation();
+
         const appName = import.meta.env.VITE_APP_NAME ?? 'Consultora DH';
 
         document.title = to.meta.title === undefined ? appName : `${to.meta.title} · ${appName}`;
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | A chunk that will not load
+    |--------------------------------------------------------------------------
+    |
+    | A navigation whose lazily imported page cannot be fetched (a stale cached
+    | bundle after a deployment, a dropped connection at the wrong moment) rejects
+    | silently: no page renders and nothing says why, which reads as "the menu does
+    | not work". The reload is attempted once per session — a second failure is
+    | reported to the console instead of looping.
+    */
+    let reloadedAfterChunkError = false;
+
+    router.onError((error) => {
+        finishNavigation();
+
+        const message = error instanceof Error ? error.message : String(error);
+        const isChunkError =
+            /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(
+                message,
+            );
+
+        if (isChunkError && !reloadedAfterChunkError) {
+            reloadedAfterChunkError = true;
+            window.location.reload();
+
+            return;
+        }
+
+        console.error('[router] La navegación ha fallado:', error);
     });
 
     return router;

@@ -6,7 +6,7 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
 import AppLoading from '@/components/ui/AppLoading.vue';
-import { pesos } from '@/composables/useFormatters';
+import { fechaHora, pesos } from '@/composables/useFormatters';
 import { useAuthStore } from '@/stores/auth';
 import { a05 } from '@/services/a05';
 import { ApiError } from '@/services/http';
@@ -94,6 +94,36 @@ async function guardarLinea(): Promise<void> {
 }
 
 const tipoArchivo = ref('operator_pdf');
+
+/*
+ * What the planilla's own state still allows.
+ *
+ * The controls used to be gated only by the permission, whatever the status, so a
+ * cancelled planilla still offered "Editar línea" and "Adjuntar". The server refuses
+ * both — a line is editable only on a draft, and a terminal planilla takes no new
+ * files — so the buttons were an offer the domain does not honour. Hiding them is the
+ * presentation; the server keeps enforcing it either way.
+ */
+const estadoTerminal = computed(
+    () => sheet.value?.status === 'cancelled' || sheet.value?.status === 'paid',
+);
+const puedeEditarLineas = computed(
+    () => auth.can('planillas.update') && sheet.value?.status === 'draft',
+);
+const puedeAdjuntar = computed(() => auth.can('planillas.update') && !estadoTerminal.value);
+
+/** The recorded cancellation: reason, date and who decided it. */
+const cancelacion = computed(() => {
+    if (sheet.value?.status !== 'cancelled') {
+        return null;
+    }
+
+    return {
+        reason: sheet.value.cancellation_reason,
+        at: sheet.value.cancelled_at,
+        by: sheet.value.cancelled_by,
+    };
+});
 
 const errores = computed<ValidationFinding[]>(() => validacion.value?.errors ?? []);
 const avisos = computed<ValidationFinding[]>(() => validacion.value?.warnings ?? []);
@@ -380,7 +410,7 @@ function descargar(ruta: string): void {
                                             <template v-else>
                                                 <span>{{ pesos(linea.liquidated_amount_cop) }}</span>
                                                 <button
-                                                    v-if="auth.can('planillas.update')"
+                                                    v-if="puedeEditarLineas"
                                                     type="button"
                                                     class="btn btn-sm btn-link p-0 ms-1"
                                                     @click="editarLinea(linea.id, linea.liquidated_amount_cop)"
@@ -428,7 +458,7 @@ function descargar(ruta: string): void {
                                 Sin comprobantes adjuntos.
                             </p>
 
-                            <div v-if="auth.can('planillas.update')" class="row g-2 align-items-end">
+                            <div v-if="puedeAdjuntar" class="row g-2 align-items-end">
                                 <div class="col-12 col-sm-4">
                                     <label class="form-label" for="tipo">Tipo</label>
                                     <select id="tipo" v-model="tipoArchivo" class="form-select">
@@ -561,6 +591,33 @@ function descargar(ruta: string): void {
                                     Cancelar planilla
                                 </AppButton>
                             </template>
+
+                            <p v-if="estadoTerminal" class="small text-body-secondary mb-0">
+                                Esta planilla está {{ sheet.status_label.toLowerCase() }} y no admite
+                                más cambios.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!--
+                        MEJ-003: the reason was recorded but never readable. It is the
+                        first thing anybody asks about a cancellation.
+                    -->
+                    <div v-if="cancelacion" class="card mb-3">
+                        <div class="card-header">
+                            <h2 class="h6 mb-0">Cancelación</h2>
+                        </div>
+                        <div class="card-body">
+                            <dl class="row mb-0 small">
+                                <dt class="col-5">Motivo</dt>
+                                <dd class="col-7">{{ cancelacion.reason ?? '—' }}</dd>
+                                <dt class="col-5">Fecha</dt>
+                                <dd class="col-7">
+                                    {{ cancelacion.at ? fechaHora(cancelacion.at) : '—' }}
+                                </dd>
+                                <dt class="col-5">Registrada por</dt>
+                                <dd class="col-7">{{ cancelacion.by?.name ?? '—' }}</dd>
+                            </dl>
                         </div>
                     </div>
 

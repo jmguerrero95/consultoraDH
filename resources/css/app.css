@@ -345,6 +345,36 @@ pre {
     color: var(--cdh-text-muted);
 }
 
+/*
+    The strip under a table that says which page is shown.
+
+    Used by several list screens but never styled, so the range sat flush against
+    the buttons. `flex-end` keeps the buttons on the reading side of the row.
+*/
+.cdh-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--cdh-space-3);
+    padding: var(--cdh-space-3) var(--cdh-space-5);
+}
+
+.cdh-pager__range {
+    font-size: var(--cdh-font-size-sm);
+    color: var(--cdh-text-muted);
+}
+
+/*
+    A sentence that qualifies the table under it — a definition, a caveat, a legend.
+    Distinct from `.cdh-card__hint`, which belongs inside a card that has no padding.
+*/
+.cdh-table-note {
+    margin: 0 0 var(--cdh-space-3);
+    font-size: var(--cdh-font-size-sm);
+    color: var(--cdh-text-muted);
+}
+
 .cdh-form-error {
     display: flex;
     gap: var(--cdh-space-1);
@@ -415,6 +445,14 @@ pre {
 .cdh-btn[aria-busy='true'] {
     cursor: not-allowed;
     opacity: 0.65;
+}
+
+/*
+    A link shaped like a button has no `disabled` attribute, so a busy one would
+    still navigate. This is the anchor-only equivalent of the rule above.
+*/
+a.cdh-btn[aria-busy='true'] {
+    pointer-events: none;
 }
 
 .cdh-btn--primary {
@@ -530,6 +568,18 @@ pre {
     padding: 0;
 }
 
+/*
+    A sentence that introduces a table inside a flush card.
+    The card body carries no padding in that variant, so the text would otherwise
+    sit against the card's edge.
+*/
+.cdh-card__hint {
+    margin: 0;
+    padding: var(--cdh-space-3) var(--cdh-space-5) 0;
+    font-size: var(--cdh-font-size-sm);
+    color: var(--cdh-text-muted);
+}
+
 .cdh-card__footer {
     padding: var(--cdh-space-3) var(--cdh-space-5);
     background: var(--cdh-surface-muted);
@@ -612,6 +662,49 @@ pre {
     border-color: var(--cdh-border);
 }
 
+/* --- Navigation progress ------------------------------------------------------ */
+.cdh-nav-progress {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 1100;
+    width: 100%;
+    height: 3px;
+    background: linear-gradient(
+        90deg,
+        var(--cdh-primary) 0%,
+        var(--cdh-primary) 65%,
+        transparent 100%
+    );
+    transform-origin: 0 50%;
+    animation: cdh-nav-progress 1.4s ease-in-out infinite;
+    pointer-events: none;
+}
+
+@keyframes cdh-nav-progress {
+    0% {
+        transform: scaleX(0.08);
+        opacity: 0.9;
+    }
+
+    50% {
+        transform: scaleX(0.6);
+        opacity: 1;
+    }
+
+    100% {
+        transform: scaleX(1);
+        opacity: 0.85;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cdh-nav-progress {
+        animation: none;
+        transform: scaleX(0.5);
+    }
+}
+
 /* --- Alerts ------------------------------------------------------------------ */
 .cdh-alert {
     display: flex;
@@ -629,6 +722,16 @@ pre {
 
 .cdh-alert__title {
     font-weight: var(--cdh-font-weight-semibold);
+}
+
+.cdh-alert__body,
+.cdh-alert__description {
+    margin: 0;
+}
+
+.cdh-alert__title + .cdh-alert__body,
+.cdh-alert__body + .cdh-alert__description {
+    margin-top: var(--cdh-space-1);
 }
 
 .cdh-alert--danger {

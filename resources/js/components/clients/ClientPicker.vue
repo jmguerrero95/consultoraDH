@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { businessApi } from '@/services/api'
 
 /**
@@ -26,14 +26,16 @@ import { businessApi } from '@/services/api'
  *
  * An empty list until the operator typed is the behaviour this replaces elsewhere in the
  * application (see `PaymentListPage`): the field looked broken before it was ever used. The
- * first page is loaded when the picker is shown, and `per_page` is bounded, so this never
- * pulls the whole client table.
+ * first page is loaded when the picker is shown, and `per_page` is one of the sizes the list
+ * endpoint accepts, so this never pulls the whole client table and never answers 422.
  */
 // `defineProps` without an assignment: the template reads the props directly, so binding them
 // to a local would only produce an unused variable.
-withDefaults(
+const props = withDefaults(
     defineProps<{
-        modelValue: number | null
+        // Widened on purpose: an empty `<select>` or a number input left blank hands back `''`,
+        // which is not `null` and used to render "Cliente seleccionado (id )".
+        modelValue: number | string | null
         label?: string
         optional?: boolean
         /** Pre-selected client, shown before any search — used for the task form. */
@@ -58,7 +60,8 @@ const search = ref('')
 const options = ref<ClientOption[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
-const touched = ref(false)
+/** Only once the operator has typed does "no matches" mean anything. */
+const typed = ref(false)
 
 interface ClientSummary {
     id: number
@@ -69,6 +72,30 @@ interface ClientSummary {
     document_type?: string
 }
 
+/** The real selection, normalised: `''`, `undefined` and `null` all mean "none". */
+const selectedId = computed<number | null>(() => {
+    const raw = props.modelValue
+
+    if (raw === null || raw === undefined || raw === '') {
+        return null
+    }
+
+    const value = Number(raw)
+
+    return Number.isFinite(value) ? value : null
+})
+
+/** What to name the current selection, preferring the caller's own label when it has one. */
+const selectedName = computed(() => {
+    if (props.selectedLabel) {
+        return props.selectedLabel
+    }
+
+    const chosen = options.value.find((option) => option.id === selectedId.value)
+
+    return chosen?.label ?? `Cliente #${selectedId.value ?? ''}`
+})
+
 /** "Nombre — CC 12345678": both halves, because a name alone is rarely unique. */
 function describe(client: ClientSummary): string {
     const name = client.full_name ?? [client.first_names, client.last_names].filter(Boolean).join(' ')
@@ -78,48 +105,105 @@ function describe(client: ClientSummary): string {
         .join(' — ')
 }
 
+// Only the newest answer may write to the list: a slow first keystroke must not
+// overwrite the results of the second one.
+let requestId = 0
+
 async function runSearch(): Promise<void> {
-    loading.value = true;
-    error.value = null;
+    const current = ++requestId
+    loading.value = true
+    error.value = null
 
     try {
         // A bounded page: the list is a picker, not a table, and loading every client to fill
-        // a dropdown would be slower and leak more than it helps.
-        const payload = await businessApi.clients.list({ search: search.value.trim(), per_page: 15 });
+        // a dropdown would be slower and leak more than it helps. `25` is one of the three
+        // page sizes the endpoint accepts; `15` answered 422.
+        const payload = await businessApi.clients.list({ search: search.value.trim(), per_page: 25 })
+
+        if (current !== requestId) {
+            return
+        }
 
         options.value = payload.clients.map((client: ClientSummary) => ({
             id: client.id,
             label: describe(client),
             document: `${client.document_type ?? ''} ${client.document_number ?? ''}`.trim(),
-        }));
+        }))
     } catch {
+        if (current !== requestId) {
+            return
+        }
+
         // An empty list here would be indistinguishable from "no matches", so the failure is
         // stated. Picking a client is never guessable from an error.
-        options.value = [];
-        error.value = 'No fue posible buscar clientes. Intente de nuevo.';
+        options.value = []
+        error.value = 'No fue posible buscar clientes. Intente de nuevo.'
     } finally {
-        loading.value = false;
+        if (current === requestId) {
+            loading.value = false
+        }
     }
 }
 
+let debounce: ReturnType<typeof setTimeout> | null = null
+// Set while `search` is changed by the component itself (choosing or clearing), so the
+// watcher does not fire a redundant request for a value the user did not type.
+let skipNextWatch = false
+
+function scheduleSearch(delay: number): void {
+    if (debounce !== null) {
+        clearTimeout(debounce)
+    }
+
+    debounce = setTimeout(() => {
+        debounce = null
+        void runSearch()
+    }, delay)
+}
+
 function choose(option: ClientOption): void {
-    emit('update:modelValue', option.id);
-    search.value = option.label;
-    touched.value = false;
+    emit('update:modelValue', option.id)
+    skipNextWatch = true
+    search.value = option.label
+    options.value = []
+    typed.value = false
 }
 
 function clear(): void {
-    emit('update:modelValue', null);
-    search.value = '';
+    emit('update:modelValue', null)
+    skipNextWatch = true
+    search.value = ''
+    typed.value = false
+    scheduleSearch(0)
 }
 
-// Loaded as soon as the picker appears, so the form is usable without typing first.
 watch(search, () => {
-    touched.value = true;
-    void runSearch();
-}, { immediate: true });
+    if (skipNextWatch) {
+        skipNextWatch = false
 
-defineExpose({ reload: runSearch });
+        return
+    }
+
+    typed.value = true
+    // Debounced: typing "Santiago" is one request, not eight.
+    scheduleSearch(300)
+})
+
+// Loaded as soon as the picker appears, so the form is usable without typing first.
+onMounted(() => {
+    void runSearch()
+})
+
+onBeforeUnmount(() => {
+    if (debounce !== null) {
+        clearTimeout(debounce)
+    }
+
+    // Any in-flight answer is ignored: the component is gone.
+    requestId++
+})
+
+defineExpose({ reload: runSearch })
 </script>
 
 <template>
@@ -131,13 +215,13 @@ defineExpose({ reload: runSearch });
             v-model="search"
             type="search"
             class="form-control"
-            :placeholder="optional ? 'Buscar por nombre o documento…' : 'Buscar por nombre o documento…'"
+            placeholder="Buscar por nombre o documento…"
             autocomplete="off"
         />
 
         <p v-if="loading" class="small text-muted mt-1 mb-0">Buscando…</p>
         <p v-else-if="error" class="small text-danger mt-1 mb-0">{{ error }}</p>
-        <p v-else-if="touched && options.length === 0" class="small text-muted mt-1 mb-0">
+        <p v-else-if="typed && options.length === 0" class="small text-muted mt-1 mb-0">
             No se encontraron clientes con «{{ search }}».
         </p>
 
@@ -146,7 +230,7 @@ defineExpose({ reload: runSearch });
                 v-for="option in options"
                 :key="option.id"
                 class="list-group-item list-group-item-action py-2"
-                :class="{ active: option.id === modelValue }"
+                :class="{ active: option.id === selectedId }"
                 role="button"
                 tabindex="0"
                 @click="choose(option)"
@@ -157,8 +241,8 @@ defineExpose({ reload: runSearch });
             </li>
         </ul>
 
-        <div v-if="modelValue !== null" class="form-text mt-1">
-            Cliente seleccionado (id {{ modelValue }}).
+        <div v-if="selectedId !== null" class="form-text mt-1">
+            Cliente seleccionado: {{ selectedName }} (id {{ selectedId }}).
             <button type="button" class="btn btn-link btn-sm p-0 align-baseline" @click="clear">
                 Cambiar
             </button>

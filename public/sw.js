@@ -12,7 +12,7 @@
 //      the first time they are actually requested instead.
 //   3. Only the application shell is precached, and only when it is there.
 
-const CACHE_NAME = 'consultora-dh-v2';
+const CACHE_NAME = 'consultora-dh-v3';
 const SHELL_URL = '/';
 
 // Precache entries are literal paths that must exist at install time.

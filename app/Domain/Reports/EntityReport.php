@@ -69,7 +69,9 @@ final class EntityReport implements ReportResult
             ->orderBy('client_affiliations.client_id')
             ->get(['client_affiliations.*', 'social_security_entities.name as entity_name', 'social_security_entities.type as entity_type'])
             ->map(fn (ClientAffiliation $affiliation): array => [
-                'entity_type' => $affiliation->type->value,
+                // The short label, not the raw enum value: `CCF` means nothing to a
+                // reader of the report, and every other format prints this same row.
+                'entity_type' => $affiliation->type->shortLabel(),
                 'entity_name' => $affiliation->getAttribute('entity_name'),
                 'client_document' => $affiliation->client?->documentLabel(),
                 'client_name' => $affiliation->client?->fullName(),

@@ -194,6 +194,14 @@ final class CompanyController extends Controller
                 'active' => AssignmentResource::collection(
                     $active->sortBy(fn ($a) => $a->client?->fullName() ?? '')->values()
                 )->resolve(),
+                // The history, not just its size. The screen showed "1 cliente
+                // histórico" and offered no way to open it: the count is a fact
+                // about the record, and a count with nothing behind it is a dead
+                // end. Same permission guard as the active list, most recent end
+                // first, which is the order somebody checks a past relationship in.
+                'history' => AssignmentResource::collection(
+                    $history->sortByDesc(fn ($a) => $a->ended_on?->toDateString() ?? '')->values()
+                )->resolve(),
                 'history_count' => $history->count(),
             ];
         }

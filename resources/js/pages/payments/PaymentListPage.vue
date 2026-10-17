@@ -1061,7 +1061,9 @@ const rangeLabel = computed(() => {
             :open="historyTarget !== null"
             wide
             title="Historial del pago"
-            @close="closeHistory"
+            cancel-label="Cerrar"
+            hide-confirm
+            @cancel="closeHistory"
         >
                 <template v-if="historyTarget">
                 <div class="cdh-stack-3">
@@ -1158,7 +1160,9 @@ const rangeLabel = computed(() => {
         <AppModal
             :open="reversalTarget !== null"
             title="Revertir aplicación"
-            @close="closeReverse"
+            cancel-label="Cerrar"
+            hide-confirm
+            @cancel="closeReverse"
         >
                 <template v-if="reversalTarget">
                 <div class="cdh-stack-3">

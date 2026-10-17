@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 namespace App\Domain\Reports;
 
+use App\Domain\Affiliations\SocialSecurityEntityType;
+use App\Domain\Billing\AgingBucket;
+use App\Domain\Billing\TrafficLight;
+use App\Domain\Planillas\ContributionSheetStatus;
+use App\Domain\Planillas\PlanillaOperator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
@@ -56,6 +61,11 @@ final class ReportFilter
      * §54 requires the PDF to show the active filters, so this has to exist somewhere
      * every format can call.
      *
+     * BUG-006: this used to print the field name and its raw value — `aging_bucket:
+     * not_due`, `entity_type: CCF` — so the PDF, the CSV and the XLSX headers carried
+     * the application's own identifiers. The names are now the words the screen uses
+     * and the values are passed through the enum that owns them.
+     *
      * @param  array<string, mixed>  $filters
      * @return list<string>
      */
@@ -68,9 +78,60 @@ final class ReportFilter
                 continue;
             }
 
-            $described[] = sprintf('%s: %s', $field, is_scalar($value) ? (string) $value : json_encode($value));
+            $described[] = sprintf('%s: %s', self::fieldLabel($field), self::valueLabel($field, $value));
         }
 
         return $described;
+    }
+
+    /** @var array<string, string> */
+    private const FIELD_LABELS = [
+        'as_of' => 'Fecha de corte',
+        'company_id' => 'Empresa (id)',
+        'client_id' => 'Cliente (id)',
+        'entity_id' => 'Entidad (id)',
+        'entity_type' => 'Tipo de entidad',
+        'period_id' => 'Periodo (id)',
+        'search' => 'Búsqueda',
+        'aging_bucket' => 'Antigüedad',
+        'traffic_light' => 'Semáforo',
+        'min_balance' => 'Saldo mínimo',
+        'minimum_balance' => 'Saldo mínimo',
+        'overdue_only' => 'Solo vencidos',
+        'operator' => 'Operador',
+        'status' => 'Estado',
+        'submitted_from' => 'Enviada desde',
+        'submitted_to' => 'Enviada hasta',
+        'year' => 'Año',
+        'months' => 'Meses',
+    ];
+
+    private static function fieldLabel(string $field): string
+    {
+        // A field the map does not know still must not reach the reader as
+        // `some_internal_key`, so it is at least written as words.
+        return self::FIELD_LABELS[$field] ?? ucfirst(str_replace('_', ' ', $field));
+    }
+
+    private static function valueLabel(string $field, mixed $value): string
+    {
+        if (is_bool($value)) {
+            return $value ? 'Sí' : 'No';
+        }
+
+        if (! is_scalar($value)) {
+            return (string) json_encode($value);
+        }
+
+        $raw = (string) $value;
+
+        return match ($field) {
+            'aging_bucket' => AgingBucket::tryFrom($raw)?->label() ?? $raw,
+            'traffic_light' => TrafficLight::tryFrom($raw)?->label() ?? $raw,
+            'entity_type' => SocialSecurityEntityType::tryFrom($raw)?->shortLabel() ?? $raw,
+            'operator' => PlanillaOperator::tryFrom($raw)?->label() ?? $raw,
+            'status' => ContributionSheetStatus::tryFrom($raw)?->label() ?? $raw,
+            default => $raw,
+        };
     }
 }

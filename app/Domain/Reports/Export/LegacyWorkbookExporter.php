@@ -285,6 +285,8 @@ final class LegacyWorkbookExporter
             ['column' => 'A', 'label' => 'Verde: pagado', 'colour' => 'FF00B050'],
             ['column' => 'F', 'label' => 'Amarillo: pendiente', 'colour' => 'FFFFFF00'],
             ['column' => 'K', 'label' => 'Rojo: vencido', 'colour' => 'FFFF0000'],
+            // MEJ-006: the reader has to know that no colour means "the system has no
+            // record", and not "nothing was owed" or "it was paid".
             ['column' => 'P', 'label' => 'Sin color: sin información de pago', 'colour' => null],
         ];
 

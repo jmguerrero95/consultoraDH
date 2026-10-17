@@ -43,6 +43,38 @@ const canChangeStatus = computed(() => auth.can('companies.change_status'));
 const maySeeClients = computed(() => payload.value?.clients.visible === true);
 const activeClients = computed<Assignment[]>(() => payload.value?.clients.active ?? []);
 
+/*
+ * The closed relationships.
+ *
+ * The summary has always said "1 cliente histórico" and stopped there, so the only
+ * way to see who it was had to be done against the database. They are kept out of
+ * the active table on purpose — somebody who left is not a current client — but a
+ * count with nothing behind it is a dead end, so they get their own section.
+ */
+const historyClients = computed<Assignment[]>(() => payload.value?.clients.history ?? []);
+
+const HISTORY_PAGE_SIZE = 10;
+const historyPage = ref(1);
+
+const historyTotalPages = computed(() =>
+    Math.max(1, Math.ceil(historyClients.value.length / HISTORY_PAGE_SIZE)),
+);
+
+const historyPageRows = computed(() =>
+    historyClients.value.slice(
+        (historyPage.value - 1) * HISTORY_PAGE_SIZE,
+        historyPage.value * HISTORY_PAGE_SIZE,
+    ),
+);
+
+function previousHistoryPage(): void {
+    historyPage.value = Math.max(1, historyPage.value - 1);
+}
+
+function nextHistoryPage(): void {
+    historyPage.value = Math.min(historyTotalPages.value, historyPage.value + 1);
+}
+
 async function load(): Promise<void> {
     loading.value = true;
     error.value = null;
@@ -68,6 +100,27 @@ function formatDate(value: string | null): string {
     return Number.isNaN(parsed.getTime())
         ? value
         : parsed.toLocaleDateString('es-CO', { year: 'numeric', month: '2-digit', day: '2-digit' });
+}
+
+/**
+ * A date as exact as the record is.
+ *
+ * An imported relationship may know only the month it started or ended — the
+ * workbook stated "ABRIL" rather than a day — and printing a day would be inventing
+ * one. `unknown` means the source never stated it at all.
+ */
+function periodLabel(value: string | null, precision?: string | null): string {
+    if (value === null || value === '') {
+        return precision === 'unknown' ? 'Fecha desconocida' : '—';
+    }
+
+    if (precision === 'month') {
+        const [year, month] = value.split('-');
+
+        return month && year ? `${month}/${year} (mes)` : formatDate(value);
+    }
+
+    return formatDate(value);
 }
 
 const deactivateOpen = ref(false);
@@ -279,6 +332,92 @@ Editar
                             </tbody>
                         </table>
                     </div>
+                </div>
+            </article>
+
+            <!--
+                Closed relationships. Same permission as the list above: a person's
+                name and document are personal data whether or not they still work
+                for the company.
+            -->
+            <article v-if="maySeeClients" class="cdh-card mt-3">
+                <h2 class="cdh-card__title">
+                    Clientes históricos
+                    <span class="cdh-badge cdh-badge--neutral ms-2">{{ historyClients.length }}</span>
+                </h2>
+                <div class="cdh-card__body cdh-card__body--flush">
+                    <AppEmptyState
+                        v-if="historyClients.length === 0"
+                        title="Sin relaciones cerradas"
+                        description="Las relaciones que ya terminaron aparecerán aquí."
+                        icon="bi-clock-history"
+                    />
+                    <template v-else>
+                        <p class="cdh-card__hint">
+                            Relaciones ya cerradas. Se conservan como historial y no ocupan la lista
+                            de clientes activos.
+                        </p>
+
+                        <div class="cdh-table-wrap">
+                            <table class="cdh-table">
+                                <thead>
+                                    <tr>
+                                        <th scope="col">Cliente</th>
+                                        <th scope="col">Documento</th>
+                                        <th scope="col">Inicio</th>
+                                        <th scope="col">Cierre</th>
+                                        <th scope="col">Estado</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="assignment in historyPageRows" :key="assignment.id">
+                                        <td data-label="Cliente">
+                                            <RouterLink
+                                                :to="{ name: 'clients.show', params: { id: assignment.client_id } }"
+                                                class="cdh-table__link"
+                                            >
+                                                {{ assignment.client?.full_name ?? assignment.client_id }}
+                                            </RouterLink>
+                                        </td>
+                                        <td data-label="Documento">
+                                            {{ assignment.client?.document_label ?? '—' }}
+                                        </td>
+                                        <td data-label="Inicio">
+                                            {{ periodLabel(assignment.started_on, assignment.started_on_precision) }}
+                                        </td>
+                                        <td data-label="Cierre">
+                                            {{ periodLabel(assignment.ended_on, assignment.ended_on_precision) }}
+                                        </td>
+                                        <td data-label="Estado">
+                                            <span class="cdh-badge cdh-badge--neutral">Cerrada</span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div v-if="historyTotalPages > 1" class="cdh-pager">
+                            <AppButton
+                                variant="ghost"
+                                size="sm"
+                                :disabled="historyPage <= 1"
+                                @click="previousHistoryPage"
+                            >
+                                Anterior
+                            </AppButton>
+                            <span class="cdh-pager__range">
+                                Página {{ historyPage }} de {{ historyTotalPages }}
+                            </span>
+                            <AppButton
+                                variant="ghost"
+                                size="sm"
+                                :disabled="historyPage >= historyTotalPages"
+                                @click="nextHistoryPage"
+                            >
+                                Siguiente
+                            </AppButton>
+                        </div>
+                    </template>
                 </div>
             </article>
         </template>

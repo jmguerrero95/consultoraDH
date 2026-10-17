@@ -171,7 +171,11 @@ function owedPeriodsLabel(row: ReceivableRow): string {
 // `null` when the screen has no context, which is the case the backend then
 // answers with nothing and no banner is drawn. The key is the data that could
 // change the signal, so a reload re-asks once instead of polling.
-const hint = useContextualSuggestion('receivables', () => summary.value?.total_overdue_cop ?? null);
+//
+// `total_overdue_cop` was never a field of the summary — it is `overdue_balance_cop` — so the
+// key was permanently `undefined` and the contextual suggestion for this screen could not
+// fire. The value is the same figure the header already shows.
+const hint = useContextualSuggestion('receivables', () => summary.value?.overdue_balance_cop ?? null);
 </script>
 
 
@@ -254,7 +258,12 @@ const hint = useContextualSuggestion('receivables', () => summary.value?.total_o
             </div>
 
             <div class="cdh-filters__field">
-                <label class="cdh-form-label" for="cartera-aging">Días de mora</label>
+                <!--
+                    MEJ-005: this is not only lateness. The list of ages contains
+                    "No vencida", so calling the control "Días de mora" promised a
+                    filter it does not apply.
+                -->
+                <label class="cdh-form-label" for="cartera-aging">Antigüedad del saldo</label>
                 <select id="cartera-aging" v-model="agingBucket" class="form-control form-control-sm">
                     <option value="">Todas</option>
                     <option v-for="option in vocabulary?.aging_buckets ?? []" :key="option.value" :value="option.value">
@@ -321,6 +330,16 @@ const hint = useContextualSuggestion('receivables', () => summary.value?.total_o
                 Limpiar filtros
             </button>
         </div>
+
+        <!--
+            MEJ-005: "saldo pendiente" and "en mora" are not the same thing, and the
+            screen showed both figures side by side without ever saying so.
+        -->
+        <p class="cdh-table-note">
+            <strong>Saldo</strong> es todo lo que sigue pendiente, incluido lo que aún no
+            vence. <strong>Vencido</strong> es sólo lo que ya pasó su fecha de pago: tener
+            saldo no significa estar en mora.
+        </p>
 
         <AppLoading v-if="loading && rows.length === 0" label="Cargando cartera" />
 

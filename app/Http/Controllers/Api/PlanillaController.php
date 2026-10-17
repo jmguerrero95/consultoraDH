@@ -191,6 +191,17 @@ final class PlanillaController extends Controller
 
     public function uploadFile(ContributionSheet $planilla, Request $request): JsonResponse
     {
+        // A terminal planilla is history. Its files and its reason are kept, but
+        // nothing new is written into it: attaching a receipt to a cancelled or paid
+        // month would be editing a closed record. The screen no longer offers the
+        // control; this is what actually refuses it.
+        if ($planilla->status->isTerminal()) {
+            return response()->json([
+                'message' => 'Una planilla '.mb_strtolower($planilla->status->label()).' ya no admite comprobantes.',
+                'code' => 'sheet_locked',
+            ], 409);
+        }
+
         $request->validate([
             'file' => ['required', 'file', 'max:10240', 'mimes:pdf,jpeg,png'],
             'kind' => ['required', 'string', 'in:operator_pdf,payment_receipt,other'],

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain\Reports;
 
+use App\Domain\Billing\AgingBucket;
 use App\Domain\Receivables\ReceivablesService;
 use Carbon\CarbonImmutable;
 
@@ -109,7 +110,8 @@ final class PortfolioReport implements ReportResult
                 'balance_cop' => (int) $item['balance_cop'],
                 'overdue_balance_cop' => (int) $item['overdue_balance_cop'],
                 'overdue_periods_count' => (int) $item['overdue_periods_count'],
-                'aging_bucket' => $item['aging_bucket'],
+                'aging_bucket' => AgingBucket::tryFrom((string) $item['aging_bucket'])?->label()
+                    ?? (string) $item['aging_bucket'],
                 'traffic_light' => $item['traffic_light_label'],
             ];
         }

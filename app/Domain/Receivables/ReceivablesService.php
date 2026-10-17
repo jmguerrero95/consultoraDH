@@ -370,7 +370,15 @@ final class ReceivablesService
             ->fromSub((clone $perClient), 'debtors')
             ->count();
 
+        // MEJ-005: a deterministic order, and one that matches the work. The list had
+        // none at all, which left the database free to return the clients in any order:
+        // the same filters could produce a different first page on two reloads, and a
+        // collections operator had nothing telling them who to call first. Most overdue
+        // money, then the oldest debt — the same shape the "días de mora" column reads.
         $rows = $perClient
+            ->orderByDesc('overdue_balance_cop')
+            ->orderBy('oldest_due_on')
+            ->orderBy('obligations.client_id')
             ->forPage($page, $perPage)
             ->get();
 

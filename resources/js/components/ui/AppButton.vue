@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { RouterLink } from 'vue-router';
 
 import type { RouteLocationRaw } from 'vue-router';
@@ -25,6 +26,16 @@ const props = withDefaults(
         size?: 'sm' | 'md';
         type?: 'button' | 'submit' | 'reset';
         busy?: boolean;
+        /**
+         * Alias of `busy`.
+         *
+         * Nine call sites wrote `:loading`, which was not a declared prop, so Vue
+         * dropped it onto the root element as a stray attribute and the button
+         * neither spun nor disabled: the operation stayed open to a second click
+         * and looked unresponsive. Accepting the alias repairs all of them at once
+         * without touching each caller.
+         */
+        loading?: boolean;
         block?: boolean;
         disabled?: boolean;
         /** Renders a router link instead of a button. */
@@ -39,6 +50,7 @@ const props = withDefaults(
         size: 'md',
         type: 'button',
         busy: false,
+        loading: false,
         block: false,
         disabled: false,
         to: null,
@@ -49,7 +61,13 @@ const props = withDefaults(
 
 const emit = defineEmits<{ click: [MouseEvent] }>();
 
-const classes = [
+/** `busy` and its `loading` alias are the same state. */
+const isBusy = computed(() => props.busy || props.loading);
+
+// Computed, so a caller that changes `variant` or `size` after mount (for example a
+// row action that turns destructive once armed) is reflected instead of frozen at
+// the value it had during setup.
+const classes = computed(() => [
     'cdh-btn',
     `cdh-btn--${props.variant}`,
     { 'cdh-btn--block': props.block },
@@ -57,11 +75,16 @@ const classes = [
     // Bootstrap's small sizing, which the design tokens already line up with.
     'btn',
     props.size === 'sm' && 'btn-sm',
-];
+]);
 </script>
 
 <template>
-    <RouterLink v-if="to !== null" :to="to" :class="classes">
+    <RouterLink
+        v-if="to !== null"
+        :to="to"
+        :class="classes"
+        :aria-busy="isBusy ? 'true' : undefined"
+    >
         <i v-if="icon" class="bi" :class="icon" aria-hidden="true" />
 
         <span><slot /></span>
@@ -73,15 +96,15 @@ const classes = [
         v-else
         :class="classes"
         :type="type"
-        :disabled="disabled || busy"
-        :aria-busy="busy ? 'true' : undefined"
+        :disabled="disabled || isBusy"
+        :aria-busy="isBusy ? 'true' : undefined"
         @click="emit('click', $event)"
     >
-        <span v-if="busy" class="cdh-spinner" aria-hidden="true" />
+        <span v-if="isBusy" class="cdh-spinner" aria-hidden="true" />
         <i v-else-if="icon" class="bi" :class="icon" aria-hidden="true" />
 
         <span><slot /></span>
 
-        <i v-if="iconEnd && !busy" class="bi" :class="iconEnd" aria-hidden="true" />
+        <i v-if="iconEnd && !isBusy" class="bi" :class="iconEnd" aria-hidden="true" />
     </button>
 </template>

@@ -18,7 +18,7 @@ final class PlanillaExporter
      */
     public function summary(ContributionSheet $sheet): array
     {
-        $sheet->load(['lines', 'files', 'company', 'period']);
+        $sheet->load(['lines', 'files', 'company', 'period', 'canceller']);
 
         return [
             'id' => (int) $sheet->id,
@@ -34,6 +34,15 @@ final class PlanillaExporter
             'sheet_number' => $sheet->sheet_number,
             'submitted_on' => $sheet->submitted_on?->format('Y-m-d'),
             'paid_on' => $sheet->paid_on?->format('Y-m-d'),
+            // The cancellation is kept as history: the reason, when it happened and
+            // who decided it. Written since §17 and, until now, unreadable from the
+            // screen that recorded it.
+            'cancellation_reason' => $sheet->cancellation_reason,
+            'cancelled_at' => $sheet->cancelled_at?->toIso8601String(),
+            'cancelled_by' => $sheet->canceller === null ? null : [
+                'id' => (int) $sheet->canceller->id,
+                'name' => $sheet->canceller->name,
+            ],
             'total_liquidated_cop' => $sheet->totalLiquidatedCop(),
             'included_line_count' => $sheet->includedLineCount(),
             'line_count' => $sheet->lines->count(),
