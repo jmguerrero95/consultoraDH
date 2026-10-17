@@ -347,16 +347,23 @@ final class AiTaskRouter
             ? trim($previous.' '.$question)
             : $question;
 
-        // Document context is authoritative: the person attached a file and is
-        // asking about it, whatever the words also happen to match.
+        // Document context is authoritative for *what the question is about* — the
+        // person attached a file and is asking about it. It is not authoritative
+        // for *which capabilities the answer needs*: "lee este documento,
+        // investiga si sigue vigente y hazme un informe" needs the document, the
+        // internet and file generation at once. The A07-R3 router forced
+        // `web=false` here, which made that impossible.
         if ($hasDocumentContext) {
             $groups[] = 'documents';
+            $groups = array_values(array_unique($groups));
+
+            $webAvailable = $this->registry->has('web_search') || $this->registry->has('weather_current');
 
             return [
                 'task' => self::TASK_DOCUMENT,
-                'tools' => $this->definitionsFor(array_values(array_unique($groups))),
-                'web' => false,
-                'weather' => false,
+                'tools' => $this->definitionsFor($groups),
+                'web' => $prefetch && $webAvailable,
+                'weather' => $weather && $prefetch && $this->registry->has('weather_current'),
                 'search_query' => $searchQuery,
                 'location' => $location,
             ];

@@ -84,6 +84,7 @@ final class AiAssistantService
         private readonly AiProviderResolver $resolver,
         private readonly DocumentRetriever $documents,
         private readonly AiTaskRouter $router,
+        private readonly AiCapabilityCatalog $capabilities,
     ) {}
 
     public function ask(AiConversation $conversation, string $question, User $user): array
@@ -107,20 +108,35 @@ final class AiAssistantService
         // thread - or in somebody else's account - cannot reach this answer.
         $passages = $this->retrievePassages($user, $question, $conversation);
 
-        // Which tools this turn may offer, and whether it needs current,
+        // Which tools this turn starts with, and whether it needs current,
         // external information. The router reads the question together with the
         // recent turns, so a follow-up ("¿y cómo estará mañana?") keeps the web
         // need and the location of the request it continues.
+        //
+        // The router is a *hint*, not an authority: its matched groups are offered
+        // alongside the always-available core and the discovery tool, and the
+        // model may reach any other capability through discovery. Laravel no
+        // longer decides the whole toolset up front.
         $routing = $this->router->route($question, $passages !== [], $recentQuestions);
-        $toolDefinitions = $routing['tools'];
+        $toolDefinitions = $this->initialToolSet($routing);
+
+        // One budget for the whole turn, created *before* anything spends time,
+        // so the external prefetch below and every provider round share the same
+        // wall clock. The A07-R3 defect was that the search ran before the budget
+        // existed, and therefore outside it.
+        $budget = AiTurnBudget::forTurn(
+            $toolDefinitions !== [],
+            microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110)),
+        );
 
         // Real external information is fetched here, not left to the model to
         // decide to fetch. A question that needs today's weather, this week's
         // news or a current regulation has already told us it needs the web; the
         // answer must not depend on the model choosing a tool. Results are
         // appended as data, exactly like the document passages, and the model is
-        // told to answer from them and cite them.
-        $external = $this->prefetchExternal($user, $routing, $question);
+        // told to answer from them and cite them. The model may still call
+        // web_search/web_fetch itself to go further.
+        $external = $this->prefetchExternal($user, $routing, $question, $budget);
 
         if ($passages !== []) {
             // After the question, so it reads as material about what was asked.
@@ -131,26 +147,122 @@ final class AiAssistantService
             $messages[] = AiMessage::user($this->externalContext($external));
         }
 
-        // One budget for the whole turn, shared by every provider round, so a
-        // tool-using question that needs three calls still finishes inside the
-        // proxy's limit and inside one attempt budget instead of spending the
-        // per-call timeout — or the attempt ceiling — three times.
-        $budget = AiTurnBudget::forTurn(
-            $toolDefinitions !== [],
-            microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110)),
-        );
-
         // Whether this turn carries real business data. A general question does
         // not, and neither does a purely public one (the weather, the news), so a
         // provider whose free tier may train on the content may answer it; a
         // system question, or one about an attached document, does, and such a
         // provider is then not eligible — see `ModelCandidate`.
-        $requiresClientData = $passages !== []
-            || ! in_array($routing['task'], [AiTaskRouter::TASK_GENERAL, AiTaskRouter::TASK_WEB], true);
+        //
+        // The classification considers the whole payload actually about to be
+        // sent, not only the current question, and the conversation remembers
+        // that it once held private data.
+        $requiresClientData = $this->classifiesAsClientData($conversation, $routing, $messages, $passages);
+
+        if ($requiresClientData && ! $conversation->contains_client_data) {
+            $conversation->forceFill(['contains_client_data' => true])->save();
+        }
 
         $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget);
 
         return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external);
+    }
+
+    /**
+     * The tools a turn starts with: the router's hints, the always-available
+     * core, and the discovery tool.
+     *
+     * This is a starting set, not a ceiling. The model can ask the catalogue what
+     * else exists and then call it; the registry and each tool's own
+     * authorization remain the only authority on whether a call may run.
+     *
+     * @param  array{tools: list<AiToolDefinition>}  $routing
+     * @return list<AiToolDefinition>
+     */
+    private function initialToolSet(array $routing): array
+    {
+        $byName = [];
+
+        foreach ($routing['tools'] as $definition) {
+            $byName[$definition->name] = $definition;
+        }
+
+        foreach ($this->capabilities->definitionsFor($this->capabilities->coreNames()) as $definition) {
+            $byName[$definition->name] = $definition;
+        }
+
+        $definitions = array_values($byName);
+
+        // The discovery tool is synthetic: it is resolved by the assistant, not
+        // by the registry, and its only output is the catalogue.
+        $definitions[] = $this->capabilities->discoveryDefinition();
+
+        return $definitions;
+    }
+
+    /**
+     * Whether the payload about to be sent carries private business data.
+     *
+     * Conservative by design: it is better to route a public question to a
+     * provider that is safe for private data than to send one private record to a
+     * provider whose free tier may train on it. Three signals are combined:
+     *
+     *   1. The conversation has already held private data.
+     *   2. This turn retrieved documents, or routed to a non-public task.
+     *   3. The exact outgoing text contains something private by nature (an email
+     *      or a long identifier run) anywhere in history, question or retrieval.
+     *
+     * @param  array{task: string}  $routing
+     * @param  list<AiMessage>  $messages
+     * @param  list<array<string, mixed>>  $passages
+     */
+    private function classifiesAsClientData(AiConversation $conversation, array $routing, array $messages, array $passages): bool
+    {
+        if ($conversation->contains_client_data) {
+            return true;
+        }
+
+        if ($passages !== []) {
+            return true;
+        }
+
+        if (! in_array($routing['task'], [AiTaskRouter::TASK_GENERAL, AiTaskRouter::TASK_WEB], true)) {
+            return true;
+        }
+
+        foreach ($messages as $message) {
+            // The system prompt is ours and fixed; only what the person wrote,
+            // what the model said and what a tool returned can carry private data.
+            if ($message->role === AiMessage::ROLE_SYSTEM) {
+                continue;
+            }
+
+            if (self::textLooksLikeClientData($message->content)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Patterns that mark text as carrying private identifiers.
+     *
+     * Deliberately blunt — an email address, or a run of six or more digits, the
+     * shape of a document number, a NIT or a phone — because the only cost of a
+     * false positive is that a public answer uses a provider eligible for private
+     * data.
+     */
+    private static function textLooksLikeClientData(string $text): bool
+    {
+        if ($text === '') {
+            return false;
+        }
+
+        if (preg_match('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/', $text) === 1) {
+            return true;
+        }
+
+        return preg_match('/\d{6,}/', $text) === 1;
     }
 
     /**
@@ -173,9 +285,16 @@ final class AiAssistantService
      * @param  array{web: bool, weather: bool, location: string|null, search_query: string|null}  $routing
      * @return list<array{kind: string, source: string, data: array<string, mixed>}>
      */
-    private function prefetchExternal(User $user, array $routing, string $question): array
+    private function prefetchExternal(User $user, array $routing, string $question, AiTurnBudget $budget): array
     {
         if (! ($routing['web'] ?? false)) {
+            return [];
+        }
+
+        // The prefetch spends the same budget as the provider calls. If the turn
+        // is already out of time there is nothing left for the model to answer
+        // with either, so fetching would only delay the honest failure.
+        if ($budget->outOfTime()) {
             return [];
         }
 
@@ -199,6 +318,10 @@ final class AiAssistantService
                     report($e);
                 }
             }
+        }
+
+        if ($budget->outOfTime()) {
+            return $blocks;
         }
 
         if ($this->registry->has('web_search') && $user->can('web_search')) {
@@ -516,6 +639,20 @@ final class AiAssistantService
 
         $currentResult = $result;
 
+        // The tools currently offered to the model. It begins as this turn's
+        // initial set and grows when the model discovers more, so a capability
+        // found in round one can be called in round two.
+        $offered = [];
+
+        foreach ($toolDefinitions as $definition) {
+            $offered[$definition->name] = $definition;
+        }
+
+        // Whether any executed tool answered from our own records. If one did,
+        // the conversation is marked as holding private data even when the turn
+        // began as a public one — a discovered client search is still private.
+        $sawPrivateTool = false;
+
         while ($round < $maxRounds) {
             $content = $currentResult->content;
             $toolCalls = $currentResult->toolCalls;
@@ -541,6 +678,27 @@ final class AiAssistantService
                     $args = $call->arguments;
                     $toolCallId = $call->id;
 
+                    // Discovery: the catalogue is not a registry tool. It is
+                    // resolved here, and the tools it names are added to the
+                    // offered set for the next round, so the model can then call
+                    // one of them directly. Nothing is executed by discovery.
+                    if ($toolName === AiCapabilityCatalog::DISCOVERY_TOOL) {
+                        $query = is_array($args) ? (string) ($args['query'] ?? '') : '';
+                        $summaries = $this->capabilities->summaries($query);
+                        $names = array_map(static fn (array $entry): string => (string) $entry['name'], $summaries);
+
+                        foreach ($this->capabilities->definitionsFor($names) as $definition) {
+                            $offered[$definition->name] = $definition;
+                        }
+
+                        $messages[] = AiMessage::toolResult($toolName, [
+                            'capabilities' => $summaries,
+                            'note' => 'Estas herramientas quedan disponibles: invócalas directamente por su nombre para completar la tarea.',
+                        ], $toolCallId);
+
+                        continue;
+                    }
+
                     if (! $this->registry->has($toolName)) {
                         $messages[] = AiMessage::toolResult($toolName, ['error' => "Herramienta desconocida: {$toolName}"], $toolCallId);
 
@@ -551,6 +709,10 @@ final class AiAssistantService
 
                     // --- Write tools: propose only, never execute from the model ---
                     if ($tool->isWrite()) {
+                        // Every write is a business mutation, so the conversation
+                        // is from here on private regardless of how it started.
+                        $sawPrivateTool = true;
+
                         try {
                             // The registry is the single authority: it normalizes the
                             // model's arguments with the tool's own validator and then
@@ -608,6 +770,10 @@ final class AiAssistantService
                     try {
                         $output = $this->registry->executeRead($toolName, $args, $user);
 
+                        if ($this->capabilities->isPrivateTool($toolName)) {
+                            $sawPrivateTool = true;
+                        }
+
                         $toolResultsThisRound[] = [
                             'tool' => $toolName,
                             'output' => $output,
@@ -661,12 +827,18 @@ final class AiAssistantService
                 // fabricated assistant message in the conversation that a later
                 // turn would be sent as legitimate history, so it propagates and
                 // nothing is persisted for this turn.
-                $currentResult = $this->resolver->complete($messages, $toolDefinitions, null, null, $budget->deadline, $requiresClientData, $budget);
+                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $requiresClientData, $budget);
             } else {
                 // No tool calls, we're done
                 $reply = $content;
                 break;
             }
+        }
+
+        // A private tool ran during this turn. The conversation must be treated as
+        // holding private data from now on, whatever the first classification said.
+        if ($sawPrivateTool && ! $conversation->contains_client_data) {
+            $conversation->forceFill(['contains_client_data' => true])->save();
         }
 
         // Reaching here means the model kept asking for tools through every round
@@ -915,6 +1087,14 @@ final class AiAssistantService
             '- Diferencia una noticia de una norma vigente. No inventes enlaces: cita solo URLs que aparezcan en',
             '  los resultados. Si las fuentes no bastan, dilo y explica qué falta.',
             '- No uses tu memoria como sustituto de un dato actual cuando existe una herramienta para obtenerlo.',
+            '',
+            'CAPACIDADES:',
+            '- Tienes un catálogo de capacidades. Si la tarea necesita algo que no ves entre tus herramientas,',
+            '  llama a discover_capabilities con lo que necesitas (clientes, cartera, estadísticas, tareas, informes,',
+            '  soporte, automatizaciones, documentos) y después usa la herramienta adecuada.',
+            '- Elige tú las herramientas y encadénalas. No preguntes al usuario qué herramienta usar; decide y ejecuta.',
+            '- Las herramientas que modifican datos devuelven una propuesta: en ese caso explica que hace falta',
+            '  confirmación. Leer, investigar y generar un archivo propio no requieren confirmación.',
             '',
             'INFORMACIÓN INTERNA DE CONSULTORA DH:',
             '- Para clientes, empresas, cartera, pagos, planillas, tareas, soporte, documentos o cifras del',
