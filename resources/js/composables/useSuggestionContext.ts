@@ -79,6 +79,6 @@ export function useSuggestionContext() {
     const route = useRoute();
 
     return {
-        context: (): SuggestionContext | null => contextForRoute(route.name as string | undefined),
+        context: (): SuggestionContext | null => contextForRoute(route?.name as string | undefined),
     };
 }

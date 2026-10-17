@@ -3,10 +3,12 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
+import SafeMarkdown from '@/components/ui/SafeMarkdown.vue';
+import ArtifactCard from '@/components/assistant/ArtifactCard.vue';
 import { ai } from '@/services/ai';
 import { useAuthStore } from '@/stores/auth';
 
-import type { AiProposal, AiStatusPayload, AiToolResult } from '@/services/ai';
+import type { AiArtifact, AiProposal, AiStatusPayload, AiToolResult } from '@/services/ai';
 
 /**
  * The assistant, available from every screen.
@@ -68,9 +70,19 @@ let messageSeq = 0;
 
 const messages = ref<ChatMessage[]>([]);
 const proposals = ref<AiProposal[]>([]);
+/** Files this thread has produced: the PDF, the spreadsheet, the report. */
+const artifacts = ref<AiArtifact[]>([]);
 const draft = ref('');
 const sending = ref(false);
 const error = ref<string | null>(null);
+/**
+ * The server's own account of what a confirmed action did.
+ *
+ * Kept apart from `error` so a success is never shown in red, and every confirm
+ * shows *something*: a confirmation that silently removed the card left the
+ * person unsure whether the action had run at all.
+ */
+const confirmation = ref<string | null>(null);
 const conversationId = ref<number | null>(null);
 const scroller = ref<HTMLElement | null>(null);
 const input = ref<HTMLInputElement | null>(null);
@@ -188,8 +200,10 @@ function newConversation(): void {
     conversationId.value = null;
     messages.value = [];
     proposals.value = [];
+    artifacts.value = [];
     attachments.value = [];
     error.value = null;
+    confirmation.value = null;
     draft.value = '';
     persistConversation();
     void nextTick(() => input.value?.focus());
@@ -228,12 +242,17 @@ async function restoreConversation(): Promise<void> {
                 model: message.model,
             }));
 
+        // The files this thread produced travel with it, so a reload shows the
+        // report where it was asked for rather than in a separate panel.
+        artifacts.value = history.artifacts ?? [];
+
         scrollToEnd();
     } catch {
         // The thread is gone, or belongs to someone else now. Start clean rather
         // than show an error for something the person did not do.
         conversationId.value = null;
         messages.value = [];
+        artifacts.value = [];
         persistConversation();
     }
 }
@@ -247,6 +266,7 @@ async function send(retryText?: string): Promise<void> {
 
     sending.value = true;
     error.value = null;
+    confirmation.value = null;
 
     if (retryText === undefined) {
         draft.value = '';
@@ -266,6 +286,7 @@ async function send(retryText?: string): Promise<void> {
         conversationId.value = turn.conversation_id;
         persistConversation();
         proposals.value = turn.proposals;
+        mergeArtifacts(turn.artifacts ?? []);
 
         // Only append when the server actually produced text: an empty bubble is
         // the failure this widget must not pretend is an answer.
@@ -274,7 +295,7 @@ async function send(retryText?: string): Promise<void> {
                 ...messages.value,
                 { id: ++messageSeq, role: 'assistant', content: turn.reply, model: turn.model, tools: turn.tools ?? [] },
             ];
-        } else if (turn.proposals.length === 0) {
+        } else if (turn.proposals.length === 0 && (turn.artifacts ?? []).length === 0) {
             markLastUserFailed();
             error.value = 'El asistente no devolvió una respuesta. Intente reformular la pregunta.';
         }
@@ -288,6 +309,40 @@ async function send(retryText?: string): Promise<void> {
     } finally {
         sending.value = false;
     }
+}
+
+/**
+ * Merge new artifacts into the ones already shown.
+ *
+ * Keyed by id: a turn, or a reload, may report a file that is already on screen,
+ * and a second identical card would look like a second file.
+ */
+function mergeArtifacts(incoming: AiArtifact[]): void {
+    if (incoming.length === 0) {
+        return;
+    }
+
+    const seen = new Set(artifacts.value.map((artifact) => artifact.id));
+
+    for (const artifact of incoming) {
+        if (!seen.has(artifact.id)) {
+            artifacts.value = [...artifacts.value, artifact];
+            seen.add(artifact.id);
+        }
+    }
+}
+
+/** The server's own words about a confirmed action, or a plain acknowledgement. */
+function describeResult(tool: string, result: unknown): string {
+    if (result !== null && typeof result === 'object') {
+        const message = (result as { message?: unknown }).message;
+
+        if (typeof message === 'string' && message.trim() !== '') {
+            return message;
+        }
+    }
+
+    return `Acción aplicada: ${tool}.`;
 }
 
 function markLastUserFailed(): void {
@@ -395,10 +450,15 @@ function isFinishedStatus(state: string): boolean {
 
 async function confirmProposal(id: number): Promise<void> {
     error.value = null;
+    confirmation.value = null;
 
     try {
-        await ai.confirmProposal(id);
+        const result = await ai.confirmProposal(id);
         proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+
+        // Use the server's own account of what ran. Removing the card and saying
+        // nothing left the person unsure whether the action had happened.
+        confirmation.value = describeResult(result.tool, result.result);
     } catch (e) {
         error.value = readError(e, 'No fue posible confirmar la propuesta.');
     }
@@ -627,7 +687,7 @@ watch(open, (value) => {
             />
 
             <div ref="scroller" class="cdh-assistant__body">
-                <div v-if="messages.length === 0 && proposals.length === 0 && attachments.length === 0" class="cdh-assistant__empty">
+                <div v-if="messages.length === 0 && proposals.length === 0 && attachments.length === 0 && artifacts.length === 0" class="cdh-assistant__empty">
                     <i class="bi bi-chat-square-text" aria-hidden="true" />
                     <p>Pregúntame lo que necesites. Puedo consultar la cartera, los clientes y los reportes.</p>
                 </div>
@@ -653,7 +713,8 @@ watch(open, (value) => {
                     :class="`cdh-assistant__message--${message.role}`"
                 >
                     <div class="cdh-assistant__bubble">
-                        <span style="white-space: pre-wrap;">{{ message.content }}</span>
+                        <SafeMarkdown v-if="message.role === 'assistant'" :content="message.content" />
+                        <span v-else class="cdh-assistant__text">{{ message.content }}</span>
                     </div>
                     <span v-if="message.role === 'assistant' && message.model" class="cdh-assistant__meta">
                         {{ message.model }}
@@ -689,6 +750,11 @@ watch(open, (value) => {
                     </div>
                 </div>
 
+                <div v-if="artifacts.length" class="cdh-assistant__artifacts">
+                    <p class="cdh-assistant__artifacts-title">Archivos generados</p>
+                    <ArtifactCard v-for="artifact in artifacts" :key="artifact.id" :artifact="artifact" />
+                </div>
+
                 <div v-if="sending" class="cdh-assistant__message cdh-assistant__message--assistant">
                     <div class="cdh-assistant__bubble cdh-assistant__bubble--pending">
                         <span class="cdh-spinner" aria-hidden="true" />
@@ -697,6 +763,7 @@ watch(open, (value) => {
                 </div>
             </div>
 
+            <AppAlert v-if="confirmation" variant="success" :message="confirmation" class="cdh-assistant__alert" />
             <AppAlert v-if="error" variant="danger" :message="error" class="cdh-assistant__alert" />
 
             <form class="cdh-assistant__composer" @submit.prevent="send()">
@@ -884,6 +951,7 @@ watch(open, (value) => {
     display: flex;
     flex-direction: column;
     max-width: 85%;
+    min-width: 0;
 }
 
 .cdh-assistant__message--user {
@@ -911,6 +979,27 @@ watch(open, (value) => {
 .cdh-assistant__bubble--pending {
     min-width: 2.5rem;
     text-align: center;
+}
+
+/* The user's own words, kept verbatim: their line breaks are meaningful and no
+   Markdown they typed is interpreted. */
+.cdh-assistant__text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.cdh-assistant__artifacts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.cdh-assistant__artifacts-title {
+    margin: 0;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--cdh-text-muted, #6b7280);
 }
 
 .cdh-assistant__meta {
@@ -1026,6 +1115,33 @@ watch(open, (value) => {
     .cdh-assistant__panel--full {
         width: 100%;
         height: calc(100vh - 1.5rem);
+    }
+}
+
+/* Small phones — 360 to 430 CSS pixels, the common Android and iPhone widths.
+   The panel already fills the width; these rules buy back the few pixels the
+   padding was taking so a full-width reply has room to breathe. */
+@media (max-width: 430px) {
+    .cdh-assistant {
+        right: 0.4rem;
+        bottom: 0.4rem;
+        left: 0.4rem;
+    }
+
+    .cdh-assistant__header {
+        padding: 0.6rem 0.7rem;
+    }
+
+    .cdh-assistant__body {
+        padding: 0.6rem;
+    }
+
+    .cdh-assistant__message {
+        max-width: 92%;
+    }
+
+    .cdh-assistant__composer {
+        padding: 0.55rem;
     }
 }
 </style>

@@ -4,6 +4,8 @@ import { computed, onMounted, ref, watch } from 'vue';
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import AppEmptyState from '@/components/ui/AppEmptyState.vue';
+import SafeMarkdown from '@/components/ui/SafeMarkdown.vue';
+import ArtifactCard from '@/components/assistant/ArtifactCard.vue';
 import AttachmentPicker from '@/components/assistant/AttachmentPicker.vue';
 import MicButton from '@/components/assistant/MicButton.vue';
 import SpeakButton from '@/components/assistant/SpeakButton.vue';
@@ -16,7 +18,8 @@ import { useVoice } from '@/composables/useVoice';
 import { useRoute } from 'vue-router';
 import { ai } from '@/services/ai';
 
-import type { AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
+import type { AiArtifact, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
+import type { AiTaskPayload } from '@/composables/useTasks';
 
 /**
  * The assistant screen.
@@ -35,12 +38,16 @@ const conversations = ref<AiConversationSummary[]>([]);
 const selectedId = ref<number | null>(null);
 const messages = ref<AiMessagePayload[]>([]);
 const proposals = ref<AiProposal[]>([]);
+/** Files this conversation has produced, shown in the thread that asked for them. */
+const artifacts = ref<AiArtifact[]>([]);
 const sources = ref<{ title: string; url: string; domain: string }[]>([]);
 const draft = ref('');
 const sending = ref(false);
 const loading = ref(true);
 const status = ref<AiStatusPayload | null>(null);
 const error = ref<string | null>(null);
+/** The server's own account of a confirmed write, shown in green. */
+const confirmation = ref<string | null>(null);
 
 // --- Background work -------------------------------------------------------
 //
@@ -63,6 +70,30 @@ const briefFormat = ref('pdf');
 const briefFilename = ref('documento');
 
 const briefText = ref('');
+
+/**
+ * The background work that belongs to the thread on screen.
+ *
+ * A task remembers the conversation it was started from, so research asked for
+ * here reports here, next to the question, rather than only in the panel at the
+ * top of the page. Work with no conversation is shown too: it is this person's
+ * work and it is still running.
+ */
+const inlineTasks = computed(() =>
+    tasks.pending().filter((task) => (task.conversation_id ?? null) === (selectedId.value ?? null)),
+);
+
+const TASK_KIND_LABELS: Record<string, string> = {
+    research: 'Investigando',
+    document_generate: 'Generando documento',
+    document_ingest: 'Procesando archivo',
+};
+
+/** A one-line, human description of what a task is doing right now. */
+function taskLabel(task: AiTaskPayload): string {
+    const base = task.stage && task.stage.trim() !== '' ? task.stage : (TASK_KIND_LABELS[task.kind] ?? 'Procesando');
+    return task.name ? `${base}: ${task.name}` : base;
+}
 
 /**
  * Upload a document and queue its indexing.
@@ -291,7 +322,9 @@ async function selectConversation(id: number): Promise<void> {
     selectedId.value = id;
     proposals.value = [];
     sources.value = [];
+    artifacts.value = [];
     error.value = null;
+    confirmation.value = null;
 
     // Dictation belongs to the turn being abandoned, not to the page. Recording
     // continues in the background otherwise, and the next thing captured is
@@ -301,8 +334,10 @@ async function selectConversation(id: number): Promise<void> {
     try {
         const payload = await ai.history(id);
         messages.value = payload.messages;
+        artifacts.value = payload.artifacts ?? [];
     } catch (e) {
         messages.value = [];
+        artifacts.value = [];
         error.value = readError(e, 'No fue posible cargar la conversación.');
     }
 }
@@ -312,7 +347,9 @@ function startNewConversation(): void {
     messages.value = [];
     proposals.value = [];
     sources.value = [];
+    artifacts.value = [];
     error.value = null;
+    confirmation.value = null;
 
     dictation.abandon();
 }
@@ -330,6 +367,7 @@ async function send(): Promise<void> {
 
     sending.value = true;
     error.value = null;
+    confirmation.value = null;
     draft.value = '';
 
     // Rendered immediately so the question stays on screen while the model
@@ -342,6 +380,7 @@ async function send(): Promise<void> {
         selectedId.value = turn.conversation_id;
         proposals.value = turn.proposals;
         collectSources(turn.tools);
+        mergeArtifacts(turn.artifacts ?? []);
 
         if (turn.reply) {
             messages.value = [
@@ -398,10 +437,12 @@ function collectSources(tools: { tool: string; output: unknown }[] | undefined):
 
 async function confirmProposal(id: number): Promise<void> {
     error.value = null;
+    confirmation.value = null;
 
     try {
-        await ai.confirmProposal(id);
+        const result = await ai.confirmProposal(id);
         proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+        confirmation.value = describeResult(result.tool, result.result);
         await refreshIfSelected();
     } catch (e) {
         error.value = readError(e, 'No fue posible confirmar la propuesta.');
@@ -423,7 +464,42 @@ async function refreshIfSelected(): Promise<void> {
     if (selectedId.value !== null) {
         const payload = await ai.history(selectedId.value);
         messages.value = payload.messages;
+        artifacts.value = payload.artifacts ?? [];
     }
+}
+
+/**
+ * Merge new artifacts into the ones already shown.
+ *
+ * Keyed by id, so a turn or a reload that reports a file already on screen does
+ * not produce a second identical card.
+ */
+function mergeArtifacts(incoming: AiArtifact[]): void {
+    if (incoming.length === 0) {
+        return;
+    }
+
+    const seen = new Set(artifacts.value.map((artifact) => artifact.id));
+
+    for (const artifact of incoming) {
+        if (!seen.has(artifact.id)) {
+            artifacts.value = [...artifacts.value, artifact];
+            seen.add(artifact.id);
+        }
+    }
+}
+
+/** The server's own words about a confirmed write, or a plain acknowledgement. */
+function describeResult(tool: string, result: unknown): string {
+    if (result !== null && typeof result === 'object') {
+        const message = (result as { message?: unknown }).message;
+
+        if (typeof message === 'string' && message.trim() !== '') {
+            return message;
+        }
+    }
+
+    return `Acción aplicada: ${tool}.`;
 }
 
 /** Surface the server's own words; they are already free of internals. */
@@ -474,6 +550,14 @@ function formatDate(value: string | null): string {
         </header>
 
         <AppAlert v-if="error" variant="danger" :title="error" class="mb-3" />
+
+        <AppAlert
+            v-if="confirmation"
+            variant="success"
+            :message="confirmation"
+            class="mb-3"
+            data-testid="confirmation"
+        />
 
         <div v-if="uploadError" class="mb-3" data-testid="upload-error">
             <AppAlert variant="danger" :title="uploadError" />
@@ -588,7 +672,8 @@ function formatDate(value: string | null): string {
                         class="cdh-ai__message"
                         :class="message.role === 'user' ? 'cdh-ai__message--user' : 'cdh-ai__message--assistant'"
                     >
-                        <p class="cdh-ai__message-body">{{ message.content }}</p>
+                        <SafeMarkdown v-if="message.role === 'assistant'" :content="message.content" />
+                        <p v-else class="cdh-ai__message-body">{{ message.content }}</p>
 
                         <div class="cdh-ai__message-tools">
                             <SpeakButton
@@ -603,6 +688,23 @@ function formatDate(value: string | null): string {
                     </div>
 
                     <p v-if="sending" class="cdh-ai__pending">Consultando…</p>
+
+                    <!-- Work already queued for this thread, shown where the
+                         question was asked rather than only in the panel above. -->
+                    <div v-if="inlineTasks.length" class="cdh-ai__inline-tasks" data-testid="inline-tasks">
+                        <div v-for="task in inlineTasks" :key="task.id" class="cdh-ai__inline-task">
+                            <span class="cdh-spinner" aria-hidden="true" />
+                            <span class="cdh-ai__inline-task-label">{{ taskLabel(task) }}</span>
+                            <span class="cdh-ai__inline-task-progress">{{ task.progress }}%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- The files this thread produced. A download link here is the
+                     difference between an answer and a proposal to answer. -->
+                <div v-if="artifacts.length > 0" class="cdh-ai__artifacts" data-testid="artifacts">
+                    <h3 class="cdh-ai__artifacts-title">Archivos</h3>
+                    <ArtifactCard v-for="artifact in artifacts" :key="artifact.id" :artifact="artifact" />
                 </div>
 
                 <div v-if="sources.length > 0" class="cdh-ai__sources">
@@ -707,6 +809,7 @@ function formatDate(value: string | null): string {
 
 .cdh-ai__sidebar-title,
 .cdh-ai__sources-title,
+.cdh-ai__artifacts-title,
 .cdh-ai__proposals-title {
     font-size: 0.875rem;
     font-weight: 600;
@@ -778,8 +881,10 @@ function formatDate(value: string | null): string {
 
 .cdh-ai__message {
     max-width: 85%;
+    min-width: 0;
     padding: 0.625rem 0.875rem;
     border-radius: var(--cdh-radius-lg, 0.5rem);
+    overflow-wrap: anywhere;
 }
 
 .cdh-ai__message--user {
@@ -812,10 +917,45 @@ function formatDate(value: string | null): string {
 }
 
 .cdh-ai__sources,
+.cdh-ai__artifacts,
 .cdh-ai__proposals {
     border: 1px solid var(--cdh-border);
     border-radius: var(--cdh-radius-lg, 0.5rem);
     padding: var(--cdh-space-3);
+}
+
+.cdh-ai__artifacts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.cdh-ai__inline-tasks {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    border-top: 1px dashed var(--cdh-border);
+    padding-top: var(--cdh-space-2);
+}
+
+.cdh-ai__inline-task {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    font-size: 0.8125rem;
+    color: var(--cdh-text-muted);
+}
+
+.cdh-ai__inline-task-label {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cdh-ai__inline-task-progress {
+    flex: 0 0 auto;
 }
 
 .cdh-ai__sources ul {
@@ -904,6 +1044,29 @@ function formatDate(value: string | null): string {
     .cdh-ai__sidebar {
         max-height: min(60vh, 32rem);
         overflow-y: auto;
+    }
+}
+
+/* Small phones — 360 to 430 CSS pixels. The transcript is where a long answer
+   lands, so it gets the space back that padding was taking, and the composer
+   stops wrapping into a column narrower than a word. */
+@media (max-width: 430px) {
+    .cdh-ai__transcript {
+        padding: var(--cdh-space-3);
+    }
+
+    .cdh-ai__message {
+        max-width: 94%;
+        padding: 0.5rem 0.65rem;
+    }
+
+    .cdh-ai__composer {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .cdh-ai__composer .cdh-ai__input {
+        width: 100%;
     }
 }
 </style>

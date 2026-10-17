@@ -22,6 +22,10 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 const ENABLED_STATUS = {
     ai_enabled: true,
+    state: 'available',
+    available: true,
+    active_model: 'llama-3.3-free',
+    cooldowns: {},
     primary: { configured: true, model: 'llama-3.3-free', base_url: 'https://provider.example' },
     fallback: { configured: false, model: null, base_url: null },
     timeout_seconds: 30,
@@ -83,6 +87,10 @@ describe('asistente de IA', () => {
             if (url.includes('/api/ai/status')) {
                 return jsonResponse({
                     ai_enabled: true,
+                    state: 'none',
+                    available: false,
+                    active_model: null,
+                    cooldowns: {},
                     primary: { configured: false, model: null, base_url: null },
                     fallback: { configured: false, model: null, base_url: null },
                     timeout_seconds: 30,
@@ -338,5 +346,102 @@ describe('asistente de IA', () => {
 
         expect(wrapper.text()).toContain('Pregunta anterior');
         expect(spy.mock.calls.some((call) => String(call[0]).includes('/api/ai/conversations/5'))).toBe(true);
+    });
+
+    it('muestra el archivo generado con su enlace de descarga', async () => {
+        stubFetch((url, init) => {
+            if (url.includes('/api/ai/status')) {
+                return jsonResponse(ENABLED_STATUS);
+            }
+
+            if (url.includes('/api/ai/conversations') && init?.method === 'POST') {
+                return jsonResponse({
+                    conversation_id: 15,
+                    reply: 'Listo, generé el informe.',
+                    provider: 'openai-compatible',
+                    model: 'llama-3.3-free',
+                    proposals: [],
+                    tools: [],
+                    artifacts: [
+                        {
+                            id: 3,
+                            filename: 'informe-cartera.pdf',
+                            format: 'pdf',
+                            size_bytes: 2048,
+                            download_url: '/api/ai/artifacts/3/download',
+                            expires_at: null,
+                        },
+                    ],
+                });
+            }
+
+            return jsonResponse({ conversations: [] });
+        });
+
+        const wrapper = await mountPage();
+
+        await wrapper.find('textarea').setValue('Genera el informe');
+        await wrapper.find('form').trigger('submit.prevent');
+        await flushPromises();
+
+        const link = wrapper.findAll('a').find((a) => a.attributes('href') === '/api/ai/artifacts/3/download');
+
+        expect(link).toBeDefined();
+        expect(link?.text()).toContain('informe-cartera.pdf');
+    });
+
+    it('muestra en verde el resultado de la acción confirmada', async () => {
+        const proposal = {
+            id: 51,
+            tool: 'create_operational_task',
+            arguments: { title: 'Revisar cartera' },
+            expires_at: '2026-10-11T11:00:00',
+            pending: true,
+        };
+
+        stubFetch((url, init) => {
+            if (url.includes('/api/ai/status')) {
+                return jsonResponse(ENABLED_STATUS);
+            }
+
+            if (url.includes('/confirm')) {
+                return jsonResponse({
+                    confirmed: true,
+                    proposal_id: 51,
+                    tool: 'create_operational_task',
+                    result: { message: 'Tarea creada.' },
+                });
+            }
+
+            if (url.includes('/api/ai/conversations/12')) {
+                return jsonResponse({ conversation_id: 12, messages: [] });
+            }
+
+            if (url.includes('/api/ai/conversations') && init?.method === 'POST') {
+                return jsonResponse({
+                    conversation_id: 12,
+                    reply: 'Propuse crear la tarea.',
+                    provider: 'openai-compatible',
+                    model: 'llama-3.3-free',
+                    proposals: [proposal],
+                    tools: [],
+                });
+            }
+
+            return jsonResponse({ conversations: [] });
+        });
+
+        const wrapper = await mountPage();
+
+        await wrapper.find('textarea').setValue('Crea una tarea');
+        await wrapper.find('form').trigger('submit.prevent');
+        await flushPromises();
+
+        const confirm = wrapper.findAll('button').find((b) => b.text() === 'Confirmar');
+        await confirm?.trigger('click');
+        await flushPromises();
+
+        expect(wrapper.text()).toContain('Tarea creada.');
+        expect(wrapper.find('[data-testid="confirmation"]').exists()).toBe(true);
     });
 });

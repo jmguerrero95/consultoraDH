@@ -107,12 +107,19 @@ export function useOutbox() {
     async function flush(): Promise<boolean> {
         const registration = await navigator.serviceWorker?.ready;
 
-        if (!registration?.sync) {
+        // `sync` is not in the DOM lib; declared here so the guard and the call
+        // agree on one shape, rather than testing a property the compiler
+        // believes cannot exist.
+        const sync = (registration as (ServiceWorkerRegistration & {
+            sync?: { register(tag: string): Promise<void> };
+        }) | undefined)?.sync;
+
+        if (!sync) {
             return false;
         }
 
         try {
-            await (registration as ServiceWorkerRegistration & { sync: { register(tag: string): Promise<void> } }).sync.register('cdh-outbox');
+            await sync.register('cdh-outbox');
 
             return true;
         } catch {
@@ -166,7 +173,7 @@ export function useAiTasks() {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
 
-    const pending = () => tasks.value.filter((task) => !task.finished);
+    const pending = () => (tasks.value ?? []).filter((task) => !task.finished);
 
     async function refresh(): Promise<void> {
         if (stopped) {
@@ -177,7 +184,10 @@ export function useAiTasks() {
 
         try {
             const response = await ai.tasks();
-            tasks.value = response.tasks;
+            // The list is the answer only when it is a list. A malformed body
+            // must not replace the tasks already known with `undefined`, which
+            // is what `schedule()` and every render of the panel then read.
+            tasks.value = Array.isArray(response.tasks) ? response.tasks : [];
             error.value = null;
         } catch (e) {
             // Silence, not an alarm: the work is still running on the server and
