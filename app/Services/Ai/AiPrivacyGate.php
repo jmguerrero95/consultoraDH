@@ -42,6 +42,20 @@ final class AiPrivacyGate
     public const REDACTION = '[dato omitido]';
 
     /**
+     * Query-string parameter names whose mere presence means the URL is carrying
+     * a secret or a session token to a third party.
+     */
+    private const SENSITIVE_URL_PARAMS = [
+        'token', 'access_token', 'refresh_token', 'id_token', 'api_key', 'apikey',
+        'api_secret', 'client_secret', 'secret', 'password', 'passwd', 'pwd',
+        'auth', 'authorization', 'credential', 'credentials', 'private_key',
+        'session', 'sessionid', 'session_id', 'sid', 'jwt', 'signature', 'sig',
+    ];
+
+    /** Shortest run of letters or digits treated as a distinctive term. */
+    private const TOKEN_MIN = 5;
+
+    /**
      * Whether a payload about to be sent to a model requires a provider
      * authorised for private data.
      *
@@ -144,6 +158,208 @@ final class AiPrivacyGate
         }
 
         return ['query' => $clean, 'redacted' => $redacted, 'blocked' => false, 'reason' => null];
+    }
+
+    /**
+     * Whether an outbound search query may leave, judged by shape *and*
+     * provenance.
+     *
+     * `sanitizeQuery()` answers the shape question: no identifier in the query.
+     * This answers the provenance question the pattern check cannot: even a query
+     * with no recognisable identifier must not leave when its terms are drawn
+     * from private material — a document the person attached, a record a private
+     * tool returned. A business name or an internal agreement has no shape a
+     * regular expression recognises; where it *came from* is the only honest
+     * signal.
+     *
+     * The rule is deliberately narrow so public research keeps working:
+     *
+     *   - no private sources in the turn → allowed (a public question is public);
+     *   - a query term appears in a private source but also in the person's own
+     *     current words → allowed (they asked for it explicitly);
+     *   - a query term appears in private material and nowhere in the person's
+     *     request → refused, because the model composed it from the private
+     *     context.
+     *
+     * The model cannot declare its own query public: it proposes terms, and the
+     * decision is made here, from the turn's metadata, never from anything the
+     * model said.
+     *
+     * The caller must use the returned `query` and never the original.
+     *
+     * @param  list<string>  $privateSources  exact private texts in the turn's context
+     * @param  list<string>  $authorizedSources  texts the person supplied themselves
+     * @return array{query: string, redacted: int, blocked: bool, reason: string|null, provenance: string}
+     */
+    public function authorizeOutboundQuery(
+        string $query,
+        array $privateSources = [],
+        array $authorizedSources = [],
+    ): array {
+        $clean = $this->sanitizeQuery($query);
+
+        if ($clean['blocked']) {
+            return $clean + ['provenance' => 'identifier'];
+        }
+
+        if ($privateSources !== [] && $this->derivesFromPrivate($clean['query'], $privateSources, $authorizedSources)) {
+            return [
+                'query' => $clean['query'],
+                'redacted' => $clean['redacted'],
+                'blocked' => true,
+                'reason' => 'La consulta parece provenir de información privada del contexto. Reformúlala con términos públicos y genéricos, sin nombres ni datos internos.',
+                'provenance' => 'private_context',
+            ];
+        }
+
+        return $clean + ['provenance' => 'public'];
+    }
+
+    /**
+     * Why a URL must not be requested, or null when it may.
+     *
+     * A URL is an outbound message too. The SSRF layer already decides *where* it
+     * may go; this decides whether the string may carry what it carries: an
+     * embedded credential, an email, a token in a query parameter, or a value
+     * taken from private material. Redirect targets are checked with the same
+     * method, so a hop cannot smuggle past the first check.
+     *
+     * A bare number in a public URL is not refused: article and document ids are
+     * ordinary. Only identifiers in the shape of a person's data, named
+     * credentials and provenance-derived values are.
+     *
+     * The returned reason never contains the URL or the offending value.
+     *
+     * @param  list<string>  $privateSources  exact private texts in the turn's context
+     * @param  list<string>  $authorizedSources  texts the person supplied themselves
+     */
+    public function sensitiveUrlReason(
+        string $url,
+        array $privateSources = [],
+        array $authorizedSources = [],
+    ): ?string {
+        if ($url === '') {
+            return null;
+        }
+
+        // Percent-encoding is a trivial veil: decode once and check both.
+        $decoded = rawurldecode($url);
+
+        if (preg_match('#^https?://[^/@]+@#i', $url) === 1 || preg_match('#^https?://[^/@]+@#i', $decoded) === 1) {
+            return 'La URL incluye credenciales y no puede solicitarse.';
+        }
+
+        $email = '/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/';
+
+        if (preg_match($email, $url) === 1 || preg_match($email, $decoded) === 1) {
+            return 'La URL contiene un dato personal (correo) y no puede solicitarse.';
+        }
+
+        $query = parse_url($url, PHP_URL_QUERY);
+        $query = is_string($query) ? rawurldecode($query) : '';
+
+        foreach ($this->queryParameterNames($query) as $name) {
+            if (in_array($name, self::SENSITIVE_URL_PARAMS, true)) {
+                return 'La URL incluye un parámetro sensible y no puede solicitarse.';
+            }
+        }
+
+        if ($query !== '' && $privateSources !== [] && $this->derivesFromPrivate($query, $privateSources, $authorizedSources)) {
+            return 'La URL contiene valores derivados de información privada y no puede solicitarse.';
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether the query's distinctive terms are drawn from private material and
+     * not from the person's own words.
+     *
+     * A term the person typed is authorised even if it also appears in private
+     * data — they asked for it. A term that exists only in private material and
+     * has surfaced in the query is the model composing from context, which is the
+     * leak this closes.
+     *
+     * @param  list<string>  $privateSources
+     * @param  list<string>  $authorizedSources
+     */
+    private function derivesFromPrivate(string $query, array $privateSources, array $authorizedSources): bool
+    {
+        $queryTokens = $this->significantTokens($query);
+
+        if ($queryTokens === []) {
+            return false;
+        }
+
+        $authorized = [];
+
+        foreach ($authorizedSources as $source) {
+            foreach (array_keys($this->significantTokens($source)) as $token) {
+                $authorized[$token] = true;
+            }
+        }
+
+        foreach ($privateSources as $source) {
+            foreach (array_keys($this->significantTokens($source)) as $token) {
+                if (isset($authorized[$token])) {
+                    continue;
+                }
+
+                if (isset($queryTokens[$token])) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The distinctive terms of a text: accented letters and digits in runs long
+     * enough to carry meaning, keyed for set membership.
+     *
+     * @return array<string, true>
+     */
+    private function significantTokens(string $text): array
+    {
+        if ($text === '') {
+            return [];
+        }
+
+        preg_match_all('/[\p{L}\p{N}]{'.self::TOKEN_MIN.',}/u', mb_strtolower($text), $matches);
+
+        $tokens = [];
+
+        foreach ($matches[0] ?? [] as $token) {
+            $tokens[$token] = true;
+        }
+
+        return $tokens;
+    }
+
+    /**
+     * The lower-cased parameter names of a query string.
+     *
+     * @return list<string>
+     */
+    private function queryParameterNames(string $query): array
+    {
+        if ($query === '') {
+            return [];
+        }
+
+        $names = [];
+
+        foreach (preg_split('/[&;]/', $query) ?: [] as $pair) {
+            $name = explode('=', $pair, 2)[0];
+            $name = strtolower(trim($name));
+
+            if ($name !== '') {
+                $names[] = $name;
+            }
+        }
+
+        return $names;
     }
 
     /**

@@ -122,8 +122,33 @@ final class AiPrivacyBoundaryTest extends TestCase
         $clock = new AiToolDeadline;
         $clock->set(microtime(true) + 5);
 
-        $this->assertLessThanOrEqual(5, $clock->cap(30));
-        $this->assertGreaterThanOrEqual(3, $clock->cap(30), 'A tool always gets a usable minimum.');
+        $timeout = $clock->budgetFor(30);
+
+        $this->assertNotNull($timeout);
+        $this->assertLessThanOrEqual(5, $timeout, 'Never more than the seconds actually left.');
+        $this->assertGreaterThanOrEqual(1, $timeout);
+        // The cap can never exceed the real remaining time.
+        $this->assertLessThanOrEqual((float) $clock->remaining(), (float) $timeout);
+    }
+
+    public function test_a_turn_with_too_little_time_left_refuses_to_start_a_call(): void
+    {
+        $clock = new AiToolDeadline;
+        $clock->set(microtime(true) + 1);
+
+        // One second left and a configured fifteen: the old `cap()` returned the
+        // three-second minimum, which overshot the deadline. It must now refuse.
+        $this->assertNull($clock->budgetFor(15), 'A call with ~1s left must not be granted 3s.');
+    }
+
+    public function test_an_expired_deadline_refuses_to_start_a_call(): void
+    {
+        $clock = new AiToolDeadline;
+        $clock->set(microtime(true) - 10);
+
+        $this->assertTrue($clock->expired());
+        $this->assertLessThan(0, (float) $clock->remaining());
+        $this->assertNull($clock->budgetFor(30), 'A passed deadline must not begin another request.');
     }
 
     public function test_a_cleared_clock_restores_the_configured_timeout(): void
@@ -132,7 +157,112 @@ final class AiPrivacyBoundaryTest extends TestCase
         $clock->set(microtime(true) + 5);
         $clock->set(null);
 
-        $this->assertSame(30, $clock->cap(30), 'Outside a turn the configured timeout is untouched.');
+        $this->assertFalse($clock->isSet());
+        $this->assertSame(30, $clock->budgetFor(30), 'Outside a turn the configured timeout is untouched.');
+        $this->assertFalse($clock->expired());
+    }
+
+    // ------------------------------------------------- outbound query provenance
+
+    public function test_a_public_query_with_no_private_context_is_allowed(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $result = $gate->authorizeOutboundQuery('reforma laboral colombiana 2026');
+
+        $this->assertFalse($result['blocked']);
+        $this->assertSame('public', $result['provenance']);
+    }
+
+    public function test_a_query_without_identifiers_is_refused_when_it_derives_from_private_material(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        // No email, no long number, no phone: only provenance can catch this.
+        $private = ['El acuerdo interno de compensación de Empresa Ficticia Andina con María Ejemplo se firmó ayer.'];
+
+        $result = $gate->authorizeOutboundQuery(
+            'acuerdo interno de compensación Empresa Ficticia Andina María Ejemplo',
+            $private,
+            ['¿Qué contiene el acuerdo?'],
+        );
+
+        $this->assertTrue($result['blocked'], 'A private query with no pattern must not leave by provenance.');
+        $this->assertSame('private_context', $result['provenance']);
+        // The reason never contains the private text.
+        $this->assertStringNotContainsString('Andina', (string) $result['reason']);
+    }
+
+    public function test_a_public_query_inside_a_private_thread_is_still_allowed(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $private = ['El saldo de cartera del cliente carlos era 900123456 el mes pasado.'];
+
+        // The person's own words authorise the terms of their question; the rest
+        // is a genuinely independent public query.
+        $result = $gate->authorizeOutboundQuery(
+            'inteligencia artificial tendencias',
+            $private,
+            ['¿Qué novedades hay sobre inteligencia artificial?'],
+        );
+
+        $this->assertFalse($result['blocked'], 'A public question in a private thread must still be searchable.');
+    }
+
+    public function test_a_term_the_person_did_not_use_but_private_data_holds_is_refused(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $private = ['La póliza de responsabilidad civil de la constructora se renovó.'];
+
+        $result = $gate->authorizeOutboundQuery(
+            'constructora responsabilidad civil noticias',
+            $private,
+            ['¿Qué hay de nuevo?'],
+        );
+
+        $this->assertTrue($result['blocked']);
+    }
+
+    // -------------------------------------------------------- sensitive URLs
+
+    public function test_a_url_with_a_sensitive_parameter_is_refused(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $this->assertNotNull($gate->sensitiveUrlReason('https://api.example.com/v1/data?access_token=abc123'));
+        $this->assertNotNull($gate->sensitiveUrlReason('https://example.com/x?api_key=secret'));
+    }
+
+    public function test_a_public_url_with_an_article_id_is_not_refused(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $this->assertNull($gate->sensitiveUrlReason('https://es.wikipedia.org/wiki/Colombia'));
+        $this->assertNull($gate->sensitiveUrlReason('https://example.com/articulo/123456'));
+    }
+
+    public function test_a_url_carrying_a_personal_identifier_is_refused_even_when_encoded(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $this->assertNotNull($gate->sensitiveUrlReason('https://example.com/u/ana.gomez@example.com'));
+        $this->assertNotNull($gate->sensitiveUrlReason('https://example.com/u/ana.gomez%40example.com'));
+        $this->assertNotNull($gate->sensitiveUrlReason('https://user:pass@example.com/private'));
+    }
+
+    public function test_a_url_with_a_value_taken_from_private_material_is_refused(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $private = ['La constructora pidió renegociar la póliza de responsabilidad.'];
+
+        $this->assertNotNull($gate->sensitiveUrlReason(
+            'https://example.com/buscar?q=constructora',
+            $private,
+            ['¿Qué hay de nuevo?'],
+        ));
     }
 
     // -------------------------------------------------------- fail-closed tools

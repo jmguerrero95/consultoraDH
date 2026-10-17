@@ -6,6 +6,7 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiToolDeadline;
 use Carbon\Carbon;
@@ -27,13 +28,19 @@ final class WebSearchTool extends AbstractAiTool
 {
     /**
      * @param  AiPrivacyGate|null  $privacy  redacts private identifiers before a
-     *                                       query leaves for a public engine
+     *                                       query leaves for a public engine, and
+     *                                       judges whether the query derives from
+     *                                       private context
      * @param  AiToolDeadline|null  $deadline  the turn's clock, so a search never
      *                                         outlives the budget that asked for it
+     * @param  AiOutboundContext|null  $outbound  the turn's private and authorised
+     *                                            source texts, so provenance — not
+     *                                            the model's claim — decides
      */
     public function __construct(
         private readonly ?AiPrivacyGate $privacy = null,
         private readonly ?AiToolDeadline $deadline = null,
+        private readonly ?AiOutboundContext $outbound = null,
     ) {}
 
     public function name(): string
@@ -104,12 +111,21 @@ final class WebSearchTool extends AbstractAiTool
         $maxResults = $arguments['max_results'];
 
         // The outbound-query boundary. A search goes to a third party (the
-        // engines behind the SearXNG instance), so an identifier that reached the
-        // query must not leave with it. A public query asked inside a private
-        // conversation is still a public query and is not blocked; a query that
-        // is *only* an identifier is refused rather than emptied. The sanitised
-        // query is what is sent and what is reported — never the original.
-        $guarded = ($this->privacy ?? app(AiPrivacyGate::class))->sanitizeQuery($query);
+        // engines behind the SearXNG instance), so two questions are asked before
+        // it leaves: does the query carry an identifier (redaction/refusal), and
+        // does it derive from private material the turn holds (document
+        // passages, private tool results)? The second is provenance, not shape —
+        // a business name has no pattern — and it is answered here, outside the
+        // model, from the turn's own metadata. A public query asked inside a
+        // private conversation is still a public query: it is allowed unless its
+        // terms are drawn from the private sources and are not the person's own
+        // words. The sanitised query is what is sent and what is reported.
+        $context = $this->outbound ?? app(AiOutboundContext::class);
+        $guarded = ($this->privacy ?? app(AiPrivacyGate::class))->authorizeOutboundQuery(
+            $query,
+            $context->privateSources(),
+            $context->authorizedSources(),
+        );
 
         if ($guarded['blocked']) {
             throw new AiToolRejected($guarded['reason'] ?? 'La consulta no puede enviarse a un buscador público.');
@@ -122,8 +138,16 @@ final class WebSearchTool extends AbstractAiTool
             throw new AiToolRejected('No hay proveedor de búsqueda web configurado. Establezca AI_WEB_SEARCH_BASE_URL.');
         }
 
+        // The turn's clock. `budgetFor` returns null once there is not enough
+        // time left to start the request at all — including an expired turn — and
+        // the search is refused rather than started with a minimum that would
+        // outlive the budget. No external connection is made after that point.
         $timeout = ($this->deadline ?? app(AiToolDeadline::class))
-            ->cap((int) config('ai.web_search.timeout_seconds', 10));
+            ->budgetFor((int) config('ai.web_search.timeout_seconds', 10));
+
+        if ($timeout === null) {
+            throw new AiToolRejected('El turno no tiene tiempo suficiente para buscar en la web; intenta de nuevo o responde con la información que ya tienes.');
+        }
 
         $url = rtrim($baseUrl, '/').'/search';
         $params = [

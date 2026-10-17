@@ -6,6 +6,8 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use App\Services\Ai\AiOutboundContext;
+use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiToolDeadline;
 use App\Services\Ai\Net\BoundedStream;
 use App\Services\Ai\Net\DownloadTooLarge;
@@ -50,6 +52,8 @@ final class WebFetchTool extends AbstractAiTool
     public function __construct(
         private readonly PinnedTransport $transport,
         private readonly ?AiToolDeadline $deadline = null,
+        private readonly ?AiPrivacyGate $privacy = null,
+        private readonly ?AiOutboundContext $outbound = null,
     ) {}
 
     public function name(): string
@@ -92,16 +96,19 @@ final class WebFetchTool extends AbstractAiTool
             throw new AiToolRejected('URL inválida: debe ser una URL http o https.');
         }
 
-        // Reject URLs with credentials
-        if (preg_match('/^https?:\/\/[^\/]+@/', $url)) {
-            throw new AiToolRejected('URLs con credenciales no son permitidas.');
-        }
+        // A URL is an outbound message too: a credential, an email, a token in a
+        // query parameter or a value taken from private material must not leave.
+        // The same check runs on every redirect target in `execute()`, so a hop
+        // cannot smuggle past this first look.
+        $context = $this->outbound ?? app(AiOutboundContext::class);
+        $reason = ($this->privacy ?? app(AiPrivacyGate::class))->sensitiveUrlReason(
+            $url,
+            $context->privateSources(),
+            $context->authorizedSources(),
+        );
 
-        // A URL is a query too: an email address carried in a path or a query
-        // string would send a personal identifier to whatever host it names. The
-        // SSRF checks below protect the *destination*; this protects the content.
-        if (preg_match('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/', $url) === 1) {
-            throw new AiToolRejected('La URL contiene un dato personal (correo) y no puede solicitarse.');
+        if ($reason !== null) {
+            throw new AiToolRejected($reason);
         }
 
         $maxChars = $arguments['max_chars'] ?? 3000;
@@ -134,14 +141,13 @@ final class WebFetchTool extends AbstractAiTool
         $maxChars = $arguments['max_chars'];
 
         // Redirects are never followed automatically: every hop has to be
-        // resolved and re-validated before it is requested.
-        $timeout = ($this->deadline ?? app(AiToolDeadline::class))
-            ->cap((int) config('ai.web_fetch.timeout_seconds', 15));
-
+        // resolved and re-validated before it is requested — including against the
+        // clock, so a redirect cannot begin a fresh request once the turn has no
+        // time left. The per-hop timeout is applied inside the loop below.
         $client = Http::withHeaders([
             'User-Agent' => 'Consultora-DH-Assistant/1.0',
             'Accept' => 'text/html,application/xhtml+xml,application/xml',
-        ])->timeout($timeout)->withOptions([
+        ])->withOptions([
             'allow_redirects' => false,
             // A proxy would resolve the hostname itself, which makes the pinned
             // address below advisory rather than authoritative: the request would
@@ -153,6 +159,10 @@ final class WebFetchTool extends AbstractAiTool
             'proxy' => '',
         ]);
 
+        // Provenance for the URL check, read once: it applies to every hop.
+        $context = $this->outbound ?? app(AiOutboundContext::class);
+        $privacy = $this->privacy ?? app(AiPrivacyGate::class);
+
         // Track redirects manually to validate each target
         $currentUrl = $url;
         $redirectCount = 0;
@@ -160,6 +170,29 @@ final class WebFetchTool extends AbstractAiTool
         $finalUrl = $url;
 
         while ($redirectCount <= self::MAX_REDIRECTS) {
+            // The clock is asked at every hop. A null answer means the turn has
+            // no time left — or too little for a call to be worth starting — and
+            // the request, first or redirect, is refused rather than begun.
+            $timeout = ($this->deadline ?? app(AiToolDeadline::class))
+                ->budgetFor((int) config('ai.web_fetch.timeout_seconds', 15));
+
+            if ($timeout === null) {
+                throw new AiToolRejected('El turno no tiene tiempo suficiente para leer la página solicitada.');
+            }
+
+            // The content policy is re-applied to the effective URL of this hop,
+            // so a redirect to a URL carrying a token or a private value is
+            // refused exactly as the first URL would be.
+            $reason = $privacy->sensitiveUrlReason(
+                $currentUrl,
+                $context->privateSources(),
+                $context->authorizedSources(),
+            );
+
+            if ($reason !== null) {
+                throw new AiToolRejected($reason);
+            }
+
             // Resolve, refuse anything not publicly routable, and pin the
             // connection to the addresses that survived. Repeated on every hop,
             // so a later redirect is checked exactly as the first request was.
@@ -187,6 +220,7 @@ final class WebFetchTool extends AbstractAiTool
 
             try {
                 $response = $client->withOptions([
+                    'timeout' => $timeout,
                     'curl' => $this->transport->pinOptions($host, $port, $resolvedIps),
                     'sink' => $body,
                 ])->get($currentUrl);

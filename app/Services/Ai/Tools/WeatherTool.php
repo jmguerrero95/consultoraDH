@@ -249,7 +249,11 @@ final class WeatherTool extends AbstractAiTool
     {
         $url = (string) config('ai.weather.geocoding_url');
         $timeout = ($this->deadline ?? app(AiToolDeadline::class))
-            ->cap((int) config('ai.weather.timeout_seconds', 10));
+            ->budgetFor((int) config('ai.weather.timeout_seconds', 10));
+
+        if ($timeout === null) {
+            throw new AiToolRejected('El turno no tiene tiempo suficiente para consultar el clima.');
+        }
 
         try {
             $response = Http::timeout($timeout)
@@ -329,7 +333,11 @@ final class WeatherTool extends AbstractAiTool
     {
         $url = (string) config('ai.weather.forecast_url');
         $timeout = ($this->deadline ?? app(AiToolDeadline::class))
-            ->cap((int) config('ai.weather.timeout_seconds', 10));
+            ->budgetFor((int) config('ai.weather.timeout_seconds', 10));
+
+        if ($timeout === null) {
+            throw new AiToolRejected('El turno no tiene tiempo suficiente para obtener el pronóstico.');
+        }
 
         $timezone = $place['timezone'] !== '' ? $place['timezone'] : 'America/Bogota';
 

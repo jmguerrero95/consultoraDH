@@ -19,8 +19,11 @@ use App\Models\PaymentAllocation;
 use App\Models\User;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiCapabilityCatalog;
+use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiTaskRouter;
+use App\Services\Ai\AiToolDeadline;
+use App\Services\Ai\Net\DnsResolver;
 use App\Services\Ai\Tools\SystemStatsTool;
 use App\Services\Ai\Tools\WebFetchTool;
 use App\Services\Ai\Tools\WebSearchTool;
@@ -67,12 +70,12 @@ final class AgentCoreTest extends TestCase
     {
         parent::setUp();
 
-        foreach (['ai.use', 'clients.view', 'receivables.view', 'companies.view', 'web_search', 'artifacts.create'] as $permission) {
+        foreach (['ai.use', 'clients.view', 'receivables.view', 'companies.view', 'web_search', 'web_fetch', 'artifacts.create'] as $permission) {
             Permission::firstOrCreate(['name' => $permission, 'guard_name' => 'web']);
         }
 
         $this->user = User::factory()->create();
-        $this->user->givePermissionTo(['ai.use', 'clients.view', 'receivables.view', 'companies.view', 'web_search', 'artifacts.create']);
+        $this->user->givePermissionTo(['ai.use', 'clients.view', 'receivables.view', 'companies.view', 'web_search', 'web_fetch', 'artifacts.create']);
 
         config([
             'ai.enabled' => true,
@@ -620,6 +623,125 @@ final class AgentCoreTest extends TestCase
         app(WebFetchTool::class)->validate([
             'url' => 'https://example.com/p?contact=ana.gomez@example.com',
         ]);
+    }
+
+    public function test_an_outbound_search_refuses_a_query_drawn_from_a_private_document(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake();
+
+        $context = app(AiOutboundContext::class);
+        $context->set(
+            privateSources: ['El acuerdo interno de compensación de Empresa Ficticia Andina con María Ejemplo.'],
+            authorizedSources: ['¿Qué contiene el acuerdo?'],
+        );
+
+        try {
+            app(WebSearchTool::class)->execute(
+                ['query' => 'acuerdo interno de compensación Empresa Ficticia Andina María Ejemplo', 'max_results' => 5],
+                $this->user,
+            );
+            $this->fail('A query drawn from a private document must not leave for a public engine.');
+        } catch (AiToolRejected) {
+            // Expected: refused before any connection.
+        } finally {
+            $context->reset();
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_an_outbound_search_allows_a_public_query_inside_a_private_context(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake(['https://search.test/*' => Http::response(['results' => []])]);
+
+        $context = app(AiOutboundContext::class);
+        $context->set(
+            privateSources: ['El saldo de cartera del cliente carlos era 900123456.'],
+            authorizedSources: ['¿Qué novedades hay sobre inteligencia artificial?'],
+        );
+
+        try {
+            $output = app(WebSearchTool::class)->execute(
+                ['query' => 'inteligencia artificial tendencias', 'max_results' => 5],
+                $this->user,
+            );
+        } finally {
+            $context->reset();
+        }
+
+        $this->assertSame('inteligencia artificial tendencias', $output['query']);
+        Http::assertSentCount(1);
+    }
+
+    public function test_an_expired_turn_refuses_an_outbound_search_before_any_request(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake();
+
+        $deadline = app(AiToolDeadline::class);
+        $deadline->set(microtime(true) - 5);
+
+        try {
+            app(WebSearchTool::class)->execute(
+                ['query' => 'reforma laboral colombiana', 'max_results' => 5],
+                $this->user,
+            );
+            $this->fail('A turn past its deadline must not start a search.');
+        } catch (AiToolRejected) {
+            // Expected: no connection is made once time is up.
+        } finally {
+            $deadline->set(null);
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_web_fetch_refuses_a_redirect_to_a_url_with_a_sensitive_parameter(): void
+    {
+        $this->app->instance(DnsResolver::class, new class implements DnsResolver
+        {
+            public function resolve(string $host): array
+            {
+                return ['93.184.216.34'];
+            }
+        });
+
+        Http::fake([
+            'http://example.test/start' => Http::response('', 302, [
+                'Location' => 'https://example.test/next?access_token=abc123',
+                'Content-Type' => 'text/html',
+            ]),
+            'https://example.test/next*' => Http::response('<html><title>No</title></html>', 200, [
+                'Content-Type' => 'text/html',
+            ]),
+        ]);
+
+        try {
+            app(WebFetchTool::class)->execute(
+                ['url' => 'http://example.test/start', 'max_chars' => 500],
+                $this->user,
+            );
+            $this->fail('A redirect to a URL with a sensitive parameter must be refused, not followed.');
+        } catch (AiToolRejected $e) {
+            $this->assertStringContainsString('sensible', $e->getMessage());
+        }
+
+        // Exactly one request: the redirect target was refused before it was made.
+        Http::assertSentCount(1);
     }
 
     // ---------------------------------------------------- historical stats labelling

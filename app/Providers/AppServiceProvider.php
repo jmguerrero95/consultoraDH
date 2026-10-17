@@ -8,6 +8,7 @@ use App\Domain\Audit\AuditableEvent;
 use App\Domain\Audit\Listeners\RecordAuditEvent;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\Listeners\EscalateSupportSla;
+use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiToolDeadline;
 use App\Services\Ai\AiToolRegistry;
@@ -52,6 +53,12 @@ final class AppServiceProvider extends ServiceProvider
         // unbound class, so a tool declaring `?AiPrivacyGate $privacy = null`
         // would silently get null (and quietly lose query redaction).
         $this->app->singleton(AiPrivacyGate::class);
+
+        // The turn's outbound provenance: which texts are private and which the
+        // person supplied themselves. Bound explicitly for the same reason as the
+        // gate — an unbound class with a defaulted parameter would silently get
+        // null and the search boundary would lose its provenance.
+        $this->app->singleton(AiOutboundContext::class);
 
         // AI Tools - bind as singletons so AiToolRegistry::make() can resolve them
         $this->app->singleton(ClientSearchTool::class);

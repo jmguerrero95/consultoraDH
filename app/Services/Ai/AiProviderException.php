@@ -219,4 +219,17 @@ class AiProviderException extends RuntimeException
     {
         return new self('No AI provider is configured.', status: 503, kind: 'not_configured', scope: self::SCOPE_INTERNAL);
     }
+
+    /**
+     * A provider call arrived with no privacy classification.
+     *
+     * Terminal, and deliberately so: a missing classification is an application
+     * fault, and asking a different provider cannot make an unclassified payload
+     * safe. The call is refused before any HTTP request, so nothing left the
+     * server.
+     */
+    public static function misclassified(string $message): self
+    {
+        return new self($message, status: 500, kind: 'privacy_contract', scope: self::SCOPE_INTERNAL);
+    }
 }

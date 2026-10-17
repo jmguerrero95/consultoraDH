@@ -87,6 +87,7 @@ final class AiAssistantService
         private readonly AiCapabilityCatalog $capabilities,
         private readonly AiPrivacyGate $privacy,
         private readonly AiToolDeadline $deadline,
+        private readonly AiOutboundContext $outbound,
     ) {}
 
     public function ask(AiConversation $conversation, string $question, User $user): array
@@ -121,6 +122,8 @@ final class AiAssistantService
             // Cleared so a later caller in the same worker does not inherit a
             // stale deadline and accidentally cap its own timeouts.
             $this->deadline->set(null);
+            // And no later caller inherits this turn's private provenance.
+            $this->outbound->reset();
         }
     }
 
@@ -141,6 +144,21 @@ final class AiAssistantService
         // Scoped to this person and this conversation, so a document in another
         // thread - or in somebody else's account - cannot reach this answer.
         $passages = $this->retrievePassages($user, $question, $conversation);
+
+        // Where this turn's text came from, for the outbound boundary. The
+        // passages are private material the model could copy into a search query;
+        // the person's own question is theirs to search with. This is set before
+        // anything outbound runs — the prefetch below and every tool the model
+        // calls read it — and it is cleared in `ask()`'s finally. It is metadata,
+        // not a claim by the model: the model proposes a query, this decides
+        // whether its terms came from somewhere they may not leave.
+        $this->outbound->set(
+            privateSources: array_map(
+                static fn (array $passage): string => trim((string) ($passage['content'] ?? '')),
+                $passages,
+            ),
+            authorizedSources: [$question],
+        );
 
         // Which tools this turn starts with, and whether it needs current,
         // external information. The router reads the question together with the
@@ -824,6 +842,12 @@ final class AiAssistantService
                             $sawPrivateTool = true;
                             $turnRequiresClientData = true;
                             $this->markConversationPrivate($conversation);
+
+                            // A private record is now in the turn's context. If a
+                            // later round turns it into a search query, the
+                            // outbound boundary must recognise its terms as coming
+                            // from here.
+                            $this->outbound->addPrivateSource($this->scrutableText($output));
                         }
 
                         $toolResultsThisRound[] = [

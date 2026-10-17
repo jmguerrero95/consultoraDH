@@ -13,7 +13,9 @@ use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiTurnBudget;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
@@ -131,7 +133,7 @@ final class AiErrorScopeAndFailoverTest extends TestCase
     }
 
     /**
-     * @return list<array{0: Request, 1: \Illuminate\Http\Client\Response}>
+     * @return list<array{0: Request, 1: Response}>
      */
     private function requestsTo(string $base): array
     {
@@ -156,7 +158,7 @@ final class AiErrorScopeAndFailoverTest extends TestCase
         return app(AiAssistantService::class)->ask($this->conversation, $question, $this->user);
     }
 
-    private function messages(): \Illuminate\Database\Eloquent\Builder
+    private function messages(): Builder
     {
         return AiMessageModel::query()->where('ai_conversation_id', $this->conversation->id);
     }
@@ -464,6 +466,117 @@ final class AiErrorScopeAndFailoverTest extends TestCase
         }
 
         Http::assertNothingSent();
+    }
+
+    // ------------------------------------------------- privacy classification contract
+
+    public function test_a_call_without_a_privacy_classification_is_refused_before_any_request(): void
+    {
+        config(['ai.privacy.allow_training_providers' => false]);
+
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1),
+        ]);
+
+        Http::fake();
+
+        try {
+            // The classification argument is omitted: the historical default of
+            // "public" is gone, so this must not reach a provider.
+            app(AiProviderResolver::class)->complete([AiMessage::user('hola')], [], null, 'chat', null, null, null);
+            $this->fail('A missing classification must be refused, not defaulted to public.');
+        } catch (AiProviderException $e) {
+            $this->assertSame(AiProviderException::SCOPE_INTERNAL, $e->scope);
+            $this->assertSame('privacy_contract', $e->kind);
+            $this->assertTrue($e->isTerminal(), 'No provider can make a missing classification safe.');
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_public_text_with_a_sensitive_identifier_cannot_be_downgraded_to_public(): void
+    {
+        config(['ai.privacy.allow_training_providers' => false]);
+
+        // The only provider may train on the content and is not authorised for
+        // private data.
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1, ['chat', 'tools'], 'training'),
+        ]);
+
+        Http::fake();
+
+        try {
+            // Explicitly public, but the payload carries an email: the content
+            // floor promotes it, so the training provider is not eligible.
+            app(AiProviderResolver::class)->complete(
+                [AiMessage::user('mi correo es ana.gomez@example.com, ¿lo actualizas?')],
+                [],
+                null,
+                'chat',
+                null,
+                false,
+                null,
+            );
+            $this->fail('A payload with a sensitive identifier must not reach a training provider.');
+        } catch (AiProviderException) {
+            // No authorised candidate: the record stays on the server.
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_an_explicitly_public_clean_call_may_use_a_training_provider(): void
+    {
+        config(['ai.privacy.allow_training_providers' => false]);
+
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1, ['chat', 'tools'], 'training'),
+        ]);
+
+        Http::fake([
+            $this->url(self::GROQ) => Http::response($this->text('Una EPS administra el aseguramiento.')),
+        ]);
+
+        $result = app(AiProviderResolver::class)->complete(
+            [AiMessage::user('Explica brevemente qué es una EPS.')],
+            [],
+            null,
+            'chat',
+            null,
+            false,
+            null,
+        );
+
+        $this->assertSame('Una EPS administra el aseguramiento.', $result->content);
+        Http::assertSentCount(1);
+    }
+
+    public function test_an_explicitly_private_call_only_uses_an_authorised_provider(): void
+    {
+        config(['ai.privacy.allow_training_providers' => false]);
+
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1, ['chat', 'tools'], 'training'),
+            'gemini' => $this->provider(self::GEMINI, 'gemini-key', ['gemini-model'], 2, ['chat', 'tools'], 'standard'),
+        ]);
+
+        Http::fake([
+            $this->url(self::GEMINI) => Http::response($this->text('El saldo del cliente es privado.')),
+        ]);
+
+        app(AiProviderResolver::class)->complete(
+            [AiMessage::user('¿Cuál es el saldo del cliente?')],
+            [],
+            null,
+            'chat',
+            null,
+            true,
+            null,
+        );
+
+        Http::assertSentCount(1);
+        Http::assertNotSent(fn (Request $request): bool => $request->url() === $this->url(self::GROQ));
     }
 
     // ------------------------------------------------------ continuity

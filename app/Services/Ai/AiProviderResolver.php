@@ -64,6 +64,7 @@ class AiProviderResolver
         private readonly ModelPool $pool,
         private readonly AiModelHealth $health,
         private readonly AiProviderQuota $quota,
+        private readonly AiPrivacyGate $privacy,
     ) {}
 
     /**
@@ -71,9 +72,11 @@ class AiProviderResolver
      * @param  list<AiMessage>  $messages
      * @param  string|null  $task  a safe label for diagnostics ('chat', 'data', ...)
      * @param  float|null  $deadline  unix timestamp by which the whole turn must finish
-     * @param  bool  $requiresClientData  true when the turn carries real business data,
-     *                                    so a provider whose free tier may train on the
-     *                                    content is not eligible
+     * @param  bool|null  $requiresClientData  true when the turn carries real business
+     *                                         data, so a provider whose free tier may
+     *                                         train on the content is not eligible. It is
+     *                                         required: `null` (the argument omitted) is a
+     *                                         refusal, never an implicit "public".
      * @param  AiTurnBudget|null  $budget  the turn's shared attempt/time budget. Passed
      *                                     by the assistant service so every round of one
      *                                     user turn spends from the same pool; when null
@@ -81,7 +84,8 @@ class AiProviderResolver
      *                                     created, which is the old behaviour for a caller
      *                                     that makes exactly one call.
      *
-     * @throws AiProviderException when no candidate can answer
+     * @throws AiProviderException when no candidate can answer, or when the privacy
+     *                             classification is missing (an application fault)
      */
     public function complete(
         array $messages,
@@ -89,9 +93,30 @@ class AiProviderResolver
         ?CloudAiProvider $preferred = null,
         ?string $task = null,
         ?float $deadline = null,
-        bool $requiresClientData = false,
+        ?bool $requiresClientData = null,
         ?AiTurnBudget $budget = null,
     ): AiResponse {
+        // The classification is mandatory. A07-R4-R1 fixed today's callers, but
+        // the contract still defaulted the argument to "public", so the next
+        // consumer that forgot it would send private content to a provider whose
+        // free tier may train on it. An absent classification is an application
+        // fault, refused here before any HTTP request, and it is terminal: no
+        // other provider can make a missing classification safe.
+        if ($requiresClientData === null) {
+            throw AiProviderException::misclassified(
+                'La llamada al proveedor no declaró la clasificación de privacidad; '
+                .'se rechaza por defecto y no se envió nada.'
+            );
+        }
+
+        // An explicit "public" is still only a claim about *intent*. The payload
+        // itself has the final say: text that carries a sensitive signal (an
+        // email, a long identifier, a phone) is promoted to private here, so a
+        // caller cannot downgrade a record to public by passing `false`.
+        if (! $requiresClientData && $this->payloadLooksSensitive($messages)) {
+            $requiresClientData = true;
+        }
+
         $required = $tools !== [] ? ['chat', 'tools'] : ['chat'];
 
         if ($requiresClientData) {
@@ -276,6 +301,35 @@ class AiProviderResolver
             'Todos los modelos de IA están temporalmente en espera tras fallos recientes'
             .($skipped > 0 ? " ({$skipped} en espera)." : '.')
         );
+    }
+
+    /**
+     * Whether the outgoing payload itself carries a sensitive signal.
+     *
+     * The classification callers pass is about *provenance* (this turn is about
+     * a client). This is the content floor: even a turn classified public is
+     * promoted when the exact text about to be sent holds an email, a long digit
+     * run or a grouped phone number. It can only raise the classification, never
+     * lower it.
+     *
+     * @param  list<AiMessage>  $messages
+     */
+    private function payloadLooksSensitive(array $messages): bool
+    {
+        $texts = [];
+
+        foreach ($messages as $message) {
+            // The system prompt is written by the application and fixed; only
+            // what the person wrote, the model said or a tool returned can carry
+            // a record.
+            if ($message->role === AiMessage::ROLE_SYSTEM) {
+                continue;
+            }
+
+            $texts[] = $message->content;
+        }
+
+        return $this->privacy->payloadRequiresClientData(texts: $texts);
     }
 
     /**
