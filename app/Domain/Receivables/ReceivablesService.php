@@ -711,9 +711,13 @@ final class ReceivablesService
      */
     public function clientBalanceCounts(?Carbon $asOf = null): array
     {
-        $asOf = $this->agingReference($asOf);
+        // Whether a date was asked for. It decides between the current ledger
+        // view and a real historical reconstruction, so a past figure is never
+        // today's balance wearing a past label.
+        $explicit = $asOf !== null;
+        $reference = $this->agingReference($asOf);
 
-        $row = DB::query()->fromSub($this->obligationsQuery(), 'obligations')
+        $row = DB::query()->fromSub($this->obligationsQuery($explicit ? $reference : null), 'obligations')
             ->selectRaw('count(distinct obligations.client_id) filter (where obligations.balance_cop > 0) as clients_with_debt')
             ->selectRaw('count(distinct obligations.client_id) filter (where obligations.paid_amount_cop > 0 and obligations.balance_cop > 0) as clients_with_partial')
             ->selectRaw('count(*) filter (where obligations.balance_cop > 0) as open_obligations')
@@ -725,7 +729,8 @@ final class ReceivablesService
             'clients_with_partial_payments' => (int) $row->clients_with_partial,
             'open_obligations' => (int) $row->open_obligations,
             'partially_paid_obligations' => (int) $row->partially_paid_obligations,
-            'as_of' => $asOf->toDateString(),
+            'as_of' => $reference->toDateString(),
+            'historical' => $explicit,
         ];
     }
 
@@ -884,9 +889,26 @@ final class ReceivablesService
         return $byCompany;
     }
 
-    private function obligationsQuery(): QueryBuilder
+    /**
+     * The obligations, with their effective amount, paid amount and balance.
+     *
+     * ## `$asOf` and why it is not cosmetic
+     *
+     * With `$asOf === null` this is the *current* ledger view: every
+     * non-reversed, non-voided allocation counts, and so does every adjustment.
+     * The dashboard, the cartera screen and every caller that omits the date get
+     * exactly what they always got.
+     *
+     * With an explicit `$asOf` it is a truthful *historical* view: an obligation
+     * counts only once it had been generated, an adjustment only once it had been
+     * created, and an allocation only once it had been created, received and not
+     * yet reversed or voided by that date. Before this, `clientBalanceCounts($asOf)`
+     * applied the date to the aging buckets only and reported today's balances
+     * under a past `as_of` label — a current figure wearing a historical date.
+     */
+    private function obligationsQuery(?Carbon $asOf = null): QueryBuilder
     {
-        return DB::table('monthly_obligations')
+        $query = DB::table('monthly_obligations')
             ->join('monthly_periods', 'monthly_periods.id', '=', 'monthly_obligations.period_id')
             ->join('clients', 'clients.id', '=', 'monthly_obligations.client_id')
             ->join('companies', 'companies.id', '=', 'monthly_obligations.company_id')
@@ -909,21 +931,82 @@ final class ReceivablesService
             // "Empresa" cell.
             ->selectRaw(self::COMPANY_DISPLAY_NAME.' as company_display_name')
             ->selectRaw('(monthly_obligations.base_amount_cop + coalesce(('
-                .'select sum(oa.delta_cop) from obligation_adjustments oa '
-                .'where oa.obligation_id = monthly_obligations.id'
+                .self::adjustmentExpression($asOf)
                 .'), 0)) as effective_amount_cop')
             ->selectRaw('coalesce(('
-                .'select sum(pa.amount_cop) from payment_allocations pa '
-                .'inner join payments p on p.id = pa.payment_id '
-                .'where pa.obligation_id = monthly_obligations.id '
-                .'and pa.reversed_at is null and p.voided_at is null'
+                .self::paymentExpression($asOf)
                 .'), 0) as paid_amount_cop')
             // The balance spelled out rather than derived from the two columns beside
             // it. Postgres will not let a `having` or a `where` refer to a select
             // alias, and every filter on this screen needs the balance, so it is
             // written once here and the query above it becomes a derived table where
             // this name is a real column.
-            ->selectRaw('('.self::balanceExpression().') as balance_cop');
+            ->selectRaw('('.self::balanceExpression($asOf).') as balance_cop');
+
+        if ($asOf !== null) {
+            // An obligation did not exist before it was generated. The upper bound
+            // is exclusive on the next midnight so the whole reference day counts.
+            $query->where('monthly_obligations.generated_at', '<', $asOf->copy()->addDay()->startOfDay());
+        }
+
+        return $query;
+    }
+
+    /**
+     * Sum of the adjustments that existed as of a date, as SQL.
+     *
+     * A reversal is its own row with a negative delta, so summing only the rows
+     * created on or before the date is exactly right: a reversal recorded later
+     * had not happened yet, and is therefore correctly absent.
+     */
+    private static function adjustmentExpression(?Carbon $asOf): string
+    {
+        $window = $asOf === null
+            ? ''
+            : ' and oa.created_at < '.self::sqlLiteral($asOf->copy()->addDay()->startOfDay());
+
+        return 'select sum(oa.delta_cop) from obligation_adjustments oa '
+            .'where oa.obligation_id = monthly_obligations.id'.$window;
+    }
+
+    /**
+     * Sum of the payments that had been applied as of a date, as SQL.
+     *
+     * With no date, the current rule: every non-reversed, non-voided allocation.
+     * With a date, an allocation counts only if it had been created by then, its
+     * payment received by then, and neither reversed nor voided by then.
+     */
+    private static function paymentExpression(?Carbon $asOf): string
+    {
+        if ($asOf === null) {
+            return 'select sum(pa.amount_cop) from payment_allocations pa '
+                .'inner join payments p on p.id = pa.payment_id '
+                .'where pa.obligation_id = monthly_obligations.id '
+                .'and pa.reversed_at is null and p.voided_at is null';
+        }
+
+        $end = self::sqlLiteral($asOf->copy()->addDay()->startOfDay());
+        $receivedBy = self::sqlLiteral($asOf->copy()->endOfDay());
+
+        return 'select sum(pa.amount_cop) from payment_allocations pa '
+            .'inner join payments p on p.id = pa.payment_id '
+            .'where pa.obligation_id = monthly_obligations.id '
+            .'and pa.created_at < '.$end
+            .' and (pa.reversed_at is null or pa.reversed_at >= '.$end.')'
+            .' and (p.voided_at is null or p.voided_at >= '.$end.')'
+            .' and p.received_on <= '.$receivedBy;
+    }
+
+    /**
+     * A safe SQL timestamp literal from a Carbon value.
+     *
+     * The value is a `Carbon` the caller built, not raw user text, and a formatted
+     * timestamp cannot contain a quote, so there is nothing here for a string to
+     * escape into.
+     */
+    private static function sqlLiteral(Carbon $moment): string
+    {
+        return "'".$moment->format('Y-m-d H:i:s')."'";
     }
 
     /**
@@ -942,17 +1025,10 @@ final class ReceivablesService
      * reversed allocation is still a row, and counting it would leave a balance
      * that no longer matches the statement screen.
      */
-    private static function balanceExpression(): string
+    private static function balanceExpression(?Carbon $asOf = null): string
     {
-        return '(monthly_obligations.base_amount_cop + coalesce(('
-            .'select sum(oa.delta_cop) from obligation_adjustments oa '
-            .'where oa.obligation_id = monthly_obligations.id'
-            .'), 0)) - coalesce(('
-            .'select sum(pa3.amount_cop) from payment_allocations pa3 '
-            .'inner join payments p3 on p3.id = pa3.payment_id '
-            .'where pa3.obligation_id = monthly_obligations.id '
-            .'and pa3.reversed_at is null and p3.voided_at is null'
-            .'), 0)';
+        return '(monthly_obligations.base_amount_cop + coalesce(('.self::adjustmentExpression($asOf)
+            .'), 0)) - coalesce(('.self::paymentExpression($asOf).'), 0)';
     }
 
     /**

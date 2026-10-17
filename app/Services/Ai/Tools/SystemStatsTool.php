@@ -120,12 +120,19 @@ final class SystemStatsTool extends AbstractAiTool
         // The money figures are only present for a role that may read cartera.
         if ($user->can('receivables.view')) {
             $balances = $this->receivables->clientBalanceCounts($asOf);
+            $historical = (bool) ($balances['historical'] ?? false);
 
             $payload['receivables'] = [
                 'clients_with_debt' => $balances['clients_with_debt'],
                 'clients_with_partial_payments' => $balances['clients_with_partial_payments'],
                 'open_obligations' => $balances['open_obligations'],
                 'partially_paid_obligations' => $balances['partially_paid_obligations'],
+                'historical' => $historical,
+                // The model must not present a past figure and today's figure,
+                // which may differ, as if they were the same statement.
+                'basis' => $historical
+                    ? 'Reconstrucción a la fecha de corte: obligaciones generadas, ajustes y pagos aplicados hasta esa fecha.'
+                    : 'Estado actual de la cartera a hoy.',
             ];
         }
 

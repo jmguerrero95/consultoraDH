@@ -28,7 +28,18 @@ class AiConversation extends Model
         'user_id',
         'client_id',
         'title',
+        'contains_client_data',
     ];
+
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'contains_client_data' => 'boolean',
+        ];
+    }
 
     protected function user(): BelongsTo
     {
