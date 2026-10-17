@@ -6,7 +6,7 @@ import AppButton from '@/components/ui/AppButton.vue';
 import { ai } from '@/services/ai';
 import { useAuthStore } from '@/stores/auth';
 
-import type { AiProposal, AiStatusPayload } from '@/services/ai';
+import type { AiProposal, AiStatusPayload, AiToolResult } from '@/services/ai';
 
 /**
  * The assistant, available from every screen.
@@ -21,6 +21,13 @@ import type { AiProposal, AiStatusPayload } from '@/services/ai';
  * so a question asked here is the same question, with the same tools, proposals and
  * confirmation flow, as one asked on `/asistente`. The header links to that page for
  * the wider view.
+ *
+ * ## What survives a reload (BUG-020-R2)
+ *
+ * The panel remembers *which* conversation is open, not a copy of it. The id is
+ * the only thing kept in the browser; the messages are re-read from the server,
+ * so there is exactly one store of the conversation and a reload shows the real
+ * thread rather than a local echo that could have drifted from it.
  *
  * ## Two rules it inherits from the full screen
  *
@@ -37,15 +44,27 @@ const auth = useAuthStore();
 
 const canUse = computed(() => auth.can('ai.use'));
 
+/** The browser's own storage, and the only thing it is trusted with: a pointer. */
+const STORAGE_CONVERSATION = 'cdh.assistant.conversation';
+const STORAGE_OPEN = 'cdh.assistant.open';
+
 const open = ref(false);
+const fullscreen = ref(false);
 const status = ref<AiStatusPayload | null>(null);
 const statusLoaded = ref(false);
 
 interface ChatMessage {
+    id: number;
     role: 'user' | 'assistant';
     content: string;
     model: string | null;
+    /** A question the server refused: kept on screen, with a retry. */
+    failed?: boolean;
+    /** Read tools that were consulted to produce this answer. */
+    tools?: AiToolResult[];
 }
+
+let messageSeq = 0;
 
 const messages = ref<ChatMessage[]>([]);
 const proposals = ref<AiProposal[]>([]);
@@ -55,6 +74,20 @@ const error = ref<string | null>(null);
 const conversationId = ref<number | null>(null);
 const scroller = ref<HTMLElement | null>(null);
 const input = ref<HTMLInputElement | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
+
+/** A file attached to this conversation, and how far its ingest has got. */
+interface Attachment {
+    id: number;
+    name: string;
+    status: string;
+    progress: number;
+    error: string | null;
+}
+
+const attachments = ref<Attachment[]>([]);
+const attachmentTimers = new Map<number, number>();
+let restored = false;
 
 /**
  * BUG-019. The launcher is no longer gated on a successful status call. It used
@@ -90,6 +123,10 @@ const notice = computed<{ variant: 'danger' | 'warning'; message: string } | nul
         return { variant: 'warning', message: 'No hay ningún proveedor de IA configurado. Contacte al administrador.' };
     }
 
+    if (status.value.state === 'quota_limited') {
+        return { variant: 'warning', message: 'El proveedor de IA alcanzó su límite de uso. Puede reintentar en unos minutos.' };
+    }
+
     if (status.value.state === 'unavailable') {
         return { variant: 'warning', message: 'Los proveedores de IA están temporalmente indisponibles. Puede reintentar en unos minutos.' };
     }
@@ -107,6 +144,8 @@ const statusLabel = computed(() => {
             return 'Sin proveedor configurado';
         case 'unavailable':
             return 'No disponible ahora';
+        case 'quota_limited':
+            return 'Límite de uso alcanzado';
         case 'fallback':
             return `Respaldo${status.value.active_model ? ` · ${status.value.active_model}` : ''}`;
         default:
@@ -138,19 +177,69 @@ function toggle(): void {
 
 function close(): void {
     open.value = false;
+    fullscreen.value = false;
+}
+
+function toggleFullscreen(): void {
+    fullscreen.value = !fullscreen.value;
 }
 
 function newConversation(): void {
     conversationId.value = null;
     messages.value = [];
     proposals.value = [];
+    attachments.value = [];
     error.value = null;
     draft.value = '';
+    persistConversation();
     void nextTick(() => input.value?.focus());
 }
 
-async function send(): Promise<void> {
-    const question = draft.value.trim();
+/**
+ * Recover the conversation after a reload from the server, not from a local copy.
+ *
+ * The stored value is an id. The messages are always the server's, so the panel
+ * cannot show a thread that no longer exists or that has moved on.
+ */
+async function restoreConversation(): Promise<void> {
+    if (restored) {
+        return;
+    }
+
+    restored = true;
+
+    const stored = storedConversation();
+
+    if (stored === null) {
+        return;
+    }
+
+    conversationId.value = stored;
+
+    try {
+        const history = await ai.history(stored);
+
+        messages.value = history.messages
+            .filter((message) => message.role === 'user' || message.role === 'assistant')
+            .map((message) => ({
+                id: ++messageSeq,
+                role: message.role as 'user' | 'assistant',
+                content: message.content,
+                model: message.model,
+            }));
+
+        scrollToEnd();
+    } catch {
+        // The thread is gone, or belongs to someone else now. Start clean rather
+        // than show an error for something the person did not do.
+        conversationId.value = null;
+        messages.value = [];
+        persistConversation();
+    }
+}
+
+async function send(retryText?: string): Promise<void> {
+    const question = (retryText ?? draft.value).trim();
 
     if (question === '' || sending.value) {
         return;
@@ -158,32 +247,150 @@ async function send(): Promise<void> {
 
     sending.value = true;
     error.value = null;
-    draft.value = '';
-    messages.value = [...messages.value, { role: 'user', content: question, model: null }];
+
+    if (retryText === undefined) {
+        draft.value = '';
+        messages.value = [...messages.value, { id: ++messageSeq, role: 'user', content: question, model: null }];
+    } else {
+        // A retry reuses the bubble that failed rather than adding a duplicate.
+        messages.value = messages.value.map((message) =>
+            message.role === 'user' && message.failed && message.content === question ? { ...message, failed: false } : message,
+        );
+    }
+
     scrollToEnd();
 
     try {
         const turn = await ai.ask(question, conversationId.value);
 
         conversationId.value = turn.conversation_id;
+        persistConversation();
         proposals.value = turn.proposals;
 
         // Only append when the server actually produced text: an empty bubble is
         // the failure this widget must not pretend is an answer.
         if (turn.reply && turn.reply.trim() !== '') {
-            messages.value = [...messages.value, { role: 'assistant', content: turn.reply, model: turn.model }];
+            messages.value = [
+                ...messages.value,
+                { id: ++messageSeq, role: 'assistant', content: turn.reply, model: turn.model, tools: turn.tools ?? [] },
+            ];
         } else if (turn.proposals.length === 0) {
+            markLastUserFailed();
             error.value = 'El asistente no devolvió una respuesta. Intente reformular la pregunta.';
         }
 
         scrollToEnd();
     } catch (e) {
-        // Keep the question so a retry does not cost the person their typing.
-        draft.value = question;
+        // Keep the question on screen, flagged, so a retry does not cost the
+        // person their typing.
+        markLastUserFailed();
         error.value = readError(e, 'No fue posible completar la consulta.');
     } finally {
         sending.value = false;
     }
+}
+
+function markLastUserFailed(): void {
+    const next = [...messages.value];
+
+    for (let index = next.length - 1; index >= 0; index -= 1) {
+        if (next[index].role === 'user') {
+            next[index] = { ...next[index], failed: true };
+
+            break;
+        }
+    }
+
+    messages.value = next;
+}
+
+function retry(message: ChatMessage): void {
+    void send(message.content);
+}
+
+/** A conversation must exist before a file can belong to it. */
+async function ensureConversation(): Promise<number> {
+    if (conversationId.value !== null) {
+        return conversationId.value;
+    }
+
+    const opened = await ai.openConversation();
+    conversationId.value = opened.conversation_id;
+    persistConversation();
+
+    return opened.conversation_id;
+}
+
+async function onFileSelected(event: Event): Promise<void> {
+    const target = event.target as HTMLInputElement;
+    const file = target.files?.[0];
+
+    // Reset the input so selecting the same file twice still fires `change`.
+    target.value = '';
+
+    if (!file) {
+        return;
+    }
+
+    error.value = null;
+
+    try {
+        const conversation = await ensureConversation();
+        const { task } = await ai.uploadTask(file, conversation);
+
+        attachments.value = [
+            ...attachments.value,
+            { id: task.id, name: task.name ?? file.name, status: task.status, progress: task.progress ?? 0, error: null },
+        ];
+
+        if (!open.value) {
+            open.value = true;
+        }
+
+        pollAttachment(task.id);
+    } catch (e) {
+        error.value = readError(e, 'No fue posible adjuntar el archivo.');
+    }
+}
+
+/**
+ * Follow an upload until it finishes.
+ *
+ * A polling loop rather than a websocket: the same task endpoint the full screen
+ * uses, and the result is on the server, so closing the panel does not lose it.
+ */
+function pollAttachment(id: number): void {
+    const tick = async (): Promise<void> => {
+        try {
+            const { task } = await ai.task(id);
+
+            attachments.value = attachments.value.map((attachment) =>
+                attachment.id === id
+                    ? { ...attachment, status: task.status, progress: task.progress ?? attachment.progress, error: task.error }
+                    : attachment,
+            );
+
+            if (task.finished) {
+                attachmentTimers.delete(id);
+
+                return;
+            }
+        } catch {
+            // A transient failure: leave the last known state and stop polling
+            // rather than loop against an endpoint that is refusing.
+            attachmentTimers.delete(id);
+
+            return;
+        }
+
+        attachmentTimers.set(id, window.setTimeout(() => void tick(), 1500));
+    };
+
+    void tick();
+}
+
+function isFinishedStatus(state: string): boolean {
+    return state === 'succeeded' || state === 'failed' || state === 'cancelled';
 }
 
 async function confirmProposal(id: number): Promise<void> {
@@ -236,8 +443,58 @@ function describeArguments(arguments_: Record<string, unknown>): string {
 }
 
 function onKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape' && open.value) {
-        close();
+    if (event.key !== 'Escape' || !open.value) {
+        return;
+    }
+
+    // Escape leaves full screen first, then closes: a person in full screen who
+    // presses Escape usually means to go back one step, not to lose the thread.
+    if (fullscreen.value) {
+        fullscreen.value = false;
+
+        return;
+    }
+
+    close();
+}
+
+function persistConversation(): void {
+    try {
+        if (conversationId.value === null) {
+            window.localStorage.removeItem(STORAGE_CONVERSATION);
+        } else {
+            window.localStorage.setItem(STORAGE_CONVERSATION, String(conversationId.value));
+        }
+    } catch {
+        // Storage can be unavailable (private mode, policy). The panel still
+        // works for this session; it just will not reopen the thread.
+    }
+}
+
+function persistOpen(): void {
+    try {
+        window.localStorage.setItem(STORAGE_OPEN, open.value ? '1' : '0');
+    } catch {
+        // See above.
+    }
+}
+
+function storedConversation(): number | null {
+    try {
+        const raw = window.localStorage.getItem(STORAGE_CONVERSATION);
+        const value = raw === null ? Number.NaN : Number(raw);
+
+        return Number.isInteger(value) && value > 0 ? value : null;
+    } catch {
+        return null;
+    }
+}
+
+function storedOpen(): boolean {
+    try {
+        return window.localStorage.getItem(STORAGE_OPEN) === '1';
+    } catch {
+        return false;
     }
 }
 
@@ -246,12 +503,20 @@ onMounted(() => {
     document.addEventListener('keydown', onKeydown);
 
     if (canUse.value) {
+        open.value = storedOpen();
         void loadStatus();
+        void restoreConversation();
     }
 });
 
 onUnmounted(() => {
     document.removeEventListener('keydown', onKeydown);
+
+    for (const handle of attachmentTimers.values()) {
+        window.clearTimeout(handle);
+    }
+
+    attachmentTimers.clear();
 });
 
 // BUG-019. The authenticated user — and with it the permission list — can
@@ -262,12 +527,22 @@ onUnmounted(() => {
 // Loading is idempotent: once a status has been fetched, later transitions do
 // not fetch again.
 watch(canUse, (value) => {
-    if (value && !statusLoaded.value) {
+    if (!value) {
+        return;
+    }
+
+    if (!statusLoaded.value) {
         void loadStatus();
+    }
+
+    if (!restored) {
+        void restoreConversation();
     }
 });
 
 watch(open, (value) => {
+    persistOpen();
+
     if (!value) {
         return;
     }
@@ -300,6 +575,7 @@ watch(open, (value) => {
             v-if="open"
             id="cdh-assistant-panel"
             class="cdh-assistant__panel"
+            :class="{ 'cdh-assistant__panel--full': fullscreen }"
             role="dialog"
             aria-modal="false"
             aria-label="Asistente de IA"
@@ -318,14 +594,23 @@ watch(open, (value) => {
                         <i class="bi bi-plus-lg" aria-hidden="true" />
                         <span class="visually-hidden">Nueva conversación</span>
                     </button>
+                    <button
+                        type="button"
+                        class="cdh-assistant__icon-btn"
+                        :title="fullscreen ? 'Salir de pantalla completa' : 'Pantalla completa'"
+                        @click="toggleFullscreen"
+                    >
+                        <i class="bi" :class="fullscreen ? 'bi-fullscreen-exit' : 'bi-arrows-fullscreen'" aria-hidden="true" />
+                        <span class="visually-hidden">{{ fullscreen ? 'Salir de pantalla completa' : 'Pantalla completa' }}</span>
+                    </button>
                     <RouterLink
                         class="cdh-assistant__icon-btn"
                         :to="{ name: 'asistente' }"
-                        title="Abrir en pantalla completa"
+                        title="Abrir en la página del asistente"
                         @click="close"
                     >
-                        <i class="bi bi-arrows-fullscreen" aria-hidden="true" />
-                        <span class="visually-hidden">Abrir en pantalla completa</span>
+                        <i class="bi bi-box-arrow-up-right" aria-hidden="true" />
+                        <span class="visually-hidden">Abrir en la página del asistente</span>
                     </RouterLink>
                     <button type="button" class="cdh-assistant__icon-btn" title="Cerrar" @click="close">
                         <i class="bi bi-x-lg" aria-hidden="true" />
@@ -342,14 +627,28 @@ watch(open, (value) => {
             />
 
             <div ref="scroller" class="cdh-assistant__body">
-                <div v-if="messages.length === 0 && proposals.length === 0" class="cdh-assistant__empty">
+                <div v-if="messages.length === 0 && proposals.length === 0 && attachments.length === 0" class="cdh-assistant__empty">
                     <i class="bi bi-chat-square-text" aria-hidden="true" />
                     <p>Pregúntame lo que necesites. Puedo consultar la cartera, los clientes y los reportes.</p>
                 </div>
 
+                <div v-if="attachments.length" class="cdh-assistant__attachments">
+                    <div v-for="attachment in attachments" :key="attachment.id" class="cdh-assistant__attachment">
+                        <i class="bi bi-paperclip" aria-hidden="true" />
+                        <span class="cdh-assistant__attachment-name">{{ attachment.name }}</span>
+                        <span v-if="!isFinishedStatus(attachment.status)" class="cdh-assistant__attachment-state">
+                            {{ attachment.progress }}%
+                        </span>
+                        <span v-else-if="attachment.status === 'failed'" class="cdh-assistant__attachment-state cdh-assistant__attachment-state--failed">
+                            No se pudo procesar
+                        </span>
+                        <i v-else class="bi bi-check2-circle cdh-assistant__attachment-ok" aria-hidden="true" />
+                    </div>
+                </div>
+
                 <div
-                    v-for="(message, index) in messages"
-                    :key="index"
+                    v-for="message in messages"
+                    :key="message.id"
                     class="cdh-assistant__message"
                     :class="`cdh-assistant__message--${message.role}`"
                 >
@@ -359,6 +658,18 @@ watch(open, (value) => {
                     <span v-if="message.role === 'assistant' && message.model" class="cdh-assistant__meta">
                         {{ message.model }}
                     </span>
+                    <button
+                        v-if="message.role === 'user' && message.failed"
+                        type="button"
+                        class="cdh-assistant__retry"
+                        @click="retry(message)"
+                    >
+                        <i class="bi bi-arrow-clockwise" aria-hidden="true" /> Reintentar
+                    </button>
+                    <div v-if="message.tools && message.tools.length" class="cdh-assistant__tools">
+                        <span class="cdh-assistant__tools-title">Datos consultados:</span>
+                        <span v-for="tool in message.tools" :key="tool.tool" class="cdh-assistant__tool-chip">{{ tool.tool }}</span>
+                    </div>
                 </div>
 
                 <div v-for="proposal in proposals" :key="proposal.id" class="cdh-assistant__proposal">
@@ -388,7 +699,24 @@ watch(open, (value) => {
 
             <AppAlert v-if="error" variant="danger" :message="error" class="cdh-assistant__alert" />
 
-            <form class="cdh-assistant__composer" @submit.prevent="send">
+            <form class="cdh-assistant__composer" @submit.prevent="send()">
+                <button
+                    type="button"
+                    class="cdh-assistant__attach"
+                    title="Adjuntar archivo"
+                    :disabled="sending"
+                    @click="fileInput?.click()"
+                >
+                    <i class="bi bi-paperclip" aria-hidden="true" />
+                    <span class="visually-hidden">Adjuntar archivo</span>
+                </button>
+                <input
+                    ref="fileInput"
+                    type="file"
+                    class="visually-hidden"
+                    accept=".txt,.csv,.md,.pdf,.docx,.xlsx,.json"
+                    @change="onFileSelected"
+                />
                 <input
                     ref="input"
                     v-model="draft"
@@ -445,6 +773,11 @@ watch(open, (value) => {
     border-radius: 0.75rem;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
     overflow: hidden;
+}
+
+.cdh-assistant__panel--full {
+    width: min(64rem, calc(100vw - 2rem));
+    height: calc(100vh - 2rem);
 }
 
 .cdh-assistant__header {
@@ -514,6 +847,39 @@ watch(open, (value) => {
     font-size: 2rem;
 }
 
+.cdh-assistant__attachments {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.cdh-assistant__attachment {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.78rem;
+    color: var(--cdh-text-muted, #6b7280);
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.55rem;
+}
+
+.cdh-assistant__attachment-name {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cdh-assistant__attachment-state--failed {
+    color: #b42318;
+}
+
+.cdh-assistant__attachment-ok {
+    color: #067647;
+}
+
 .cdh-assistant__message {
     display: flex;
     flex-direction: column;
@@ -551,6 +917,38 @@ watch(open, (value) => {
     font-size: 0.7rem;
     color: var(--cdh-text-muted, #6b7280);
     margin-top: 0.15rem;
+}
+
+.cdh-assistant__retry {
+    margin-top: 0.25rem;
+    border: 1px solid #b42318;
+    background: transparent;
+    color: #b42318;
+    border-radius: 0.4rem;
+    font-size: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    cursor: pointer;
+}
+
+.cdh-assistant__tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    margin-top: 0.25rem;
+}
+
+.cdh-assistant__tools-title {
+    font-size: 0.7rem;
+    color: var(--cdh-text-muted, #6b7280);
+}
+
+.cdh-assistant__tool-chip {
+    font-size: 0.68rem;
+    background: #eef2ff;
+    color: #3538cd;
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
 }
 
 .cdh-assistant__proposal {
@@ -599,6 +997,20 @@ watch(open, (value) => {
     background: #fff;
 }
 
+.cdh-assistant__attach {
+    border: 1px solid #d0d5dd;
+    background: #fff;
+    color: var(--cdh-text-muted, #6b7280);
+    border-radius: 0.5rem;
+    padding: 0 0.6rem;
+    cursor: pointer;
+}
+
+.cdh-assistant__attach:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 @media (max-width: 576px) {
     .cdh-assistant {
         right: 0.75rem;
@@ -609,6 +1021,11 @@ watch(open, (value) => {
     .cdh-assistant__panel {
         width: 100%;
         height: min(34rem, calc(100vh - 5rem));
+    }
+
+    .cdh-assistant__panel--full {
+        width: 100%;
+        height: calc(100vh - 1.5rem);
     }
 }
 </style>

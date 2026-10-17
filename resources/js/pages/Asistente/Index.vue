@@ -211,6 +211,8 @@ const availability = computed(() => {
             return 'No hay ningún proveedor de IA configurado.';
         case 'unavailable':
             return 'Los proveedores de IA no están disponibles en este momento; se reintentará automáticamente.';
+        case 'quota_limited':
+            return 'El proveedor de IA alcanzó su límite de uso. Puede reintentar en unos minutos.';
         case 'fallback':
             return `Operativo con el proveedor de respaldo${model.value !== '—' ? ` (${model.value})` : ''}.`;
         default:

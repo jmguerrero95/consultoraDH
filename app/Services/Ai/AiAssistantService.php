@@ -6,6 +6,7 @@ namespace App\Services\Ai;
 
 use App\Domain\Ai\AiMessage;
 use App\Domain\Ai\AiResponse;
+use App\Domain\Ai\AiToolDefinition;
 use App\Domain\Documents\DocumentRetriever;
 use App\Models\AiActionProposal;
 use App\Models\AiConversation;
@@ -81,6 +82,7 @@ final class AiAssistantService
         private readonly AiToolRegistry $registry,
         private readonly AiProviderResolver $resolver,
         private readonly DocumentRetriever $documents,
+        private readonly AiTaskRouter $router,
     ) {}
 
     public function ask(AiConversation $conversation, string $question, User $user): array
@@ -108,11 +110,22 @@ final class AiAssistantService
             $messages[] = AiMessage::user($this->documentContext($passages));
         }
 
-        $toolDefinitions = $this->registry->definitions();
+        // Which tools this turn may offer, from what was asked. A general
+        // question is offered none, so a free model is not handed eighteen
+        // schemas it will not use; a system question is offered only the ones
+        // that concern it. The router never turns a system question into general
+        // chat — see `AiTaskRouter`.
+        $routing = $this->router->route($question, $passages !== []);
+        $toolDefinitions = $routing['tools'];
 
-        $result = $this->resolver->complete($messages, $toolDefinitions);
+        // One budget for the whole turn, shared by every provider round, so a
+        // tool-using question that needs three calls still finishes inside the
+        // proxy's limit instead of spending the per-call timeout three times.
+        $deadline = microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110));
 
-        return $this->processResult($result, $conversation, $user, $question, $messages);
+        $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $deadline);
+
+        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $deadline);
     }
 
     /**
@@ -265,8 +278,11 @@ final class AiAssistantService
     /**
      * Process the LLM result: extract tool calls, execute read tools in a loop,
      * produce proposals for writes, and build the final reply.
+     *
+     * @param  list<AiMessage>  $messages
+     * @param  list<AiToolDefinition>  $toolDefinitions  the same subset for every round
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, float $deadline): array
     {
         $proposals = [];
         $toolResults = [];
@@ -408,7 +424,7 @@ final class AiAssistantService
                 // fabricated assistant message in the conversation that a later
                 // turn would be sent as legitimate history, so it propagates and
                 // nothing is persisted for this turn.
-                $currentResult = $this->resolver->complete($messages, $this->registry->definitions());
+                $currentResult = $this->resolver->complete($messages, $toolDefinitions, null, null, $deadline);
             } else {
                 // No tool calls, we're done
                 $reply = $content;

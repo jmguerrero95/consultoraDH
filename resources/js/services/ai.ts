@@ -60,24 +60,67 @@ export interface AiTurnPayload {
     tools?: AiToolResult[];
 }
 
+/**
+ * The health of one model in the pool (BUG-020-R2).
+ *
+ * Safe metadata only: which model, which host, whether it answered recently and
+ * how fast. It carries no prompt, no document and no credential.
+ */
+export interface AiModelHealth {
+    model: string;
+    provider: string;
+    priority: number;
+    tools: boolean;
+    /** `ok`, `degraded`, `unchecked` or `quota_limited`. */
+    state: string;
+    cooldown_seconds: number;
+    fails: number;
+    last_kind: string | null;
+    last_ok_seconds_ago: number | null;
+    last_latency_ms: number | null;
+}
+
+/** One provider attempt, kept so a failure can be explained rather than guessed. */
+export interface AiDiagnostic {
+    at: number;
+    task: string | null;
+    model: string;
+    provider: string;
+    outcome: 'ok' | 'failed';
+    kind: string | null;
+    http: number | null;
+    scope: string | null;
+    detail: string | null;
+    latency_ms: number;
+}
+
 export interface AiStatusPayload {
     ai_enabled: boolean;
     /**
-     * Which provider is answering right now (BUG-017).
+     * What the pool can do right now (BUG-017, widened by BUG-020-R2).
      *
-     * `none` means nothing is configured; `available` means the primary is up;
-     * `fallback` means the primary is cooling down after a failure and the
-     * fallback is covering; `unavailable` means every provider is cooling down.
-     * The value changes with reality, unlike the old `configured` booleans, which
-     * were true for a provider that had been failing for an hour.
+     * `none` means nothing is configured; `available` means a model that recently
+     * answered is usable; `fallback` means the first choice is down and a backup
+     * is carrying the turn; `unchecked` means nothing has been tried yet this
+     * process; `quota_limited` means the provider is refusing on quota, which no
+     * amount of model-switching within the same account fixes; `unavailable`
+     * means every candidate is cooling down. The value changes with reality,
+     * unlike the old `configured` booleans, which stayed true for a provider that
+     * had been failing for an hour.
      */
-    state: 'none' | 'available' | 'fallback' | 'unavailable';
+    state: 'none' | 'available' | 'fallback' | 'unchecked' | 'quota_limited' | 'unavailable';
     /** Whether a question would be answered at all. */
     available: boolean;
     /** The model that would answer now, or null. */
     active_model: string | null;
+    /** Which model actually answered last, if any. */
+    last_result?: { model: string; provider: string; at: number } | null;
     /** Seconds each slot is still cooling down for, keyed by slot name. */
     cooldowns: Record<string, number>;
+    /** Every candidate, in the order the resolver would try it. */
+    models?: AiModelHealth[];
+    /** The most recent attempts, newest first. */
+    diagnostics?: AiDiagnostic[];
     primary: { configured: boolean; model: string | null };
     fallback: { configured: boolean; model: string | null };
     timeout_seconds: number;
@@ -216,6 +259,11 @@ export const ai = {
      */
     tasks(): Promise<{ tasks: AiTaskPayload[] }> {
         return request<{ tasks: AiTaskPayload[] }>('GET', '/api/ai/tasks');
+    },
+
+    /** One task, for polling its progress after a reload or a reconnect. */
+    task(id: number): Promise<{ task: AiTaskPayload }> {
+        return request<{ task: AiTaskPayload }>('GET', `/api/ai/tasks/${id}`);
     },
 
     /**

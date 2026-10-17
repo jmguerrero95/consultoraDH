@@ -94,6 +94,14 @@ return Application::configure(dirname(__DIR__))
             ->everyMinute()
             ->withoutOverlapping()
             ->onOneServer();
+
+        // A07: keep the free-model catalogue fresh without a request ever
+        // paying for the download. The pool reads the cached copy; this is the
+        // only thing that refreshes it.
+        $schedule->command('ai:models --refresh')
+            ->everySixHours()
+            ->withoutOverlapping()
+            ->onOneServer();
     })
     ->withMiddleware(function (Middleware $middleware): void {
         // Baseline security headers on every dynamic response.

@@ -36,10 +36,15 @@ interface CloudAiProvider
     /**
      * Ask the model to continue the conversation.
      *
+     * `$timeoutSeconds` bounds this single call. It is passed by the resolver so
+     * that a turn's remaining wall-clock budget — not merely a fixed per-call
+     * timeout — decides how long the provider may take, which is what keeps a
+     * slow free model from pushing the whole request past the proxy's limit.
+     *
      * @param  list<AiMessage>  $messages
      * @param  list<AiToolDefinition>  $tools
      *
      * @throws AiProviderException on any failure, retryable or not
      */
-    public function complete(array $messages, array $tools = []): AiResponse;
+    public function complete(array $messages, array $tools = [], ?int $timeoutSeconds = null): AiResponse;
 }

@@ -93,12 +93,21 @@ final readonly class AiMessage
 
         if ($this->role === self::ROLE_ASSISTANT && $this->toolCalls !== null) {
             $wire['tool_calls'] = array_map(function (array $call): array {
+                // `arguments` must be a JSON *object* string, not a JSON array.
+                // A call with no arguments decodes to `[]`, which encoded as
+                // `"[]"` and was rejected by the provider — with the same 400 for
+                // every candidate, because the payload, not the model, was wrong.
+                // Casting the top level to an object makes `[]` become `{}` while
+                // nested arrays stay arrays.
                 return [
                     'id' => $call['id'] ?? '',
                     'type' => 'function',
                     'function' => [
                         'name' => $call['name'],
-                        'arguments' => json_encode($call['arguments'] ?? [], JSON_UNESCAPED_SLASHES),
+                        'arguments' => json_encode(
+                            (object) ($call['arguments'] ?? []),
+                            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+                        ),
                     ],
                 ];
             }, $this->toolCalls);

@@ -8,110 +8,196 @@ use App\Domain\Ai\AiMessage;
 use App\Domain\Ai\AiResponse;
 use App\Domain\Ai\AiToolDefinition;
 use Illuminate\Support\Facades\Cache;
+use Throwable;
 
 /**
- * Chooses which provider answers, in what order, and how often to try again.
+ * Chooses which model answers, in what order, and remembers what has worked.
  *
- * ## An ordered, bounded list
+ * ## From two slots to a pool
  *
- * The candidates are the configured slots, in order: primary first, then the
- * fallback. There is no scoring and no round robin — the operator says which host
- * is expected to answer and which one covers for it, and that is the whole policy.
- * What the resolver adds is a bound: one turn makes at most
- * `ai.max_attempts` provider calls, so a provider that is down cannot turn a
- * single question into an unbounded sequence of timeouts.
+ * The candidates are no longer "primary then fallback". They are every model the
+ * deployment may use — the two slots for backward compatibility, plus an
+ * optional explicit pool, plus the free OpenRouter models the catalogue knows
+ * about — filtered by the capabilities the turn actually needs and ordered by
+ * what has recently worked.
  *
- * ## Cooldown: a provider that just failed is left alone for a while
+ * ## Ordering is adaptive, not round-robin
  *
- * When a slot fails a **retryable** call — a timeout, a transport error, a 429 or
- * a 5xx — it is put in a short cooldown (`ai.cooldown_seconds`). The next turn
- * skips it and goes straight to the next candidate. This is what keeps a burst of
- * questions from each paying the full timeout against a host that is already
- * known to be failing, and it is why the status endpoint can say, truthfully,
- * which provider is answering right now. A successful call clears the cooldown at
- * once; the slot is not "punished" beyond the moment it actually fails.
+ * A model that answered a moment ago goes first; a model that has never been
+ * tried goes next, in configured order; a model that has been failing goes last.
+ * That is the difference that matters on a free tier: the primary that has timed
+ * out five times does not get the first sixty seconds of every question just
+ * because its cooldown expired. It is retried — progressively, after a longer
+ * pause each time — but behind the models that are answering.
  *
- * ## A rejected credential is not an outage
+ * ## Failures are classified and remembered, not just caught
  *
- * A 401 or a request the provider called malformed is **not** retried against the
- * fallback and does **not** enter cooldown. The fallback has its own credential, so
- * trying it would replace a clear "this key is wrong" with a second attempt that is
- * also going to fail, and would hide the misconfiguration behind another provider's
- * answer. Those failures propagate as they are.
+ * A rejected credential disables the whole endpoint (every model behind that
+ * key), a global rate limit does the same for as long as the provider said, a
+ * missing model is parked for hours, and a timeout cools only its own model down
+ * briefly. None of those are "try the next model and hope".
  *
- * The cooldown is kept in the application cache, so it is shared across the
- * workers that answer requests rather than living in one process's memory.
+ * ## The bound
+ *
+ * One turn makes at most `ai.max_attempts` provider calls, so a pool of sixteen
+ * models cannot turn a single question into sixteen timeouts.
  */
 class AiProviderResolver
 {
+    private const DIAGNOSTICS_KEY = 'ai.diagnostics.recent';
+
+    private const LAST_RESULT_KEY = 'ai.last_result';
+
+    public function __construct(
+        private readonly ModelPool $pool,
+        private readonly AiModelHealth $health,
+    ) {}
+
     /**
      * @param  list<AiToolDefinition>  $tools
      * @param  list<AiMessage>  $messages
+     * @param  string|null  $task  a safe label for diagnostics ('chat', 'data', ...)
+     * @param  float|null  $deadline  unix timestamp by which the whole turn must finish
      *
      * @throws AiProviderException when no candidate can answer
      */
-    public function complete(array $messages, array $tools = [], ?CloudAiProvider $preferred = null): AiResponse
-    {
-        $candidates = $this->candidates($preferred);
+    public function complete(
+        array $messages,
+        array $tools = [],
+        ?CloudAiProvider $preferred = null,
+        ?string $task = null,
+        ?float $deadline = null,
+    ): AiResponse {
+        $required = $tools !== [] ? ['chat', 'tools'] : ['chat'];
+
+        $candidates = $this->ordered($this->pool->supporting($required), $preferred);
 
         if ($candidates === []) {
-            throw AiProviderException::notConfigured();
+            throw $this->pool->all() === []
+                ? AiProviderException::notConfigured()
+                : AiProviderException::unavailable(
+                    $tools !== []
+                        ? 'No hay ningún modelo configurado que admita herramientas en este momento.'
+                        : 'No hay ningún modelo de IA configurado y disponible.'
+                );
         }
 
-        $maxAttempts = max(1, (int) config('ai.max_attempts', count($candidates)));
+        // The turn's wall-clock budget. A free model can be slow, and several of
+        // them in a row must still finish inside the proxy's own limit, so the
+        // budget — not a fixed per-call timeout — is what bounds the turn.
+        $deadline ??= microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110));
+
+        $maxAttempts = max(1, (int) config('ai.max_attempts', 4));
+        $configuredTimeout = max(3, (int) config('ai.timeout_seconds', 30));
         $attempts = 0;
         $lastFailure = null;
-        $skippedForCooldown = 0;
+        $skipped = 0;
+        $skippedRateLimited = 0;
+        $outOfTime = false;
 
-        foreach ($candidates as $provider) {
+        foreach ($candidates as $candidate) {
             if ($attempts >= $maxAttempts) {
                 break;
             }
 
-            // A slot that failed a moment ago is skipped rather than tried again,
-            // which is the whole point of the cooldown.
-            if ($this->inCooldown($provider->name())) {
-                $skippedForCooldown++;
+            $remaining = (int) floor($deadline - microtime(true));
+
+            if ($remaining < 3) {
+                $outOfTime = true;
+
+                break;
+            }
+
+            if ($this->health->endpointDisabled($candidate)) {
+                $skipped++;
+
+                continue;
+            }
+
+            if ($this->health->endpointRateLimited($candidate)) {
+                $skipped++;
+                $skippedRateLimited++;
+
+                continue;
+            }
+
+            if ($this->health->inCooldown($candidate)) {
+                $skipped++;
 
                 continue;
             }
 
             $attempts++;
+            $startedAt = microtime(true);
+
+            // Never wait longer than the turn has left, and never longer than the
+            // operator's per-attempt ceiling.
+            $attemptTimeout = max(3, min($configuredTimeout, $remaining));
 
             try {
-                $response = $provider->complete($messages, $tools);
-
-                // It answered, so whatever cooldown it carried is over.
-                $this->clearCooldown($provider->name());
-
-                return $response;
+                $response = $this->providerFor($candidate)->complete($messages, $tools, $attemptTimeout);
             } catch (AiProviderException $e) {
+                $latency = $this->latenciesFrom($startedAt);
+                $this->health->recordFailure($candidate, $e, $latency);
+                $this->recordDiagnostic($task, $candidate, $e, $latency, 'failed');
+
                 $lastFailure = $e;
 
-                // A wrong credential or a malformed request is not a provider
-                // outage: it will fail the same way on the next try, and trying
-                // the fallback would mask a misconfiguration.
                 if (! $e->retryable) {
                     throw $e;
                 }
 
-                $this->markCooldown($provider->name());
+                continue;
+            } catch (Throwable $e) {
+                // A failure this application did not classify is still that one
+                // model's problem: it is cooled down and the turn moves on rather
+                // than dying because a candidate returned something unexpected.
+                $converted = AiProviderException::unavailable($e::class.': '.$e->getMessage());
+                $latency = $this->latenciesFrom($startedAt);
+                $this->health->recordFailure($candidate, $converted, $latency);
+                $this->recordDiagnostic($task, $candidate, $converted, $latency, 'failed');
+                $lastFailure = $converted;
+
+                continue;
             }
+
+            $latency = $this->latenciesFrom($startedAt);
+            $this->health->recordSuccess($candidate, $latency);
+            $this->recordDiagnostic($task, $candidate, null, $latency, 'ok');
+            $this->rememberLastResult($candidate);
+
+            return $response;
         }
 
         if ($lastFailure !== null) {
             throw $lastFailure;
         }
 
-        // Every candidate was in cooldown and none was attempted. Reported as a
-        // temporary unavailability, not as a configuration problem: the slots are
-        // configured, they are just cooling down from a recent failure.
+        // Nothing was attempted: every candidate was cooling down, disabled or
+        // rate limited, or the turn's budget was already spent. Reported as
+        // temporary unavailability, not as a configuration problem.
+        if ($outOfTime) {
+            throw AiProviderException::unavailable(
+                'La consulta agotó el tiempo disponible antes de que un modelo respondiera.'
+            );
+        }
+
+        if ($skippedRateLimited > 0) {
+            throw AiProviderException::rateLimited(
+                'La cuota de los proveedores de IA está agotada temporalmente'
+                .($skipped > 0 ? " ({$skipped} en espera)." : '.')
+            );
+        }
+
         throw AiProviderException::unavailable(
-            'Todos los proveedores de IA están temporalmente en espera tras fallos recientes'
-            .($skippedForCooldown > 0 ? " ({$skippedForCooldown} en espera)." : '.')
+            'Todos los modelos de IA están temporalmente en espera tras fallos recientes'
+            .($skipped > 0 ? " ({$skipped} en espera)." : '.')
         );
     }
 
+    /**
+     * The backward-compatible primary slot, as a provider.
+     */
     public function primary(): CloudAiProvider
     {
         return new OpenAiCompatibleProvider($this->slot('primary'), 'primary');
@@ -122,87 +208,88 @@ class AiProviderResolver
         return new OpenAiCompatibleProvider($this->slot('fallback'), 'fallback');
     }
 
-    /**
-     * Whether the assistant can answer at all.
-     */
     public function anyConfigured(): bool
     {
-        return $this->primary()->isConfigured() || $this->fallback()->isConfigured();
+        return $this->pool->all() !== [];
     }
 
     /**
-     * Which provider would answer a question asked right now (BUG-017).
+     * Which state the assistant is in, from configuration and real recent health.
      *
-     * `none`        — nothing is configured.
-     * `available`   — the primary is configured and not cooling down.
-     * `fallback`    — the primary is unusable right now and the fallback is not.
-     * `unavailable` — providers exist but all of them are cooling down.
-     *
-     * No provider is contacted to answer this: it is read from configuration and
-     * the cooldown cache, so asking the question costs nothing.
+     * `none`             — nothing is configured.
+     * `available`        — a model that recently answered is usable now.
+     * `fallback`         — the first candidate is unusable but another is not.
+     * `unchecked`        — configured, usable, but no recent proof it answers.
+     * `quota_limited`    — every usable candidate is behind a provider quota wall.
+     * `unavailable`      — configured but every candidate is cooling down.
      */
     public function state(): string
     {
-        $primary = $this->primary();
-        $fallback = $this->fallback();
+        $candidates = $this->pool->all();
 
-        if (! $primary->isConfigured() && ! $fallback->isConfigured()) {
+        if ($candidates === []) {
             return 'none';
         }
 
-        $primaryUsable = $primary->isConfigured() && ! $this->inCooldown($primary->name());
-        $fallbackUsable = $fallback->isConfigured() && ! $this->inCooldown($fallback->name());
+        $ordered = $this->ordered($candidates);
 
-        if ($primaryUsable) {
-            return 'available';
+        $usable = array_values(array_filter(
+            $ordered,
+            fn (ModelCandidate $c): bool => ! $this->blocked($c),
+        ));
+
+        if ($usable === []) {
+            foreach ($candidates as $candidate) {
+                if ($this->health->endpointRateLimited($candidate)) {
+                    return 'quota_limited';
+                }
+            }
+
+            return 'unavailable';
         }
 
-        if ($fallbackUsable) {
-            return 'fallback';
+        $topUsable = ! $this->blocked($ordered[0]);
+        $firstUsable = $usable[0];
+
+        if ($this->health->recentSuccess($firstUsable)) {
+            return $topUsable ? 'available' : 'fallback';
         }
 
-        return 'unavailable';
+        return $topUsable ? 'unchecked' : 'fallback';
     }
 
     /**
-     * The model that would answer now, or null when none can.
+     * The model that would answer a question asked right now, or null.
      */
     public function activeModel(): ?string
     {
-        $primary = $this->primary();
-        $fallback = $this->fallback();
+        $ordered = $this->ordered($this->pool->all());
 
-        if ($primary->isConfigured() && ! $this->inCooldown($primary->name())) {
-            return $primary->model();
+        foreach ($ordered as $candidate) {
+            if (! $this->blocked($candidate)) {
+                return $candidate->model;
+            }
         }
 
-        if ($fallback->isConfigured() && ! $this->inCooldown($fallback->name())) {
-            return $fallback->model();
-        }
-
-        return null;
+        // Nothing is usable right now: still name the model that answered last,
+        // so the interface can say what was working rather than nothing at all.
+        return $this->lastResult()['model'] ?? null;
     }
 
     /**
-     * How many seconds each slot is still cooling down for, keyed by slot name.
-     *
-     * The stored value is cast rather than checked with `is_int`: the cache store
-     * configured here is Redis, and Redis returns every value as a string, so an
-     * `is_int()` test was always false and the cooldown was silently never
-     * applied — the mechanism was there and had no effect.
+     * How many seconds each model is still cooling down for, keyed by label.
      *
      * @return array<string, int>
      */
     public function cooldowns(): array
     {
         $remaining = [];
-        $now = now()->timestamp;
 
-        foreach (['primary', 'fallback'] as $name) {
-            $until = (int) Cache::get($this->cooldownKey($name), 0);
+        foreach ($this->pool->all() as $candidate) {
+            $seconds = $this->health->cooldownRemaining($candidate);
 
-            if ($until > $now) {
-                $remaining[$name] = $until - $now;
+            if ($seconds > 0) {
+                $remaining[$candidate->label()] = $seconds;
             }
         }
 
@@ -210,58 +297,180 @@ class AiProviderResolver
     }
 
     /**
-     * The ordered, deduplicated list of providers this turn may use.
+     * The health snapshot of every candidate, for the status endpoint.
      *
-     * @return list<CloudAiProvider>
+     * @return list<array<string, mixed>>
      */
-    private function candidates(?CloudAiProvider $preferred): array
+    public function snapshot(): array
     {
-        $primary = $preferred ?? $this->primary();
-        $fallback = $this->fallback();
+        return $this->health->report($this->ordered($this->pool->all()));
+    }
 
-        $list = [];
-        $seen = [];
+    /**
+     * The most recent provider attempts, safe metadata only.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function diagnostics(): array
+    {
+        $rows = Cache::get(self::DIAGNOSTICS_KEY);
 
-        foreach ([$primary, $fallback] as $provider) {
-            $name = $provider->name();
+        return is_array($rows) ? $rows : [];
+    }
 
-            if (isset($seen[$name])) {
-                continue;
+    /**
+     * @return array{model: ?string, provider: ?string, at: ?int}|null
+     */
+    public function lastResult(): ?array
+    {
+        $stored = Cache::get(self::LAST_RESULT_KEY);
+
+        return is_array($stored) ? $stored : null;
+    }
+
+    /**
+     * @return list<ModelCandidate>
+     */
+    public function pool(): array
+    {
+        return $this->pool->all();
+    }
+
+    /**
+     * Order candidates by what has recently worked, then by configuration.
+     *
+     * Health is read once per candidate and folded into a sort key, rather than
+     * re-read inside the comparator: a comparator runs O(n log n) times and each
+     * read is a cache round trip.
+     *
+     * @param  list<ModelCandidate>  $candidates
+     * @return list<ModelCandidate>
+     */
+    private function ordered(array $candidates, ?CloudAiProvider $preferred = null): array
+    {
+        $wanted = $preferred?->model();
+        $decorated = [];
+
+        foreach ($candidates as $candidate) {
+            $key = $this->orderKey($candidate);
+
+            if (is_string($wanted) && $wanted !== '' && $candidate->model === $wanted) {
+                $key = [-1, 0, 0];
             }
 
-            $seen[$name] = true;
+            $decorated[] = ['key' => $key, 'candidate' => $candidate];
+        }
 
-            if ($provider->isConfigured()) {
-                $list[] = $provider;
+        usort($decorated, static fn (array $a, array $b): int => $a['key'] <=> $b['key']);
+
+        return array_map(static fn (array $row): ModelCandidate => $row['candidate'], $decorated);
+    }
+
+    /**
+     * @return array{int, int, int}
+     */
+    private function orderKey(ModelCandidate $candidate): array
+    {
+        $snapshot = $this->health->snapshot($candidate);
+        $okAt = $snapshot['last_ok_at'];
+        $ttl = max(30, (int) config('ai.health.success_ttl_seconds', 900));
+
+        if ($okAt !== null && (now()->timestamp - (int) $okAt) <= $ttl) {
+            // Proven to work: fastest first.
+            return [0, $snapshot['last_latency_ms'] === null ? 999999 : (int) $snapshot['last_latency_ms'], $candidate->priority];
+        }
+
+        if (($snapshot['last_at'] ?? null) === null) {
+            // Never tried: honour the configured order.
+            return [1, $candidate->priority, 0];
+        }
+
+        // Tried and currently unproven: fewest failures first, then order.
+        return [2, (int) $snapshot['fails'], $candidate->priority];
+    }
+
+    private function blocked(ModelCandidate $candidate): bool
+    {
+        return $this->health->endpointDisabled($candidate)
+            || $this->health->endpointRateLimited($candidate)
+            || $this->health->inCooldown($candidate);
+    }
+
+    private function providerFor(ModelCandidate $candidate): CloudAiProvider
+    {
+        return new OpenAiCompatibleProvider(
+            $candidate->toConfig(),
+            $candidate->label(),
+            $this->internalFallbackModels($candidate),
+        );
+    }
+
+    /**
+     * OpenRouter's own ordered fallback list, only when explicitly enabled.
+     *
+     * It is off by default because the resolver already walks the pool; enabling
+     * both at once would send the same alternatives twice. When enabled it is
+     * limited to the remaining tool-capable OpenRouter candidates.
+     *
+     * @return list<string>
+     */
+    private function internalFallbackModels(ModelCandidate $candidate): array
+    {
+        if (! (bool) config('ai.openrouter.use_models_fallback', false) || ! $candidate->isOpenRouter()) {
+            return [];
+        }
+
+        $models = [];
+
+        foreach ($this->ordered($this->pool->supporting(['chat', 'tools'])) as $other) {
+            if ($other->model !== $candidate->model && $other->isOpenRouter()) {
+                $models[] = $other->model;
             }
         }
 
-        return $list;
+        return array_slice($models, 0, 4);
     }
 
-    private function cooldownKey(string $name): string
+    private function latenciesFrom(float $startedAt): int
     {
-        return "ai.provider.cooldown.{$name}";
+        return (int) round((microtime(true) - $startedAt) * 1000);
     }
 
-    private function inCooldown(string $name): bool
+    private function rememberLastResult(ModelCandidate $candidate): void
     {
-        // Cast, not `is_int`: Redis hands back a string. See `cooldowns()`.
-        $until = (int) Cache::get($this->cooldownKey($name), 0);
-
-        return $until > now()->timestamp;
+        Cache::put(self::LAST_RESULT_KEY, [
+            'model' => $candidate->model,
+            'provider' => $candidate->providerHost(),
+            'at' => now()->timestamp,
+        ], 3600);
     }
 
-    private function markCooldown(string $name): void
-    {
-        $seconds = max(1, (int) config('ai.cooldown_seconds', 60));
+    private function recordDiagnostic(
+        ?string $task,
+        ModelCandidate $candidate,
+        ?AiProviderException $error,
+        int $latencyMs,
+        string $outcome,
+    ): void {
+        $rows = $this->diagnostics();
 
-        Cache::put($this->cooldownKey($name), now()->timestamp + $seconds, $seconds);
-    }
+        array_unshift($rows, [
+            'at' => now()->timestamp,
+            'task' => $task,
+            'model' => $candidate->model,
+            'provider' => $candidate->providerHost(),
+            'outcome' => $outcome,
+            'kind' => $error?->kind,
+            'http' => $error?->status,
+            'scope' => $error?->accountWide === true ? 'account' : null,
+            // The provider's own reason for refusing, truncated. It describes the
+            // shape of the request, never the person's text or the credential, and
+            // it is what turns "malformed (400)" into something actionable.
+            'detail' => $error === null ? null : mb_substr($error->getMessage(), 0, 200),
+            'latency_ms' => $latencyMs,
+        ]);
 
-    private function clearCooldown(string $name): void
-    {
-        Cache::forget($this->cooldownKey($name));
+        Cache::put(self::DIAGNOSTICS_KEY, array_slice($rows, 0, 20), 3600);
     }
 
     /**

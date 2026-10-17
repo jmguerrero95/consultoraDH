@@ -309,26 +309,45 @@ final class AiAssistantController extends Controller
         // BUG-017. The status used to report only whether each slot was configured —
         // which never changed, so a provider that had been failing for an hour still
         // read as "configured". It now reports which provider is *available right
-        // now*: the resolver's own cooldown state decides that, and no provider is
+        // now*: the resolver's own health state decides that, and no provider is
         // contacted to answer, so asking costs nothing. Cached for a few seconds so
         // a polling widget does not re-read it on every tick.
+        //
+        // BUG-020-R2. The state is now the pool's, not two slots': it says whether
+        // a model that recently answered is usable, whether the first choice is
+        // down and a backup is carrying the turn, whether nothing has answered
+        // recently, or whether a quota wall is the reason. It never says "operativo"
+        // merely because a key is configured.
         $seconds = max(1, (int) config('ai.status_cache_seconds', 20));
 
         $status = Cache::remember('ai.status', $seconds, function (): array {
             $primary = $this->resolver->primary();
             $fallback = $this->resolver->fallback();
+            $state = $this->resolver->state();
 
             return [
                 'ai_enabled' => config('ai.enabled', false),
-                'state' => $this->resolver->state(),
+                'state' => $state,
                 'available' => $this->resolver->anyConfigured()
-                    && $this->resolver->state() !== 'unavailable',
+                    && in_array($state, ['available', 'fallback', 'unchecked'], true),
                 // The JSON key stays `active_model`; the method is `activeModel()`.
                 // Calling the snake_case name meant `/api/ai/status` threw
                 // `Call to undefined method` and answered 500 — so the whole
                 // endpoint, and with it the assistant's status, was unreachable.
                 'active_model' => $this->resolver->activeModel(),
+                // Which model actually answered last, not merely which is first in
+                // the configuration. The interface reports the one that worked.
+                'last_result' => $this->resolver->lastResult(),
                 'cooldowns' => $this->resolver->cooldowns(),
+                // The health of every candidate, safe metadata only: model id,
+                // endpoint host, state, failure kind, latency. Never a key and
+                // never a prompt.
+                'models' => $this->resolver->snapshot(),
+                // The most recent attempts, so a failure can be explained without
+                // reading a log: which model, which task, which HTTP status,
+                // which classified error, how long it took, and whether it ended
+                // in an answer.
+                'diagnostics' => array_slice($this->resolver->diagnostics(), 0, 10),
                 'primary' => [
                     'configured' => $primary->isConfigured(),
                     'model' => $primary->model(),

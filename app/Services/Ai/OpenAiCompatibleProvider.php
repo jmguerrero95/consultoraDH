@@ -33,10 +33,12 @@ class OpenAiCompatibleProvider implements CloudAiProvider
     /**
      * @param  array{base_url: ?string, api_key: ?string, model: ?string}  $config
      * @param  string  $name  the slot this provider fills, for audit purposes
+     * @param  list<string>  $models  ordered OpenRouter fallback list, if enabled
      */
     public function __construct(
         private readonly array $config,
         private readonly string $name = 'primary',
+        private readonly array $models = [],
     ) {}
 
     /**
@@ -75,11 +77,13 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         return new AiToolDefinition($name, $description, $parameters);
     }
 
-    public function complete(array $messages, array $tools = []): AiResponse
+    public function complete(array $messages, array $tools = [], ?int $timeoutSeconds = null): AiResponse
     {
         if (! $this->isConfigured()) {
             throw AiProviderException::notConfigured();
         }
+
+        $timeout = max(3, $timeoutSeconds ?? (int) config('ai.timeout_seconds', 30));
 
         $payload = [
             'model' => $this->slot()['model'],
@@ -91,9 +95,17 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             $payload['tool_choice'] = 'auto';
         }
 
+        // OpenRouter's own ordering of alternative models for one call. It is
+        // only populated when the operator explicitly asks for it, because the
+        // resolver already falls back candidate by candidate and running both
+        // mechanisms at once would duplicate requests rather than add a route.
+        if ($this->models !== []) {
+            $payload['models'] = array_values($this->models);
+        }
+
         try {
             $response = Http::withToken($this->slot()['api_key'])
-                ->timeout((int) config('ai.timeout_seconds', 30))
+                ->timeout($timeout)
                 ->acceptJson()
                 ->asJson()
                 ->post($this->endpoint(), $payload);
@@ -104,7 +116,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         }
 
         if ($response->failed()) {
-            throw $this->classify($response->status(), $response->json());
+            throw $this->classify($response->status(), $response->json(), $response->header('Retry-After'));
         }
 
         return $this->parse($response->json());
@@ -115,7 +127,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
      *
      * @param  array<string, mixed>|null  $body
      */
-    private function classify(int $status, ?array $body): AiProviderException
+    private function classify(int $status, ?array $body, ?string $retryAfter = null): AiProviderException
     {
         $detail = $this->providerMessage($body);
 
@@ -125,9 +137,20 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             ),
 
             $status === 429 => AiProviderException::rateLimited(
-                'The AI provider is rate limiting this deployment.'.$detail
+                'The AI provider is rate limiting this deployment.'.$detail,
+                $this->retryAfterSeconds($retryAfter),
+                $this->looksAccountWide($body),
             ),
 
+            // A model the host does not know is not an outage: it is a catalogue
+            // or configuration error, parked for hours rather than retried in a
+            // minute. Another candidate may be perfectly healthy.
+            $status === 404 => AiProviderException::modelMissing(
+                'The AI provider does not recognise the configured model.'.$detail
+            ),
+
+            // Retryable across candidates: free models differ in which request
+            // parameters they accept.
             $status === 400 || $status === 422 => AiProviderException::malformed(
                 'The AI provider refused the request as malformed.'.$detail
             ),
@@ -138,6 +161,61 @@ class OpenAiCompatibleProvider implements CloudAiProvider
                 'The AI provider returned an error.'.$detail
             ),
         };
+    }
+
+    /**
+     * `Retry-After` is seconds or an HTTP date; anything else is ignored.
+     */
+    private function retryAfterSeconds(?string $header): ?int
+    {
+        if ($header === null || trim($header) === '') {
+            return null;
+        }
+
+        if (ctype_digit(trim($header))) {
+            return max(0, (int) trim($header));
+        }
+
+        $timestamp = strtotime($header);
+
+        return $timestamp === false ? null : max(0, $timestamp - now()->timestamp);
+    }
+
+    /**
+     * Whether a 429 belongs to the whole account rather than to one model.
+     *
+     * OpenRouter's free tier has limits that apply across every free model
+     * (`free-models-per-day`, `free-models-per-min`), and those are the ones
+     * where choosing another model of the same account cannot help. A 429 that
+     * names only a provider or a model is scoped to that candidate and the next
+     * one is tried. The test is on the provider's own words, not on the status
+     * code, because the status code is identical in both cases.
+     *
+     * @param  array<string, mixed>|null  $body
+     */
+    private function looksAccountWide(?array $body): bool
+    {
+        $error = $body['error'] ?? null;
+
+        if (is_string($error)) {
+            $text = $error;
+        } elseif (is_array($error) && is_string($error['message'] ?? null)) {
+            $text = $error['message'];
+        } elseif (is_string($body['message'] ?? null)) {
+            $text = $body['message'];
+        } else {
+            return false;
+        }
+
+        $text = mb_strtolower($text);
+
+        foreach (['free-models', 'free model', 'free models', 'daily limit', 'insufficient credits', 'requires more credits', 'add credits'] as $marker) {
+            if (str_contains($text, $marker)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -152,6 +230,20 @@ class OpenAiCompatibleProvider implements CloudAiProvider
     private function providerMessage(?array $body): string
     {
         $message = $body['error']['message'] ?? $body['message'] ?? null;
+
+        // OpenRouter wraps an upstream refusal: the top-level message is generic
+        // ("Provider returned error") and the actual reason is a JSON string
+        // inside metadata.raw. Reading it is what turns a bare 400 into something
+        // that names the offending field.
+        $raw = $body['error']['metadata']['raw'] ?? null;
+
+        if (is_string($raw) && $raw !== '') {
+            $decoded = json_decode($raw, true);
+
+            if (is_array($decoded) && is_string($decoded['message'] ?? null)) {
+                $message = $decoded['message'];
+            }
+        }
 
         if (! is_string($message) || $message === '') {
             return '';
@@ -169,8 +261,8 @@ class OpenAiCompatibleProvider implements CloudAiProvider
 
         if (! is_array($choice)) {
             // A 200 with nothing usable in it is a provider fault, not a model
-            // decision, and it is worth trying the other host.
-            throw AiProviderException::unavailable('The AI provider returned an empty answer.');
+            // decision, and it is worth trying another model.
+            throw AiProviderException::emptyAnswer('The AI provider returned an empty answer.');
         }
 
         $message = $choice['message'] ?? [];
@@ -188,7 +280,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             $calls[] = new AiToolCall(
                 $function['name'],
                 $this->decodeArguments($function['arguments'] ?? null),
-                is_string($call['id'] ?? null) ? $call['id'] : null,
+                $this->normaliseToolCallId($call['id'] ?? null),
             );
         }
 
@@ -201,7 +293,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         // and, if that fails too, surfaces an error the caller can show instead of
         // storing nothing as though it were something.
         if (trim($content) === '' && $calls === []) {
-            throw AiProviderException::unavailable('The AI provider returned an empty answer.');
+            throw AiProviderException::emptyAnswer();
         }
 
         return new AiResponse(
@@ -231,6 +323,26 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         $decoded = json_decode($raw, true);
 
         return is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * A tool call needs an id, and the assistant message that announces it and the
+     * tool message that answers it must use the *same* one, or the provider
+     * rejects the continuation with a 400.
+     *
+     * Not every model sends one. Several free models return a `tool_calls` entry
+     * with no `id`, and passing that omission straight through produced
+     * `tool_call_id: null` on the next round — a 400 on every candidate, because
+     * the payload, not the model, was wrong. Assigning an id here, once, means
+     * both messages agree on it, and the id is stable for the life of the call.
+     */
+    private function normaliseToolCallId(mixed $id): string
+    {
+        if (is_string($id) && trim($id) !== '') {
+            return $id;
+        }
+
+        return 'call_'.bin2hex(random_bytes(9));
     }
 
     /**
