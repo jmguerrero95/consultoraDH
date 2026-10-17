@@ -133,6 +133,17 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         $detail = $this->providerMessage($body);
 
         return match (true) {
+            // A safety refusal is the provider's decision about the *content*,
+            // not a fault of the model or the key. It is terminal: asking a
+            // different provider the same question to get the refusal answered is
+            // the evasion the privacy rules forbid, so the turn stops here and
+            // says why. Checked before 401/403 so a content filter expressed as a
+            // 403 is not mistaken for a credential problem.
+            in_array($status, [400, 403, 422], true) && $this->messageMentionsContentPolicy($body)
+                => AiProviderException::contentPolicy(
+                    'The AI provider refused the content under its safety policy.'.$detail
+                ),
+
             $status === 401 || $status === 403 => AiProviderException::authentication(
                 'The AI provider rejected the configured credentials.'.$detail
             ),
@@ -150,10 +161,13 @@ class OpenAiCompatibleProvider implements CloudAiProvider
                 'The AI provider does not recognise the configured model.'.$detail
             ),
 
-            // Retryable across candidates: free models differ in which request
-            // parameters they accept.
+            // Failover across candidates: free models differ in which request
+            // parameters they accept. When the refusal names tools, the model is
+            // not merely malformed — it cannot do tool work — so it is downgraded
+            // to conversation-only rather than offered the same payload again.
             $status === 400 || $status === 422 => AiProviderException::malformed(
-                'The AI provider refused the request as malformed.'.$detail
+                'The AI provider refused the request as malformed.'.$detail,
+                $this->messageMentionsTools($body) ? 'tools' : null,
             ),
 
             // A retired model does not always arrive as a 404: Cloudflare reports
@@ -362,6 +376,79 @@ class OpenAiCompatibleProvider implements CloudAiProvider
     }
 
     /**
+     * Whether a failure body is the provider refusing the *content*.
+     *
+     * Deliberately narrow: it must name a safety mechanism, so an access denial
+     * expressed as a 403 ("Access denied. Please check your network settings")
+     * is not misread as a content refusal and does not end the turn. Only the
+     * provider's own error text is read, never the prompt.
+     *
+     * @param  array<string, mixed>|null  $body
+     */
+    private function messageMentionsContentPolicy(?array $body): bool
+    {
+        $text = mb_strtolower($this->providerMessage($body));
+
+        foreach ([
+            'content policy',
+            'content_policy',
+            'content filter',
+            'safety',
+            'moderation',
+            'prohibited',
+            'flagged',
+            'violates',
+            'violation',
+        ] as $marker) {
+            if (str_contains($text, $marker)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether a 400/422 names tool or function support as the problem.
+     *
+     * Used to downgrade a model that cannot do tool calling to conversation-only,
+     * so it keeps answering general questions instead of being asked the same
+     * rejected payload on every turn. It requires both a tool word and a
+     * rejection word, so an unrelated "invalid messages[0]" is not mistaken for a
+     * missing capability.
+     *
+     * @param  array<string, mixed>|null  $body
+     */
+    private function messageMentionsTools(?array $body): bool
+    {
+        $text = mb_strtolower($this->providerMessage($body));
+
+        if (! str_contains($text, 'tool') && ! str_contains($text, 'function')) {
+            return false;
+        }
+
+        foreach ([
+            'not supported',
+            'unsupported',
+            'does not support',
+            "doesn't support",
+            'do not support',
+            'unknown',
+            'unrecognized',
+            'unrecognised',
+            'invalid',
+            'not available',
+            'no tool',
+        ] as $marker) {
+            if (str_contains($text, $marker)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * @param  array<string, mixed>|null  $body
      */
     private function parse(?array $body): AiResponse
@@ -372,6 +459,16 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             // A 200 with nothing usable in it is a provider fault, not a model
             // decision, and it is worth trying another model.
             throw AiProviderException::emptyAnswer('The AI provider returned an empty answer.');
+        }
+
+        // A provider can also refuse the content with a 200 and a finish reason
+        // rather than an error status. Treating that as an empty answer would hop
+        // providers to get the same policy refusal answered elsewhere, which is
+        // exactly what must not happen.
+        if ($this->finishReasonIsContentFilter($choice['finish_reason'] ?? null)) {
+            throw AiProviderException::contentPolicy(
+                'The AI provider refused the content under its safety policy.'
+            );
         }
 
         $message = $choice['message'] ?? [];
@@ -412,6 +509,20 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             $this->slot()['model'],
             is_string($body['id'] ?? null) ? $body['id'] : null,
         );
+    }
+
+    /**
+     * Whether a choice's `finish_reason` says the content was filtered.
+     *
+     * @param  mixed  $reason
+     */
+    private function finishReasonIsContentFilter(mixed $reason): bool
+    {
+        if (! is_string($reason)) {
+            return false;
+        }
+
+        return in_array(mb_strtolower($reason), ['content_filter', 'safety', 'blocked', 'recitation'], true);
     }
 
     /**

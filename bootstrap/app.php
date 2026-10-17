@@ -352,11 +352,26 @@ return Application::configure(dirname(__DIR__))
                 return null;
             }
 
+            // BUG-021. The message now names the *kind* of failure, from the
+            // classified scope, instead of collapsing every provider fault into
+            // one sentence. A refused credential, an exhausted quota, a content
+            // refusal and a transport outage are different situations and the
+            // person is told which one happened. The scope is a fixed vocabulary,
+            // never the provider's raw text, so nothing internal leaks.
+            $message = match ($e->scope) {
+                AiProviderException::SCOPE_CREDENTIAL => 'Un proveedor de IA rechazó el acceso. Se requiere revisar su credencial o permisos.',
+                AiProviderException::SCOPE_QUOTA_ACCOUNT,
+                AiProviderException::SCOPE_QUOTA_MODEL => 'Los proveedores de IA alcanzaron su límite de uso. Intente de nuevo en unos minutos.',
+                AiProviderException::SCOPE_POLICY => 'El proveedor de IA rechazó el contenido por sus políticas de seguridad.',
+                AiProviderException::SCOPE_MODEL => 'Ningún modelo de IA configurado pudo responder a la solicitud.',
+                AiProviderException::SCOPE_INTERNAL => 'El asistente de IA no pudo procesar la solicitud. Revise la configuración del proveedor.',
+                default => 'El asistente de IA no está disponible en este momento. Intente de nuevo en unos segundos.',
+            };
+
             return response()->json([
-                'message' => $e->retryable
-                    ? 'El asistente de IA no está disponible en este momento. Intente de nuevo en unos segundos.'
-                    : 'El asistente de IA no pudo procesar la solicitud. Revise la configuración del proveedor.',
+                'message' => $message,
                 'code' => 'ai_provider_unavailable',
+                'reason' => $e->scope,
             ], 503);
         });
 

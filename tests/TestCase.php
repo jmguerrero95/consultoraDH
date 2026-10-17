@@ -3,6 +3,7 @@
 namespace Tests;
 
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+use Illuminate\Support\Facades\Http;
 
 abstract class TestCase extends BaseTestCase
 {
@@ -25,5 +26,19 @@ abstract class TestCase extends BaseTestCase
          | turn it back on in their own `setUp` and fake the provider.
          */
         config(['ai.suggestions.reasoning.enabled' => false]);
+
+        /*
+         | BUG-021. No test may reach a real provider by accident.
+         |
+         | `phpunit.xml` already blanks every AI credential, so the pool is empty
+         | unless a test builds a candidate. This is the second, independent
+         | guard: the HTTP client itself refuses any request that was not matched
+         | by a registered fake, so a test that forgets to fake — or that fails
+         | over to a candidate nobody meant to call — fails loudly here instead of
+         | spending a free tier's quota against a real endpoint. Tests that need a
+         | provider fake it; tests that need the network for their own reasons use
+         | their own client, which this does not touch.
+         */
+        Http::preventStrayRequests();
     }
 }

@@ -233,6 +233,50 @@ final class DocumentPipelineTest extends TestCase
         $this->assertStringContainsString('ANDINA', $whole['content'] ?? '');
     }
 
+    /**
+     * A CSV is a type the picker accepts, so a CSV must ingest.
+     *
+     * It did not. The `csv` arm of `DocumentIngestor::extract()` returned the
+     * delimited text as a bare string where the method promises
+     * `array{text, pages, locators}`, so every CSV upload died in a TypeError
+     * that reached the person as "no fue posible extraer su contenido" - a
+     * message about content when the fault was a return type. The whole path is
+     * exercised here, because the defect only existed at the join.
+     */
+    public function test_a_csv_upload_is_ingested_and_readable(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'cdh-pipeline').'.csv';
+
+        file_put_contents($path, implode("\n", [
+            'cliente,poliza,saldo,estado',
+            'Ficticio Uno,POLIZA-7731,1500000,vencido',
+            'Ficticio Dos,POLIZA-8842,0,al dia',
+        ]));
+
+        $response = $this->actingAs($this->user)->post('/api/ai/tasks', [
+            'file' => new UploadedFile($path, 'polizas.csv', 'text/csv', null, true),
+            'conversation_id' => $this->conversation->id,
+        ]);
+
+        $response->assertAccepted();
+
+        $this->assertSame(1, $this->workTheQueue());
+
+        $task = AiTask::query()->findOrFail((int) $response->json('task.id'));
+        $task->refresh();
+
+        $this->assertSame(AiTask::STATUS_SUCCEEDED, $task->status, (string) $task->error);
+
+        $attachment = AiAttachment::query()->where('ai_task_id', $task->id)->firstOrFail();
+        $this->assertSame(AiAttachment::STATUS_PROCESSED, $attachment->status);
+
+        $found = app(DocumentRetriever::class)
+            ->search($this->user, 'POLIZA-7731', $this->conversation->id);
+
+        $this->assertNotEmpty($found['passages'], 'The ingested CSV is answerable.');
+        $this->assertStringContainsString('POLIZA-7731', $found['passages'][0]['content'] ?? '');
+    }
+
     // ---------------------------------------------------------------------
     // Idempotency
     // ---------------------------------------------------------------------

@@ -120,8 +120,12 @@ final class AiAssistantService
 
         // One budget for the whole turn, shared by every provider round, so a
         // tool-using question that needs three calls still finishes inside the
-        // proxy's limit instead of spending the per-call timeout three times.
-        $deadline = microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110));
+        // proxy's limit and inside one attempt budget instead of spending the
+        // per-call timeout — or the attempt ceiling — three times.
+        $budget = AiTurnBudget::forTurn(
+            $toolDefinitions !== [],
+            microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110)),
+        );
 
         // Whether this turn carries real business data. A general question does
         // not, so a provider whose free tier may train on the content may answer
@@ -129,9 +133,9 @@ final class AiAssistantService
         // such a provider is then not eligible — see `ModelCandidate`.
         $requiresClientData = $passages !== [] || $routing['task'] !== AiTaskRouter::TASK_GENERAL;
 
-        $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $deadline, $requiresClientData);
+        $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget);
 
-        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $deadline, $requiresClientData);
+        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData);
     }
 
     /**
@@ -287,15 +291,17 @@ final class AiAssistantService
      *
      * @param  list<AiMessage>  $messages
      * @param  list<AiToolDefinition>  $toolDefinitions  the same subset for every round
+     * @param  AiTurnBudget  $budget  the turn's shared attempt/time budget, spent by every
+     *                                synthesis round as well as the first call
      * @param  bool  $requiresClientData  carried into every synthesis round, so the
      *                                    second round cannot reach a provider the first
      *                                    one was not allowed to use
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, float $deadline, bool $requiresClientData = false): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false): array
     {
         $proposals = [];
         $toolResults = [];
-        $maxRounds = 4;
+        $maxRounds = max(1, (int) config('ai.tool_max_rounds', 4));
         $round = 0;
         $reply = null;
 
@@ -433,7 +439,7 @@ final class AiAssistantService
                 // fabricated assistant message in the conversation that a later
                 // turn would be sent as legitimate history, so it propagates and
                 // nothing is persisted for this turn.
-                $currentResult = $this->resolver->complete($messages, $toolDefinitions, null, null, $deadline, $requiresClientData);
+                $currentResult = $this->resolver->complete($messages, $toolDefinitions, null, null, $budget->deadline, $requiresClientData, $budget);
             } else {
                 // No tool calls, we're done
                 $reply = $content;

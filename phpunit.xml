@@ -39,5 +39,46 @@
         <env name="SESSION_DRIVER" value="array" force="true"/>
         <env name="TELESCOPE_ENABLED" value="false" force="true"/>
         <env name="NIGHTWATCH_ENABLED" value="false" force="true"/>
+
+        <!--
+            AI providers: no credential, no endpoint, no pool.
+
+            BUG-021. A test that inherited the development `.env` really reached a
+            provider: the assistant's runtime test configured its own fake primary
+            but the *pool* still held the real Groq, Gemini, Cloudflare and
+            OpenRouter candidates from `.env`, and a turn that failed over walked
+            straight out to the network. Every credential is blanked here, so the
+            pool is empty unless a test builds a candidate itself, and the
+            catalogue-driven OpenRouter sources are switched off too. A test that
+            wants a provider must say so with `Http::fake()` and its own config.
+        -->
+        <env name="AI_PRIMARY_BASE_URL" value="" force="true"/>
+        <env name="AI_PRIMARY_API_KEY" value="" force="true"/>
+        <env name="AI_PRIMARY_MODEL" value="" force="true"/>
+        <env name="AI_FALLBACK_BASE_URL" value="" force="true"/>
+        <env name="AI_FALLBACK_API_KEY" value="" force="true"/>
+        <env name="AI_FALLBACK_MODEL" value="" force="true"/>
+
+        <env name="GROQ_ENABLED" value="false" force="true"/>
+        <env name="GROQ_API_KEY" value="" force="true"/>
+        <env name="GROQ_MODELS" value="" force="true"/>
+
+        <env name="CLOUDFLARE_AI_ENABLED" value="false" force="true"/>
+        <env name="CLOUDFLARE_AI_API_TOKEN" value="" force="true"/>
+        <env name="CLOUDFLARE_ACCOUNT_ID" value="" force="true"/>
+        <env name="CLOUDFLARE_AI_MODELS" value="" force="true"/>
+
+        <env name="GEMINI_ENABLED" value="false" force="true"/>
+        <env name="GEMINI_API_KEY" value="" force="true"/>
+        <env name="GEMINI_MODELS" value="" force="true"/>
+
+        <env name="OPENCODE_ZEN_ENABLED" value="false" force="true"/>
+        <env name="OPENCODE_ZEN_API_KEY" value="" force="true"/>
+        <env name="OPENCODE_ZEN_MODELS" value="" force="true"/>
+
+        <env name="AI_POOL" value="[]" force="true"/>
+        <env name="AI_EXTRA_MODELS" value="" force="true"/>
+        <env name="AI_OPENROUTER_DYNAMIC_POOL" value="false" force="true"/>
+        <env name="AI_OPENROUTER_INCLUDE_FREE_ROUTER" value="false" force="true"/>
     </php>
 </phpunit>

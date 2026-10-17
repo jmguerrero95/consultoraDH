@@ -92,18 +92,30 @@ return [
     /*
      * Failover policy.
      *
-     * `max_attempts` bounds how many provider calls one turn may make. The pool
-     * may hold many models, but a single question still makes at most this many
-     * calls, so a broad pool cannot become an unbounded sequence of timeouts.
+     * `max_attempts` bounds how many provider calls one general turn may make
+     * (one round of conversation). `tool_max_attempts` is the same bound for a
+     * turn that uses tools, which is several rounds by nature — ask, call a tool,
+     * synthesise — so it needs more room for a legitimate operation plus a couple
+     * of failovers.
+     *
+     * Both are *per user turn*, not per provider round: the assistant service
+     * creates one `AiTurnBudget` and every `complete()` call of that turn spends
+     * from it. That is the BUG-021 fix — the counter used to be local to
+     * `complete()`, so a three-round question had three independent budgets.
      *
      * `cooldown_seconds` is retained for compatibility with deployments that set
      * it; the per-model policy actually in force lives under `health` below,
      * where the cooldown grows with the failure streak instead of being fixed.
      *
      * AI_MAX_ATTEMPTS
+     * AI_TOOL_MAX_ATTEMPTS
      * AI_COOLDOWN_SECONDS
      */
     'max_attempts' => (int) env('AI_MAX_ATTEMPTS', 4),
+
+    'tool_max_attempts' => (int) env('AI_TOOL_MAX_ATTEMPTS', 8),
+
+    'tool_max_rounds' => (int) env('AI_TOOL_MAX_ROUNDS', 4),
 
     'cooldown_seconds' => (int) env('AI_COOLDOWN_SECONDS', 60),
 
@@ -307,7 +319,11 @@ return [
     |
     | A rejected credential disables the whole endpoint for
     | `credential_cooldown_seconds`, because switching models behind the same key
-    | is the same wall. A model the provider does not know is parked for
+    | is the same wall. That window *escalates* with each further rejection up to
+    | `credential_max_cooldown_seconds`, so a still-denied key stops being probed
+    | as a side effect of ordinary questions, while the cap — and the fact that
+    | correcting the key produces a new endpoint hash, hence fresh state — keeps
+    | recovery possible. A model the provider does not know is parked for
     | `model_missing_cooldown_seconds` until the catalogue is corrected.
     */
     'health' => [
@@ -315,6 +331,7 @@ return [
         'max_cooldown_seconds' => (int) env('AI_HEALTH_MAX_COOLDOWN_SECONDS', 1800),
         'model_missing_cooldown_seconds' => (int) env('AI_HEALTH_MODEL_MISSING_COOLDOWN_SECONDS', 21600),
         'credential_cooldown_seconds' => (int) env('AI_HEALTH_CREDENTIAL_COOLDOWN_SECONDS', 600),
+        'credential_max_cooldown_seconds' => (int) env('AI_HEALTH_CREDENTIAL_MAX_COOLDOWN_SECONDS', 86400),
         'success_ttl_seconds' => (int) env('AI_HEALTH_SUCCESS_TTL_SECONDS', 900),
     ],
 

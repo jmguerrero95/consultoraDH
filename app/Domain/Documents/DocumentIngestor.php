@@ -295,7 +295,7 @@ final class DocumentIngestor
             'pdf' => $this->extractPdf($contents),
             'docx' => ['text' => $this->extractDocx($contents), 'pages' => null, 'locators' => []],
             'xlsx' => $this->extractXlsx($contents),
-            'csv' => $this->extractDelimited($contents, ','),
+            'csv' => ['text' => $this->extractDelimited($contents, ','), 'pages' => null, 'locators' => []],
             'txt', 'md' => ['text' => $this->cap($contents), 'pages' => null, 'locators' => []],
             default => throw new AiToolRejected('Formato no admitido.'),
         };

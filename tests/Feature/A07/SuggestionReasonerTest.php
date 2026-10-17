@@ -161,8 +161,11 @@ final class SuggestionReasonerTest extends TestCase
 
         $this->offer();
 
+        // Scoped to the client the suggestion was written for. An unscoped
+        // client-account question is answered with silence, not with whoever
+        // happens to be worst, so asking without the id would test nothing.
         $response = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$this->client->id);
 
         $response->assertOk()
             ->assertJsonPath('suggestion.reasoned', true)
@@ -258,7 +261,7 @@ final class SuggestionReasonerTest extends TestCase
 
         // And the person is still told something true.
         $response = $this->actingAs($this->user)
-            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account');
+            ->getJson('/api/ai/suggestion?module=receivables&operation=client_account&client_id='.$this->client->id);
 
         $response->assertOk()
             ->assertJsonPath('suggestion.reasoned', false)

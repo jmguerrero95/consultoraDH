@@ -39,8 +39,20 @@ use Throwable;
  *
  * ## The bound
  *
- * One turn makes at most `ai.max_attempts` provider calls, so a pool of sixteen
- * models cannot turn a single question into sixteen timeouts.
+ * A user turn — every round of it — makes at most the turn budget's provider
+ * calls, so a pool of sixteen models cannot turn a single question into sixteen
+ * timeouts, and a tool round cannot restart the count and spend the budget twice.
+ * The budget is a shared object the assistant service creates once and passes to
+ * every `complete()`, not a counter local to this method.
+ *
+ * ## A refused credential is not the end of the turn
+ *
+ * A 401/403 belongs to one provider's key. The endpoint is quarantined (with an
+ * escalating window, so a still-denied key stops being probed on ordinary
+ * questions) and the turn continues on the next *independent* provider. Only two
+ * scopes are terminal: a content-policy refusal, which must not be evaded by
+ * asking elsewhere, and an application/configuration fault, which no other
+ * provider can fix.
  */
 class AiProviderResolver
 {
@@ -62,6 +74,12 @@ class AiProviderResolver
      * @param  bool  $requiresClientData  true when the turn carries real business data,
      *                                    so a provider whose free tier may train on the
      *                                    content is not eligible
+     * @param  AiTurnBudget|null  $budget  the turn's shared attempt/time budget. Passed
+     *                                     by the assistant service so every round of one
+     *                                     user turn spends from the same pool; when null
+     *                                     (a task, a suggestion) a single-round budget is
+     *                                     created, which is the old behaviour for a caller
+     *                                     that makes exactly one call.
      *
      * @throws AiProviderException when no candidate can answer
      */
@@ -72,6 +90,7 @@ class AiProviderResolver
         ?string $task = null,
         ?float $deadline = null,
         bool $requiresClientData = false,
+        ?AiTurnBudget $budget = null,
     ): AiResponse {
         $required = $tools !== [] ? ['chat', 'tools'] : ['chat'];
 
@@ -80,6 +99,16 @@ class AiProviderResolver
         }
 
         $candidates = $this->ordered($this->pool->supporting($required), $preferred);
+
+        // A model that refused tool calling keeps its place for conversation but
+        // is not offered a tool payload again, so the same 400 is not repeated
+        // every turn while it still answers general questions.
+        if ($tools !== []) {
+            $candidates = array_values(array_filter(
+                $candidates,
+                fn (ModelCandidate $candidate): bool => ! $this->health->toolsUnsupported($candidate),
+            ));
+        }
 
         if ($candidates === []) {
             throw $this->pool->all() === []
@@ -91,25 +120,27 @@ class AiProviderResolver
                 );
         }
 
+        // One budget for the whole turn. When the caller did not supply one this
+        // is still bounded — it simply bounds this call.
+        $budget ??= AiTurnBudget::forTurn($tools !== [], $deadline);
+
         // The turn's wall-clock budget. A free model can be slow, and several of
         // them in a row must still finish inside the proxy's own limit, so the
         // budget — not a fixed per-call timeout — is what bounds the turn.
-        $deadline ??= microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110));
+        $deadline = $budget->deadline;
 
-        $maxAttempts = max(1, (int) config('ai.max_attempts', 4));
         $configuredTimeout = max(3, (int) config('ai.timeout_seconds', 30));
-        $attempts = 0;
         $lastFailure = null;
         $skipped = 0;
         $skippedRateLimited = 0;
         $outOfTime = false;
 
         foreach ($candidates as $candidate) {
-            if ($attempts >= $maxAttempts) {
+            if ($budget->exhausted()) {
                 break;
             }
 
-            $remaining = (int) floor($deadline - microtime(true));
+            $remaining = $budget->remainingSeconds();
 
             if ($remaining < 3) {
                 $outOfTime = true;
@@ -145,7 +176,7 @@ class AiProviderResolver
                 continue;
             }
 
-            $attempts++;
+            $budget->spend();
             $this->quota->record($candidate);
             $startedAt = microtime(true);
 
@@ -157,14 +188,28 @@ class AiProviderResolver
                 $response = $this->providerFor($candidate)->complete($messages, $tools, $attemptTimeout);
             } catch (AiProviderException $e) {
                 $latency = $this->latenciesFrom($startedAt);
+
+                // A refusal that is not about this model — a content-policy
+                // decision, or an application/configuration fault — ends the turn.
+                // It is not the model's fault, so the model is not cooled down,
+                // and it is not evaded by asking a different provider.
+                if ($e->isTerminal()) {
+                    $this->recordDiagnostic($task, $candidate, $e, $latency, 'refused');
+
+                    throw $e;
+                }
+
+                // A model that rejected the tools payload is downgraded rather
+                // than cooled: it can still answer conversation.
+                if ($e->missingCapability === 'tools') {
+                    $this->health->markToolsUnsupported($candidate);
+                }
+
                 $this->health->recordFailure($candidate, $e, $latency);
                 $this->recordDiagnostic($task, $candidate, $e, $latency, 'failed');
 
                 $lastFailure = $e;
-
-                if (! $e->retryable) {
-                    throw $e;
-                }
+                $budget->countFailover();
 
                 continue;
             } catch (Throwable $e) {
@@ -176,6 +221,7 @@ class AiProviderResolver
                 $this->health->recordFailure($candidate, $converted, $latency);
                 $this->recordDiagnostic($task, $candidate, $converted, $latency, 'failed');
                 $lastFailure = $converted;
+                $budget->countFailover();
 
                 continue;
             }
@@ -195,6 +241,12 @@ class AiProviderResolver
         // Nothing was attempted: every candidate was cooling down, disabled or
         // rate limited, or the turn's budget was already spent. Reported as
         // temporary unavailability, not as a configuration problem.
+        if ($budget->exhausted()) {
+            throw AiProviderException::unavailable(
+                'El turno agotó el número de intentos disponibles antes de que un modelo respondiera.'
+            );
+        }
+
         if ($outOfTime) {
             throw AiProviderException::unavailable(
                 'La consulta agotó el tiempo disponible antes de que un modelo respondiera.'
@@ -481,7 +533,18 @@ class AiProviderResolver
             'outcome' => $outcome,
             'kind' => $error?->kind,
             'http' => $error?->status,
-            'scope' => $error?->accountWide === true ? 'account' : null,
+            // Where the fault lies and what the resolver did about it. `scope` is
+            // the classified failure scope (model, credential, quota_model,
+            // quota_account, capability, policy, internal); `action` says whether
+            // the turn moved on or stopped, which is what turns a bare 503 into a
+            // diagnosis.
+            'scope' => $error?->scope,
+            'account_wide' => $error?->accountWide === true ?: null,
+            'action' => match (true) {
+                $error === null => 'answered',
+                $error->isTerminal() => 'stopped',
+                default => 'failed_over',
+            },
             // The provider's own reason for refusing, truncated. It describes the
             // shape of the request, never the person's text or the credential, and
             // it is what turns "malformed (400)" into something actionable.

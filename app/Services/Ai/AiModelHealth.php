@@ -41,7 +41,7 @@ class AiModelHealth
     private const RECORD_TTL = 86400;
 
     /**
-     * @return array{fails: int, last_kind: ?string, last_at: ?int, cooldown_until: int, last_ok_at: ?int, last_latency_ms: ?int, last_status: ?int}
+     * @return array{fails: int, last_kind: ?string, last_scope: ?string, last_at: ?int, cooldown_until: int, last_ok_at: ?int, last_latency_ms: ?int, last_status: ?int}
      */
     public function snapshot(ModelCandidate $candidate): array
     {
@@ -50,6 +50,7 @@ class AiModelHealth
         $empty = [
             'fails' => 0,
             'last_kind' => null,
+            'last_scope' => null,
             'last_at' => null,
             'cooldown_until' => 0,
             'last_ok_at' => null,
@@ -73,9 +74,11 @@ class AiModelHealth
         ], self::RECORD_TTL);
 
         // A model that answers proves its endpoint is neither disabled nor
-        // rate limited, so both endpoint-level flags are cleared at once.
+        // rate limited, so both endpoint-level flags are cleared at once, and the
+        // credential-failure streak is forgotten: a working key is a fresh start.
         Cache::forget($this->disabledKey($candidate));
         Cache::forget($this->rateLimitedKey($candidate));
+        Cache::forget($this->credentialFailsKey($candidate));
     }
 
     public function recordFailure(ModelCandidate $candidate, AiProviderException $error, int $latencyMs): int
@@ -89,6 +92,7 @@ class AiModelHealth
         Cache::put($this->recordKey($candidate), [
             'fails' => $fails,
             'last_kind' => $error->kind,
+            'last_scope' => $error->scope,
             'last_at' => now()->timestamp,
             'cooldown_until' => $until,
             'last_ok_at' => $previous['last_ok_at'],
@@ -98,8 +102,16 @@ class AiModelHealth
 
         // An authentication failure is a property of the credential: disable the
         // whole endpoint so the same wrong key is not re-tried model by model.
+        //
+        // BUG-021. The cooldown escalates with repeated rejections. A single
+        // fixed 600s window meant a still-denied credential was re-probed as a
+        // side effect of ordinary questions every ten minutes, so users kept
+        // hitting a failing turn for a restriction that had not changed. Growing
+        // the window (600s, 20m, 40m, ... capped at a day) makes the failed probe
+        // rare, while the cap — and the fact that correcting the key yields a new
+        // endpoint hash and therefore fresh state — keeps recovery possible.
         if ($error->kind === 'auth') {
-            $this->markEndpointDisabled($candidate, (int) config('ai.health.credential_cooldown_seconds', 600));
+            $this->markEndpointDisabled($candidate, $this->credentialCooldownFor($candidate));
         }
 
         // Only an account-wide limit justifies setting the endpoint aside:
@@ -174,6 +186,29 @@ class AiModelHealth
         Cache::forget($this->recordKey($candidate));
         Cache::forget($this->disabledKey($candidate));
         Cache::forget($this->rateLimitedKey($candidate));
+        Cache::forget($this->credentialFailsKey($candidate));
+        Cache::forget($this->toolsUnsupportedKey($candidate));
+    }
+
+    /**
+     * Remember that this model refused tool calling and serves conversation only.
+     *
+     * Recorded when the provider answers a tool payload with a 400/422 that names
+     * tools. It is not a cooldown: the model is healthy, it simply cannot do this
+     * one thing, so it stays in the pool for general questions and is skipped when
+     * the turn needs a tool.
+     */
+    public function markToolsUnsupported(ModelCandidate $candidate): void
+    {
+        Cache::put($this->toolsUnsupportedKey($candidate), now()->timestamp, self::RECORD_TTL);
+    }
+
+    /**
+     * Whether this model has shown it cannot do tool calling.
+     */
+    public function toolsUnsupported(ModelCandidate $candidate): bool
+    {
+        return Cache::get($this->toolsUnsupportedKey($candidate)) !== null;
     }
 
     public function markEndpointRateLimited(ModelCandidate $candidate, int $seconds): void
@@ -213,17 +248,45 @@ class AiModelHealth
                 'model' => $candidate->model,
                 'provider' => $candidate->providerHost(),
                 'priority' => $candidate->priority,
-                'tools' => $candidate->supportsTools(),
+                'tools' => $candidate->supportsTools() && ! $this->toolsUnsupported($candidate),
                 'state' => $state,
                 'cooldown_seconds' => $cooldown,
                 'fails' => (int) $snapshot['fails'],
                 'last_kind' => $snapshot['last_kind'],
+                'last_scope' => $snapshot['last_scope'],
                 'last_ok_seconds_ago' => $snapshot['last_ok_at'] === null ? null : max(0, now()->timestamp - (int) $snapshot['last_ok_at']),
                 'last_latency_ms' => $snapshot['last_latency_ms'] === null ? null : (int) $snapshot['last_latency_ms'],
             ];
         }
 
         return $report;
+    }
+
+    /**
+     * How long to set a rejected credential aside, growing with each rejection.
+     *
+     * The first refusal costs `credential_cooldown_seconds`; each further refusal
+     * behind the same key doubles it, capped at
+     * `credential_max_cooldown_seconds`. The counter is per endpoint, so a key
+     * that is corrected (which changes the endpoint hash) starts clean, and a
+     * key that is not corrected stops being probed on ordinary questions long
+     * before the cap is reached.
+     */
+    private function credentialCooldownFor(ModelCandidate $candidate): int
+    {
+        $key = $this->credentialFailsKey($candidate);
+        $fails = (int) Cache::get($key, 0) + 1;
+
+        $base = max(60, (int) config('ai.health.credential_cooldown_seconds', 600));
+        $max = max($base, (int) config('ai.health.credential_max_cooldown_seconds', 86400));
+
+        $seconds = (int) min($base * (2 ** min($fails - 1, 10)), $max);
+
+        // Kept longer than any cooldown it can produce, so the streak survives to
+        // the next refusal and the escalation actually escalates.
+        Cache::put($key, $fails, 172800);
+
+        return $seconds;
     }
 
     private function cooldownFor(AiProviderException $error, int $fails): int
@@ -260,5 +323,15 @@ class AiModelHealth
     private function rateLimitedKey(ModelCandidate $candidate): string
     {
         return 'ai.endpoint.ratelimited.'.$candidate->endpointHash();
+    }
+
+    private function credentialFailsKey(ModelCandidate $candidate): string
+    {
+        return 'ai.endpoint.credential_fails.'.$candidate->endpointHash();
+    }
+
+    private function toolsUnsupportedKey(ModelCandidate $candidate): string
+    {
+        return 'ai.model.no_tools.'.substr(sha1($candidate->key()), 0, 24);
     }
 }
