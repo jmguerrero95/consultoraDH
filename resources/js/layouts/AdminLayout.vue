@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router';
 
 import AdminSidebar from '@/components/layout/AdminSidebar.vue';
 import AdminTopbar from '@/components/layout/AdminTopbar.vue';
+import FloatingAssistant from '@/components/assistant/FloatingAssistant.vue';
 import AppToasts from '@/components/ui/AppToasts.vue';
 
 /**
@@ -71,6 +72,10 @@ onBeforeUnmount(() => {
                 <RouterView />
             </main>
         </div>
+
+        <!-- The assistant, available from every admin screen. It renders nothing
+             unless the signed-in user may use it. -->
+        <FloatingAssistant />
 
         <AppToasts />
     </div>

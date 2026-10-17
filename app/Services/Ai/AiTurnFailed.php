@@ -31,4 +31,17 @@ class AiTurnFailed extends RuntimeException
             .$rounds.' rounds. The turn produced no response.'
         );
     }
+
+    /**
+     * The model answered with nothing (BUG-018).
+     *
+     * Raised before anything is persisted, for the same reason as the tool-round
+     * case: an empty assistant turn stored now is history the next turn replays as
+     * something the assistant said. The person sees an error, and the conversation
+     * is left exactly as it was.
+     */
+    public static function emptyAnswer(): self
+    {
+        return new self('The model returned an empty answer. The turn produced no response.');
+    }
 }

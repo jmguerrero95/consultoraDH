@@ -79,6 +79,32 @@ return [
     ],
 
     /*
+     * Failover policy (BUG-016).
+     *
+     * `max_attempts` bounds how many provider calls one turn may make, and
+     * `cooldown_seconds` is how long a slot that failed a retryable call is left
+     * alone before it is tried again. Together they keep a provider outage from
+     * turning each question into a fresh timeout, without ever hiding a
+     * misconfiguration: a slot that answers is cleared immediately, and a
+     * rejected credential is never retried at all.
+     *
+     * AI_MAX_ATTEMPTS
+     * AI_COOLDOWN_SECONDS
+     */
+    'max_attempts' => (int) env('AI_MAX_ATTEMPTS', 2),
+
+    'cooldown_seconds' => (int) env('AI_COOLDOWN_SECONDS', 60),
+
+    /*
+     * How long the status endpoint's answer is cached. It reads configuration and
+     * the cooldown state and calls no provider, so this is short — just enough to
+     * keep a polling widget from re-computing it on every tick.
+     *
+     * AI_STATUS_CACHE_SECONDS
+     */
+    'status_cache_seconds' => (int) env('AI_STATUS_CACHE_SECONDS', 20),
+
+    /*
      * Web search configuration (SearXNG-compatible).
      *
      * AI_WEB_SEARCH_ENABLED

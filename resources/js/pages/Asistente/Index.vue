@@ -192,7 +192,7 @@ const hint = useSuggestion();
 const { context: suggestionContext } = useSuggestionContext();
 
 const enabled = computed(() => status.value?.ai_enabled === true);
-const model = computed(() => status.value?.primary?.model ?? status.value?.fallback?.model ?? '—');
+const model = computed(() => status.value?.active_model ?? '—');
 
 /** An unconfigured provider is reported plainly rather than as a failure. */
 const availability = computed(() => {
@@ -204,11 +204,18 @@ const availability = computed(() => {
         return 'Asistente desactivado en este entorno.';
     }
 
-    if (!status.value.primary.configured && !status.value.fallback.configured) {
-        return 'No hay ningún proveedor de IA configurado.';
+    // BUG-017: say which provider is answering *now*, and name the model, rather
+    // than reporting whether a slot was ever configured.
+    switch (status.value.state) {
+        case 'none':
+            return 'No hay ningún proveedor de IA configurado.';
+        case 'unavailable':
+            return 'Los proveedores de IA no están disponibles en este momento; se reintentará automáticamente.';
+        case 'fallback':
+            return `Operativo con el proveedor de respaldo${model.value !== '—' ? ` (${model.value})` : ''}.`;
+        default:
+            return `Operativo${model.value !== '—' ? ` con ${model.value}` : ''}.`;
     }
-
-    return `Operativo con ${model.value}.`;
 });
 
 onMounted(async () => {

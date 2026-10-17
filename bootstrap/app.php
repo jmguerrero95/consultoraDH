@@ -18,6 +18,8 @@ use App\Http\Middleware\RequireAnyAbility;
 use App\Http\Middleware\SecurityHeaders;
 use App\Http\Middleware\TrustHosts;
 use App\Http\Middleware\VerifySupportEmailHmac;
+use App\Services\Ai\AiProviderException;
+use App\Services\Ai\AiTurnFailed;
 use App\Support\Security\TrustedHostsNotConfigured;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
@@ -326,6 +328,39 @@ return Application::configure(dirname(__DIR__))
                 'message' => $e->getMessage(),
                 'code' => $e->reason,
             ], 422);
+        });
+
+        /*
+         * The AI assistant's own failures.
+         *
+         * These used to fall through to the generic 500 body: the person asked a
+         * question, the turn failed, and the screen showed nothing usable while the
+         * log held the reason. The message here is written for a person and never
+         * carries the provider's raw text or the configured URL; those stay in the
+         * log the framework already writes.
+         */
+        $exceptions->render(function (AiProviderException $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => $e->retryable
+                    ? 'El asistente de IA no está disponible en este momento. Intente de nuevo en unos segundos.'
+                    : 'El asistente de IA no pudo procesar la solicitud. Revise la configuración del proveedor.',
+                'code' => 'ai_provider_unavailable',
+            ], 503);
+        });
+
+        $exceptions->render(function (AiTurnFailed $e, Request $request) {
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            return response()->json([
+                'message' => 'El asistente no produjo una respuesta. La conversación no se modificó; intente reformular la pregunta.',
+                'code' => 'ai_turn_failed',
+            ], 502);
         });
 
         $exceptions->render(function (AuthenticationException $e, Request $request) {

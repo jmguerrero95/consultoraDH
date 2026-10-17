@@ -62,8 +62,24 @@ export interface AiTurnPayload {
 
 export interface AiStatusPayload {
     ai_enabled: boolean;
-    primary: { configured: boolean; model: string | null; base_url: string | null };
-    fallback: { configured: boolean; model: string | null; base_url: string | null };
+    /**
+     * Which provider is answering right now (BUG-017).
+     *
+     * `none` means nothing is configured; `available` means the primary is up;
+     * `fallback` means the primary is cooling down after a failure and the
+     * fallback is covering; `unavailable` means every provider is cooling down.
+     * The value changes with reality, unlike the old `configured` booleans, which
+     * were true for a provider that had been failing for an hour.
+     */
+    state: 'none' | 'available' | 'fallback' | 'unavailable';
+    /** Whether a question would be answered at all. */
+    available: boolean;
+    /** The model that would answer now, or null. */
+    active_model: string | null;
+    /** Seconds each slot is still cooling down for, keyed by slot name. */
+    cooldowns: Record<string, number>;
+    primary: { configured: boolean; model: string | null };
+    fallback: { configured: boolean; model: string | null };
     timeout_seconds: number;
     proposal_ttl_minutes: number;
 }

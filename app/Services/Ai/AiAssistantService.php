@@ -424,27 +424,47 @@ final class AiAssistantService
             throw AiTurnFailed::toolRoundsExhausted($maxRounds);
         }
 
+        // BUG-018: an answer of nothing is not an answer.
+        //
+        // A model that returns whitespace — or a round that produced only tool
+        // calls whose text did not come back — would otherwise be persisted as an
+        // assistant turn, showing the person an empty bubble and sending that
+        // empty text back to the provider as history on the next turn. A turn that
+        // produced only a *proposal* has no prose either, but the proposal is a
+        // real result, so that case is allowed to have no reply text — it simply
+        // stores no assistant message.
+        $hasReply = trim((string) $reply) !== '';
+
+        if (! $hasReply && $proposals === []) {
+            throw AiTurnFailed::emptyAnswer();
+        }
+
+        $provider = $currentResult->provider ?? $result->provider;
+        $model = $currentResult->model ?? $result->model;
+
         // Persist user message and assistant reply
         AiMessageModel::query()->create([
             'ai_conversation_id' => $conversation->id,
             'role' => AiMessage::ROLE_USER,
             'content' => $question,
-            'provider' => $currentResult->provider ?? $result->provider,
-            'model' => $currentResult->model ?? $result->model,
+            'provider' => $provider,
+            'model' => $model,
         ]);
 
-        AiMessageModel::query()->create([
-            'ai_conversation_id' => $conversation->id,
-            'role' => AiMessage::ROLE_ASSISTANT,
-            'content' => $reply,
-            'provider' => $currentResult->provider ?? $result->provider,
-            'model' => $currentResult->model ?? $result->model,
-        ]);
+        if ($hasReply) {
+            AiMessageModel::query()->create([
+                'ai_conversation_id' => $conversation->id,
+                'role' => AiMessage::ROLE_ASSISTANT,
+                'content' => $reply,
+                'provider' => $provider,
+                'model' => $model,
+            ]);
+        }
 
         return [
-            'reply' => $reply,
-            'provider' => $currentResult->provider ?? $result->provider,
-            'model' => $currentResult->model ?? $result->model,
+            'reply' => $hasReply ? $reply : '',
+            'provider' => $provider,
+            'model' => $model,
             'proposals' => $proposals,
             'tools' => $toolResults,
         ];

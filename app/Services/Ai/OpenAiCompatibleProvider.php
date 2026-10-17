@@ -192,6 +192,18 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             );
         }
 
+        // BUG-018: a 200 with neither prose nor a tool call is not an answer.
+        //
+        // It used to become an `AiResponse` with `content: ''`, which the service
+        // then persisted as an assistant turn: the person saw a blank bubble, and
+        // the next turn replayed that blank as something the assistant had said.
+        // Treating it as a retryable provider fault gives the fallback its chance
+        // and, if that fails too, surfaces an error the caller can show instead of
+        // storing nothing as though it were something.
+        if (trim($content) === '' && $calls === []) {
+            throw AiProviderException::unavailable('The AI provider returned an empty answer.');
+        }
+
         return new AiResponse(
             $content,
             $calls,

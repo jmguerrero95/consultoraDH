@@ -16,6 +16,7 @@ use App\Services\Ai\AiToolRegistry;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Cache;
 
 /**
  * Handles one turn of an AI conversation: question → tool calls → answer/proposal.
@@ -305,26 +306,40 @@ final class AiAssistantController extends Controller
             return $this->fail('AI assistant access denied.', 401);
         }
 
-        $primaryConfigured = ! empty(config('ai.primary.base_url'))
-            && ! empty(config('ai.primary.model'));
+        // BUG-017. The status used to report only whether each slot was configured —
+        // which never changed, so a provider that had been failing for an hour still
+        // read as "configured". It now reports which provider is *available right
+        // now*: the resolver's own cooldown state decides that, and no provider is
+        // contacted to answer, so asking costs nothing. Cached for a few seconds so
+        // a polling widget does not re-read it on every tick.
+        $seconds = max(1, (int) config('ai.status_cache_seconds', 20));
 
-        $fallbackConfigured = ! empty(config('ai.fallback.base_url'))
-            && ! empty(config('ai.fallback.model'));
+        $status = Cache::remember('ai.status', $seconds, function (): array {
+            $primary = $this->resolver->primary();
+            $fallback = $this->resolver->fallback();
 
-        return response()->json([
-            'ai_enabled' => config('ai.enabled', false),
-            'primary' => [
-                'configured' => $primaryConfigured,
-                'model' => config('ai.primary.model'),
-                'base_url' => config('ai.primary.base_url'),
-            ],
-            'fallback' => [
-                'configured' => $fallbackConfigured,
-                'model' => config('ai.fallback.model'),
-                'base_url' => config('ai.fallback.base_url'),
-            ],
-            'timeout_seconds' => config('ai.timeout_seconds', 30),
-            'proposal_ttl_minutes' => config('ai.proposal_ttl_minutes', 15),
-        ]);
+            return [
+                'ai_enabled' => config('ai.enabled', false),
+                'state' => $this->resolver->state(),
+                'available' => $this->resolver->anyConfigured()
+                    && $this->resolver->state() !== 'unavailable',
+                'active_model' => $this->resolver->active_model(),
+                'cooldowns' => $this->resolver->cooldowns(),
+                'primary' => [
+                    'configured' => $primary->isConfigured(),
+                    'model' => $primary->model(),
+                ],
+                'fallback' => [
+                    'configured' => $fallback->isConfigured(),
+                    'model' => $fallback->model(),
+                ],
+                'timeout_seconds' => config('ai.timeout_seconds', 30),
+                'proposal_ttl_minutes' => config('ai.proposal_ttl_minutes', 15),
+            ];
+        });
+
+        // The configured base URLs are not published: they are deployment detail, and
+        // the interface does not need them to say which model is answering.
+        return response()->json($status);
     }
 }
