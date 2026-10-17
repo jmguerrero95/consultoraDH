@@ -71,6 +71,33 @@ final class AiIntentRoutingTest extends TestCase
         $this->assertStringContainsString('temperatura', (string) $routing['search_query']);
     }
 
+    public function test_a_followup_with_noise_words_keeps_the_previous_location(): void
+    {
+        // "¿Y mañana qué tal estará?" leaves "manana tal estara" after stopword
+        // removal — every token a place name it is not. The turn continues the
+        // weather question before it and must keep that question's location
+        // instead of searching for a place called "tal".
+        $routing = $this->router()->route('¿Y mañana qué tal estará?', false, [
+            'Revisa la temperatura y humedad de Girón, Santander, el día de hoy.',
+        ]);
+
+        $this->assertTrue($routing['web']);
+        $this->assertTrue($routing['weather']);
+        $this->assertStringContainsString('giron', (string) $routing['location']);
+        $this->assertStringNotContainsString('tal', (string) $routing['location']);
+    }
+
+    public function test_a_followup_that_names_a_new_place_uses_it(): void
+    {
+        $routing = $this->router()->route('¿Y en Bogotá qué tal estará?', false, [
+            'Revisa la temperatura y humedad de Girón, Santander, el día de hoy.',
+        ]);
+
+        $this->assertTrue($routing['weather']);
+        $this->assertStringContainsString('bogota', (string) $routing['location']);
+        $this->assertStringNotContainsString('giron', (string) $routing['location']);
+    }
+
     public function test_an_affirmative_followup_reuses_the_previous_request(): void
     {
         $routing = $this->router()->route('Sí, hazlo.', false, [

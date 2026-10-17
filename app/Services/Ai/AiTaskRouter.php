@@ -322,8 +322,23 @@ final class AiTaskRouter
         // automatically.
         $prefetch = $needsWeb && ! $aboutOurData;
 
-        $location = $this->extractLocation($haystack)
-            ?? (($weather || $publicTopic) && $previous !== null ? $this->extractLocation($this->normalise($previous)) : null);
+        // The place to look up. A follow-up such as "¿y mañana?" contains no
+        // place of its own — every token it leaves after stopword removal is
+        // noise ("tal", from "qué tal") — so it keeps the place named in the
+        // request it continues. A follow-up that does name a place ("¿y en
+        // Bogotá?") names it after "en" and is used as-is.
+        $ownLocation = $this->extractLocation($haystack);
+        $previousLocation = $previous !== null ? $this->extractLocation($this->normalise($previous)) : null;
+
+        $location = $ownLocation;
+
+        if ($isFollowUp && $previousLocation !== null && ! str_contains($haystack, ' en ')) {
+            $location = $previousLocation;
+        }
+
+        if ($location === null && ($weather || $publicTopic)) {
+            $location = $previousLocation;
+        }
 
         // The query the prefetch will use. A follow-up is joined to the request
         // it continues, so a search for "¿y cómo estará mañana?" searches for the
@@ -472,6 +487,17 @@ final class AiTaskRouter
                 if (in_array($deictic, $words, true)) {
                     return true;
                 }
+            }
+
+            // A short message that opens with a continuation conjunction ("y",
+            // "e", "también", "además") continues the request before it. "¿Y en
+            // Bogotá qué tal estará?" names a place but no administrative
+            // subject, so it is not a new request: it extends the weather
+            // question it follows.
+            $first = preg_replace('/^[^\p{L}]+/u', '', $words[0] ?? '') ?? '';
+
+            if (in_array($first, ['y', 'e', 'tambien', 'también', 'ademas', 'además'], true)) {
+                return true;
             }
         }
 

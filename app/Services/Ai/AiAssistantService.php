@@ -150,7 +150,7 @@ final class AiAssistantService
 
         $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget);
 
-        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData);
+        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external);
     }
 
     /**
@@ -501,8 +501,11 @@ final class AiAssistantService
      * @param  bool  $requiresClientData  carried into every synthesis round, so the
      *                                    second round cannot reach a provider the first
      *                                    one was not allowed to use
+     * @param  list<array{kind: string, source: string, data: array<string, mixed>}>  $prefetched
+     *                                    results the server fetched for the turn, so the
+     *                                    answer and the sources it used are reported together
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = []): array
     {
         $proposals = [];
         $toolResults = [];
@@ -674,6 +677,13 @@ final class AiAssistantService
             throw AiTurnFailed::toolRoundsExhausted($maxRounds);
         }
 
+        // Some models occasionally print their function-call envelope as plain
+        // text instead of returning it as a tool call: the answer comes back
+        // followed by `{"name": "weather_current", "parameters": {...}}`. That
+        // raw envelope is not part of the answer and is removed here, so it is
+        // never shown to the person nor stored as conversation history.
+        $reply = self::stripToolCallLeak((string) $reply);
+
         // BUG-018: an answer of nothing is not an answer.
         //
         // A model that returns whitespace — or a round that produced only tool
@@ -716,9 +726,57 @@ final class AiAssistantService
             'provider' => $provider,
             'model' => $model,
             'proposals' => $proposals,
-            'tools' => $toolResults,
+            'tools' => $this->mergePrefetchedTools($toolResults, $prefetched),
             'artifacts' => $artifacts,
         ];
+    }
+
+    /**
+     * Add the server-side prefetched results to the turn's tool results.
+     *
+     * The web search and the weather lookup run in `prefetchExternal`, before the
+     * model is asked, so their results never pass through a tool call of the
+     * model's own and would otherwise be invisible to the interface: the answer
+     * would cite sources the "Fuentes" panel then did not list. Reporting them
+     * here is what keeps the sources and the prose in agreement.
+     *
+     * A tool the model also called itself is left to the model's own entry, so a
+     * search the model repeated does not appear twice.
+     *
+     * @param  list<array<string, mixed>>  $toolResults
+     * @param  list<array{kind: string, source: string, data: array<string, mixed>}>  $prefetched
+     * @return list<array<string, mixed>>
+     */
+    private function mergePrefetchedTools(array $toolResults, array $prefetched): array
+    {
+        if ($prefetched === []) {
+            return $toolResults;
+        }
+
+        $present = [];
+
+        foreach ($toolResults as $entry) {
+            if (is_array($entry) && isset($entry['tool'])) {
+                $present[(string) $entry['tool']] = true;
+            }
+        }
+
+        foreach ($prefetched as $block) {
+            $tool = match ($block['kind'] ?? '') {
+                'weather' => 'weather_current',
+                'search' => 'web_search',
+                default => null,
+            };
+
+            if ($tool === null || isset($present[$tool]) || ! is_array($block['data'] ?? null)) {
+                continue;
+            }
+
+            $toolResults[] = ['tool' => $tool, 'output' => $block['data']];
+            $present[$tool] = true;
+        }
+
+        return $toolResults;
     }
 
     /**
@@ -754,6 +812,70 @@ final class AiAssistantService
     }
 
     /**
+     * Remove a trailing function-call envelope a model leaked into its text.
+     *
+     * The envelope shape is exactly the one the providers use on the wire: an
+     * object with a `name` and either `parameters` or `arguments`. Only a
+     * balanced object at the very end of the reply is removed, and only when it
+     * actually decodes to that shape, so ordinary prose that ends in a brace or
+     * a legitimately generated JSON document the person asked for is untouched.
+     *
+     * @param  string  $reply
+     */
+    public static function stripToolCallLeak(string $reply): string
+    {
+        $text = rtrim($reply);
+
+        // A fenced block is the other shape the same leak takes.
+        if (str_ends_with($text, '```') && preg_match('/```(?:json|JSON)?\s*(\{.*\})\s*```$/s', $text, $m) === 1) {
+            $inner = json_decode($m[1], true);
+
+            if (is_array($inner) && array_key_exists('name', $inner)
+                && (array_key_exists('parameters', $inner) || array_key_exists('arguments', $inner))) {
+                return rtrim((string) preg_replace('/```(?:json|JSON)?\s*\{.*\}\s*```$/s', '', $text));
+            }
+        }
+
+        if ($text === '' || ! str_ends_with($text, '}')) {
+            return $reply;
+        }
+
+        // Walk back to the opening brace that balances the trailing one. Braces
+        // are ASCII, so scanning bytes is safe on an UTF-8 string.
+        $depth = 0;
+        $start = null;
+
+        for ($i = strlen($text) - 1; $i >= 0; $i--) {
+            $char = $text[$i];
+
+            if ($char === '}') {
+                $depth++;
+            } elseif ($char === '{') {
+                $depth--;
+
+                if ($depth === 0) {
+                    $start = $i;
+
+                    break;
+                }
+            }
+        }
+
+        if ($start === null) {
+            return $reply;
+        }
+
+        $decoded = json_decode(substr($text, $start), true);
+
+        if (! is_array($decoded) || ! array_key_exists('name', $decoded)
+            || (! array_key_exists('parameters', $decoded) && ! array_key_exists('arguments', $decoded))) {
+            return $reply;
+        }
+
+        return rtrim(substr($text, 0, $start));
+    }
+
+    /**
      * System prompt – multi-zone, see class docblock.
      *
      * The rules are about *behaviour under autonomy*: the assistant has real
@@ -777,6 +899,9 @@ final class AiAssistantService
             '  crear un archivo privado solicitado no requieren confirmación: ya están autorizados.',
             '- Nunca afirmes que algo quedó hecho si no lo está. Si de verdad no pudiste, di qué intentaste y qué',
             '  falló, en lugar de inventar el resultado.',
+            '- Si una herramienta devuelve un error, corrígelo y vuelve a intentarlo, o usa otra herramienta.',
+            '  No narres al usuario mensajes internos, nombres de parámetros ni el nombre técnico de la',
+            '  herramienta: entrega el resultado, o un resumen sencillo de lo que no fue posible.',
             '',
             'INFORMACIÓN ACTUAL E INTERNET:',
             '- Sí tienes acceso a internet mediante las herramientas web_search y web_fetch, y a datos',
@@ -825,6 +950,8 @@ final class AiAssistantService
             '- Responde con claridad, sin repetir la pregunta, sin disculpas innecesarias y sin mezclar idiomas.',
             '- Sé breve cuando la pregunta es simple y completo cuando la tarea lo exige. No muestres campos',
             '  técnicos que no aportan al usuario.',
+            '- No escribas el nombre de una herramienta ni un objeto JSON de llamada dentro de tu respuesta;',
+            '  usa las herramientas de forma nativa y responde solo con el resultado y su texto.',
         ];
 
         return AiMessage::system(implode("\n", $rules));

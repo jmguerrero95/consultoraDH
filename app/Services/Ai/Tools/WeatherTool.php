@@ -114,6 +114,16 @@ final class WeatherTool extends AbstractAiTool
         $location = $this->requireString($arguments, 'location', 160);
         $days = $arguments['days'] ?? 2;
 
+        // Models routinely send an integer as a numeric string. Accepting it here
+        // turns a needless "days must be an integer" round-trip — which a weak
+        // model then reports to the person instead of retrying — into the
+        // successful call the argument already meant.
+        if (is_string($days) && preg_match('/^\s*\d+\s*$/', $days) === 1) {
+            $days = (int) trim($days);
+        } elseif (is_float($days) && $days === floor($days)) {
+            $days = (int) $days;
+        }
+
         if (! is_int($days) || $days < 1 || $days > 3) {
             throw new AiToolRejected("'days' debe ser un entero entre 1 y 3.");
         }
