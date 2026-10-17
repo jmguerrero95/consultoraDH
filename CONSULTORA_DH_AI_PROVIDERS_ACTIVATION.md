@@ -12,7 +12,8 @@ configuración/integración confirmados.
 
 - **SHA inicial (`BASE_SHA`)**: `dcd5d65359864d67ff46870c21ad5bc83d265d03`
   (HEAD de `main` == `origin/main` al comenzar; cierre de R2).
-- **SHA final (`FINAL_SHA`)**: el commit de esta entrega (código + este informe).
+- **SHA final (`FINAL_SHA`)**: `45576c9f70eb144b2e6a315afc6005b762d200e5`
+  (commit funcional: el código de esta entrega y este mismo informe).
 - **Push**: a `origin/main`, sin `--force`.
 - **Restricciones respetadas**: no se reemplazó `.env`, no se cambiaron
   contraseñas, no se imprime ninguna clave/token/cabecera privada, no se tocó
@@ -243,7 +244,7 @@ lo dispara la denegación de Groq.
 ```text
 CONSULTORA_DH_AI_PROVIDERS_ACTIVATION
 BASE_SHA=dcd5d65359864d67ff46870c21ad5bc83d265d03
-FINAL_SHA=<commit de esta entrega>
+FINAL_SHA=45576c9f70eb144b2e6a315afc6005b762d200e5
 GIT_SYNC=ok
 GROQ=FAIL (openai/gpt-oss-120b; 401/403 "Access denied. Please check your network settings."; denegación de red/cuenta, no id ni conectividad)
 CLOUDFLARE=FAIL (modelo corregido a @cf/meta/llama-3.1-8b-instruct-fp8; sin re-verificar por tope de solicitudes)
