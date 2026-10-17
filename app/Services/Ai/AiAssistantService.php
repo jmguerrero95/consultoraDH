@@ -117,7 +117,7 @@ final class AiAssistantService
         $this->deadline->set($budget->deadline);
 
         try {
-            return $this->runTurn($conversation, $question, $user, $messages, $recentQuestions, $budget);
+            return $this->runTurn($conversation, $question, $user, $messages, $history, $recentQuestions, $budget);
         } finally {
             // Cleared so a later caller in the same worker does not inherit a
             // stale deadline and accidentally cap its own timeouts.
@@ -131,10 +131,11 @@ final class AiAssistantService
      * The body of a turn, inside the budget and the tool deadline.
      *
      * @param  list<AiMessage>  $messages
+     * @param  list<AiMessage>  $history  the prior exchange pairs, oldest first
      * @param  list<string>  $recentQuestions
      * @return array<string, mixed>
      */
-    private function runTurn(AiConversation $conversation, string $question, User $user, array $messages, array $recentQuestions, AiTurnBudget $budget): array
+    private function runTurn(AiConversation $conversation, string $question, User $user, array $messages, array $history, array $recentQuestions, AiTurnBudget $budget): array
     {
         // What the person has attached to *this* conversation, retrieved before
         // the model is asked. This is the step that makes "upload a spreadsheet,
@@ -145,19 +146,9 @@ final class AiAssistantService
         // thread - or in somebody else's account - cannot reach this answer.
         $passages = $this->retrievePassages($user, $question, $conversation);
 
-        // Where this turn's text came from, for the outbound boundary. The
-        // passages are private material the model could copy into a search query;
-        // the person's own question is theirs to search with. This is set before
-        // anything outbound runs — the prefetch below and every tool the model
-        // calls read it — and it is cleared in `ask()`'s finally. It is metadata,
-        // not a claim by the model: the model proposes a query, this decides
-        // whether its terms came from somewhere they may not leave.
+        // Where this turn's text came from, for the outbound boundary.
         $this->outbound->set(
-            privateSources: array_map(
-                static fn (array $passage): string => trim((string) ($passage['content'] ?? '')),
-                $passages,
-            ),
-            authorizedSources: [$question],
+            privateSources: $this->privateSourcesForTurn($conversation, $history, $passages),
         );
 
         // Which tools this turn starts with, and whether it needs current,
@@ -208,6 +199,58 @@ final class AiAssistantService
         $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget);
 
         return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external);
+    }
+
+    /**
+     * The private material this turn's outbound boundary must recognise.
+     *
+     * Two sources, both provenance rather than shape:
+     *
+     *   1. The passages retrieved from documents attached to this conversation:
+     *      the exact text the model could copy into a search query.
+     *   2. The prior turns themselves, but only once the thread is *known* to
+     *      hold private data (`contains_client_data`). A business name or an
+     *      internal clause the model saw in the history has no pattern the gate
+     *      can match, so without this the history was invisible provenance: the
+     *      model could search a client name it read three turns ago and nothing
+     *      would refuse it. A clean public thread keeps its history as public
+     *      context, so a genuine public follow-up is not refused.
+     *
+     * The person's own current question is deliberately absent: it is not an
+     * authorisation for anything private, so repeating an identifier in the
+     * question does not make it searchable. It is also absent so the ordinary
+     * case — a public follow-up whose terms the question states — is not blocked
+     * by the question's own words.
+     *
+     * @param  list<AiMessage>  $history
+     * @param  list<array<string, mixed>>  $passages
+     * @return list<string>
+     */
+    private function privateSourcesForTurn(AiConversation $conversation, array $history, array $passages): array
+    {
+        $sources = [];
+
+        foreach ($passages as $passage) {
+            $content = trim((string) ($passage['content'] ?? ''));
+
+            if ($content !== '') {
+                $sources[] = $content;
+            }
+        }
+
+        if (! (bool) $conversation->contains_client_data) {
+            return $sources;
+        }
+
+        foreach ($history as $message) {
+            if ($message->role === AiMessage::ROLE_SYSTEM) {
+                continue;
+            }
+
+            $sources[] = $message->content;
+        }
+
+        return $sources;
     }
 
     /**

@@ -9,6 +9,7 @@ use App\Domain\Documents\DocumentRetriever;
 use App\Models\AiConversation;
 use App\Models\AiTask;
 use App\Models\User;
+use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiProviderResolver;
@@ -63,6 +64,7 @@ final class ResearchTask implements AiTaskHandler
         private readonly DocumentRetriever $documents,
         private readonly AiPrivacyGate $privacy,
         private readonly AiToolDeadline $deadline,
+        private readonly AiOutboundContext $outbound,
     ) {}
 
     public function kind(): string
@@ -72,23 +74,31 @@ final class ResearchTask implements AiTaskHandler
 
     public function handle(AiTask $task): array
     {
-        $user = User::query()->findOrFail($task->user_id);
-
-        $question = trim((string) ($task->input['question'] ?? ''));
-
-        if ($question === '') {
-            throw new \RuntimeException('La investigación no tiene una pregunta.');
-        }
-
-        // The task's own budget, deliberately separate from a chat turn's: a
-        // background research run may reasonably take longer than a request the
-        // person is waiting on, and reusing the chat ceiling would fail long work
-        // that is behaving correctly. The deadline also caps every outbound tool
-        // call made while gathering sources.
+        // A queue worker reuses this container across jobs, so provenance from a
+        // previous task must not survive into this one. The context is cleared on
+        // the way in and again on the way out: the `finally` covers a task that
+        // threw, and the opening clear covers a worker that entered with a stale
+        // context already set.
         $budget = AiTurnBudget::forTurn(false, microtime(true) + self::SYNTHESIS_TIMEOUT_SECONDS);
-        $this->deadline->set($budget->deadline);
 
         try {
+            $this->outbound->set();
+
+            $user = User::query()->findOrFail($task->user_id);
+
+            $question = trim((string) ($task->input['question'] ?? ''));
+
+            if ($question === '') {
+                throw new \RuntimeException('La investigación no tiene una pregunta.');
+            }
+
+            // The task's own budget, deliberately separate from a chat turn's: a
+            // background research run may reasonably take longer than a request
+            // the person is waiting on, and reusing the chat ceiling would fail
+            // long work that is behaving correctly. The deadline also caps every
+            // outbound tool call made while gathering sources.
+            $this->deadline->set($budget->deadline);
+
             $task->forceFill(['stage' => 'Buscando fuentes', 'progress' => 20])->save();
 
             $sources = $this->gather($user, $question, $task->ai_conversation_id);
@@ -121,6 +131,7 @@ final class ResearchTask implements AiTaskHandler
             ];
         } finally {
             $this->deadline->set(null);
+            $this->outbound->reset();
         }
     }
 
@@ -145,13 +156,20 @@ final class ResearchTask implements AiTaskHandler
         // Scoped to this task's conversation, exactly as an assistant turn is, so
         // a document attached to a different thread stays out - and so a
         // conversation's contents never leak into another's research.
+        //
+        // Each passage is *private* provenance for the outbound boundary. The
+        // boundary is told where the attachment text came from before any search
+        // runs, so a research task that turned an internal name from the
+        // spreadsheet into a web query ("investiga los nombres del archivo") is
+        // refused rather than disclosing the document.
         foreach ($this->attachments($user, $question, $conversationId) as $source) {
             $sources[] = $source;
+            $this->outbound->addPrivateSource($source['title'].' '.$source['snippet']);
         }
 
         foreach ([
-            ['tool' => 'document_search', 'arguments' => ['query' => $question, 'max_results' => 5]],
-            ['tool' => 'web_search', 'arguments' => ['query' => $question, 'max_results' => 5]],
+            ['tool' => 'document_search', 'arguments' => ['query' => $question, 'max_results' => 5], 'private' => true],
+            ['tool' => 'web_search', 'arguments' => ['query' => $question, 'max_results' => 5], 'private' => false],
         ] as $attempt) {
             try {
                 $output = $this->tools->executeRead($attempt['tool'], $attempt['arguments'], $user);
@@ -180,6 +198,13 @@ final class ResearchTask implements AiTaskHandler
 
                 $seen[$key] = true;
                 $sources[] = $source;
+
+                // Passages found in the person's own documents are private
+                // provenance too. Web results are public and are deliberately not
+                // registered: only what came from the person's records is.
+                if ($attempt['private']) {
+                    $this->outbound->addPrivateSource($source['title'].' '.$source['snippet']);
+                }
 
                 if (count($sources) >= self::MAX_SOURCES) {
                     return $sources;

@@ -168,18 +168,19 @@ final class AiPrivacyGate
      * This answers the provenance question the pattern check cannot: even a query
      * with no recognisable identifier must not leave when its terms are drawn
      * from private material — a document the person attached, a record a private
-     * tool returned. A business name or an internal agreement has no shape a
-     * regular expression recognises; where it *came from* is the only honest
-     * signal.
+     * tool returned, a prior turn of a conversation known to hold private data. A
+     * business name or an internal agreement has no shape a regular expression
+     * recognises; where it *came from* is the only honest signal.
      *
      * The rule is deliberately narrow so public research keeps working:
      *
      *   - no private sources in the turn → allowed (a public question is public);
-     *   - a query term appears in a private source but also in the person's own
-     *     current words → allowed (they asked for it explicitly);
-     *   - a query term appears in private material and nowhere in the person's
-     *     request → refused, because the model composed it from the private
-     *     context.
+     *   - a query whose terms appear in no private source → allowed, even inside a
+     *     private conversation;
+     *   - a query term that appears in private material → refused, wherever it
+     *     came from. The person's own words are not an authorisation: typing an
+     *     identifier into the current question does not make it public, so a term
+     *     the private material holds is refused even when the person repeated it.
      *
      * The model cannot declare its own query public: it proposes terms, and the
      * decision is made here, from the turn's metadata, never from anything the
@@ -188,13 +189,11 @@ final class AiPrivacyGate
      * The caller must use the returned `query` and never the original.
      *
      * @param  list<string>  $privateSources  exact private texts in the turn's context
-     * @param  list<string>  $authorizedSources  texts the person supplied themselves
      * @return array{query: string, redacted: int, blocked: bool, reason: string|null, provenance: string}
      */
     public function authorizeOutboundQuery(
         string $query,
         array $privateSources = [],
-        array $authorizedSources = [],
     ): array {
         $clean = $this->sanitizeQuery($query);
 
@@ -202,7 +201,7 @@ final class AiPrivacyGate
             return $clean + ['provenance' => 'identifier'];
         }
 
-        if ($privateSources !== [] && $this->derivesFromPrivate($clean['query'], $privateSources, $authorizedSources)) {
+        if ($privateSources !== [] && $this->derivesFromPrivate($clean['query'], $privateSources)) {
             return [
                 'query' => $clean['query'],
                 'redacted' => $clean['redacted'],
@@ -224,6 +223,13 @@ final class AiPrivacyGate
      * taken from private material. Redirect targets are checked with the same
      * method, so a hop cannot smuggle past the first check.
      *
+     * The provenance check covers *every* component a request transmits to the
+     * destination — user info, path, query string and fragment — not only the
+     * query string. A private value in the path ("/documentos/ProyectoAlondra")
+     * travels exactly as a query parameter would, and percent-encoding is decoded
+     * once before the comparison, so "%41londra" is checked as "Alondra". The host
+     * is deliberately excluded: it names the public site, not the record on it.
+     *
      * A bare number in a public URL is not refused: article and document ids are
      * ordinary. Only identifiers in the shape of a person's data, named
      * credentials and provenance-derived values are.
@@ -231,12 +237,10 @@ final class AiPrivacyGate
      * The returned reason never contains the URL or the offending value.
      *
      * @param  list<string>  $privateSources  exact private texts in the turn's context
-     * @param  list<string>  $authorizedSources  texts the person supplied themselves
      */
     public function sensitiveUrlReason(
         string $url,
         array $privateSources = [],
-        array $authorizedSources = [],
     ): ?string {
         if ($url === '') {
             return null;
@@ -255,8 +259,13 @@ final class AiPrivacyGate
             return 'La URL contiene un dato personal (correo) y no puede solicitarse.';
         }
 
-        $query = parse_url($url, PHP_URL_QUERY);
-        $query = is_string($query) ? rawurldecode($query) : '';
+        $parts = parse_url($url);
+
+        if (! is_array($parts)) {
+            return null;
+        }
+
+        $query = is_string($parts['query'] ?? null) ? rawurldecode((string) $parts['query']) : '';
 
         foreach ($this->queryParameterNames($query) as $name) {
             if (in_array($name, self::SENSITIVE_URL_PARAMS, true)) {
@@ -264,48 +273,52 @@ final class AiPrivacyGate
             }
         }
 
-        if ($query !== '' && $privateSources !== [] && $this->derivesFromPrivate($query, $privateSources, $authorizedSources)) {
-            return 'La URL contiene valores derivados de información privada y no puede solicitarse.';
+        if ($privateSources === []) {
+            return null;
+        }
+
+        // Everything the request carries to the destination: user info, path,
+        // query and fragment, decoded once. A fragment is included even though an
+        // ordinary HTTP request does not transmit it, because the tool reports it
+        // back as the page that was read, and a private fragment is still text
+        // the model chose out of private material.
+        $carried = [];
+
+        foreach (['user', 'pass', 'path', 'query', 'fragment'] as $component) {
+            if (is_string($parts[$component] ?? null) && $parts[$component] !== '') {
+                $carried[] = rawurldecode((string) $parts[$component]);
+            }
+        }
+
+        if ($carried !== [] && $this->derivesFromPrivate(implode(' ', $carried), $privateSources)) {
+            return 'La URL contiene información privada y no puede consultarse.';
         }
 
         return null;
     }
 
     /**
-     * Whether the query's distinctive terms are drawn from private material and
-     * not from the person's own words.
+     * Whether the given text's distinctive terms are drawn from private material.
      *
-     * A term the person typed is authorised even if it also appears in private
-     * data — they asked for it. A term that exists only in private material and
-     * has surfaced in the query is the model composing from context, which is the
-     * leak this closes.
+     * A term that exists in any private source and has surfaced in the outbound
+     * text is the model composing from private context, which is the leak this
+     * closes. The person's own words do not authorise a private term: a term the
+     * private material holds is refused wherever it came from, because repeating
+     * an identifier is not by itself a decision to publish it.
      *
      * @param  list<string>  $privateSources
-     * @param  list<string>  $authorizedSources
      */
-    private function derivesFromPrivate(string $query, array $privateSources, array $authorizedSources): bool
+    private function derivesFromPrivate(string $text, array $privateSources): bool
     {
-        $queryTokens = $this->significantTokens($query);
+        $tokens = $this->significantTokens($text);
 
-        if ($queryTokens === []) {
+        if ($tokens === []) {
             return false;
-        }
-
-        $authorized = [];
-
-        foreach ($authorizedSources as $source) {
-            foreach (array_keys($this->significantTokens($source)) as $token) {
-                $authorized[$token] = true;
-            }
         }
 
         foreach ($privateSources as $source) {
             foreach (array_keys($this->significantTokens($source)) as $token) {
-                if (isset($authorized[$token])) {
-                    continue;
-                }
-
-                if (isset($queryTokens[$token])) {
+                if (isset($tokens[$token])) {
                     return true;
                 }
             }
@@ -318,6 +331,12 @@ final class AiPrivacyGate
      * The distinctive terms of a text: accented letters and digits in runs long
      * enough to carry meaning, keyed for set membership.
      *
+     * Runs are split on camelCase and letter/digit transitions before the length
+     * filter, so a value that arrived glued together — "ProyectoAlondra",
+     * "articulo123456", a path segment — yields the same terms as the separated
+     * text. Without that, a private name joined into a single path segment would
+     * match nothing and leave unblocked.
+     *
      * @return array<string, true>
      */
     private function significantTokens(string $text): array
@@ -325,6 +344,10 @@ final class AiPrivacyGate
         if ($text === '') {
             return [];
         }
+
+        $text = preg_replace('/(?<=[\p{Ll}])(?=\p{Lu})/u', ' ', $text) ?? $text;
+        $text = preg_replace('/(?<=[\p{L}])(?=\p{N})/u', ' ', $text) ?? $text;
+        $text = preg_replace('/(?<=[\p{N}])(?=\p{L})/u', ' ', $text) ?? $text;
 
         preg_match_all('/[\p{L}\p{N}]{'.self::TOKEN_MIN.',}/u', mb_strtolower($text), $matches);
 

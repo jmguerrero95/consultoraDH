@@ -114,17 +114,16 @@ final class WebSearchTool extends AbstractAiTool
         // engines behind the SearXNG instance), so two questions are asked before
         // it leaves: does the query carry an identifier (redaction/refusal), and
         // does it derive from private material the turn holds (document
-        // passages, private tool results)? The second is provenance, not shape —
-        // a business name has no pattern — and it is answered here, outside the
-        // model, from the turn's own metadata. A public query asked inside a
-        // private conversation is still a public query: it is allowed unless its
-        // terms are drawn from the private sources and are not the person's own
-        // words. The sanitised query is what is sent and what is reported.
+        // passages, private tool results, a flagged thread's history)? The second
+        // is provenance, not shape — a business name has no pattern — and it is
+        // answered here, outside the model, from the turn's own metadata. A
+        // public query asked inside a private conversation is still a public
+        // query: it is allowed as long as none of its terms appear in the private
+        // sources. The sanitised query is what is sent and what is reported.
         $context = $this->outbound ?? app(AiOutboundContext::class);
         $guarded = ($this->privacy ?? app(AiPrivacyGate::class))->authorizeOutboundQuery(
             $query,
             $context->privateSources(),
-            $context->authorizedSources(),
         );
 
         if ($guarded['blocked']) {

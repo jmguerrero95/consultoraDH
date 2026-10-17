@@ -184,7 +184,6 @@ final class AiPrivacyBoundaryTest extends TestCase
         $result = $gate->authorizeOutboundQuery(
             'acuerdo interno de compensación Empresa Ficticia Andina María Ejemplo',
             $private,
-            ['¿Qué contiene el acuerdo?'],
         );
 
         $this->assertTrue($result['blocked'], 'A private query with no pattern must not leave by provenance.');
@@ -199,15 +198,35 @@ final class AiPrivacyBoundaryTest extends TestCase
 
         $private = ['El saldo de cartera del cliente carlos era 900123456 el mes pasado.'];
 
-        // The person's own words authorise the terms of their question; the rest
-        // is a genuinely independent public query.
+        // A genuinely independent public question: none of its terms appear in
+        // the private material, so it is searchable even in a private thread.
         $result = $gate->authorizeOutboundQuery(
             'inteligencia artificial tendencias',
             $private,
-            ['¿Qué novedades hay sobre inteligencia artificial?'],
         );
 
         $this->assertFalse($result['blocked'], 'A public question in a private thread must still be searchable.');
+    }
+
+    public function test_a_private_term_that_lives_only_in_the_history_is_refused(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        // The thread is already known to hold private data, so its prior turns
+        // are private provenance. The name exists in no document and in no tool
+        // result — only in what was said before, which is the gap that was open.
+        $history = [
+            'El acuerdo confidencial de Proyecto Alondra establece una compensación especial.',
+            'Entendido, lo tengo presente.',
+        ];
+
+        $refused = $gate->authorizeOutboundQuery('Proyecto Alondra compensación especial', $history);
+        $this->assertTrue($refused['blocked'], 'A term drawn from the prior history must not reach a public engine.');
+        $this->assertSame('private_context', $refused['provenance']);
+
+        // An independent public question carries none of those terms and stays open.
+        $allowed = $gate->authorizeOutboundQuery('inteligencia artificial tendencias 2026', $history);
+        $this->assertFalse($allowed['blocked']);
     }
 
     public function test_a_term_the_person_did_not_use_but_private_data_holds_is_refused(): void
@@ -219,7 +238,6 @@ final class AiPrivacyBoundaryTest extends TestCase
         $result = $gate->authorizeOutboundQuery(
             'constructora responsabilidad civil noticias',
             $private,
-            ['¿Qué hay de nuevo?'],
         );
 
         $this->assertTrue($result['blocked']);
@@ -261,7 +279,47 @@ final class AiPrivacyBoundaryTest extends TestCase
         $this->assertNotNull($gate->sensitiveUrlReason(
             'https://example.com/buscar?q=constructora',
             $private,
-            ['¿Qué hay de nuevo?'],
+        ));
+    }
+
+    public function test_a_url_with_a_private_value_in_the_path_is_refused(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $private = ['El acuerdo confidencial de Proyecto Alondra establece una compensación especial.'];
+
+        // The value travels in the path, not the query string, and the name is
+        // glued together in camelCase: the comparison must split it and recognise
+        // it, or a private name in a path segment would leave unnoticed.
+        $this->assertNotNull($gate->sensitiveUrlReason(
+            'https://portal.example.com/documentos/ProyectoAlondra/compensacion-especial',
+            $private,
+        ));
+    }
+
+    public function test_a_percent_encoded_private_value_in_the_path_is_refused(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $private = ['El acuerdo confidencial de Proyecto Alondra establece una compensación especial.'];
+
+        $this->assertNotNull($gate->sensitiveUrlReason(
+            'https://portal.example.com/documentos/Proyecto%20Alondra',
+            $private,
+        ));
+    }
+
+    public function test_a_public_path_is_not_refused_when_it_shares_no_private_term(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $private = ['El acuerdo confidencial de Proyecto Alondra establece una compensación especial.'];
+
+        // A public page with ordinary path segments: provenance must not turn
+        // every URL into a refusal just because the thread held private data.
+        $this->assertNull($gate->sensitiveUrlReason(
+            'https://es.wikipedia.org/wiki/Energia_renovable',
+            $private,
         ));
     }
 

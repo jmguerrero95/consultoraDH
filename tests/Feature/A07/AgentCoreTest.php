@@ -637,7 +637,6 @@ final class AgentCoreTest extends TestCase
         $context = app(AiOutboundContext::class);
         $context->set(
             privateSources: ['El acuerdo interno de compensación de Empresa Ficticia Andina con María Ejemplo.'],
-            authorizedSources: ['¿Qué contiene el acuerdo?'],
         );
 
         try {
@@ -667,7 +666,6 @@ final class AgentCoreTest extends TestCase
         $context = app(AiOutboundContext::class);
         $context->set(
             privateSources: ['El saldo de cartera del cliente carlos era 900123456.'],
-            authorizedSources: ['¿Qué novedades hay sobre inteligencia artificial?'],
         );
 
         try {
@@ -681,6 +679,91 @@ final class AgentCoreTest extends TestCase
 
         $this->assertSame('inteligencia artificial tendencias', $output['query']);
         Http::assertSentCount(1);
+    }
+
+    public function test_a_private_term_from_the_conversation_history_does_not_reach_a_search_engine(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                // Round 1: the model composes its query out of what it read in
+                // the thread, not out of the current question.
+                ->push($this->toolCallBody('web_search', [
+                    'query' => 'Proyecto Alondra compensación especial',
+                    'max_results' => 5,
+                ], 'c1'))
+                ->push($this->textBody('No puedo buscar eso sin exponer el acuerdo.')),
+            'https://search.test/*' => Http::response(['results' => []]),
+        ]);
+
+        // The thread is known to hold private data, and the name lives only in
+        // its history: no document, no tool result, no pattern the gate could
+        // match on its own.
+        $conversation = $this->conversation();
+        $conversation->forceFill(['contains_client_data' => true])->save();
+
+        AiMessageModel::query()->create([
+            'ai_conversation_id' => $conversation->id,
+            'role' => 'user',
+            'content' => 'El acuerdo confidencial de Proyecto Alondra establece una compensación especial.',
+        ]);
+        AiMessageModel::query()->create([
+            'ai_conversation_id' => $conversation->id,
+            'role' => 'assistant',
+            'content' => 'Entendido, lo tengo presente.',
+        ]);
+
+        $result = app(AiAssistantService::class)->ask($conversation, 'Investiga si lo anterior sigue vigente', $this->user);
+
+        $this->assertSame('No puedo buscar eso sin exponer el acuerdo.', $result['reply']);
+
+        // The composed query was refused before any connection, so the private
+        // name travels in no outbound request — to the engine or anywhere else.
+        Http::assertNotSent(function (Request $request): bool {
+            $url = urldecode($request->url());
+
+            return str_contains($url, 'Proyecto Alondra') || str_contains($url, 'ProyectoAlondra');
+        });
+    }
+
+    public function test_a_public_follow_up_in_a_private_thread_still_reaches_the_search_engine(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('web_search', [
+                    'query' => 'inteligencia artificial tendencias',
+                    'max_results' => 5,
+                ], 'c1'))
+                ->push($this->textBody('Encontré estas tendencias.')),
+            'https://search.test/*' => Http::response(['results' => []]),
+        ]);
+
+        $conversation = $this->conversation();
+        $conversation->forceFill(['contains_client_data' => true])->save();
+
+        AiMessageModel::query()->create([
+            'ai_conversation_id' => $conversation->id,
+            'role' => 'user',
+            'content' => 'El saldo de cartera del cliente carlos era 900123456.',
+        ]);
+
+        app(AiAssistantService::class)->ask($conversation, '¿Qué novedades hay sobre inteligencia artificial?', $this->user);
+
+        // None of the query's terms appear in the private material, so the search
+        // is an independent public one and must not be refused.
+        Http::assertSent(function (Request $request): bool {
+            return str_contains($request->url(), 'search.test')
+                && str_contains(urldecode($request->url()), 'inteligencia');
+        });
     }
 
     public function test_an_expired_turn_refuses_an_outbound_search_before_any_request(): void
@@ -738,6 +821,47 @@ final class AgentCoreTest extends TestCase
             $this->fail('A redirect to a URL with a sensitive parameter must be refused, not followed.');
         } catch (AiToolRejected $e) {
             $this->assertStringContainsString('sensible', $e->getMessage());
+        }
+
+        // Exactly one request: the redirect target was refused before it was made.
+        Http::assertSentCount(1);
+    }
+
+    public function test_web_fetch_refuses_a_redirect_to_a_url_that_carries_a_private_path(): void
+    {
+        $this->app->instance(DnsResolver::class, new class implements DnsResolver
+        {
+            public function resolve(string $host): array
+            {
+                return ['93.184.216.34'];
+            }
+        });
+
+        Http::fake([
+            'http://example.test/start' => Http::response('', 302, [
+                'Location' => 'https://example.test/documentos/ProyectoAlondra/compensacion-especial',
+                'Content-Type' => 'text/html',
+            ]),
+            'https://example.test/documentos/*' => Http::response('<html><title>No</title></html>', 200, [
+                'Content-Type' => 'text/html',
+            ]),
+        ]);
+
+        // The private name lives in the turn's context; the first URL is ordinary,
+        // and only the redirect target carries it — in a path segment.
+        $context = app(AiOutboundContext::class);
+        $context->set(privateSources: ['El acuerdo confidencial de Proyecto Alondra establece una compensación especial.']);
+
+        try {
+            app(WebFetchTool::class)->execute(
+                ['url' => 'http://example.test/start', 'max_chars' => 500],
+                $this->user,
+            );
+            $this->fail('A redirect to a URL carrying a private value in its path must be refused, not followed.');
+        } catch (AiToolRejected $e) {
+            $this->assertStringContainsString('privada', $e->getMessage());
+        } finally {
+            $context->reset();
         }
 
         // Exactly one request: the redirect target was refused before it was made.

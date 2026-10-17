@@ -104,7 +104,6 @@ final class WebFetchTool extends AbstractAiTool
         $reason = ($this->privacy ?? app(AiPrivacyGate::class))->sensitiveUrlReason(
             $url,
             $context->privateSources(),
-            $context->authorizedSources(),
         );
 
         if ($reason !== null) {
@@ -181,12 +180,12 @@ final class WebFetchTool extends AbstractAiTool
             }
 
             // The content policy is re-applied to the effective URL of this hop,
-            // so a redirect to a URL carrying a token or a private value is
-            // refused exactly as the first URL would be.
+            // so a redirect to a URL carrying a token or a private value — in the
+            // path, the user info, the query or the fragment — is refused exactly
+            // as the first URL would be.
             $reason = $privacy->sensitiveUrlReason(
                 $currentUrl,
                 $context->privateSources(),
-                $context->authorizedSources(),
             );
 
             if ($reason !== null) {

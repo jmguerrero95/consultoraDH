@@ -7,6 +7,7 @@ use App\Domain\Documents\DocumentIngestor;
 use App\Models\AiConversation;
 use App\Models\AiTask;
 use App\Models\User;
+use App\Services\Ai\AiOutboundContext;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
@@ -143,9 +144,16 @@ final class ResearchAttachmentTest extends TestCase
         $this->assertContains('investigacion.xlsx', $titles);
         $this->assertStringContainsString('INDICADOR-INTERNO-8801', json_encode($result['sources']));
 
-        // And the web search is untouched and still contributes.
-        $this->assertContains('https://www.dian.gov.co/fuente', $urls);
-        $this->assertSame('answered', $result['outcome']);
+        // The question repeats an internal indicator that lives in the attached
+        // spreadsheet, so the web search is refused by provenance instead of
+        // disclosing it: the term travels in no outbound request and the web
+        // source is not returned.
+        Http::assertNotSent(function ($request): bool {
+            $url = urldecode($request->url());
+
+            return str_contains($url, 'INDICADOR-INTERNO-8801') || str_contains($url, 'INDICADOR');
+        });
+        $this->assertNotContains('https://www.dian.gov.co/fuente', $urls);
     }
 
     public function test_research_does_not_reach_a_document_from_another_conversation(): void
@@ -203,5 +211,53 @@ final class ResearchAttachmentTest extends TestCase
             $result['sources'],
             static fn (array $source): bool => $source['domain'] === 'adjunto',
         )));
+    }
+
+    public function test_a_second_research_job_does_not_inherit_the_previous_tasks_provenance(): void
+    {
+        $context = app(AiOutboundContext::class);
+
+        // Job 1: a question that repeats an internal indicator from its own
+        // attachment. Its terms are registered as private for the duration of
+        // the job, and the web search is refused.
+        $privateThread = AiConversation::query()->create(['user_id' => $this->owner->id, 'title' => 'Privada']);
+        $this->ingest($this->owner, $privateThread, 'INDICADOR-INTERNO-8801');
+        $this->webResult('https://www.dian.gov.co/fuente');
+
+        $first = $this->researchTask($this->owner, $privateThread, '¿Cuál es el INDICADOR-INTERNO-8801?');
+        app(ResearchTask::class)->handle($first);
+
+        // A queue worker keeps the container alive between jobs, so nothing of
+        // job 1 may survive into job 2.
+        $this->assertSame([], $context->privateSources(), 'The worker must not carry provenance between jobs.');
+
+        // Job 2: a public question in a clean thread. If job 1's provenance had
+        // survived, this ordinary search would be refused for no reason.
+        $cleanThread = AiConversation::query()->create(['user_id' => $this->owner->id, 'title' => 'Limpia']);
+        $second = $this->researchTask($this->owner, $cleanThread, 'Régimen de las SAS en Colombia');
+
+        $result = app(ResearchTask::class)->handle($second);
+
+        $this->assertContains('https://www.dian.gov.co/fuente', array_column($result['sources'], 'url'));
+    }
+
+    public function test_a_failed_research_job_leaves_no_provenance_behind(): void
+    {
+        $context = app(AiOutboundContext::class);
+
+        // A worker that somehow entered with provenance already set, and a task
+        // that fails before it can do any work of its own.
+        $context->set(privateSources: ['residuo de un trabajo anterior']);
+
+        $task = $this->researchTask($this->owner, null, '');
+
+        try {
+            app(ResearchTask::class)->handle($task);
+            $this->fail('A research task with no question must fail.');
+        } catch (RuntimeException) {
+            // Expected: the task cannot run, but it must still clean up.
+        }
+
+        $this->assertSame([], $context->privateSources(), 'A failed job must not leave provenance for the next one.');
     }
 }

@@ -14,21 +14,22 @@ namespace App\Services\Ai;
  * the assistant (which retrieved the passages and ran the tools) to the outbound
  * tool (which is about to send a query).
  *
- * Two lists, and the difference between them is the whole policy:
+ * One list — `privateSources`: the text the turn holds that must not leave.
+ * Passages from a document the person attached, results of tools that answer
+ * from our records, and — when the thread is known to hold private data — the
+ * prior turns themselves. A model that turns any of these into a search query is
+ * copying private material outward.
  *
- *   - `privateSources` — text the turn holds that must not leave: passages from a
- *     document the person attached, results of tools that answer from our
- *     records. A model that turns these into a search query is copying private
- *     material outward.
- *   - `authorizedSources` — text the person supplied themselves (their current
- *     question). Their own words are theirs to search with; a term they typed is
- *     allowed even when it also appears in private data.
+ * The person's own current question is deliberately *not* listed as an
+ * authorisation for anything private: a term that appears in private material is
+ * refused wherever it came from, because typing an identifier is not by itself a
+ * decision to publish it. A genuinely independent public query carries terms that
+ * appear in no private source, so it is still allowed — that is what keeps public
+ * research working inside a private conversation.
  *
  * It is bound as a singleton because it is per-request state, and it is reset
  * when the turn ends so a later caller does not inherit stale provenance. An
- * empty holder is the truthful "nothing private is in play" state, and the search
- * boundary then allows a public query, which is what keeps public research
- * working inside a private conversation.
+ * empty holder is the truthful "nothing private is in play" state.
  */
 final class AiOutboundContext
 {
@@ -41,26 +42,17 @@ final class AiOutboundContext
     /** @var list<string> */
     private array $privateSources = [];
 
-    /** @var list<string> */
-    private array $authorizedSources = [];
-
     /**
      * Start a turn's provenance.
      *
      * @param  list<string>  $privateSources
-     * @param  list<string>  $authorizedSources
      */
-    public function set(array $privateSources = [], array $authorizedSources = []): void
+    public function set(array $privateSources = []): void
     {
         $this->privateSources = [];
-        $this->authorizedSources = [];
 
         foreach ($privateSources as $source) {
             $this->addPrivateSource($source);
-        }
-
-        foreach ($authorizedSources as $source) {
-            $this->addAuthorizedSource($source);
         }
     }
 
@@ -81,22 +73,6 @@ final class AiOutboundContext
     }
 
     /**
-     * Record a text the person supplied themselves.
-     */
-    public function addAuthorizedSource(mixed $text): void
-    {
-        if (! is_string($text) || trim($text) === '') {
-            return;
-        }
-
-        if (count($this->authorizedSources) >= self::MAX_SOURCES) {
-            return;
-        }
-
-        $this->authorizedSources[] = mb_substr($text, 0, self::MAX_SOURCE_CHARS);
-    }
-
-    /**
      * @return list<string>
      */
     public function privateSources(): array
@@ -105,19 +81,10 @@ final class AiOutboundContext
     }
 
     /**
-     * @return list<string>
-     */
-    public function authorizedSources(): array
-    {
-        return $this->authorizedSources;
-    }
-
-    /**
      * Clear at the end of a turn, so the next caller inherits nothing.
      */
     public function reset(): void
     {
         $this->privateSources = [];
-        $this->authorizedSources = [];
     }
 }
