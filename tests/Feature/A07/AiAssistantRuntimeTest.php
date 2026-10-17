@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiTurnFailed;
+use App\Services\Ai\ModelPool;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -360,6 +361,57 @@ final class AiAssistantRuntimeTest extends TestCase
             0,
             $this->myMessages()->where('role', AiMessage::ROLE_ASSISTANT)->count(),
             'A failed turn stores no assistant reply to be mistaken for an answer later.'
+        );
+    }
+
+    /**
+     * A retired model does not always arrive as a 404.
+     *
+     * Cloudflare reports a deprecated model as a 503 whose body names the model.
+     * Classified as transport it would cool for a moment and be asked again on
+     * the next turn; because the body is explicit about a retired model, it is
+     * treated as missing and parked, exactly like a 404.
+     */
+    public function test_a_503_that_names_a_deprecated_model_is_parked_as_missing(): void
+    {
+        // Only the faked primary may be in the pool: a real deployment's named
+        // providers would otherwise be reached as fallback candidates.
+        config([
+            'ai.pool' => [],
+            'ai.extra_models' => [],
+            'ai.providers' => [],
+            'ai.openrouter.dynamic_pool' => false,
+            'ai.openrouter.include_free_router' => false,
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::response([
+                'success' => false,
+                'errors' => [[
+                    'code' => 7001,
+                    'message' => 'Model has been deprecated: @cf/meta/infire-llama-3.1-8b-instruct was deprecated on 2026-05-30. Choose an available model.',
+                ]],
+            ], 503),
+        ]);
+
+        $this->assertCount(1, app(ModelPool::class)->all(), 'Only the faked primary is reachable.');
+
+        try {
+            $this->ask('¿Qué es una EPS en Colombia?');
+            $this->fail('A retired model must not be answered as if it were merely unreachable.');
+        } catch (AiProviderException $e) {
+            $this->assertSame(
+                'not_found',
+                $e->kind,
+                'A 503 that names a deprecated model is a catalogue problem, not an outage.'
+            );
+            $this->assertTrue($e->retryable, 'Another candidate may still answer the same turn.');
+        }
+
+        $this->assertSame(
+            0,
+            $this->myMessages()->count(),
+            'Nothing is persisted when no model answered.'
         );
     }
 

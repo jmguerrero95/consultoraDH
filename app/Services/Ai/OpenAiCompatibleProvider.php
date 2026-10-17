@@ -156,6 +156,14 @@ class OpenAiCompatibleProvider implements CloudAiProvider
                 'The AI provider refused the request as malformed.'.$detail
             ),
 
+            // A retired model does not always arrive as a 404: Cloudflare reports
+            // a deprecated model as a 503. Treating that as a transport blip would
+            // re-ask the same dead model on every turn, so it is parked like any
+            // other missing model while the other candidates carry on.
+            $status >= 500 && $this->messageMentionsRetiredModel($body) => AiProviderException::modelMissing(
+                'The AI provider no longer serves the configured model.'.$detail
+            ),
+
             // 5xx and anything else unexpected are treated as transport: the same
             // request may well succeed on another host or in a moment.
             default => AiProviderException::unavailable(
@@ -325,6 +333,32 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         }
 
         return ' ('.mb_substr($message, 0, 200).')';
+    }
+
+    /**
+     * Whether a failure body says the model itself is gone.
+     *
+     * Only consulted for a 5xx. It demands the word "model" *and* a retirement
+     * phrase, so a generic upstream "not found" blip is not mistaken for a
+     * retired model and does not park a healthy candidate for hours.
+     *
+     * @param  array<string, mixed>|null  $body
+     */
+    private function messageMentionsRetiredModel(?array $body): bool
+    {
+        $text = mb_strtolower($this->providerMessage($body));
+
+        if (! str_contains($text, 'model')) {
+            return false;
+        }
+
+        foreach (['deprecated', 'does not exist', 'no longer available', 'unknown model', 'has been removed', 'not supported anymore'] as $marker) {
+            if (str_contains($text, $marker)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
