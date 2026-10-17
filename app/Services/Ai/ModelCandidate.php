@@ -24,7 +24,24 @@ namespace App\Services\Ai;
 final readonly class ModelCandidate
 {
     /**
+     * Independent free hosts, so the status says "groq" or "gemini" rather than
+     * a bare hostname. Matching is on the URL substring, not an exact host, so a
+     * regional or proxied subdomain still maps to its provider.
+     *
+     * @var array<string, string>
+     */
+    private const KNOWN_HOSTS = [
+        'api.groq.com' => 'groq',
+        'api.cloudflare.com' => 'cloudflare',
+        'generativelanguage.googleapis.com' => 'gemini',
+        'opencode.ai' => 'opencode_zen',
+    ];
+
+    /**
      * @param  list<string>  $capabilities  which of 'chat' / 'tools' this model supports
+     * @param  string  $dataPolicy  `standard` when the endpoint's terms forbid training on
+     *                              the content; `training` when its free tier may use it,
+     *                              in which case real business data must not be sent there
      */
     public function __construct(
         public string $baseUrl,
@@ -34,11 +51,30 @@ final readonly class ModelCandidate
         public array $capabilities = ['chat', 'tools'],
         public string $source = 'config',
         public ?int $contextLength = null,
+        public string $providerName = '',
+        public string $dataPolicy = 'standard',
     ) {}
 
     public function supportsTools(): bool
     {
         return in_array('tools', $this->capabilities, true);
+    }
+
+    /**
+     * Whether real business data may be sent to this endpoint.
+     *
+     * A provider whose free tier may train on the content is only used for
+     * general questions unless the deployment has explicitly authorised it for
+     * client data. The question is about *our* data leaving the building, so the
+     * safe default is "no" and the operator opts in per deployment.
+     */
+    public function supportsClientData(): bool
+    {
+        if ($this->dataPolicy !== 'training') {
+            return true;
+        }
+
+        return (bool) config('ai.privacy.allow_training_providers', false);
     }
 
     public function supportsChat(): bool
@@ -77,8 +113,18 @@ final readonly class ModelCandidate
 
     public function providerHost(): string
     {
+        if ($this->providerName !== '') {
+            return $this->providerName;
+        }
+
         if ($this->isOpenRouter()) {
             return 'openrouter';
+        }
+
+        foreach (self::KNOWN_HOSTS as $host => $name) {
+            if (str_contains($this->baseUrl, $host)) {
+                return $name;
+            }
         }
 
         $host = parse_url($this->baseUrl, PHP_URL_HOST);

@@ -53,6 +53,14 @@ class ModelPool
             $this->push($candidates, $candidate);
         }
 
+        // Independent free providers (Groq, Cloudflare, Gemini, …). Added after
+        // the explicit pool: an operator who listed them by hand expects them
+        // tried, and the live health ordering promotes whichever actually
+        // answers regardless of this cold-start position.
+        foreach ($this->namedProviders() as $candidate) {
+            $this->push($candidates, $candidate);
+        }
+
         if ($openRouter !== null) {
             // The free router is a real candidate: OpenRouter picks a free model
             // that matches the requested capabilities, so it is not a placeholder.
@@ -121,6 +129,14 @@ class ModelPool
                     }
 
                     if ($capability === 'chat' && ! $candidate->supportsChat()) {
+                        return false;
+                    }
+
+                    // A turn that carries real business data must not reach a
+                    // provider whose free tier may train on it. The capability is
+                    // derived from the provider's declared policy, so a training
+                    // provider can still serve general questions.
+                    if ($capability === 'client_data' && ! $candidate->supportsClientData()) {
                         return false;
                     }
                 }
@@ -268,6 +284,85 @@ class ModelPool
                 source: 'pool',
                 contextLength: is_int($entry['context'] ?? null) ? $entry['context'] : null,
             );
+        }
+
+        return $candidates;
+    }
+
+    /**
+     * Candidates from the independent providers in `ai.providers`.
+     *
+     * Each provider is expanded into one candidate per configured model, all
+     * sharing that provider's endpoint and credential — so health, cooldown and
+     * a rejected key are tracked per (endpoint, model), and a quota wall on one
+     * provider does not touch another.
+     *
+     * A provider with no base URL, no key or no models contributes nothing: the
+     * pool must never hold a candidate that cannot be called.
+     *
+     * @return list<ModelCandidate>
+     */
+    private function namedProviders(): array
+    {
+        $providers = config('ai.providers', []);
+
+        if (! is_array($providers)) {
+            return [];
+        }
+
+        $candidates = [];
+
+        foreach ($providers as $name => $provider) {
+            if (! is_array($provider) || ! (bool) ($provider['enabled'] ?? true)) {
+                continue;
+            }
+
+            $baseUrl = $provider['base_url'] ?? null;
+
+            // Cloudflare puts the account id in the URL rather than the token.
+            $accountId = $provider['account_id'] ?? null;
+
+            if (is_string($baseUrl) && is_string($accountId) && $accountId !== '') {
+                $baseUrl = str_replace('{account_id}', $accountId, $baseUrl);
+            }
+
+            $apiKey = $provider['api_key'] ?? null;
+            $models = $provider['models'] ?? null;
+
+            if (! is_string($baseUrl) || $baseUrl === '' || ! is_string($apiKey) || $apiKey === '') {
+                continue;
+            }
+
+            if (! is_array($models) || $models === []) {
+                continue;
+            }
+
+            $priority = (int) ($provider['priority'] ?? 150);
+
+            $declared = $provider['capabilities'] ?? null;
+            $capabilities = is_array($declared) && $declared !== []
+                ? array_values(array_map('strval', $declared))
+                : ['chat', 'tools'];
+
+            $dataPolicy = (string) ($provider['data_policy'] ?? 'training');
+
+            foreach ($models as $model) {
+                if (! is_string($model) || trim($model) === '') {
+                    continue;
+                }
+
+                $candidates[] = new ModelCandidate(
+                    baseUrl: $baseUrl,
+                    apiKey: $apiKey,
+                    model: trim($model),
+                    // Declared order within the provider is preserved.
+                    priority: $priority++,
+                    capabilities: $capabilities,
+                    source: 'provider',
+                    providerName: (string) $name,
+                    dataPolicy: $dataPolicy,
+                );
+            }
         }
 
         return $candidates;

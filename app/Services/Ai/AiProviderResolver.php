@@ -51,6 +51,7 @@ class AiProviderResolver
     public function __construct(
         private readonly ModelPool $pool,
         private readonly AiModelHealth $health,
+        private readonly AiProviderQuota $quota,
     ) {}
 
     /**
@@ -58,6 +59,9 @@ class AiProviderResolver
      * @param  list<AiMessage>  $messages
      * @param  string|null  $task  a safe label for diagnostics ('chat', 'data', ...)
      * @param  float|null  $deadline  unix timestamp by which the whole turn must finish
+     * @param  bool  $requiresClientData  true when the turn carries real business data,
+     *                                    so a provider whose free tier may train on the
+     *                                    content is not eligible
      *
      * @throws AiProviderException when no candidate can answer
      */
@@ -67,8 +71,13 @@ class AiProviderResolver
         ?CloudAiProvider $preferred = null,
         ?string $task = null,
         ?float $deadline = null,
+        bool $requiresClientData = false,
     ): AiResponse {
         $required = $tools !== [] ? ['chat', 'tools'] : ['chat'];
+
+        if ($requiresClientData) {
+            $required[] = 'client_data';
+        }
 
         $candidates = $this->ordered($this->pool->supporting($required), $preferred);
 
@@ -127,7 +136,17 @@ class AiProviderResolver
                 continue;
             }
 
+            // The provider's own 429 is authoritative, but a documented RPM/RPD
+            // can be respected deliberately instead of hit.
+            if (! $this->quota->allow($candidate)) {
+                $skipped++;
+                $skippedRateLimited++;
+
+                continue;
+            }
+
             $attempts++;
+            $this->quota->record($candidate);
             $startedAt = microtime(true);
 
             // Never wait longer than the turn has left, and never longer than the

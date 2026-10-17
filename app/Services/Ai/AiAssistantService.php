@@ -123,9 +123,15 @@ final class AiAssistantService
         // proxy's limit instead of spending the per-call timeout three times.
         $deadline = microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110));
 
-        $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $deadline);
+        // Whether this turn carries real business data. A general question does
+        // not, so a provider whose free tier may train on the content may answer
+        // it; a system question, or one about an attached document, does, and
+        // such a provider is then not eligible — see `ModelCandidate`.
+        $requiresClientData = $passages !== [] || $routing['task'] !== AiTaskRouter::TASK_GENERAL;
 
-        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $deadline);
+        $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $deadline, $requiresClientData);
+
+        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $deadline, $requiresClientData);
     }
 
     /**
@@ -281,8 +287,11 @@ final class AiAssistantService
      *
      * @param  list<AiMessage>  $messages
      * @param  list<AiToolDefinition>  $toolDefinitions  the same subset for every round
+     * @param  bool  $requiresClientData  carried into every synthesis round, so the
+     *                                    second round cannot reach a provider the first
+     *                                    one was not allowed to use
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, float $deadline): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, float $deadline, bool $requiresClientData = false): array
     {
         $proposals = [];
         $toolResults = [];
@@ -424,7 +433,7 @@ final class AiAssistantService
                 // fabricated assistant message in the conversation that a later
                 // turn would be sent as legitimate history, so it propagates and
                 // nothing is persisted for this turn.
-                $currentResult = $this->resolver->complete($messages, $toolDefinitions, null, null, $deadline);
+                $currentResult = $this->resolver->complete($messages, $toolDefinitions, null, null, $deadline, $requiresClientData);
             } else {
                 // No tool calls, we're done
                 $reply = $content;

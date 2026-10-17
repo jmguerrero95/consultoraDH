@@ -33,6 +33,17 @@ declare(strict_types=1);
 | names.
 |
 */
+/*
+ * A comma-separated environment value as a clean list. Defined here because it
+ * only ever shapes this file's arrays.
+ */
+$csv = static function (?string $value): array {
+    return array_values(array_filter(
+        array_map('trim', explode(',', (string) $value)),
+        static fn (string $item): bool => $item !== '',
+    ));
+};
+
 return [
     /*
      * Master switch. AI_ENABLED=false is the default, and the assistant answers
@@ -175,6 +186,111 @@ return [
         'dynamic_pool' => (bool) env('AI_OPENROUTER_DYNAMIC_POOL', true),
         'max_dynamic_models' => (int) env('AI_OPENROUTER_MAX_DYNAMIC_MODELS', 5),
         'use_models_fallback' => (bool) env('AI_OPENROUTER_USE_MODELS_FALLBACK', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Independent free providers
+    |--------------------------------------------------------------------------
+    |
+    | OpenRouter is not the only free tier, and depending on one shared quota is
+    | the fragility this section removes. Each entry is an independent endpoint
+    | with its own credential, so a quota wall on one provider does not stop the
+    | assistant: the resolver moves to the next candidate, and health is tracked
+    | per (endpoint, model) exactly as it is for OpenRouter.
+    |
+    | An entry contributes candidates only when it has a base URL, a key AND at
+    | least one model id. Nothing is invented: with no key there is no candidate,
+    | so the pool never advertises a provider the deployment cannot call.
+    |
+    | `models` is the free-only enforcement for an independent endpoint. This
+    | application cannot read those providers' price lists, so the operator
+    | declares what is free, exactly as the pool report documents. Listing a paid
+    | model here would contradict the free-only mandate; the list is the contract.
+    |
+    | `data_policy` is the privacy gate. `training` means the provider's free tier
+    | may use the content to train, so real client data must not be sent there:
+    | such a candidate only serves general questions unless
+    | `AI_ALLOW_TRAINING_PROVIDERS` is set. The default is the safe one.
+    |
+    | Cloudflare takes its account id in the URL, not the credential, so the
+    | template carries `{account_id}` and the id comes from configuration.
+    |
+    | OpenCode Zen is optional and disabled unless a legitimate, separate key
+    | exists and its free use is confirmed. It is never driven through the
+    | OpenCode CLI or its interactive session.
+    */
+    'providers' => [
+        'groq' => [
+            'base_url' => env('GROQ_BASE_URL', 'https://api.groq.com/openai/v1'),
+            'api_key' => env('GROQ_API_KEY'),
+            'models' => $csv(env('GROQ_MODELS')),
+            'priority' => (int) env('GROQ_PRIORITY', 150),
+            'capabilities' => ['chat', 'tools'],
+            'data_policy' => env('GROQ_DATA_POLICY', 'training'),
+            'enabled' => (bool) env('GROQ_ENABLED', true),
+        ],
+
+        'cloudflare' => [
+            'base_url' => env('CLOUDFLARE_AI_BASE_URL', 'https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1'),
+            'account_id' => env('CLOUDFLARE_ACCOUNT_ID'),
+            'api_key' => env('CLOUDFLARE_AI_API_TOKEN'),
+            'models' => $csv(env('CLOUDFLARE_AI_MODELS')),
+            'priority' => (int) env('CLOUDFLARE_AI_PRIORITY', 150),
+            'capabilities' => ['chat', 'tools'],
+            'data_policy' => env('CLOUDFLARE_AI_DATA_POLICY', 'training'),
+            'enabled' => (bool) env('CLOUDFLARE_AI_ENABLED', true),
+        ],
+
+        'gemini' => [
+            'base_url' => env('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai'),
+            'api_key' => env('GEMINI_API_KEY'),
+            'models' => $csv(env('GEMINI_MODELS')),
+            'priority' => (int) env('GEMINI_PRIORITY', 150),
+            'capabilities' => ['chat', 'tools'],
+            'data_policy' => env('GEMINI_DATA_POLICY', 'training'),
+            'enabled' => (bool) env('GEMINI_ENABLED', true),
+        ],
+
+        'opencode_zen' => [
+            'base_url' => env('OPENCODE_ZEN_BASE_URL', 'https://opencode.ai/zen/v1'),
+            'api_key' => env('OPENCODE_ZEN_API_KEY'),
+            'models' => $csv(env('OPENCODE_ZEN_MODELS')),
+            'priority' => (int) env('OPENCODE_ZEN_PRIORITY', 250),
+            'capabilities' => ['chat', 'tools'],
+            'data_policy' => env('OPENCODE_ZEN_DATA_POLICY', 'training'),
+            'enabled' => (bool) env('OPENCODE_ZEN_ENABLED', false),
+        ],
+    ],
+
+    /*
+     * Whether a provider whose free tier may train on the content may receive
+     * real business data. Off by default; turning it on is an explicit,
+     * documented decision by the owner, not a default.
+     *
+     * AI_ALLOW_TRAINING_PROVIDERS
+     */
+    'privacy' => [
+        'allow_training_providers' => (bool) env('AI_ALLOW_TRAINING_PROVIDERS', false),
+    ],
+
+    /*
+     | Local request quotas per provider, in requests per minute and per day.
+     |
+     | Zero disables the local cap: the provider's own 429 (and `Retry-After`)
+     | is then the only limit — the safe default, because a wrong local cap would
+     | refuse a request the provider would have served. Set these to stay under a
+     | documented free tier deliberately instead of discovering it through a 429.
+     | Token quotas (TPM/TPD-like) are honoured from the provider's own headers on
+     | a 429 rather than metered locally, which would be a poorer count than the
+     | provider's.
+     */
+    'rate_limits' => [
+        'openrouter' => ['rpm' => (int) env('AI_OPENROUTER_RPM', 0), 'rpd' => (int) env('AI_OPENROUTER_RPD', 0)],
+        'groq' => ['rpm' => (int) env('GROQ_RPM', 0), 'rpd' => (int) env('GROQ_RPD', 0)],
+        'cloudflare' => ['rpm' => (int) env('CLOUDFLARE_AI_RPM', 0), 'rpd' => (int) env('CLOUDFLARE_AI_RPD', 0)],
+        'gemini' => ['rpm' => (int) env('GEMINI_RPM', 0), 'rpd' => (int) env('GEMINI_RPD', 0)],
+        'opencode_zen' => ['rpm' => (int) env('OPENCODE_ZEN_RPM', 0), 'rpd' => (int) env('OPENCODE_ZEN_RPD', 0)],
     ],
 
     /*

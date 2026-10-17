@@ -116,7 +116,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         }
 
         if ($response->failed()) {
-            throw $this->classify($response->status(), $response->json(), $response->header('Retry-After'));
+            throw $this->classify($response->status(), $response->json(), $response->headers());
         }
 
         return $this->parse($response->json());
@@ -126,8 +126,9 @@ class OpenAiCompatibleProvider implements CloudAiProvider
      * Turn a non-2xx answer into the right kind of failure.
      *
      * @param  array<string, mixed>|null  $body
+     * @param  array<string, array<int, string>>  $headers
      */
-    private function classify(int $status, ?array $body, ?string $retryAfter = null): AiProviderException
+    private function classify(int $status, ?array $body, array $headers = []): AiProviderException
     {
         $detail = $this->providerMessage($body);
 
@@ -138,7 +139,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
 
             $status === 429 => AiProviderException::rateLimited(
                 'The AI provider is rate limiting this deployment.'.$detail,
-                $this->retryAfterSeconds($retryAfter),
+                $this->retryAfterSeconds($headers),
                 $this->looksAccountWide($body),
             ),
 
@@ -164,21 +165,79 @@ class OpenAiCompatibleProvider implements CloudAiProvider
     }
 
     /**
-     * `Retry-After` is seconds or an HTTP date; anything else is ignored.
+     * The wait the provider asked for, from whichever of its headers carries it.
+     *
+     * Free tiers express this differently: `Retry-After` is the standard, Groq
+     * also sends `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens` as a
+     * Go-style duration (`2.4s`, `1m30s`), and a value is only meaningful when it
+     * can be read; anything else is ignored rather than guessed. The longest of
+     * the present values wins, because the request should not be retried until
+     * all of the provider's limits have cleared.
+     *
+     * @param  array<string, array<int, string>>  $headers
      */
-    private function retryAfterSeconds(?string $header): ?int
+    private function retryAfterSeconds(array $headers): ?int
     {
-        if ($header === null || trim($header) === '') {
-            return null;
+        $waits = [];
+
+        foreach (['retry-after', 'x-ratelimit-reset-requests', 'x-ratelimit-reset-tokens'] as $name) {
+            $value = $headers[$name][0] ?? null;
+
+            if (! is_string($value) || trim($value) === '') {
+                continue;
+            }
+
+            $seconds = $this->parseWait($value);
+
+            if ($seconds !== null) {
+                $waits[] = $seconds;
+            }
         }
 
-        if (ctype_digit(trim($header))) {
-            return max(0, (int) trim($header));
+        return $waits === [] ? null : max($waits);
+    }
+
+    /**
+     * A header value that is a number of seconds, a Go-style duration, or an
+     * HTTP date. Anything else is `null` rather than a guess.
+     */
+    private function parseWait(string $value): ?int
+    {
+        $value = trim($value);
+
+        if (ctype_digit($value)) {
+            return max(0, (int) $value);
         }
 
-        $timestamp = strtotime($header);
+        // A Go-style duration: `1.5s`, `200ms`, `1m30s`, `1h2m3s`.
+        if (preg_match('/^(?:\d+(?:\.\d+)?(?:h|ms|m|s))+$/', $value) === 1) {
+            $seconds = 0.0;
 
-        return $timestamp === false ? null : max(0, $timestamp - now()->timestamp);
+            preg_match_all('/(\d+(?:\.\d+)?)(h|ms|m|s)/', $value, $parts, PREG_SET_ORDER);
+
+            foreach ($parts as $part) {
+                $amount = (float) $part[1];
+                $seconds += match ($part[2]) {
+                    'h' => $amount * 3600,
+                    'm' => $amount * 60,
+                    'ms' => $amount / 1000,
+                    default => $amount,
+                };
+            }
+
+            return (int) ceil($seconds);
+        }
+
+        // An HTTP date, e.g. "Wed, 21 Oct 2026 07:28:00 GMT".
+        if (preg_match('/[A-Za-z]{3}/', $value) === 1) {
+            $timestamp = strtotime($value);
+
+            if ($timestamp !== false) {
+                return max(0, $timestamp - now()->timestamp);
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -195,6 +254,19 @@ class OpenAiCompatibleProvider implements CloudAiProvider
      */
     private function looksAccountWide(?array $body): bool
     {
+        // The independent free providers (Groq, Cloudflare, Gemini, OpenCode Zen)
+        // meter a *free plan*, and that plan belongs to the account, not to a
+        // model: a 429 there means the deployment is walled for the window,
+        // whichever model it would ask next. Trying a sibling model of the same
+        // account would spend another request to learn the same thing.
+        $host = parse_url((string) ($this->slot()['base_url'] ?? ''), PHP_URL_HOST) ?: '';
+
+        foreach (['api.groq.com', 'api.cloudflare.com', 'generativelanguage.googleapis.com', 'opencode.ai'] as $named) {
+            if ($host === $named || str_ends_with($host, '.'.$named)) {
+                return true;
+            }
+        }
+
         $error = $body['error'] ?? null;
 
         if (is_string($error)) {
@@ -229,7 +301,10 @@ class OpenAiCompatibleProvider implements CloudAiProvider
      */
     private function providerMessage(?array $body): string
     {
-        $message = $body['error']['message'] ?? $body['message'] ?? null;
+        // Cloudflare reports failures as `{"success":false,"errors":[{"code":…,
+        // "message":…}]}` rather than OpenAI's `error` object; Cloudflare's own
+        // message also names the quota code, which is the useful part.
+        $message = $body['error']['message'] ?? $body['message'] ?? $body['errors'][0]['message'] ?? null;
 
         // OpenRouter wraps an upstream refusal: the top-level message is generic
         // ("Provider returned error") and the actual reason is a JSON string
