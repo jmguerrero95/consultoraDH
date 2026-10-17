@@ -105,4 +105,37 @@ const html = computed(() => renderMarkdown(props.content));
     border-top: 1px solid rgba(0, 0, 0, 0.15);
     margin: 0.75em 0;
 }
+
+/* A table is a block that scrolls inside the message rather than widening the
+   transcript: on a 360px phone a five-column table cannot fit, and letting it
+   push the layout sideways is what the "no horizontal scroll" rule forbids. */
+.cdh-markdown :deep(table) {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    margin: 0.5em 0;
+    font-size: 0.9375em;
+}
+
+.cdh-markdown :deep(th),
+.cdh-markdown :deep(td) {
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    padding: 0.35em 0.55em;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.cdh-markdown :deep(th) {
+    font-weight: 600;
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.cdh-markdown :deep(ul ul),
+.cdh-markdown :deep(ul ol),
+.cdh-markdown :deep(ol ul),
+.cdh-markdown :deep(ol ol) {
+    margin: 0.15em 0;
+}
 </style>

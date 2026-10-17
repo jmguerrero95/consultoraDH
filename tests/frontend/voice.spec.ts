@@ -159,9 +159,16 @@ function emitResult(instance: FakeRecognition, transcript: string, isFinal: bool
     });
 }
 
-function installSynthesis(): { spoken: string[]; paused: number; resumed: number; cancelled: number } {
+function installSynthesis(
+    voices: Array<{ lang: string; name: string; default: boolean }> = [
+        { lang: 'es-CO', name: 'Monica', default: true },
+        { lang: 'en-US', name: 'Alex', default: false },
+    ],
+): { spoken: string[]; langs: string[]; voices: Array<unknown>; paused: number; resumed: number; cancelled: number } {
     const spoken: string[] = [];
-    const tally = { spoken, paused: 0, resumed: 0, cancelled: 0 };
+    const langs: string[] = [];
+    const chosen: Array<unknown> = [];
+    const tally = { spoken, langs, voices: chosen, paused: 0, resumed: 0, cancelled: 0 };
 
     /*
      | The utterance is captured by value at construction time, not read off the
@@ -195,8 +202,10 @@ function installSynthesis(): { spoken: string[]; paused: number; resumed: number
     );
 
     vi.stubGlobal('speechSynthesis', {
-        speak(utterance: { text: string }) {
+        speak(utterance: { text: string; lang: string; voice: unknown }) {
             spoken.push(utterance.text);
+            langs.push(utterance.lang);
+            chosen.push(utterance.voice);
         },
         pause: () => {
             tally.paused += 1;
@@ -207,10 +216,7 @@ function installSynthesis(): { spoken: string[]; paused: number; resumed: number
         cancel: () => {
             tally.cancelled += 1;
         },
-        getVoices: () => [
-            { lang: 'es-CO', name: 'Monica', default: true },
-            { lang: 'en-US', name: 'Alex', default: false },
-        ],
+        getVoices: () => voices,
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
     });
@@ -404,7 +410,38 @@ describe('useVoice — playback', () => {
         playback.speak('La cartera vencida asciende a 45 millones.');
 
         expect(tally.spoken).toEqual(['La cartera vencida asciende a 45 millones.']);
+        expect(tally.langs).toEqual(['es-CO']);
         expect(playback.error.value).toBeNull();
+    });
+
+    it('speaks a table as sentences, never as pipes or asterisks (A07-R4)', () => {
+        const tally = installSynthesis();
+        const { playback } = useVoice();
+
+        playback.speak('| Cliente | Saldo |\n| --- | --- |\n| Empresa A | 120.000 |');
+
+        expect(tally.spoken).toHaveLength(1);
+        const spoken = tally.spoken[0];
+
+        expect(spoken).not.toContain('|');
+        expect(spoken).not.toContain('---');
+        expect(spoken).toBe('Cliente: Empresa A. Saldo: 120.000.');
+    });
+
+    it('prefers Colombian Spanish when the browser lists another Spanish variant first (A07-R4)', () => {
+        const tally = installSynthesis([
+            { lang: 'es-ES', name: 'Monica', default: true },
+            { lang: 'es-CO', name: 'Salome', default: false },
+        ]);
+        const { playback } = useVoice();
+
+        playback.speak('hola');
+
+        // Whatever order the browser enumerates voices in, the utterance must
+        // carry the es-CO voice rather than the first Spanish one it found.
+        const chosen = tally.voices[0] as { lang: string } | null;
+
+        expect(chosen?.lang).toBe('es-CO');
     });
 
     it('ignores an empty reply rather than speaking nothing', () => {

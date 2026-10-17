@@ -125,43 +125,184 @@ function renderBlocks(text: string): string {
     const lines = text.split('\n');
     const out: string[] = [];
 
-    let mode: 'none' | 'ul' | 'ol' | 'quote' = 'none';
+    let quoteOpen = false;
     let paragraph: string[] = [];
 
-    const closeBlock = (): void => {
-        if (mode === 'ul') {
-            out.push('</ul>');
-        } else if (mode === 'ol') {
-            out.push('</ol>');
-        } else if (mode === 'quote') {
-            out.push('</blockquote>');
+    // List state: a stack of open lists, so `- a` / `  - b` renders as a nested
+    // `<ul>` inside the parent `<li>` rather than two sibling lists. The open
+    // `<li>` is closed lazily — when its sibling, a dedent, or the end of the
+    // list arrives — because a nested list has to be written *inside* it.
+    const listStack: Array<'ul' | 'ol'> = [];
+    const listIndents: number[] = [];
+    let itemOpen = false;
+
+    const emit = (fragment: string): void => {
+        out.push(fragment);
+    };
+
+    // Appends to the fragment already written. A list item's `</li>` belongs on
+    // the same line as its `<li>`, not on a line of its own, so the markup stays
+    // the compact shape a renderer — and this file's own tests — expect.
+    const appendToLast = (fragment: string): void => {
+        if (out.length === 0) {
+            out.push(fragment);
+
+            return;
         }
 
-        mode = 'none';
+        out[out.length - 1] += fragment;
+    };
+
+    const closeOpenItem = (): void => {
+        if (itemOpen) {
+            appendToLast('</li>');
+            itemOpen = false;
+        }
+    };
+
+    const closeLists = (): void => {
+        closeOpenItem();
+
+        while (listStack.length > 0) {
+            emit((listStack.pop() as 'ul' | 'ol') === 'ol' ? '</ol>' : '</ul>');
+            listIndents.pop();
+
+            if (listStack.length > 0) {
+                // The parent item that contained this nested list is still open.
+                appendToLast('</li>');
+            }
+        }
+    };
+
+    const closeQuote = (): void => {
+        if (quoteOpen) {
+            emit('</blockquote>');
+            quoteOpen = false;
+        }
     };
 
     const flushParagraph = (): void => {
         if (paragraph.length > 0) {
-            out.push(`<p>${paragraph.join('<br>')}</p>`);
+            emit(`<p>${paragraph.join('<br>')}</p>`);
             paragraph = [];
         }
     };
 
-    for (const line of lines) {
+    const indentWidth = (line: string): number => {
+        const match = line.match(/^[ \t]*/);
+
+        return match === null ? 0 : match[0].replace(/\t/g, '  ').length;
+    };
+
+    const handleListItem = (type: 'ul' | 'ol', content: string, indent: number): void => {
+        closeQuote();
+
+        // A shallower indent closes every deeper list, and the parent item that
+        // held it, before the new sibling is written.
+        while (listStack.length > 0 && indent < listIndents[listIndents.length - 1]) {
+            closeOpenItem();
+
+            emit((listStack.pop() as 'ul' | 'ol') === 'ol' ? '</ol>' : '</ul>');
+            listIndents.pop();
+
+            if (listStack.length > 0) {
+                appendToLast('</li>');
+            }
+        }
+
+        if (listStack.length === 0) {
+            listStack.push(type);
+            listIndents.push(indent);
+            emit(type === 'ol' ? '<ol>' : '<ul>');
+        } else if (indent > listIndents[listIndents.length - 1]) {
+            listStack.push(type);
+            listIndents.push(indent);
+            emit(type === 'ol' ? '<ol>' : '<ul>');
+        } else {
+            closeOpenItem();
+
+            const topType = listStack[listStack.length - 1];
+
+            if (topType !== type) {
+                emit(topType === 'ol' ? '</ol>' : '</ul>');
+                listStack.pop();
+                listIndents.pop();
+                listStack.push(type);
+                listIndents.push(indent);
+                emit(type === 'ol' ? '<ol>' : '<ul>');
+            }
+        }
+
+        emit(`<li>${inline(content)}`);
+        itemOpen = true;
+    };
+
+    const isSeparatorRow = (line: string): boolean =>
+        /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
+
+    const splitRow = (line: string): string[] => {
+        let row = line.trim();
+
+        if (row.startsWith('|')) {
+            row = row.slice(1);
+        }
+
+        if (row.endsWith('|')) {
+            row = row.slice(0, -1);
+        }
+
+        return row.split('|').map((cell) => cell.trim());
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
         // A stashed code block on a line of its own is a block, not a paragraph.
         const codeOnly = line.match(/^\uE000(\d+)\uE000$/);
 
         if (codeOnly) {
             flushParagraph();
-            closeBlock();
-            out.push(`\uE000${codeOnly[1]}\uE000`);
+            closeLists();
+            closeQuote();
+            emit(`\uE000${codeOnly[1]}\uE000`);
 
             continue;
         }
 
         if (line.trim() === '') {
             flushParagraph();
-            closeBlock();
+            closeLists();
+            closeQuote();
+
+            continue;
+        }
+
+        // A pipe table: a header row followed by a separator row. The separator
+        // is what distinguishes a real table from prose that happens to use `|`.
+        if (line.includes('|') && isSeparatorRow(lines[i + 1] ?? '')) {
+            flushParagraph();
+            closeLists();
+            closeQuote();
+
+            const header = splitRow(line);
+            emit(`<table><thead><tr>${header.map((cell) => `<th>${inline(cell)}</th>`).join('')}</tr></thead>`);
+
+            const body: string[] = [];
+            i += 2;
+
+            for (; i < lines.length; i++) {
+                const row = lines[i];
+
+                if (row.trim() === '' || !row.includes('|') || isSeparatorRow(row)) {
+                    i--;
+
+                    break;
+                }
+
+                body.push(`<tr>${splitRow(row).map((cell) => `<td>${inline(cell)}</td>`).join('')}</tr>`);
+            }
+
+            emit(`<tbody>${body.join('')}</tbody></table>`);
 
             continue;
         }
@@ -170,17 +311,19 @@ function renderBlocks(text: string): string {
 
         if (heading) {
             flushParagraph();
-            closeBlock();
+            closeLists();
+            closeQuote();
             const level = heading[1].length;
-            out.push(`<h${level}>${inline(heading[2].trim())}</h${level}>`);
+            emit(`<h${level}>${inline(heading[2].trim())}</h${level}>`);
 
             continue;
         }
 
         if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
             flushParagraph();
-            closeBlock();
-            out.push('<hr>');
+            closeLists();
+            closeQuote();
+            emit('<hr>');
 
             continue;
         }
@@ -190,14 +333,14 @@ function renderBlocks(text: string): string {
 
         if (quote) {
             flushParagraph();
+            closeLists();
 
-            if (mode !== 'quote') {
-                closeBlock();
-                out.push('<blockquote>');
-                mode = 'quote';
+            if (!quoteOpen) {
+                emit('<blockquote>');
+                quoteOpen = true;
             }
 
-            out.push(`<p>${inline(quote[1])}</p>`);
+            emit(`<p>${inline(quote[1])}</p>`);
 
             continue;
         }
@@ -206,14 +349,7 @@ function renderBlocks(text: string): string {
 
         if (bullet) {
             flushParagraph();
-
-            if (mode !== 'ul') {
-                closeBlock();
-                out.push('<ul>');
-                mode = 'ul';
-            }
-
-            out.push(`<li>${inline(bullet[1])}</li>`);
+            handleListItem('ul', bullet[1], indentWidth(line));
 
             continue;
         }
@@ -222,24 +358,19 @@ function renderBlocks(text: string): string {
 
         if (numbered) {
             flushParagraph();
-
-            if (mode !== 'ol') {
-                closeBlock();
-                out.push('<ol>');
-                mode = 'ol';
-            }
-
-            out.push(`<li>${inline(numbered[1])}</li>`);
+            handleListItem('ol', numbered[1], indentWidth(line));
 
             continue;
         }
 
-        closeBlock();
+        closeLists();
+        closeQuote();
         paragraph.push(inline(line.trim()));
     }
 
     flushParagraph();
-    closeBlock();
+    closeLists();
+    closeQuote();
 
     return out.join('\n');
 }
@@ -285,17 +416,94 @@ function inline(line: string): string {
  *
  * Markdown is punctuation. Read literally, `**Cartera**` becomes "asterisk
  * asterisk Cartera asterisk asterisk", a numbered source list becomes a stream
- * of digits, and a heading becomes a hash. This removes the punctuation the
- * renderer above turns into structure, keeping the words — so a reply that is
- * pleasant to read is also pleasant to hear.
+ * of digits, a heading becomes a hash, and a table becomes a row of vertical
+ * bars. This removes the punctuation the renderer above turns into structure,
+ * keeping the words — so a reply that is pleasant to read is also pleasant to
+ * hear.
+ *
+ * Tables get more than punctuation removal: each row is turned into
+ * "encabezado: valor" pairs, because "Cliente | Saldo" read aloud is noise while
+ * "Cliente: Empresa A. Saldo: 120.000" is a sentence.
  */
 export function stripMarkdown(source: string): string {
-    return source
-        .replace(/\r\n?/g, '\n')
+    const normalized = source.replace(/\r\n?/g, '\n');
+    const lines = normalized.split('\n');
+    const spoken: string[] = [];
+
+    const isSeparatorRow = (line: string): boolean =>
+        /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
+
+    const splitRow = (line: string): string[] => {
+        let row = line.trim();
+
+        if (row.startsWith('|')) {
+            row = row.slice(1);
+        }
+
+        if (row.endsWith('|')) {
+            row = row.slice(0, -1);
+        }
+
+        return row.split('|').map((cell) => cell.trim());
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        if (line.includes('|') && isSeparatorRow(lines[i + 1] ?? '')) {
+            const header = splitRow(line);
+            i += 2;
+
+            for (; i < lines.length; i++) {
+                const row = lines[i];
+
+                if (row.trim() === '' || !row.includes('|') || isSeparatorRow(row)) {
+                    i--;
+
+                    break;
+                }
+
+                const values = splitRow(row);
+                const parts = header
+                    .map((column, index) => {
+                        const value = values[index] ?? '';
+
+                        return value === '' ? column : `${column}: ${value}`;
+                    })
+                    .filter((part) => part !== '');
+
+                if (parts.length > 0) {
+                    spoken.push(`${parts.join('. ')}.`);
+                }
+            }
+
+            continue;
+        }
+
+        spoken.push(line);
+    }
+
+    return spoken
+        .join('\n')
         .replace(/```[\s\S]*?```/g, ' ')
         .replace(/`([^`]*)`/g, '$1')
         .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
         .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+        // A bare URL is unreadable aloud; its host still names the source.
+        .replace(/https?:\/\/[^\s<>()"']+/g, (url: string) => {
+            try {
+                return new URL(url).hostname.replace(/^www\./, '');
+            } catch {
+                return ' ';
+            }
+        })
+        .replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (_match, entity: string) => {
+            const decoded: Record<string, string> = {
+                amp: 'y', lt: ' ', gt: ' ', quot: '', '#39': '', nbsp: ' ',
+            };
+
+            return decoded[entity] ?? ' ';
+        })
         .replace(/^\s{0,3}#{1,6}\s+/gm, '')
         .replace(/^\s*&gt;\s?/gm, '')
         .replace(/^\s*>\s?/gm, '')
@@ -304,6 +512,8 @@ export function stripMarkdown(source: string): string {
         .replace(/^\s*([-*_])\1{2,}\s*$/gm, '')
         .replace(/(\*\*|__)(.*?)\1/g, '$2')
         .replace(/(\*|_)(.*?)\1/g, '$2')
+        // A leftover pipe is table punctuation and must not be spoken.
+        .replace(/\s*\|\s*/g, ' ')
         .replace(/[ \t]+/g, ' ')
         .replace(/\n{2,}/g, '. ')
         .replace(/\n/g, ' ')

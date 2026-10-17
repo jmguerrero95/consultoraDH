@@ -345,10 +345,15 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
         const utterance = new SpeechSynthesisUtterance(content);
         utterance.lang = lang;
 
-        // Spanish voice when the browser has one; otherwise the utterance is
-        // still spoken, with the platform's own default, which is better than
-        // refusing to read at all.
-        const spanish = voiceList.value.find((voice) => voice.lang.toLowerCase().startsWith('es'));
+        // Spanish voice when the browser has one, and Colombian Spanish first:
+        // the product speaks es-CO, so a browser that offers `es-CO` and, say,
+        // `es-ES` must not be read in a peninsular accent because it enumerated
+        // the Spanish voices in a different order. Falls back to any `es`, and
+        // then to the platform default, which is better than refusing to read.
+        const spoken = voiceList.value;
+        const spanish = spoken.find((voice) => voice.lang.toLowerCase() === 'es-co')
+            ?? spoken.find((voice) => voice.lang.toLowerCase().replace('_', '-').startsWith('es-co'))
+            ?? spoken.find((voice) => voice.lang.toLowerCase().startsWith('es'));
 
         if (spanish) {
             utterance.voice = spanish;

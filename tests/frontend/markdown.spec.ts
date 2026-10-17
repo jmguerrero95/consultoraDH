@@ -107,6 +107,62 @@ describe('stripMarkdown', () => {
     });
 });
 
+describe('renderMarkdown — tables and nested lists (A07-R4)', () => {
+    it('renders a pipe table as a real table', () => {
+        const html = renderMarkdown('| Cliente | Saldo |\n| --- | --- |\n| Empresa A | 120.000 |');
+
+        expect(html).toContain('<table>');
+        expect(html).toContain('<th>Cliente</th>');
+        expect(html).toContain('<th>Saldo</th>');
+        expect(html).toContain('<td>Empresa A</td>');
+        expect(html).toContain('<td>120.000</td>');
+    });
+
+    it('does not treat a lone pipe as a table', () => {
+        const html = renderMarkdown('El operador a | b');
+
+        expect(html).not.toContain('<table>');
+        expect(html).toContain('a | b');
+    });
+
+    it('renders a nested list inside its parent item', () => {
+        const html = renderMarkdown('- Cartera\n  - Vencida\n  - Corriente\n- Clientes');
+
+        expect(html).toContain('<ul>');
+        expect(html).toContain('<li>Vencida</li>');
+        // The nested list must be inside the parent item, not a sibling list.
+        expect(html).toMatch(/<li>Cartera[\s\S]*<ul>[\s\S]*<li>Vencida<\/li>[\s\S]*<\/ul>/);
+    });
+});
+
+describe('stripMarkdown — spoken tables (A07-R4)', () => {
+    it('turns a table row into header: value sentences, never pipes', () => {
+        const spoken = stripMarkdown('| Cliente | Saldo |\n| --- | --- |\n| Empresa A | 120.000 |');
+
+        expect(spoken).not.toContain('|');
+        expect(spoken).toContain('Cliente: Empresa A');
+        expect(spoken).toContain('Saldo: 120.000');
+    });
+
+    it('does not speak a long URL, only its host', () => {
+        const spoken = stripMarkdown('Fuente: https://www.banrep.gov.co/es/estadisticas/inflacion');
+
+        expect(spoken).not.toContain('https://');
+        expect(spoken).not.toContain('/es/');
+        expect(spoken).toContain('banrep.gov.co');
+    });
+
+    it('does not speak HTML entities or decorative symbols', () => {
+        const spoken = stripMarkdown('Cartera &amp; saldo\n\n---\n\n**Total**');
+
+        expect(spoken).not.toContain('&amp;');
+        expect(spoken).not.toContain('---');
+        expect(spoken).not.toContain('**');
+        expect(spoken).toContain('Cartera');
+        expect(spoken).toContain('Total');
+    });
+});
+
 describe('SafeMarkdown component', () => {
     it('renders formatted content and never injects a script element', () => {
         const wrapper = mount(SafeMarkdown, {
