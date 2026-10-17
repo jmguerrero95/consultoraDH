@@ -746,6 +746,15 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     });
 
     Route::middleware('can:support.reply')->group(function (): void {
+        /*
+         * Opening a case from the staff side.
+         *
+         * The screen has always posted here; the route is new. See the controller for why
+         * the client had a 404 hidden behind an `index.html` parse error.
+         */
+        Route::post('/support/conversations', [SupportConversationController::class, 'store'])
+            ->name('api.support.conversations.store');
+
         Route::post('/support/conversations/{conversation}/messages', [SupportConversationController::class, 'sendMessage'])
             ->name('api.support.conversations.messages.store');
 

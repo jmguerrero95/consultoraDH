@@ -23,7 +23,7 @@ class SupportConversationAssigned implements AuditableEvent, ShouldBroadcast, Su
 
     public function __construct(
         public SupportConversation $conversation,
-        public User $assignee,
+        public ?User $assignee,
         public User $actor
     ) {}
 
@@ -75,7 +75,7 @@ class SupportConversationAssigned implements AuditableEvent, ShouldBroadcast, Su
     {
         return [
             'queue_id' => $this->conversation->queue_id,
-            'assignee_id' => $this->assignee->id,
+            'assignee_id' => $this->assignee?->id,
         ];
     }
 }

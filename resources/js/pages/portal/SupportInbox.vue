@@ -109,59 +109,79 @@ function openConversation(conversation: Conversation) {
   _router.push(`/portal/soporte/${conversation.id}`);
 }
 
-const statusLabel = (status: string) => {
-  const labels: Record<string, string> = {
-    open: 'Abierta',
-    waiting_staff: 'Esperando staff',
-    waiting_client: 'Esperando cliente',
-    resolved: 'Resuelta',
-    closed: 'Cerrada',
-  };
-  return labels[status] || status;
+const STATUS_LABELS: Record<string, string> = {
+  open: 'Abierta',
+  waiting_staff: 'Esperando staff',
+  waiting_client: 'Esperando cliente',
+  resolved: 'Resuelta',
+  closed: 'Cerrada',
 };
 
-const priorityLabel = (priority: string) => {
-  const labels: Record<string, string> = {
-    normal: 'Normal',
-    high: 'Alta',
-    urgent: 'Urgente',
-  };
-  return labels[priority] || priority;
+const PRIORITY_LABELS: Record<string, string> = {
+  normal: 'Normal',
+  high: 'Alta',
+  urgent: 'Urgente',
 };
 
-const statusBadgeClass = (status: string) => {
+/**
+ * A status never renders as an empty badge.
+ *
+ * `labels[status] || status` returned `''` when the value was missing or unknown, and an
+ * empty pill on a support list reads as a broken layout rather than as a missing value.
+ */
+const statusLabel = (status?: string | null) =>
+  (status ? STATUS_LABELS[status] ?? status : '') || 'Sin estado';
+
+const priorityLabel = (priority?: string | null) =>
+  (priority ? PRIORITY_LABELS[priority] ?? priority : '') || 'Sin prioridad';
+
+/**
+ * Badge colours that actually exist.
+ *
+ * These maps returned `bg-gray-100 text-gray-800` — Tailwind class names, in a Bootstrap
+ * project with no Tailwind build — so every badge on the list rendered with no background
+ * at all. They are Bootstrap utilities now.
+ */
+const statusBadgeClass = (status?: string | null) => {
   const classes: Record<string, string> = {
-    open: 'bg-gray-100 text-gray-800',
-    waiting_staff: 'bg-yellow-100 text-yellow-800',
-    waiting_client: 'bg-blue-100 text-blue-800',
-    resolved: 'bg-green-100 text-green-800',
-    closed: 'bg-gray-100 text-gray-600',
+    open: 'bg-secondary text-white',
+    waiting_staff: 'bg-warning text-dark',
+    waiting_client: 'bg-info text-white',
+    resolved: 'bg-success text-white',
+    closed: 'bg-light text-dark border',
   };
-  return classes[status] || 'bg-gray-100 text-gray-800';
+
+  return (status && classes[status]) || 'bg-secondary text-white';
 };
 
-const priorityBadgeClass = (priority: string) => {
+const priorityBadgeClass = (priority?: string | null) => {
   const classes: Record<string, string> = {
-    normal: 'bg-gray-100 text-gray-800',
-    high: 'bg-orange-100 text-orange-800',
-    urgent: 'bg-red-100 text-red-800',
+    normal: 'bg-light text-dark border',
+    high: 'bg-warning text-dark',
+    urgent: 'bg-danger text-white',
   };
-  return classes[priority] || 'bg-gray-100 text-gray-800';
+
+  return (priority && classes[priority]) || 'bg-light text-dark border';
 };
 
-const formatRelativeTime = (dateString: string) => {
+const formatRelativeTime = (dateString?: string | null) => {
+  if (!dateString) return '—';
+
   const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
+  const timestamp = date.getTime();
+
+  if (Number.isNaN(timestamp)) return '—';
+
+  const diffMins = Math.floor((Date.now() - timestamp) / 60000);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
 
   if (diffMins < 1) return 'Ahora';
   if (diffMins < 60) return `hace ${diffMins} min`;
   if (diffHours < 24) return `hace ${diffHours} h`;
   if (diffDays < 7) return `hace ${diffDays} d`;
-  return date.toLocaleDateString('es-ES');
+
+  return date.toLocaleDateString('es-CO');
 };
 </script>
 
@@ -222,7 +242,7 @@ const formatRelativeTime = (dateString: string) => {
             <td>
               <strong>{{ c.subject }}</strong>
             </td>
-            <td class="d-none d-md-table-cell">{{ c.queue?.name }}</td>
+            <td class="d-none d-md-table-cell">{{ c.queue?.name || '—' }}</td>
             <td class="text-center">
               <span :class="statusBadgeClass(c.status)" class="badge px-2 py-1">
                 {{ statusLabel(c.status) }}

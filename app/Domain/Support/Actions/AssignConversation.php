@@ -13,9 +13,11 @@ use Illuminate\Support\Facades\Dispatch;
 
 class AssignConversation
 {
-    public function execute(SupportConversation $conversation, User $assignee, User $actor): SupportConversation
+    public function execute(SupportConversation $conversation, ?User $assignee, User $actor): SupportConversation
     {
-        if ($assignee->account_type !== 'staff' || ! $assignee->status->value === 'active') {
+        // `null` means unassign, which is a legitimate outcome — the record keeps no
+        // assignee rather than keeping a stale one.
+        if ($assignee !== null && ($assignee->account_type !== 'staff' || $assignee->status->value !== 'active')) {
             throw new \InvalidArgumentException('Assignee must be an active staff user');
         }
 
@@ -31,7 +33,7 @@ class AssignConversation
             }
 
             // Check queue membership unless actor has support.view_all
-            if (! $actor->hasPermissionTo('support.view_all')) {
+            if ($assignee !== null && ! $actor->hasPermissionTo('support.view_all')) {
                 $isMember = SupportQueueMember::where('queue_id', $conversation->queue_id)
                     ->where('user_id', $assignee->id)
                     ->exists();
@@ -41,7 +43,7 @@ class AssignConversation
                 }
             }
 
-            $conversation->assigned_to_user_id = $assignee->id;
+            $conversation->assigned_to_user_id = $assignee?->id;
             $conversation->save();
 
             // Dispatch broadcast after commit

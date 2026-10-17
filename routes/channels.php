@@ -17,7 +17,18 @@ use Illuminate\Support\Facades\Broadcast;
 
 // Support conversation channel - for realtime messages and updates (client-visible)
 Broadcast::channel('support.conversation.{conversationId}', function (User $user, string $conversationId) {
-    $conversation = SupportConversation::find($conversationId);
+    // A channel name that is not a number cannot name a conversation.
+    //
+    // This was the 500 behind `/broadcasting/auth`: the create screen had no
+    // conversation yet, so the browser asked for `support.conversation.NaN`, and
+    // `find('NaN')` reached PostgreSQL as a bigint comparison and raised a query
+    // exception inside the auth callback. An unparsable id is a refusal, not a
+    // server error, so it is refused here before it ever reaches the database.
+    if (! ctype_digit($conversationId)) {
+        return false;
+    }
+
+    $conversation = SupportConversation::find((int) $conversationId);
 
     if (! $conversation) {
         return false;
@@ -57,7 +68,12 @@ Broadcast::channel('support.staff.conversation.{conversationId}', function (User
         return false;
     }
 
-    $conversation = SupportConversation::find($conversationId);
+    // Same guard as the client-visible channel above: `NaN` is not an id.
+    if (! ctype_digit($conversationId)) {
+        return false;
+    }
+
+    $conversation = SupportConversation::find((int) $conversationId);
 
     if (! $conversation) {
         return false;

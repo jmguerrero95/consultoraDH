@@ -282,6 +282,7 @@ interface ApiClient {
             per_page: number;
         }>;
         conversation(id: number, params: Record<string, any>): Promise<any>;
+        createConversation(payload: { subject: string; body_text: string; queue_id?: number | null }): Promise<any>;
         sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<any>;
         uploadAttachment(conversationId: number, file: File): Promise<any>;
         markRead(conversationId: number, upToMessageId: number): Promise<any>;
@@ -289,6 +290,15 @@ interface ApiClient {
 
     support: {
         queues(): Promise<{ data: { id: number; name: string }[] }>;
+        /**
+         * The staff who can be assigned a conversation.
+         *
+         * Declared here because the inbox and the conversation screen both call it and the
+         * implementation has always answered it; without the declaration TypeScript treated
+         * `api.support` as a shape that does not contain it, which failed the whole object
+         * literal in the client and cascaded onto every other `support` call.
+         */
+        agents(): Promise<{ data: { id: number; name: string; email: string }[] }>;
         inbox(params: Record<string, any>): Promise<{ data: any[]; current_page: number; last_page: number; total: number; per_page: number }>;
         conversation(id: number, params: Record<string, any>): Promise<any>;
         createConversation(payload: Record<string, any>): Promise<{ data: any }>;
@@ -302,6 +312,8 @@ interface ApiClient {
         closeConversation(conversationId: number): Promise<{ data: any }>;
         reopenConversation(conversationId: number): Promise<{ data: any }>;
         assignConversation(conversationId: number, userId: number | null): Promise<{ data: any }>;
+        /** Records how far this user has read, so the unread badge clears. */
+        markRead(conversationId: number, upToMessageId: number): Promise<any>;
         loadMoreMessages(conversationId: number, beforeId: number, perPage: number): Promise<any>;
     };
 
@@ -1008,6 +1020,14 @@ export const api: ApiClient = {
             return request('GET', `/api/portal/support/conversations/${id}`, { query: params });
         },
 
+        createConversation(payload: {
+            subject: string;
+            body_text: string;
+            queue_id?: number | null;
+        }): Promise<{ data: any }> {
+            return request('POST', '/api/portal/support/conversations', { body: payload });
+        },
+
         sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<{
             data: any;
         }> {
@@ -1056,6 +1076,19 @@ export const api: ApiClient = {
 
         sendNote(conversationId: number, payload: { body_text: string }): Promise<{ data: any }> {
             return request('POST', `/api/support/conversations/${conversationId}/notes`, { body: payload });
+        },
+
+        /**
+         * Record how far this user has read.
+         *
+         * The staff screen called `api.support.markRead` and the method did not exist, so the
+         * transcript could never clear its unread marker. The endpoint has always existed
+         * (`POST /api/support/conversations/{id}/read`); this is the declaration of it.
+         */
+        markRead(conversationId: number, upToMessageId: number): Promise<{ data: any }> {
+            return request('POST', `/api/support/conversations/${conversationId}/read`, {
+                body: { up_to_message_id: upToMessageId },
+            });
         },
 
         /**

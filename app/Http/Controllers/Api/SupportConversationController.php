@@ -10,11 +10,14 @@ use App\Domain\Support\Actions\AssignConversation;
 use App\Domain\Support\Actions\ChangeConversationPriority;
 use App\Domain\Support\Actions\ChangeConversationQueue;
 use App\Domain\Support\Actions\CloseConversation;
+use App\Domain\Support\Actions\CreateSupportConversation;
 use App\Domain\Support\Actions\MarkConversationRead;
 use App\Domain\Support\Actions\ReopenConversation;
 use App\Domain\Support\Actions\ResolveConversation;
 use App\Domain\Support\Actions\StoreSupportAttachment;
 use App\Domain\Support\SupportConversationPriority;
+use App\Domain\Support\SupportMessageChannel;
+use App\Domain\Support\SupportMessageSenderKind;
 use App\Http\Controllers\Controller;
 use App\Models\SupportConversation;
 use App\Models\SupportMessage;
@@ -30,6 +33,66 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SupportConversationController extends Controller
 {
+    /**
+     * A conversation opened by staff, on behalf of a client.
+     *
+     * ## Why this did not exist
+     *
+     * The portal had `store`; the staff screen did not. `api.support.createConversation()`
+     * had always posted to `/api/support/conversations`, but no route answered it — the SPA
+     * catch-all returned `index.html`, the client failed parsing it as JSON, and "Nueva
+     * conversación" opened the conversation screen with no id, which then asked the server
+     * for conversation `NaN`. There is now an endpoint, and it is the one the client already
+     * called.
+     *
+     * ## Why the client is required here and optional in the portal
+     *
+     * A staff member opening a case is doing so for a named person — that is who the thread
+     * is about, and `client_id` is what every later screen and permission check reads. The
+     * portal can infer it from the session; here it has to be stated.
+     */
+    public function store(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'client_id' => 'required|integer|exists:clients,id',
+            'subject' => 'required|string|max:255',
+            'body_text' => 'required|string|max:65535',
+            'queue_id' => 'nullable|integer|exists:support_queues,id',
+            'priority' => 'nullable|string|in:normal,high,urgent',
+            'attachment_ids' => 'sometimes|array',
+            'attachment_ids.*' => 'integer|exists:support_message_attachments,id',
+        ]);
+
+        try {
+            $conversation = app(CreateSupportConversation::class)->execute([
+                'client_id' => $validated['client_id'],
+                'queue_id' => $validated['queue_id'] ?? null,
+                'subject' => $validated['subject'],
+                'priority' => isset($validated['priority'])
+                    ? SupportConversationPriority::from($validated['priority'])
+                    : SupportConversationPriority::Normal,
+                'origin_channel' => SupportMessageChannel::Staff,
+                'first_message' => $validated['body_text'],
+                'sender_kind' => SupportMessageSenderKind::Staff,
+            ], $request->user());
+        } catch (\InvalidArgumentException $e) {
+            // No default queue configured: a configuration state, not a bug, and the
+            // operator is told which one is missing rather than shown a 500.
+            return response()->json([
+                'message' => 'No hay una cola por defecto configurada. Elija una cola.',
+                'code' => 'no_default_queue',
+            ], 409);
+        }
+
+        if (! empty($validated['attachment_ids'])) {
+            SupportMessageAttachment::whereIn('id', $validated['attachment_ids'])
+                ->whereNull('support_message_id')
+                ->update(['support_message_id' => $conversation->last_message_id]);
+        }
+
+        return response()->json($conversation->load('client', 'queue', 'messages.attachments'), 201);
+    }
+
     public function show(Request $request, SupportConversation $conversation): JsonResponse
     {
         $this->authorizeConversationAccess($request->user(), $conversation);
@@ -135,11 +198,14 @@ class SupportConversationController extends Controller
     {
         $this->authorizeConversationAccess($request->user(), $conversation);
 
+        // `present|nullable` so the "Sin asignar" option works. The rule used to be
+        // `required|integer`, so choosing it sent `user_id: null` and the server
+        // answered 422: the one control that removes an assignee could never succeed.
         $validated = $request->validate([
-            'user_id' => 'required|integer|exists:users,id',
+            'user_id' => 'present|nullable|integer|exists:users,id',
         ]);
 
-        $assignee = User::findOrFail($validated['user_id']);
+        $assignee = $validated['user_id'] === null ? null : User::findOrFail($validated['user_id']);
 
         $conversation = app(AssignConversation::class)->execute($conversation, $assignee, $request->user());
 

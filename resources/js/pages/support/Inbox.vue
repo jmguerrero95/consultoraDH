@@ -185,24 +185,33 @@ const priorityLabel = (priority?: string | null) => {
   return (priority && labels[priority]) || priority || 'Sin prioridad';
 };
 
-const statusBadgeClass = (status: string) => {
+/**
+ * Badge colours that exist.
+ *
+ * These maps returned Tailwind class names (`bg-gray-100`, `text-gray-800`) in a Bootstrap
+ * project with no Tailwind build, so every status and priority pill rendered with no
+ * background at all.
+ */
+const statusBadgeClass = (status?: string | null) => {
   const classes: Record<string, string> = {
-    open: 'bg-gray-100 text-gray-800',
-    waiting_staff: 'bg-yellow-100 text-yellow-800',
-    waiting_client: 'bg-blue-100 text-blue-800',
-    resolved: 'bg-green-100 text-green-800',
-    closed: 'bg-gray-100 text-gray-600',
+    open: 'bg-secondary text-white',
+    waiting_staff: 'bg-warning text-dark',
+    waiting_client: 'bg-info text-white',
+    resolved: 'bg-success text-white',
+    closed: 'bg-light text-dark border',
   };
-  return classes[status] || 'bg-gray-100 text-gray-800';
+
+  return (status && classes[status]) || 'bg-secondary text-white';
 };
 
-const priorityBadgeClass = (priority: string) => {
+const priorityBadgeClass = (priority?: string | null) => {
   const classes: Record<string, string> = {
-    normal: 'bg-gray-100 text-gray-800',
-    high: 'bg-orange-100 text-orange-800',
-    urgent: 'bg-red-100 text-red-800',
+    normal: 'bg-light text-dark border',
+    high: 'bg-warning text-dark',
+    urgent: 'bg-danger text-white',
   };
-  return classes[priority] || 'bg-gray-100 text-gray-800';
+
+  return (priority && classes[priority]) || 'bg-light text-dark border';
 };
 
 /**
@@ -230,7 +239,7 @@ const formatRelativeTime = (dateString?: string | null) => {
   if (diffMins < 60) return `hace ${diffMins} min`;
   if (diffHours < 24) return `hace ${diffHours} h`;
   if (diffDays < 7) return `hace ${diffDays} d`;
-  return date.toLocaleDateString('es-ES');
+  return date.toLocaleDateString('es-CO');
 };
 </script>
 
@@ -346,10 +355,16 @@ const formatRelativeTime = (dateString?: string | null) => {
             <td>
               <div>
                 <strong>{{ c.subject }}</strong>
-                <div class="text-muted small">{{ c.client.first_names }} {{ c.client.last_names }} ({{ c.client.document_number }})</div>
+                <div class="text-muted small">
+                  <template v-if="c.client">
+                    {{ c.client.first_names }} {{ c.client.last_names }}
+                    <template v-if="c.client.document_number">({{ c.client.document_number }})</template>
+                  </template>
+                  <template v-else>Sin cliente asociado</template>
+                </div>
               </div>
             </td>
-            <td class="d-none d-md-table-cell">{{ c.queue?.name }}</td>
+            <td class="d-none d-md-table-cell">{{ c.queue?.name || '—' }}</td>
             <td class="d-none d-lg-table-cell">
               <span v-if="c.assignee">{{ c.assignee.name }}</span>
               <span v-else class="text-muted">Sin asignar</span>
