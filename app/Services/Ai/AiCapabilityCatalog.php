@@ -290,10 +290,53 @@ final class AiCapabilityCatalog
 
     /**
      * Whether the named tool answers from Consultora DH's own records.
+     *
+     * Kept as the single gate the turn uses to decide whether a tool result may
+     * go to a provider whose free tier may train on it.
      */
     public function isPrivateTool(string $name): bool
     {
-        return (bool) (self::META[$name]['private'] ?? false);
+        return $this->requiresClientData($name);
+    }
+
+    /**
+     * Whether a tool's output requires a provider authorised for private data.
+     *
+     * ## Fail closed
+     *
+     * A07-R4 defaulted an unclassified tool to *public*. That is the wrong
+     * default: the day someone registers a new tool and forgets to describe it,
+     * its output would be eligible for a provider that may train on it. A tool
+     * the catalogue has never heard of is now treated as answering from our
+     * records until someone says otherwise, which is the only safe direction for
+     * the mistake to point.
+     *
+     * `public` is reserved for the tools that demonstrably never touch our data:
+     * the ones that leave for the open internet, the static vocabulary, and the
+     * artifact writer (which stores privately and reads nothing).
+     */
+    public function requiresClientData(string $name): bool
+    {
+        return $this->sensitivity($name) !== 'public';
+    }
+
+    /**
+     * The declared sensitivity of a tool: `public`, `client`, or `unknown`.
+     *
+     * A registered tool with no metadata is `unknown`, which is treated as
+     * private everywhere; a name that is not a registered tool at all is
+     * `unknown` too, so a model cannot reach a private classification by
+     * inventing a tool name.
+     */
+    public function sensitivity(string $name): string
+    {
+        $entry = self::META[$name] ?? null;
+
+        if ($entry === null) {
+            return 'unknown';
+        }
+
+        return $entry['private'] ? 'client' : 'public';
     }
 
     /**
@@ -320,7 +363,9 @@ final class AiCapabilityCatalog
             $meta = self::META[$name] ?? [
                 'purpose' => $tool->description(),
                 'when' => 'Cuando la tarea lo requiera.',
-                'private' => false,
+                // Fail closed: an undescribed tool is advertised as private so a
+                // model is never told an unknown capability is safe to publish.
+                'private' => true,
                 'internet' => false,
                 'keywords' => [],
             ];
@@ -330,7 +375,8 @@ final class AiCapabilityCatalog
                 'purpose' => $meta['purpose'],
                 'when' => $meta['when'],
                 'mode' => $tool->isWrite() ? 'write' : 'read',
-                'private_data' => $meta['private'],
+                'private_data' => $this->requiresClientData($name),
+                'classified' => $this->sensitivity($name) !== 'unknown',
                 'needs_internet' => $meta['internet'],
                 'arguments' => $this->argumentNames($tool),
                 'keywords' => $meta['keywords'],

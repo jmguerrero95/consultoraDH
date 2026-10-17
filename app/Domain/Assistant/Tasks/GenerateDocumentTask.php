@@ -10,6 +10,7 @@ use App\Models\AiTask;
 use App\Models\User;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiProviderResolver;
+use App\Services\Ai\AiTurnBudget;
 use App\Services\Ai\Tools\CreateArtifactTool;
 use Illuminate\Support\Facades\Log;
 
@@ -80,7 +81,7 @@ final class GenerateDocumentTask implements AiTaskHandler
 
             $task->forceFill(['stage' => 'Redactando', 'progress' => 45])->save();
 
-            $content = $this->draft($user, $title, $format, $brief);
+            $content = $this->draft($user, $title, $format, $brief, $task);
         }
 
         $task->forceFill(['stage' => 'Generando archivo', 'progress' => 70])->save();
@@ -125,7 +126,7 @@ final class GenerateDocumentTask implements AiTaskHandler
      * zero-byte file is a worse outcome than a failed task, because it looks
      * like success.
      */
-    private function draft(User $user, string $title, string $format, string $brief): string
+    private function draft(User $user, string $title, string $format, string $brief, AiTask $task): string
     {
         $shape = match ($format) {
             'xlsx', 'csv' => 'Devuelve un arreglo JSON de filas, donde la primera fila son los encabezados. Solo el JSON.',
@@ -138,11 +139,33 @@ final class GenerateDocumentTask implements AiTaskHandler
             "\nNo inventes cifras, fechas ni nombres que no aparezcan en la indicación. ".
             'Si falta un dato, escribe «[dato pendiente]» en su lugar.';
 
+        // A generated document is private by default: an unclassified document is
+        // not a public one, and a brief can embed business context. The
+        // classification is stamped when the task is queued and travels with it;
+        // when nothing stamped it, the safe reading is "private".
+        //
+        // This is why drafting a document never reaches a provider whose free
+        // tier may train on the content, whatever the brief says.
+        $requiresClientData = (bool) ($task->input['contains_client_data'] ?? true);
+
+        // The task's own budget, independent of any chat turn: document drafting
+        // is long work and must not be cut short by a budget meant for a request
+        // the person is waiting on.
+        $budget = AiTurnBudget::forTurn(false, microtime(true) + self::SYNTHESIS_TIMEOUT_SECONDS);
+
         try {
-            $response = $this->providers->complete([
-                AiMessage::system($system),
-                AiMessage::user('Título: '.$title."\n\nIndicación:\n".$brief),
-            ]);
+            $response = $this->providers->complete(
+                [
+                    AiMessage::system($system),
+                    AiMessage::user('Título: '.$title."\n\nIndicación:\n".$brief),
+                ],
+                [],
+                null,
+                'document',
+                $budget->deadline,
+                $requiresClientData,
+                $budget,
+            );
         } catch (AiProviderException $e) {
             throw new \RuntimeException('El proveedor de lenguaje no está disponible en este momento.', 0, $e);
         } catch (\Throwable $e) {

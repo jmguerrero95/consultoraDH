@@ -4,9 +4,13 @@ declare(strict_types=1);
 
 namespace Tests\Feature\A07;
 
+use App\Domain\Ai\AiToolRejected;
+use App\Domain\Assistant\Tasks\GenerateDocumentTask;
+use App\Domain\Assistant\Tasks\ResearchTask;
 use App\Domain\Receivables\ReceivablesService;
 use App\Models\AiConversation;
 use App\Models\AiMessage as AiMessageModel;
+use App\Models\AiTask;
 use App\Models\Client;
 use App\Models\Company;
 use App\Models\MonthlyObligation;
@@ -14,10 +18,18 @@ use App\Models\Payment;
 use App\Models\PaymentAllocation;
 use App\Models\User;
 use App\Services\Ai\AiAssistantService;
+use App\Services\Ai\AiCapabilityCatalog;
+use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiTaskRouter;
+use App\Services\Ai\Tools\SystemStatsTool;
+use App\Services\Ai\Tools\WebFetchTool;
+use App\Services\Ai\Tools\WebSearchTool;
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 
@@ -43,18 +55,24 @@ final class AgentCoreTest extends TestCase
 {
     private const PROVIDER_URL = 'https://provider.test/v1/chat/completions';
 
+    /** A provider whose free tier may train on the content: public turns only. */
+    private const PUBLIC_URL = 'https://public.test/v1/chat/completions';
+
+    /** A provider authorised for private data. */
+    private const PRIVATE_URL = 'https://private.test/v1/chat/completions';
+
     private User $user;
 
     protected function setUp(): void
     {
         parent::setUp();
 
-        foreach (['ai.use', 'clients.view', 'receivables.view', 'companies.view'] as $permission) {
+        foreach (['ai.use', 'clients.view', 'receivables.view', 'companies.view', 'web_search', 'artifacts.create'] as $permission) {
             Permission::firstOrCreate(['name' => $permission, 'guard_name' => 'web']);
         }
 
         $this->user = User::factory()->create();
-        $this->user->givePermissionTo(['ai.use', 'clients.view', 'receivables.view', 'companies.view']);
+        $this->user->givePermissionTo(['ai.use', 'clients.view', 'receivables.view', 'companies.view', 'web_search', 'artifacts.create']);
 
         config([
             'ai.enabled' => true,
@@ -317,5 +335,415 @@ final class AgentCoreTest extends TestCase
         $this->assertTrue($historical['historical']);
         $this->assertFalse($current['historical']);
         $this->assertSame('2024-01-31', $historical['as_of']);
+    }
+
+    // ------------------------------------------------- same-turn privacy escalation
+
+    /**
+     * Two endpoints with different data policies.
+     *
+     * `publico` may train on what it is sent, so it is only ever eligible for a
+     * public turn; `privado` is authorised for private data. The distinction is
+     * the whole test: a leak is a private payload that reaches the first.
+     */
+    private function twoProviders(): void
+    {
+        config([
+            'ai.primary' => ['base_url' => null, 'api_key' => null, 'model' => null],
+            'ai.fallback' => ['base_url' => null, 'api_key' => null, 'model' => null],
+            'ai.providers' => [
+                'publico' => [
+                    'enabled' => true,
+                    'base_url' => 'https://public.test/v1',
+                    'api_key' => 'pub-key',
+                    'models' => ['pub-model'],
+                    'priority' => 1,
+                    'data_policy' => 'training',
+                    'capabilities' => ['chat', 'tools'],
+                ],
+                'privado' => [
+                    'enabled' => true,
+                    'base_url' => 'https://private.test/v1',
+                    'api_key' => 'priv-key',
+                    'models' => ['priv-model'],
+                    'priority' => 5,
+                    'data_policy' => 'standard',
+                    'capabilities' => ['chat', 'tools'],
+                ],
+            ],
+            'ai.privacy.allow_training_providers' => false,
+        ]);
+    }
+
+    /**
+     * @param  iterable<array{0: Request, 1: Response}>  $recorded
+     * @return list<Request>
+     */
+    private function sentTo(iterable $recorded, string $url): array
+    {
+        $out = [];
+
+        foreach ($recorded as [$request]) {
+            if ($request->url() === $url) {
+                $out[] = $request;
+            }
+        }
+
+        return $out;
+    }
+
+    public function test_a_private_tool_result_is_not_sent_to_a_training_provider_in_the_same_turn(): void
+    {
+        $this->twoProviders();
+
+        $document = 'PRIV'.random_int(1000000, 9999999);
+
+        Client::factory()->create([
+            'document_type' => 'CC',
+            'document_number' => $document,
+            'first_names' => 'Privada',
+            'last_names' => 'Uno',
+        ]);
+
+        Http::fake([
+            self::PUBLIC_URL => Http::sequence()
+                // Round 1 is a public question, so the training provider may answer it.
+                ->push($this->toolCallBody('client_search', ['query' => $document], 'c1'))
+                // If a second round ever reached this endpoint, the record leaked.
+                ->push($this->textBody('No debería llegar aquí.')),
+            self::PRIVATE_URL => Http::response(
+                $this->textBody('La clienta Privada Uno tiene documento '.$document.'.'),
+            ),
+        ]);
+
+        $conversation = $this->conversation();
+        $result = app(AiAssistantService::class)->ask($conversation, 'Explícame brevemente qué es una EPS', $this->user);
+
+        $this->assertSame('La clienta Privada Uno tiene documento '.$document.'.', $result['reply']);
+        $this->assertTrue((bool) $conversation->fresh()->contains_client_data);
+
+        $sent = Http::recorded();
+        $toPublic = $this->sentTo($sent, self::PUBLIC_URL);
+        $toPrivate = $this->sentTo($sent, self::PRIVATE_URL);
+
+        $this->assertCount(1, $toPublic, 'The round that carries the private record must not go back to the training provider.');
+        $this->assertCount(1, $toPrivate, 'The authorised provider carries the private round.');
+
+        $this->assertStringNotContainsString(
+            $document,
+            $toPublic[0]->body(),
+            'Not one byte of the private record reached a provider that may train on it.',
+        );
+        $this->assertStringContainsString(
+            $document,
+            $toPrivate[0]->body(),
+            'The authorised provider received the record it was asked to synthesise.',
+        );
+    }
+
+    public function test_without_an_authorised_provider_the_private_record_never_leaves_and_the_turn_fails(): void
+    {
+        config([
+            'ai.primary' => ['base_url' => null, 'api_key' => null, 'model' => null],
+            'ai.fallback' => ['base_url' => null, 'api_key' => null, 'model' => null],
+            'ai.providers' => [
+                'publico' => [
+                    'enabled' => true,
+                    'base_url' => 'https://public.test/v1',
+                    'api_key' => 'pub-key',
+                    'models' => ['pub-model'],
+                    'priority' => 1,
+                    'data_policy' => 'training',
+                    'capabilities' => ['chat', 'tools'],
+                ],
+            ],
+            'ai.privacy.allow_training_providers' => false,
+        ]);
+
+        Client::factory()->create([
+            'document_type' => 'CC',
+            'document_number' => 'PRIV'.random_int(1000000, 9999999),
+            'first_names' => 'Privada',
+            'last_names' => 'Uno',
+        ]);
+
+        Http::fake([
+            self::PUBLIC_URL => Http::sequence()
+                ->push($this->toolCallBody('client_search', ['query' => 'PRIV9001234'], 'c1'))
+                ->push($this->textBody('No debería llegar aquí.')),
+        ]);
+
+        $conversation = $this->conversation();
+
+        try {
+            app(AiAssistantService::class)->ask($conversation, 'Explícame brevemente qué es una EPS', $this->user);
+            $this->fail('The turn must fail rather than send a private record to a training provider.');
+        } catch (AiProviderException $e) {
+            $this->assertStringContainsString('autorizado', $e->getMessage());
+        }
+
+        $this->assertTrue(
+            (bool) $conversation->fresh()->contains_client_data,
+            'The thread is marked private even though the turn failed.',
+        );
+
+        $toPublic = $this->sentTo(Http::recorded(), self::PUBLIC_URL);
+        $this->assertCount(1, $toPublic);
+        $this->assertStringNotContainsString('PRIV9001234', $toPublic[0]->body());
+    }
+
+    // --------------------------------------------------------- async task privacy
+
+    public function test_research_synthesis_keeps_a_private_task_off_a_training_provider(): void
+    {
+        $this->twoProviders();
+        config(['ai.web_search.enabled' => true, 'ai.web_search.base_url' => 'https://search.test']);
+
+        Http::fake([
+            'https://search.test/*' => Http::response(['results' => [[
+                'title' => 'Norma vigente',
+                'url' => 'https://ejemplo.test/norma',
+                'content' => 'Contenido público de la norma.',
+            ]]]),
+            self::PUBLIC_URL => Http::response($this->textBody('No debería usarse.')),
+            self::PRIVATE_URL => Http::response($this->textBody('Resumen según la fuente [1].')),
+        ]);
+
+        $task = AiTask::query()->create([
+            'user_id' => $this->user->id,
+            'ai_conversation_id' => $this->conversation()->id,
+            'kind' => AiTask::KIND_RESEARCH,
+            'status' => AiTask::STATUS_QUEUED,
+            'progress' => 0,
+            'input' => [
+                'question' => '¿Cuál es la situación de la empresa?',
+                'contains_client_data' => true,
+            ],
+            'dedupe_key' => 'research-'.uniqid(),
+        ]);
+
+        $result = app(ResearchTask::class)->handle($task);
+
+        $this->assertSame('answered', $result['outcome']);
+
+        $sent = Http::recorded();
+        $this->assertCount(0, $this->sentTo($sent, self::PUBLIC_URL), 'A private research task must not reach a training provider.');
+        $this->assertCount(1, $this->sentTo($sent, self::PRIVATE_URL));
+    }
+
+    public function test_document_drafting_uses_an_authorised_provider(): void
+    {
+        $this->twoProviders();
+        Storage::fake('local');
+
+        Http::fake([
+            self::PUBLIC_URL => Http::response($this->textBody('No debería usarse.')),
+            self::PRIVATE_URL => Http::response($this->textBody('Contenido redactado.')),
+        ]);
+
+        $task = AiTask::query()->create([
+            'user_id' => $this->user->id,
+            'ai_conversation_id' => $this->conversation()->id,
+            'kind' => AiTask::KIND_DOCUMENT_GENERATE,
+            'status' => AiTask::STATUS_QUEUED,
+            'progress' => 0,
+            'input' => [
+                'format' => 'txt',
+                'filename' => 'nota',
+                'brief' => 'Resume la situación de la empresa.',
+                'contains_client_data' => true,
+            ],
+            'dedupe_key' => 'document-'.uniqid(),
+        ]);
+
+        $result = app(GenerateDocumentTask::class)->handle($task);
+
+        $this->assertSame('txt', $result['format']);
+
+        $sent = Http::recorded();
+        $this->assertCount(0, $this->sentTo($sent, self::PUBLIC_URL), 'Document drafting must not reach a training provider.');
+        $this->assertCount(1, $this->sentTo($sent, self::PRIVATE_URL));
+    }
+
+    // ---------------------------------------------------------- outbound search boundary
+
+    public function test_an_outbound_search_strips_a_private_identifier_before_it_leaves(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+            'ai.web_search.timeout_seconds' => 5,
+        ]);
+
+        Http::fake(['https://search.test/*' => Http::response(['results' => []])]);
+
+        $output = app(WebSearchTool::class)->execute(
+            ['query' => 'cliente ana.gomez@example.com cartera', 'max_results' => 5],
+            $this->user,
+        );
+
+        $this->assertStringNotContainsString('ana.gomez@example.com', $output['query']);
+
+        Http::assertSent(function (Request $request): bool {
+            if (! str_contains($request->url(), 'search.test')) {
+                return false;
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $params);
+
+            return ! str_contains($params['q'] ?? '', 'ana.gomez@example.com')
+                && str_contains($params['q'] ?? '', 'cartera');
+        });
+    }
+
+    public function test_an_outbound_search_refuses_a_query_that_is_only_an_identifier(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake(['https://search.test/*' => Http::response(['results' => []])]);
+
+        $this->expectException(AiToolRejected::class);
+
+        app(WebSearchTool::class)->execute(
+            ['query' => '900123456', 'max_results' => 5],
+            $this->user,
+        );
+    }
+
+    public function test_web_fetch_refuses_a_url_that_carries_an_email(): void
+    {
+        $this->expectException(AiToolRejected::class);
+
+        app(WebFetchTool::class)->validate([
+            'url' => 'https://example.com/p?contact=ana.gomez@example.com',
+        ]);
+    }
+
+    // ---------------------------------------------------- historical stats labelling
+
+    public function test_historical_stats_label_register_counts_as_current(): void
+    {
+        $tool = app(SystemStatsTool::class);
+
+        $historical = $tool->execute(['as_of' => '2024-06-30'], $this->user);
+
+        $this->assertSame('current', $historical['scope']['register']);
+        $this->assertSame('current', $historical['clients']['basis']);
+        $this->assertContains('clients.active', $historical['not_reconstructable']);
+        $this->assertSame('historical', $historical['scope']['financial']);
+        $this->assertTrue($historical['receivables']['historical']);
+
+        // With no cut-off requested, nothing changes: the payload stays as it was.
+        $current = $tool->execute([], $this->user);
+
+        $this->assertArrayNotHasKey('scope', $current);
+        $this->assertArrayNotHasKey('basis', $current['clients']);
+        $this->assertFalse($current['receivables']['historical']);
+    }
+
+    public function test_a_payment_reversed_after_the_cut_off_still_counted_as_debt_at_the_cut_off(): void
+    {
+        $service = app(ReceivablesService::class);
+        $asOf = Carbon::parse('2024-05-31');
+
+        $beforeHistorical = $service->clientBalanceCounts($asOf)['clients_with_debt'];
+        $beforeCurrent = $service->clientBalanceCounts()['clients_with_debt'];
+
+        $client = Client::factory()->create();
+        $company = Company::factory()->create();
+
+        /** @var MonthlyObligation $obligation */
+        $obligation = MonthlyObligation::factory()->forMonth('2024-05')->create([
+            'client_id' => $client->id,
+            'company_id' => $company->id,
+            'base_amount_cop' => 100000,
+            'generated_at' => Carbon::parse('2024-05-05 09:00:00'),
+        ]);
+
+        $payment = Payment::factory()->create([
+            'client_id' => $client->id,
+            'amount_cop' => 100000,
+            'received_on' => '2024-05-10',
+        ]);
+
+        PaymentAllocation::factory()->create([
+            'payment_id' => $payment->id,
+            'obligation_id' => $obligation->id,
+            'amount_cop' => 100000,
+            'created_at' => Carbon::parse('2024-05-10 10:00:00'),
+        ]);
+
+        // The payment is voided *after* the cut-off. At the cut-off it was live,
+        // so the obligation was settled; today it is not.
+        $payment->forceFill([
+            'voided_at' => Carbon::parse('2024-06-15 10:00:00'),
+            'void_reason' => 'Reverso posterior al corte para la prueba.',
+        ])->save();
+
+        $historical = $service->clientBalanceCounts($asOf);
+        $current = $service->clientBalanceCounts();
+
+        $this->assertSame(
+            $beforeHistorical,
+            $historical['clients_with_debt'],
+            'A reversal recorded after the cut-off must not change the balance as it stood then.',
+        );
+        $this->assertSame(
+            $beforeCurrent + 1,
+            $current['clients_with_debt'],
+            'The void restores the debt in the current books.',
+        );
+    }
+
+    // --------------------------------------------------- migration-backed privacy
+
+    public function test_the_privacy_flag_column_exists_and_defaults_to_public(): void
+    {
+        $this->assertTrue(Schema::hasColumn('ai_conversations', 'contains_client_data'));
+
+        $conversation = $this->conversation();
+
+        $this->assertFalse(
+            (bool) $conversation->fresh()->contains_client_data,
+            'A new thread is not assumed private until something says it is.',
+        );
+    }
+
+    // ------------------------------------------------ unanticipated capability discovery
+
+    public function test_a_general_request_can_discover_a_data_tool_the_router_never_hinted(): void
+    {
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                // A general request: the router offers only the core set.
+                ->push($this->toolCallBody('discover_capabilities', ['query' => 'cartera'], 'c1'))
+                ->push($this->toolCallBody('receivables_summary', [], 'c2'))
+                ->push($this->textBody('La cartera está así.')),
+        ]);
+
+        $conversation = $this->conversation();
+        $result = app(AiAssistantService::class)->ask(
+            $conversation,
+            'Organiza un panorama general del estado del negocio',
+            $this->user,
+        );
+
+        $this->assertSame('La cartera está así.', $result['reply']);
+
+        $sent = Http::recorded();
+        $this->assertCount(3, $sent);
+
+        $firstTools = $this->toolNames($sent[0][0]);
+        $this->assertContains(AiCapabilityCatalog::DISCOVERY_TOOL, $firstTools);
+        $this->assertNotContains(
+            'receivables_summary',
+            $firstTools,
+            'The router did not anticipate this request, so the tool cannot already be offered.',
+        );
+        $this->assertContains('receivables_summary', $this->toolNames($sent[1][0]), 'Discovery put it on the wire.');
+        $this->assertContains('receivables_summary', array_column($result['tools'], 'tool'));
     }
 }

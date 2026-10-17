@@ -7,8 +7,10 @@ namespace App\Domain\Assistant;
 use App\Domain\Assistant\Tasks\GenerateDocumentTask;
 use App\Jobs\AiTaskHandlerResolver;
 use App\Jobs\RunAiTask;
+use App\Models\AiConversation;
 use App\Models\AiTask;
 use App\Models\User;
+use App\Services\Ai\AiPrivacyGate;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -54,6 +56,7 @@ final class AiTaskService
 
     public function __construct(
         private readonly AiTaskHandlerResolver $handlers,
+        private readonly AiPrivacyGate $privacy,
     ) {}
 
     /**
@@ -189,6 +192,11 @@ final class AiTaskService
 
         return $this->createTask($user, AiTask::KIND_RESEARCH, [
             'question' => $question,
+            // The classification is decided when the work is created and travels
+            // with it, so the worker does not have to guess whether a thread that
+            // queued this research had already handled private data.
+            'contains_client_data' => $this->isPrivateConversation($conversationId)
+                || $this->privacy->looksPrivate($question),
         ], $conversationId, $dedupeKey);
     }
 
@@ -246,7 +254,27 @@ final class AiTaskService
             'filename' => $filename,
             'content' => $content,
             'brief' => $brief,
+            // A generated document is a private deliverable by default: an
+            // unclassified document is not a public one.
+            'contains_client_data' => true,
         ], $conversationId, $dedupeKey);
+    }
+
+    /**
+     * Whether a conversation already holds private data.
+     *
+     * Read at creation time and stored on the task, so the sensitivity travels
+     * with the work instead of being re-guessed (possibly wrongly) later.
+     */
+    private function isPrivateConversation(?int $conversationId): bool
+    {
+        if ($conversationId === null) {
+            return false;
+        }
+
+        return (bool) AiConversation::query()
+            ->whereKey($conversationId)
+            ->value('contains_client_data');
     }
 
     /**

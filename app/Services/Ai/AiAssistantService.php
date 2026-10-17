@@ -85,6 +85,8 @@ final class AiAssistantService
         private readonly DocumentRetriever $documents,
         private readonly AiTaskRouter $router,
         private readonly AiCapabilityCatalog $capabilities,
+        private readonly AiPrivacyGate $privacy,
+        private readonly AiToolDeadline $deadline,
     ) {}
 
     public function ask(AiConversation $conversation, string $question, User $user): array
@@ -99,6 +101,38 @@ final class AiAssistantService
             AiMessage::user($question),
         ];
 
+        // One budget for the whole turn, created *before* anything spends time.
+        // The A07-R4 defect was that document retrieval ran before the budget
+        // existed and was therefore outside it; now retrieval, the external
+        // prefetch and every provider round share one wall clock. A turn always
+        // offers at least the discovery tool, so the tool-aware budget applies.
+        $budget = AiTurnBudget::forTurn(
+            true,
+            microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110)),
+        );
+
+        // Outbound tools read this to cap their own HTTP timeouts by what is left
+        // of the turn, so a fetch cannot outlive the budget that asked for it.
+        $this->deadline->set($budget->deadline);
+
+        try {
+            return $this->runTurn($conversation, $question, $user, $messages, $recentQuestions, $budget);
+        } finally {
+            // Cleared so a later caller in the same worker does not inherit a
+            // stale deadline and accidentally cap its own timeouts.
+            $this->deadline->set(null);
+        }
+    }
+
+    /**
+     * The body of a turn, inside the budget and the tool deadline.
+     *
+     * @param  list<AiMessage>  $messages
+     * @param  list<string>  $recentQuestions
+     * @return array<string, mixed>
+     */
+    private function runTurn(AiConversation $conversation, string $question, User $user, array $messages, array $recentQuestions, AiTurnBudget $budget): array
+    {
         // What the person has attached to *this* conversation, retrieved before
         // the model is asked. This is the step that makes "upload a spreadsheet,
         // then ask about it" work: without it the model has no idea the file
@@ -119,15 +153,6 @@ final class AiAssistantService
         // longer decides the whole toolset up front.
         $routing = $this->router->route($question, $passages !== [], $recentQuestions);
         $toolDefinitions = $this->initialToolSet($routing);
-
-        // One budget for the whole turn, created *before* anything spends time,
-        // so the external prefetch below and every provider round share the same
-        // wall clock. The A07-R3 defect was that the search ran before the budget
-        // existed, and therefore outside it.
-        $budget = AiTurnBudget::forTurn(
-            $toolDefinitions !== [],
-            microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110)),
-        );
 
         // Real external information is fetched here, not left to the model to
         // decide to fetch. A question that needs today's weather, this week's
@@ -158,8 +183,8 @@ final class AiAssistantService
         // that it once held private data.
         $requiresClientData = $this->classifiesAsClientData($conversation, $routing, $messages, $passages);
 
-        if ($requiresClientData && ! $conversation->contains_client_data) {
-            $conversation->forceFill(['contains_client_data' => true])->save();
+        if ($requiresClientData) {
+            $this->markConversationPrivate($conversation);
         }
 
         $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget);
@@ -217,17 +242,7 @@ final class AiAssistantService
      */
     private function classifiesAsClientData(AiConversation $conversation, array $routing, array $messages, array $passages): bool
     {
-        if ($conversation->contains_client_data) {
-            return true;
-        }
-
-        if ($passages !== []) {
-            return true;
-        }
-
-        if (! in_array($routing['task'], [AiTaskRouter::TASK_GENERAL, AiTaskRouter::TASK_WEB], true)) {
-            return true;
-        }
+        $texts = [];
 
         foreach ($messages as $message) {
             // The system prompt is ours and fixed; only what the person wrote,
@@ -236,33 +251,41 @@ final class AiAssistantService
                 continue;
             }
 
-            if (self::textLooksLikeClientData($message->content)) {
-                return true;
-            }
+            $texts[] = $message->content;
         }
 
-        return false;
+        return $this->privacy->payloadRequiresClientData(
+            conversationFlagged: (bool) $conversation->contains_client_data,
+            hasPrivateDocuments: $passages !== [],
+            nonPublicTask: ! in_array($routing['task'], [AiTaskRouter::TASK_GENERAL, AiTaskRouter::TASK_WEB], true),
+            texts: $texts,
+        );
     }
 
     /**
-     * Patterns that mark text as carrying private identifiers.
+     * Persist the private mark on a conversation, once.
      *
-     * Deliberately blunt — an email address, or a run of six or more digits, the
-     * shape of a document number, a NIT or a phone — because the only cost of a
-     * false positive is that a public answer uses a provider eligible for private
-     * data.
+     * Called the instant a private record enters the turn, not when the turn
+     * ends, so the thread is protected even if the round that follows has no
+     * authorised provider and the turn fails.
      */
-    private static function textLooksLikeClientData(string $text): bool
+    private function markConversationPrivate(AiConversation $conversation): void
     {
-        if ($text === '') {
-            return false;
+        if (! $conversation->contains_client_data) {
+            $conversation->forceFill(['contains_client_data' => true])->save();
+        }
+    }
+
+    /**
+     * A tool's output as scannable text, whatever shape it came back in.
+     */
+    private function scrutableText(mixed $output): string
+    {
+        if (is_string($output)) {
+            return $output;
         }
 
-        if (preg_match('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/', $text) === 1) {
-            return true;
-        }
-
-        return preg_match('/\d{6,}/', $text) === 1;
+        return json_encode($output, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '';
     }
 
     /**
@@ -370,6 +393,7 @@ final class AiAssistantService
             if ($block['kind'] === 'weather') {
                 $lines[] = $this->weatherContext($block['data']);
                 $lines[] = '';
+
                 continue;
             }
 
@@ -625,8 +649,8 @@ final class AiAssistantService
      *                                    second round cannot reach a provider the first
      *                                    one was not allowed to use
      * @param  list<array{kind: string, source: string, data: array<string, mixed>}>  $prefetched
-     *                                    results the server fetched for the turn, so the
-     *                                    answer and the sources it used are reported together
+     *                                                                                             results the server fetched for the turn, so the
+     *                                                                                             answer and the sources it used are reported together
      */
     private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = []): array
     {
@@ -653,7 +677,22 @@ final class AiAssistantService
         // began as a public one — a discovered client search is still private.
         $sawPrivateTool = false;
 
+        // The classification is *mutable* across the turn. A turn can begin as a
+        // public question, discover a client tool, receive a private record and
+        // need one more round to say something about it: at that point the second
+        // round is carrying the record, so it may not reuse the first round's
+        // "public" answer. It is raised the moment the record is in the payload
+        // and lowered never.
+        $turnRequiresClientData = $requiresClientData;
+
         while ($round < $maxRounds) {
+            // No further request of any kind once the turn has no time left. A
+            // tool call is an outbound request too, so it is refused here rather
+            // than started and abandoned halfway through the turn's budget.
+            if ($budget->outOfTime()) {
+                break;
+            }
+
             $content = $currentResult->content;
             $toolCalls = $currentResult->toolCalls;
             $round++;
@@ -712,6 +751,8 @@ final class AiAssistantService
                         // Every write is a business mutation, so the conversation
                         // is from here on private regardless of how it started.
                         $sawPrivateTool = true;
+                        $turnRequiresClientData = true;
+                        $this->markConversationPrivate($conversation);
 
                         try {
                             // The registry is the single authority: it normalizes the
@@ -770,8 +811,19 @@ final class AiAssistantService
                     try {
                         $output = $this->registry->executeRead($toolName, $args, $user);
 
-                        if ($this->capabilities->isPrivateTool($toolName)) {
+                        // The record is now in hand, and the decision about
+                        // whether it may travel is made *here*, before it is
+                        // appended to the payload rather than at the end of the
+                        // loop. A tool that answers from our records raises the
+                        // turn immediately; so does one the catalogue has not
+                        // classified (fail closed) and so does a result that
+                        // merely contains an identifier. The conversation is
+                        // persisted at the same moment, so a turn that dies here
+                        // still leaves the thread marked.
+                        if ($this->capabilities->isPrivateTool($toolName) || $this->privacy->looksPrivate($this->scrutableText($output))) {
                             $sawPrivateTool = true;
+                            $turnRequiresClientData = true;
+                            $this->markConversationPrivate($conversation);
                         }
 
                         $toolResultsThisRound[] = [
@@ -827,7 +879,7 @@ final class AiAssistantService
                 // fabricated assistant message in the conversation that a later
                 // turn would be sent as legitimate history, so it propagates and
                 // nothing is persisted for this turn.
-                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $requiresClientData, $budget);
+                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget);
             } else {
                 // No tool calls, we're done
                 $reply = $content;
@@ -837,8 +889,8 @@ final class AiAssistantService
 
         // A private tool ran during this turn. The conversation must be treated as
         // holding private data from now on, whatever the first classification said.
-        if ($sawPrivateTool && ! $conversation->contains_client_data) {
-            $conversation->forceFill(['contains_client_data' => true])->save();
+        if ($sawPrivateTool) {
+            $this->markConversationPrivate($conversation);
         }
 
         // Reaching here means the model kept asking for tools through every round
@@ -991,8 +1043,6 @@ final class AiAssistantService
      * balanced object at the very end of the reply is removed, and only when it
      * actually decodes to that shape, so ordinary prose that ends in a brace or
      * a legitimately generated JSON document the person asked for is untouched.
-     *
-     * @param  string  $reply
      */
     public static function stripToolCallLeak(string $reply): string
     {

@@ -9,7 +9,7 @@ use App\Domain\Receivables\ReceivablesService;
 use App\Models\Client;
 use App\Models\Company;
 use App\Models\User;
-use Carbon\Carbon;
+use Illuminate\Support\Carbon;
 
 /**
  * The portfolio's headline counts, for questions that want numbers and nothing
@@ -94,6 +94,14 @@ final class SystemStatsTool extends AbstractAiTool
         $asOf = isset($arguments['as_of']) ? Carbon::parse((string) $arguments['as_of']) : null;
         $counts = $this->metrics->counts();
 
+        // A historical question changes what can be answered. The money figures
+        // *can* be reconstructed to a date; the register counts cannot, because a
+        // client's status is a current column with no history table behind it.
+        // The two are therefore not labelled with the same date: the register is
+        // marked current and listed as not reconstructable, so a reader never
+        // takes today's count for the count on the cut-off date.
+        $historical = $asOf !== null;
+
         $payload = [
             'as_of' => ($asOf ?? now())->toDateString(),
             'clients' => [
@@ -110,30 +118,53 @@ final class SystemStatsTool extends AbstractAiTool
             ],
         ];
 
+        if ($historical) {
+            $payload['scope'] = ['register' => 'current'];
+            $payload['clients']['basis'] = 'current';
+            $payload['clients']['note'] = 'El estado activo/inactivo es el estado actual del registro: no existe historial de estados que permita reconstruirlo a la fecha de corte.';
+            $payload['not_reconstructable'] = [
+                'clients.total', 'clients.active', 'clients.inactive',
+                'companies.total', 'companies.active',
+            ];
+            $payload['definitions']['basis'] = 'Cada bloque trae «basis»: «historical» significa reconstruido a la fecha de corte; «current» significa que es el estado de hoy y no debe presentarse como si fuera de esa fecha.';
+        }
+
         if ($user->can('companies.view')) {
             $payload['companies'] = [
                 'active' => $counts['active_companies'],
                 'total' => Company::query()->count(),
             ];
+
+            if ($historical) {
+                $payload['companies']['basis'] = 'current';
+            }
         }
 
         // The money figures are only present for a role that may read cartera.
         if ($user->can('receivables.view')) {
             $balances = $this->receivables->clientBalanceCounts($asOf);
-            $historical = (bool) ($balances['historical'] ?? false);
+            $financialHistorical = (bool) ($balances['historical'] ?? false);
 
             $payload['receivables'] = [
                 'clients_with_debt' => $balances['clients_with_debt'],
                 'clients_with_partial_payments' => $balances['clients_with_partial_payments'],
                 'open_obligations' => $balances['open_obligations'],
                 'partially_paid_obligations' => $balances['partially_paid_obligations'],
-                'historical' => $historical,
+                'historical' => $financialHistorical,
                 // The model must not present a past figure and today's figure,
                 // which may differ, as if they were the same statement.
-                'basis' => $historical
+                'basis' => $financialHistorical
                     ? 'Reconstrucción a la fecha de corte: obligaciones generadas, ajustes y pagos aplicados hasta esa fecha.'
                     : 'Estado actual de la cartera a hoy.',
             ];
+
+            if ($historical) {
+                // Machine-readable, so a caller does not have to read prose to
+                // learn that the financial block is reconstructed while the
+                // register counts above are not.
+                $payload['receivables']['basis_kind'] = $financialHistorical ? 'historical' : 'current';
+                $payload['scope']['financial'] = $financialHistorical ? 'historical' : 'current';
+            }
         }
 
         return $payload;

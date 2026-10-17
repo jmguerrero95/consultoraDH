@@ -6,6 +6,7 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use App\Services\Ai\AiToolDeadline;
 use App\Services\Ai\Net\BoundedStream;
 use App\Services\Ai\Net\DownloadTooLarge;
 use App\Services\Ai\Net\PinnedTransport;
@@ -46,7 +47,10 @@ final class WebFetchTool extends AbstractAiTool
         'text/xml',
     ];
 
-    public function __construct(private readonly PinnedTransport $transport) {}
+    public function __construct(
+        private readonly PinnedTransport $transport,
+        private readonly ?AiToolDeadline $deadline = null,
+    ) {}
 
     public function name(): string
     {
@@ -93,6 +97,13 @@ final class WebFetchTool extends AbstractAiTool
             throw new AiToolRejected('URLs con credenciales no son permitidas.');
         }
 
+        // A URL is a query too: an email address carried in a path or a query
+        // string would send a personal identifier to whatever host it names. The
+        // SSRF checks below protect the *destination*; this protects the content.
+        if (preg_match('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/', $url) === 1) {
+            throw new AiToolRejected('La URL contiene un dato personal (correo) y no puede solicitarse.');
+        }
+
         $maxChars = $arguments['max_chars'] ?? 3000;
 
         if (! is_int($maxChars) || $maxChars < 1 || $maxChars > 10000) {
@@ -124,10 +135,13 @@ final class WebFetchTool extends AbstractAiTool
 
         // Redirects are never followed automatically: every hop has to be
         // resolved and re-validated before it is requested.
+        $timeout = ($this->deadline ?? app(AiToolDeadline::class))
+            ->cap((int) config('ai.web_fetch.timeout_seconds', 15));
+
         $client = Http::withHeaders([
             'User-Agent' => 'Consultora-DH-Assistant/1.0',
             'Accept' => 'text/html,application/xhtml+xml,application/xml',
-        ])->timeout(15)->withOptions([
+        ])->timeout($timeout)->withOptions([
             'allow_redirects' => false,
             // A proxy would resolve the hostname itself, which makes the pinned
             // address below advisory rather than authoritative: the request would

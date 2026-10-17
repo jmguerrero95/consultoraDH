@@ -372,6 +372,19 @@ return [
     ],
 
     /*
+     * Web fetch configuration.
+     *
+     * The outbound timeout for reading a page the model asked for. It is a
+     * separate key so the turn's remaining time can cap it independently of the
+     * search timeout; see `AiToolDeadline`.
+     *
+     * AI_WEB_FETCH_TIMEOUT_SECONDS
+     */
+    'web_fetch' => [
+        'timeout_seconds' => (int) env('AI_WEB_FETCH_TIMEOUT_SECONDS', 15),
+    ],
+
+    /*
      * Weather configuration (Open-Meteo, free and key-less).
      *
      * The harmless specialisation of "what is true today": two fixed public

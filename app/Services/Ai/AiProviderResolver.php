@@ -111,13 +111,25 @@ class AiProviderResolver
         }
 
         if ($candidates === []) {
-            throw $this->pool->all() === []
-                ? AiProviderException::notConfigured()
-                : AiProviderException::unavailable(
-                    $tools !== []
-                        ? 'No hay ningún modelo configurado que admita herramientas en este momento.'
-                        : 'No hay ningún modelo de IA configurado y disponible.'
+            if ($this->pool->all() === []) {
+                throw AiProviderException::notConfigured();
+            }
+
+            // The specific case the privacy boundary creates: the payload needs a
+            // provider authorised for private data and there is none right now.
+            // Saying so is the honest failure — the record stays on the server.
+            if ($requiresClientData) {
+                throw AiProviderException::unavailable(
+                    'No hay ningún proveedor autorizado para datos privados en este momento; '
+                    .'la información no salió del servidor. Vuelve a intentarlo en unos minutos.'
                 );
+            }
+
+            throw AiProviderException::unavailable(
+                $tools !== []
+                    ? 'No hay ningún modelo configurado que admita herramientas en este momento.'
+                    : 'No hay ningún modelo de IA configurado y disponible.'
+            );
         }
 
         // One budget for the whole turn. When the caller did not supply one this

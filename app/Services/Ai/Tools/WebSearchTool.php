@@ -6,6 +6,8 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use App\Services\Ai\AiPrivacyGate;
+use App\Services\Ai\AiToolDeadline;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
 
@@ -23,6 +25,17 @@ use Illuminate\Support\Facades\Http;
  */
 final class WebSearchTool extends AbstractAiTool
 {
+    /**
+     * @param  AiPrivacyGate|null  $privacy  redacts private identifiers before a
+     *                                       query leaves for a public engine
+     * @param  AiToolDeadline|null  $deadline  the turn's clock, so a search never
+     *                                         outlives the budget that asked for it
+     */
+    public function __construct(
+        private readonly ?AiPrivacyGate $privacy = null,
+        private readonly ?AiToolDeadline $deadline = null,
+    ) {}
+
     public function name(): string
     {
         return 'web_search';
@@ -90,12 +103,27 @@ final class WebSearchTool extends AbstractAiTool
         $query = $arguments['query'];
         $maxResults = $arguments['max_results'];
 
+        // The outbound-query boundary. A search goes to a third party (the
+        // engines behind the SearXNG instance), so an identifier that reached the
+        // query must not leave with it. A public query asked inside a private
+        // conversation is still a public query and is not blocked; a query that
+        // is *only* an identifier is refused rather than emptied. The sanitised
+        // query is what is sent and what is reported — never the original.
+        $guarded = ($this->privacy ?? app(AiPrivacyGate::class))->sanitizeQuery($query);
+
+        if ($guarded['blocked']) {
+            throw new AiToolRejected($guarded['reason'] ?? 'La consulta no puede enviarse a un buscador público.');
+        }
+
+        $query = $guarded['query'];
+
         $baseUrl = config('ai.web_search.base_url');
         if (empty($baseUrl)) {
             throw new AiToolRejected('No hay proveedor de búsqueda web configurado. Establezca AI_WEB_SEARCH_BASE_URL.');
         }
 
-        $timeout = config('ai.web_search.timeout_seconds', 10);
+        $timeout = ($this->deadline ?? app(AiToolDeadline::class))
+            ->cap((int) config('ai.web_search.timeout_seconds', 10));
 
         $url = rtrim($baseUrl, '/').'/search';
         $params = [

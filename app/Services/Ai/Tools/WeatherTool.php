@@ -6,6 +6,7 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
+use App\Services\Ai\AiToolDeadline;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -36,6 +37,12 @@ use Illuminate\Support\Facades\Http;
  */
 final class WeatherTool extends AbstractAiTool
 {
+    /**
+     * @param  AiToolDeadline|null  $deadline  the turn's clock, so a forecast call
+     *                                         never outlives the budget that asked for it
+     */
+    public function __construct(private readonly ?AiToolDeadline $deadline = null) {}
+
     /**
      * WMO weather codes, in the words a person uses.
      *
@@ -241,7 +248,8 @@ final class WeatherTool extends AbstractAiTool
     private function searchPlaces(string $name): array
     {
         $url = (string) config('ai.weather.geocoding_url');
-        $timeout = (int) config('ai.weather.timeout_seconds', 10);
+        $timeout = ($this->deadline ?? app(AiToolDeadline::class))
+            ->cap((int) config('ai.weather.timeout_seconds', 10));
 
         try {
             $response = Http::timeout($timeout)
@@ -320,7 +328,8 @@ final class WeatherTool extends AbstractAiTool
     private function forecast(array $place, int $days): array
     {
         $url = (string) config('ai.weather.forecast_url');
-        $timeout = (int) config('ai.weather.timeout_seconds', 10);
+        $timeout = ($this->deadline ?? app(AiToolDeadline::class))
+            ->cap((int) config('ai.weather.timeout_seconds', 10));
 
         $timezone = $place['timezone'] !== '' ? $place['timezone'] : 'America/Bogota';
 

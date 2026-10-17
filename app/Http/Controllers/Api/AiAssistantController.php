@@ -13,8 +13,10 @@ use App\Models\User;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProposalNotConfirmable;
 use App\Services\Ai\AiProposalService;
+use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiToolRegistry;
+use App\Services\Ai\AiTurnFailed;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -53,6 +55,28 @@ final class AiAssistantController extends Controller
     private function fail(string $message, int $status): JsonResponse
     {
         return response()->json(['error' => $message, 'message' => $message], $status);
+    }
+
+    /**
+     * A turn that could not be answered right now, but could later.
+     *
+     * The important case is the privacy boundary: a turn that discovered a
+     * private record and found no provider authorised to receive it must fail
+     * *without* the record leaving the server, and the person must be told that
+     * plainly rather than shown a 500. `recoverable` is what lets the interface
+     * offer a retry instead of treating it as a permanent error.
+     */
+    private function unavailable(\Throwable $e): JsonResponse
+    {
+        $message = $e instanceof AiTurnFailed
+            ? 'El asistente no pudo completar la respuesta esta vez. Vuelve a intentarlo en un momento.'
+            : $e->getMessage();
+
+        return response()->json([
+            'error' => $message,
+            'message' => $message,
+            'recoverable' => true,
+        ], 503);
     }
 
     /**
@@ -165,7 +189,11 @@ final class AiAssistantController extends Controller
             ]);
         }
 
-        $result = $this->assistant->ask($conversation, $data['question'], $request->user());
+        try {
+            $result = $this->assistant->ask($conversation, $data['question'], $request->user());
+        } catch (AiProviderException|AiTurnFailed $e) {
+            return $this->unavailable($e);
+        }
 
         return response()->json([
             'conversation_id' => $conversation->id,
@@ -269,7 +297,11 @@ final class AiAssistantController extends Controller
         }
 
         // Service handles all persistence: user message + assistant reply
-        $result = $this->assistant->ask($conversation, $data['message'], $request->user());
+        try {
+            $result = $this->assistant->ask($conversation, $data['message'], $request->user());
+        } catch (AiProviderException|AiTurnFailed $e) {
+            return $this->unavailable($e);
+        }
 
         return response()->json([
             'conversation_id' => $conversation->id,

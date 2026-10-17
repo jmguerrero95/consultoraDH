@@ -6,11 +6,15 @@ namespace App\Domain\Assistant\Tasks;
 
 use App\Domain\Ai\AiMessage;
 use App\Domain\Documents\DocumentRetriever;
+use App\Models\AiConversation;
 use App\Models\AiTask;
 use App\Models\User;
+use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiProviderResolver;
+use App\Services\Ai\AiToolDeadline;
 use App\Services\Ai\AiToolRegistry;
+use App\Services\Ai\AiTurnBudget;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -57,6 +61,8 @@ final class ResearchTask implements AiTaskHandler
         private readonly AiToolRegistry $tools,
         private readonly AiProviderResolver $providers,
         private readonly DocumentRetriever $documents,
+        private readonly AiPrivacyGate $privacy,
+        private readonly AiToolDeadline $deadline,
     ) {}
 
     public function kind(): string
@@ -74,36 +80,48 @@ final class ResearchTask implements AiTaskHandler
             throw new \RuntimeException('La investigación no tiene una pregunta.');
         }
 
-        $task->forceFill(['stage' => 'Buscando fuentes', 'progress' => 20])->save();
+        // The task's own budget, deliberately separate from a chat turn's: a
+        // background research run may reasonably take longer than a request the
+        // person is waiting on, and reusing the chat ceiling would fail long work
+        // that is behaving correctly. The deadline also caps every outbound tool
+        // call made while gathering sources.
+        $budget = AiTurnBudget::forTurn(false, microtime(true) + self::SYNTHESIS_TIMEOUT_SECONDS);
+        $this->deadline->set($budget->deadline);
 
-        $sources = $this->gather($user, $question, $task->ai_conversation_id);
+        try {
+            $task->forceFill(['stage' => 'Buscando fuentes', 'progress' => 20])->save();
 
-        $task->forceFill([
-            'stage' => $sources === [] ? 'Sin fuentes' : 'Sintetizando',
-            'progress' => 60,
-        ])->save();
+            $sources = $this->gather($user, $question, $task->ai_conversation_id);
 
-        // No sources is reported, not papered over. An answer nobody can check is
-        // worse than an honest "no encontré nada".
-        if ($sources === []) {
+            $task->forceFill([
+                'stage' => $sources === [] ? 'Sin fuentes' : 'Sintetizando',
+                'progress' => 60,
+            ])->save();
+
+            // No sources is reported, not papered over. An answer nobody can check is
+            // worse than an honest "no encontré nada".
+            if ($sources === []) {
+                return [
+                    'question' => $question,
+                    'summary' => null,
+                    'sources' => [],
+                    'outcome' => 'no_sources',
+                ];
+            }
+
+            $summary = $this->synthesize($user, $question, $sources, $task, $budget);
+
             return [
                 'question' => $question,
-                'summary' => null,
-                'sources' => [],
-                'outcome' => 'no_sources',
+                'summary' => $summary,
+                // The sources travel with the answer, always, and are never edited:
+                // the citations are what make the summary worth anything.
+                'sources' => $sources,
+                'outcome' => $summary === null ? 'sources_only' : 'answered',
             ];
+        } finally {
+            $this->deadline->set(null);
         }
-
-        $summary = $this->synthesize($user, $question, $sources);
-
-        return [
-            'question' => $question,
-            'summary' => $summary,
-            // The sources travel with the answer, always, and are never edited:
-            // the citations are what make the summary worth anything.
-            'sources' => $sources,
-            'outcome' => $summary === null ? 'sources_only' : 'answered',
-        ];
     }
 
     /**
@@ -258,7 +276,7 @@ final class ResearchTask implements AiTaskHandler
      *
      * @param  list<array{title: string, url: string, domain: string, snippet: string}>  $sources
      */
-    private function synthesize(User $user, string $question, array $sources): ?string
+    private function synthesize(User $user, string $question, array $sources, AiTask $task, AiTurnBudget $budget): ?string
     {
         // Numbered so the model cites "[1]" rather than restating a URL and
         // getting it subtly wrong.
@@ -271,6 +289,28 @@ final class ResearchTask implements AiTaskHandler
                 'url' => $source['url'],
                 'snippet' => $source['snippet'],
             ];
+        }
+
+        // A research synthesis may carry private data even when the question
+        // looks public: the sources can include fragments of an attached
+        // spreadsheet, and the question can name a client. The classification is
+        // decided from the provenance the task travelled with *and* what the
+        // payload actually contains, and it is persisted, so the thread stays
+        // protected afterwards.
+        $texts = [$question];
+
+        foreach ($sources as $source) {
+            $texts[] = $source['title'].' '.$source['snippet'];
+        }
+
+        $requiresClientData = $this->privacy->payloadRequiresClientData(
+            conversationFlagged: (bool) ($task->input['contains_client_data'] ?? false) || $this->conversationIsPrivate($task),
+            hasPrivateDocuments: $this->hasAttachmentSources($sources),
+            texts: $texts,
+        );
+
+        if ($requiresClientData) {
+            $this->markConversationPrivate($task);
         }
 
         $system = <<<'PROMPT'
@@ -287,12 +327,20 @@ final class ResearchTask implements AiTaskHandler
         PROMPT;
 
         try {
-            $response = $this->providers->complete([
-                AiMessage::system($system),
-                AiMessage::user(
-                    "PREGUNTA:\n".$question."\n\nFUENTES:\n".json_encode($catalogue, JSON_UNESCAPED_UNICODE),
-                ),
-            ]);
+            $response = $this->providers->complete(
+                [
+                    AiMessage::system($system),
+                    AiMessage::user(
+                        "PREGUNTA:\n".$question."\n\nFUENTES:\n".json_encode($catalogue, JSON_UNESCAPED_UNICODE),
+                    ),
+                ],
+                [],
+                null,
+                'research',
+                $budget->deadline,
+                $requiresClientData,
+                $budget,
+            );
         } catch (AiProviderException $e) {
             // Quota, upstream 429, or no slot configured at all. The sources are
             // already the deliverable, so they are returned with no summary
@@ -315,6 +363,51 @@ final class ResearchTask implements AiTaskHandler
         }
 
         return $this->citationsAreReal($text, $catalogue) ? $text : null;
+    }
+
+    /**
+     * Whether the task's conversation already holds private data.
+     */
+    private function conversationIsPrivate(AiTask $task): bool
+    {
+        if ($task->ai_conversation_id === null) {
+            return false;
+        }
+
+        return (bool) AiConversation::query()
+            ->whereKey($task->ai_conversation_id)
+            ->value('contains_client_data');
+    }
+
+    /**
+     * Persist the private mark on the task's conversation, once.
+     */
+    private function markConversationPrivate(AiTask $task): void
+    {
+        if ($task->ai_conversation_id === null) {
+            return;
+        }
+
+        AiConversation::query()
+            ->whereKey($task->ai_conversation_id)
+            ->where('contains_client_data', false)
+            ->update(['contains_client_data' => true]);
+    }
+
+    /**
+     * Whether any source is a fragment of an attached document.
+     *
+     * @param  list<array{domain: string}>  $sources
+     */
+    private function hasAttachmentSources(array $sources): bool
+    {
+        foreach ($sources as $source) {
+            if (($source['domain'] ?? '') === 'adjunto') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

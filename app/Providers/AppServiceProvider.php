@@ -8,6 +8,8 @@ use App\Domain\Audit\AuditableEvent;
 use App\Domain\Audit\Listeners\RecordAuditEvent;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\Listeners\EscalateSupportSla;
+use App\Services\Ai\AiPrivacyGate;
+use App\Services\Ai\AiToolDeadline;
 use App\Services\Ai\AiToolRegistry;
 use App\Services\Ai\Net\DnsResolver;
 use App\Services\Ai\Net\SystemDnsResolver;
@@ -41,6 +43,16 @@ final class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        // The turn's clock, shared by the assistant (which sets it) and every
+        // outbound tool (which caps its own timeout by what is left of it).
+        $this->app->singleton(AiToolDeadline::class);
+
+        // The single privacy boundary. It is stateless, but it must be an
+        // explicit binding: Laravel returns a parameter's default value for an
+        // unbound class, so a tool declaring `?AiPrivacyGate $privacy = null`
+        // would silently get null (and quietly lose query redaction).
+        $this->app->singleton(AiPrivacyGate::class);
+
         // AI Tools - bind as singletons so AiToolRegistry::make() can resolve them
         $this->app->singleton(ClientSearchTool::class);
         $this->app->singleton(ClientSummaryTool::class);

@@ -126,7 +126,18 @@ final class SuggestionReasoner
         }
 
         try {
-            $response = $this->resolver->complete($this->messages($request, $evidence));
+            // The evidence is a real client's balances, so this call always
+            // requires a provider authorised for private data. It used to rely on
+            // the default (`false`), which meant a suggestion about a named
+            // client could be sent to a provider whose free tier may train on it.
+            $response = $this->resolver->complete(
+                $this->messages($request, $evidence),
+                [],
+                null,
+                'suggestion',
+                null,
+                true,
+            );
         } catch (AiProviderException $e) {
             // A provider that is down is the ordinary case on a free tier, not an
             // error worth surfacing: the deterministic sentence is already good.
