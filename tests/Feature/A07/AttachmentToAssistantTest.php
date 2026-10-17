@@ -379,4 +379,34 @@ final class AttachmentToAssistantTest extends TestCase
 
         $this->assertSame(0, app(DocumentRetriever::class)->search($reader, 'VALOR-6644', $conversation->id)['attachments_considered']);
     }
+
+    public function test_opening_a_conversation_returns_the_files_that_were_attached_to_it(): void
+    {
+        $conversation = $this->conversationFor($this->owner);
+        $this->ingestWorkbook($this->owner, $conversation, 'VALOR-SHOW-9090');
+
+        $response = $this->actingAs($this->owner)->getJson("/api/ai/conversations/{$conversation->id}");
+
+        $response->assertOk();
+
+        // Attachments travel with the conversation so the widget and the full
+        // page can rebuild a thread from the server instead of from memory: a
+        // file uploaded before a reload must still be visible after it.
+        $attachments = $response->json('attachments');
+
+        $this->assertIsArray($attachments);
+        $this->assertCount(1, $attachments);
+        $this->assertSame('marcadores.xlsx', $attachments[0]['name']);
+        $this->assertSame(\App\Models\AiAttachment::STATUS_PROCESSED, $attachments[0]['status']);
+    }
+
+    public function test_attachments_of_another_persons_conversation_are_not_delivered_by_show(): void
+    {
+        $theirs = $this->conversationFor($this->stranger, 'Suya');
+        $this->ingestWorkbook($this->stranger, $theirs, 'AJENO-SHOW-1234');
+
+        $this->actingAs($this->owner)
+            ->getJson("/api/ai/conversations/{$theirs->id}")
+            ->assertForbidden();
+    }
 }

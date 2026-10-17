@@ -165,8 +165,22 @@ const statusLabel = computed(() => {
     }
 });
 
-async function loadStatus(): Promise<void> {
-    try {
+/**
+ * Where the "open full page" link goes.
+ *
+ * It carries the active conversation id so the full page selects the same
+ * thread instead of opening a new one: something started in the widget and
+ * continued in full screen must not split into two conversations.
+ */
+const fullPageTarget = computed(() => {
+    if (conversationId.value === null) {
+        return { name: 'asistente' as const };
+    }
+
+    return { name: 'asistente' as const, query: { conversation: String(conversationId.value) } };
+});
+
+async function loadStatus(): Promise<void> {    try {
         status.value = await ai.status();
         statusError.value = null;
     } catch (e) {
@@ -245,6 +259,19 @@ async function restoreConversation(): Promise<void> {
         // The files this thread produced travel with it, so a reload shows the
         // report where it was asked for rather than in a separate panel.
         artifacts.value = history.artifacts ?? [];
+
+        // And the files the person attached. Restored from the server, not from
+        // memory: a thread that was given a spreadsheet must still show it after
+        // a reload or when the same thread is opened from the full page.
+        attachments.value = (history.attachments ?? []).map((attachment) => ({
+            id: attachment.id,
+            name: attachment.name,
+            status: attachment.status === 'processed' || attachment.status === 'empty'
+                ? 'succeeded'
+                : (attachment.status === 'unreadable' ? 'failed' : 'queued'),
+            progress: attachment.status === 'processed' || attachment.status === 'empty' ? 100 : 0,
+            error: attachment.status_note,
+        }));
 
         scrollToEnd();
     } catch {
@@ -665,7 +692,7 @@ watch(open, (value) => {
                     </button>
                     <RouterLink
                         class="cdh-assistant__icon-btn"
-                        :to="{ name: 'asistente' }"
+                        :to="fullPageTarget"
                         title="Abrir en la página del asistente"
                         @click="close"
                     >

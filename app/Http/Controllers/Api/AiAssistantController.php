@@ -6,6 +6,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Models\AiActionProposal;
 use App\Models\AiArtifact;
+use App\Models\AiAttachment;
 use App\Models\AiConversation;
 use App\Models\AiMessage;
 use App\Models\User;
@@ -205,7 +206,28 @@ final class AiAssistantController extends Controller
             // not of a separate panel: after a reload the person sees the PDF
             // they asked for where they asked for it.
             'artifacts' => $this->artifactsFor($conversation),
+            // The files the person attached. The A07-R3 widget restored messages
+            // and artifacts but not these, so a thread that had been given a
+            // spreadsheet came back looking empty. The server is the source of
+            // truth, so they are rebuilt from here rather than from memory.
+            'attachments' => $this->attachmentsFor($conversation),
         ]);
+    }
+
+    /**
+     * The attachments belonging to a conversation, oldest first.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function attachmentsFor(AiConversation $conversation): array
+    {
+        return AiAttachment::query()
+            ->where('ai_conversation_id', $conversation->id)
+            ->where('user_id', $conversation->user_id)
+            ->orderBy('id')
+            ->get()
+            ->map(fn (AiAttachment $attachment): array => $attachment->toPublicArray())
+            ->all();
     }
 
     /**

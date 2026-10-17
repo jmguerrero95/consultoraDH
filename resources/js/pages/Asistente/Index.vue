@@ -18,7 +18,7 @@ import { useVoice } from '@/composables/useVoice';
 import { useRoute } from 'vue-router';
 import { ai } from '@/services/ai';
 
-import type { AiArtifact, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
+import type { AiArtifact, AiAttachmentSummary, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
 import type { AiTaskPayload } from '@/composables/useTasks';
 
 /**
@@ -40,6 +40,10 @@ const messages = ref<AiMessagePayload[]>([]);
 const proposals = ref<AiProposal[]>([]);
 /** Files this conversation has produced, shown in the thread that asked for them. */
 const artifacts = ref<AiArtifact[]>([]);
+/** Files the person attached to this thread, rebuilt from the server on reload. */
+const attachments = ref<AiAttachmentSummary[]>([]);
+/** Whether the conversation drawer is open. Meaningful on mobile only. */
+const drawerOpen = ref(false);
 const sources = ref<{ title: string; url: string; domain: string }[]>([]);
 const draft = ref('');
 const sending = ref(false);
@@ -209,6 +213,35 @@ function focusComposer(): void {
 // screen down with it.
 watch(() => route?.query?.suggested, applySuggestedAction, { immediate: true });
 
+/**
+ * The conversation an incoming link asked to open, or null.
+ *
+ * The widget's "open full page" link carries the active thread id, so arriving
+ * here selects that same thread instead of starting an unrelated one.
+ */
+function conversationFromQuery(): number | null {
+    const raw = route?.query?.conversation;
+    const value = Array.isArray(raw) ? raw[0] : raw;
+
+    if (typeof value !== 'string' || value.trim() === '') {
+        return null;
+    }
+
+    const id = Number(value);
+
+    return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+// A link that swaps to another conversation while this screen is already open
+// must land too, not only the first arrival.
+watch(() => route?.query?.conversation, () => {
+    const id = conversationFromQuery();
+
+    if (id !== null && id !== selectedId.value) {
+        void selectConversation(id);
+    }
+});
+
 // Voice is optional everywhere: neither control appears where the browser
 // cannot provide it, and the composer works exactly the same without them.
 const { dictation, playback } = useVoice();
@@ -253,6 +286,14 @@ const availability = computed(() => {
 
 onMounted(async () => {
     await Promise.all([loadStatus(), loadConversations()]);
+
+    // A link from the widget names the conversation to open.
+    const fromQuery = conversationFromQuery();
+
+    if (fromQuery !== null && fromQuery !== selectedId.value) {
+        await selectConversation(fromQuery);
+    }
+
     loading.value = false;
 
     // After the page has settled, and independently of it: a suggestion that
@@ -323,8 +364,10 @@ async function selectConversation(id: number): Promise<void> {
     proposals.value = [];
     sources.value = [];
     artifacts.value = [];
+    attachments.value = [];
     error.value = null;
     confirmation.value = null;
+    drawerOpen.value = false;
 
     // Dictation belongs to the turn being abandoned, not to the page. Recording
     // continues in the background otherwise, and the next thing captured is
@@ -335,9 +378,11 @@ async function selectConversation(id: number): Promise<void> {
         const payload = await ai.history(id);
         messages.value = payload.messages;
         artifacts.value = payload.artifacts ?? [];
+        attachments.value = payload.attachments ?? [];
     } catch (e) {
         messages.value = [];
         artifacts.value = [];
+        attachments.value = [];
         error.value = readError(e, 'No fue posible cargar la conversación.');
     }
 }
@@ -348,8 +393,10 @@ function startNewConversation(): void {
     proposals.value = [];
     sources.value = [];
     artifacts.value = [];
+    attachments.value = [];
     error.value = null;
     confirmation.value = null;
+    drawerOpen.value = false;
 
     dictation.abandon();
 }
@@ -465,6 +512,7 @@ async function refreshIfSelected(): Promise<void> {
         const payload = await ai.history(selectedId.value);
         messages.value = payload.messages;
         artifacts.value = payload.artifacts ?? [];
+        attachments.value = payload.attachments ?? [];
     }
 }
 
@@ -547,6 +595,19 @@ function formatDate(value: string | null): string {
                 <h1 class="cdh-ai__title">Asistente de IA</h1>
                 <p class="cdh-ai__status" :class="{ 'cdh-ai__status--off': !enabled }">{{ availability }}</p>
             </div>
+
+            <!-- Mobile-first: the conversation list is a drawer that opens on
+                 demand, so the chat is the first thing on a phone screen. -->
+            <button
+                type="button"
+                class="cdh-ai__drawer-toggle"
+                :aria-expanded="drawerOpen"
+                aria-controls="cdh-ai-conversations"
+                @click="drawerOpen = !drawerOpen"
+            >
+                <i class="bi bi-chat-square-text" aria-hidden="true" />
+                Conversaciones
+            </button>
         </header>
 
         <AppAlert v-if="error" variant="danger" :title="error" class="mb-3" />
@@ -614,15 +675,10 @@ function formatDate(value: string | null): string {
         </form>
 
         <!--
-            Above the transcript and below the error, so it is the first thing
-            read after the page opens and never covers work already on screen.
+            Background work travels inside the conversation column, below the
+            transcript, so on a phone the chat is not pushed off the screen by a
+            task panel. It is the same `tasks` controller either way.
         -->
-        <!--
-            Background work, and what became of it. Shown here because this is the
-            screen people come back to after closing the app mid-task.
-        -->
-        <TaskPanel class="mb-3" :controller="tasks" />
-
         <SuggestionHint
             v-if="hint.hasSuggestion.value && hint.suggestion.value"
             class="mb-3"
@@ -633,7 +689,7 @@ function formatDate(value: string | null): string {
         />
 
         <div class="cdh-ai__body">
-            <aside class="cdh-ai__sidebar" aria-label="Conversaciones">
+            <aside id="cdh-ai-conversations" class="cdh-ai__sidebar" :class="{ 'cdh-ai__sidebar--open': drawerOpen }" aria-label="Conversaciones">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <h2 class="cdh-ai__sidebar-title">Conversaciones</h2>
                     <AppButton variant="link" size="sm" @click="startNewConversation">Nueva</AppButton>
@@ -706,6 +762,25 @@ function formatDate(value: string | null): string {
                     <h3 class="cdh-ai__artifacts-title">Archivos</h3>
                     <ArtifactCard v-for="artifact in artifacts" :key="artifact.id" :artifact="artifact" />
                 </div>
+
+                <!-- Files the person attached. Restored from the server rather
+                     than from memory, so a thread that was given a spreadsheet
+                     still shows it after a reload or on another device. -->
+                <div v-if="attachments.length > 0" class="cdh-ai__attachments" data-testid="attachments">
+                    <h3 class="cdh-ai__artifacts-title">Adjuntos</h3>
+                    <ul>
+                        <li v-for="attachment in attachments" :key="attachment.id" class="cdh-ai__attachment">
+                            <i class="bi bi-paperclip" aria-hidden="true" />
+                            <span class="cdh-ai__attachment-name">{{ attachment.name }}</span>
+                            <span v-if="attachment.status === 'unreadable'" class="cdh-ai__attachment-note">No se pudo procesar</span>
+                            <span v-else-if="attachment.status !== 'processed'" class="cdh-ai__attachment-note">Procesando…</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Background work, kept below the conversation rather than
+                     above it, so on a phone the first thing seen is the chat. -->
+                <TaskPanel class="cdh-ai__tasks" :controller="tasks" />
 
                 <div v-if="sources.length > 0" class="cdh-ai__sources">
                     <h3 class="cdh-ai__sources-title">Fuentes</h3>
@@ -781,8 +856,30 @@ function formatDate(value: string | null): string {
 </template>
 
 <style scoped>
+.cdh-ai {
+    overflow-x: hidden;
+}
+
 .cdh-ai__header {
     margin-bottom: var(--cdh-space-4);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--cdh-space-3);
+    flex-wrap: wrap;
+}
+
+.cdh-ai__drawer-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.7rem;
+    border: 1px solid var(--cdh-border);
+    border-radius: var(--cdh-radius-md, 0.375rem);
+    background: var(--cdh-surface);
+    color: inherit;
+    font: inherit;
+    font-size: 0.8125rem;
 }
 
 .cdh-ai__title {
@@ -858,6 +955,15 @@ function formatDate(value: string | null): string {
     color: var(--cdh-text-muted);
 }
 
+/* Mobile-first: the conversation list is hidden until the drawer is opened. */
+.cdh-ai__sidebar {
+    display: none;
+}
+
+.cdh-ai__sidebar--open {
+    display: block;
+}
+
 .cdh-ai__main {
     display: flex;
     flex-direction: column;
@@ -918,10 +1024,44 @@ function formatDate(value: string | null): string {
 
 .cdh-ai__sources,
 .cdh-ai__artifacts,
+.cdh-ai__attachments,
 .cdh-ai__proposals {
     border: 1px solid var(--cdh-border);
     border-radius: var(--cdh-radius-lg, 0.5rem);
     padding: var(--cdh-space-3);
+}
+
+.cdh-ai__attachments ul {
+    list-style: none;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.cdh-ai__attachment {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+    font-size: 0.875rem;
+}
+
+.cdh-ai__attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cdh-ai__attachment-note {
+    flex: 0 0 auto;
+    color: var(--cdh-text-muted);
+    font-size: 0.75rem;
+}
+
+.cdh-ai__tasks {
+    margin-top: var(--cdh-space-2);
 }
 
 .cdh-ai__artifacts {
@@ -1011,6 +1151,13 @@ function formatDate(value: string | null): string {
     gap: var(--cdh-space-2);
     align-items: flex-start;
     flex-wrap: wrap;
+    /* Always within reach on a phone: the composer sticks to the bottom of the
+       viewport once it would otherwise scroll away. */
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    background: var(--cdh-surface);
+    padding-bottom: calc(var(--cdh-space-2) + env(safe-area-inset-bottom, 0px));
 }
 
 .cdh-ai__message-tools {
@@ -1041,7 +1188,14 @@ function formatDate(value: string | null): string {
         grid-template-columns: 16rem 1fr;
     }
 
+    /* The drawer toggle is a mobile affordance; on desktop the sidebar is a
+       permanent column. */
+    .cdh-ai__drawer-toggle {
+        display: none;
+    }
+
     .cdh-ai__sidebar {
+        display: block;
         max-height: min(60vh, 32rem);
         overflow-y: auto;
     }

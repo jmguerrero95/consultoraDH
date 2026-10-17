@@ -66,8 +66,28 @@ export interface AiArtifact {
     expires_at: string | null;
 }
 
-export interface AiTurnPayload {
-    conversation_id: number;
+/**
+ * A file attached to a conversation, as the server reports it.
+ *
+ * Present so that reloading a thread rebuilds the attachment list from the
+ * server rather than from memory: a file uploaded in the widget must still be
+ * there when the same thread is opened in the full page, or after the phone
+ * wakes up. `status` is the ingest state (`processed`, `unreadable`, `empty`),
+ * not a task status.
+ */
+export interface AiAttachmentSummary {
+    id: number;
+    conversation_id: number | null;
+    name: string;
+    mime_type: string | null;
+    extension: string | null;
+    size_bytes: number | null;
+    status: string;
+    status_note: string | null;
+    created_at: string | null;
+}
+
+export interface AiTurnPayload {    conversation_id: number;
     reply: string;
     provider: string | null;
     model: string | null;
@@ -261,8 +281,8 @@ export const ai = {
         return request<{ conversation_id: number; title: string | null; created_at: string | null }>('POST', '/api/ai/conversations/open');
     },
 
-    history(conversationId: number): Promise<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[] }> {
-        return request<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[] }>(
+    history(conversationId: number): Promise<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[]; attachments?: AiAttachmentSummary[] }> {
+        return request<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[]; attachments?: AiAttachmentSummary[] }>(
             'GET',
             `/api/ai/conversations/${conversationId}`,
         );
