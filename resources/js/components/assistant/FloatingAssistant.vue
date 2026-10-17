@@ -56,8 +56,46 @@ const conversationId = ref<number | null>(null);
 const scroller = ref<HTMLElement | null>(null);
 const input = ref<HTMLInputElement | null>(null);
 
-/** Only shown when the deployment has the assistant on and answers that it can. */
-const available = computed(() => statusLoaded.value && status.value?.ai_enabled === true);
+/**
+ * BUG-019. The launcher is no longer gated on a successful status call. It used
+ * to be hidden unless the last `/api/ai/status` had answered `ai_enabled: true`,
+ * so a failed status request — a 500, a network error, an expired session —
+ * silently removed the entry point for someone who is allowed to use the
+ * assistant. Visibility now follows the permission alone (RBAC unchanged) and
+ * whatever the status says is shown *inside* the panel. This holds the reason
+ * that the status could not be read, so the panel can say so.
+ */
+const statusError = ref<string | null>(null);
+
+/**
+ * The reason the assistant may not answer, in the panel's own words.
+ *
+ * `null` when there is nothing to warn about, including while the status is
+ * still loading: the header says "Comprobando…" for that case already.
+ */
+const notice = computed<{ variant: 'danger' | 'warning'; message: string } | null>(() => {
+    if (statusError.value) {
+        return { variant: 'danger', message: statusError.value };
+    }
+
+    if (!statusLoaded.value || !status.value) {
+        return null;
+    }
+
+    if (status.value.ai_enabled !== true) {
+        return { variant: 'warning', message: 'El asistente no está habilitado en este entorno.' };
+    }
+
+    if (status.value.state === 'none') {
+        return { variant: 'warning', message: 'No hay ningún proveedor de IA configurado. Contacte al administrador.' };
+    }
+
+    if (status.value.state === 'unavailable') {
+        return { variant: 'warning', message: 'Los proveedores de IA están temporalmente indisponibles. Puede reintentar en unos minutos.' };
+    }
+
+    return null;
+});
 
 const statusLabel = computed(() => {
     if (!status.value) {
@@ -79,8 +117,12 @@ const statusLabel = computed(() => {
 async function loadStatus(): Promise<void> {
     try {
         status.value = await ai.status();
-    } catch {
+        statusError.value = null;
+    } catch (e) {
+        // A failed status call must not remove the access point: keep the error
+        // to show inside the panel and leave the launcher in place.
         status.value = null;
+        statusError.value = readError(e, 'No fue posible consultar el estado del asistente. El acceso sigue disponible.');
     } finally {
         statusLoaded.value = true;
     }
@@ -200,16 +242,29 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 onMounted(() => {
-    if (!canUse.value) {
-        return;
-    }
-
+    // The keydown listener is cheap and does not depend on permissions.
     document.addEventListener('keydown', onKeydown);
-    void loadStatus();
+
+    if (canUse.value) {
+        void loadStatus();
+    }
 });
 
 onUnmounted(() => {
     document.removeEventListener('keydown', onKeydown);
+});
+
+// BUG-019. The authenticated user — and with it the permission list — can
+// arrive after this component has mounted: on a cold load the auth store is
+// still restoring the session when the admin shell renders, so `canUse` is
+// false on the first tick and only turns true later. Without this watcher the
+// status was never loaded for that user and the launcher never appeared.
+// Loading is idempotent: once a status has been fetched, later transitions do
+// not fetch again.
+watch(canUse, (value) => {
+    if (value && !statusLoaded.value) {
+        void loadStatus();
+    }
 });
 
 watch(open, (value) => {
@@ -225,10 +280,12 @@ watch(open, (value) => {
 
 <template>
     <div v-if="canUse" class="cdh-assistant">
-        <!-- The launcher. Hidden entirely when the assistant cannot answer, so there
-             is never a button that opens an apology. -->
+        <!-- The launcher. Shown to anyone who may use the assistant, whatever
+             the status call answered: a status failure or a provider that is
+             momentarily down must not silently remove the entry point. The real
+             state is explained inside the panel. -->
         <button
-            v-if="!open && available"
+            v-if="!open"
             type="button"
             class="cdh-assistant__fab"
             :aria-expanded="open"
@@ -276,6 +333,13 @@ watch(open, (value) => {
                     </button>
                 </div>
             </header>
+
+            <AppAlert
+                v-if="notice"
+                :variant="notice.variant"
+                :message="notice.message"
+                class="cdh-assistant__notice"
+            />
 
             <div ref="scroller" class="cdh-assistant__body">
                 <div v-if="messages.length === 0 && proposals.length === 0" class="cdh-assistant__empty">
@@ -520,6 +584,10 @@ watch(open, (value) => {
 }
 
 .cdh-assistant__alert {
+    margin: 0.5rem 0.85rem 0;
+}
+
+.cdh-assistant__notice {
     margin: 0.5rem 0.85rem 0;
 }
 

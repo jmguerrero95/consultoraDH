@@ -323,7 +323,11 @@ final class AiAssistantController extends Controller
                 'state' => $this->resolver->state(),
                 'available' => $this->resolver->anyConfigured()
                     && $this->resolver->state() !== 'unavailable',
-                'active_model' => $this->resolver->active_model(),
+                // The JSON key stays `active_model`; the method is `activeModel()`.
+                // Calling the snake_case name meant `/api/ai/status` threw
+                // `Call to undefined method` and answered 500 — so the whole
+                // endpoint, and with it the assistant's status, was unreachable.
+                'active_model' => $this->resolver->activeModel(),
                 'cooldowns' => $this->resolver->cooldowns(),
                 'primary' => [
                     'configured' => $primary->isConfigured(),
