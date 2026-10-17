@@ -1,5 +1,7 @@
 import { getCurrentInstance, onBeforeUnmount, ref, shallowRef } from 'vue';
 
+import { stripMarkdown } from '@/utils/markdown';
+
 import type { Ref } from 'vue';
 
 /**
@@ -326,7 +328,11 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
             return;
         }
 
-        const content = text.trim();
+        // The reply is read as a person would read it, not as the Markdown it is
+        // stored in: `**cartera**` is spoken "cartera", not "asterisk asterisk
+        // cartera asterisk asterisk". `stripMarkdown` leaves ordinary prose
+        // untouched, so a plain reply is spoken exactly as written.
+        const content = stripMarkdown(text);
 
         if (content === '') {
             return;

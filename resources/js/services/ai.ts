@@ -50,6 +50,22 @@ export interface AiToolResult {
     output: unknown;
 }
 
+/**
+ * A file the assistant produced and that belongs to a conversation.
+ *
+ * The file itself is private: `download_url` is an authorised endpoint, not a
+ * public path, and it only answers the person whose id it was stored under.
+ * `size_bytes` and `format` are what the card shows before anyone downloads.
+ */
+export interface AiArtifact {
+    id: number;
+    filename: string;
+    format: string;
+    size_bytes: number;
+    download_url: string;
+    expires_at: string | null;
+}
+
 export interface AiTurnPayload {
     conversation_id: number;
     reply: string;
@@ -58,6 +74,14 @@ export interface AiTurnPayload {
     proposals: AiProposal[];
     /** Present on `ask`, absent on `messages` — both call the same service. */
     tools?: AiToolResult[];
+    /**
+     * Files produced during this turn — a PDF, an XLSX, a Word document.
+     *
+     * Here rather than in a separate panel because the file is the answer: a
+     * turn that ends with "te propongo generar el documento" and no download is
+     * exactly the defect this carries the fix for.
+     */
+    artifacts?: AiArtifact[];
 }
 
 /**
@@ -237,8 +261,11 @@ export const ai = {
         return request<{ conversation_id: number; title: string | null; created_at: string | null }>('POST', '/api/ai/conversations/open');
     },
 
-    history(conversationId: number): Promise<{ conversation_id: number; messages: AiMessagePayload[] }> {
-        return request<{ conversation_id: number; messages: AiMessagePayload[] }>('GET', `/api/ai/conversations/${conversationId}`);
+    history(conversationId: number): Promise<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[] }> {
+        return request<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[] }>(
+            'GET',
+            `/api/ai/conversations/${conversationId}`,
+        );
     },
 
     confirmProposal(proposalId: number): Promise<{ confirmed: boolean; proposal_id: number; tool: string; result: unknown }> {
