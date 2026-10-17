@@ -34,12 +34,30 @@ it('produces the morosos report from A03 receivables arithmetic', function (): v
 
     expect($report->rows())->toBeArray()
         ->and($report->columns())->not->toBeEmpty()
-        ->and($report->meta()['title'])->toBe('Morosos / cartera pendiente');
+        // The label the report publishes, not an internal name: MEJ-008 replaced the
+        // jargon in the report titles with the wording the screens use.
+        ->and($report->meta()['title'])->toBe(ReportType::Morosos->label());
 
     // And the numbers agree with the service it delegates to, exactly.
     $a03 = app(ReceivablesService::class)->list([], 1, 500);
 
     expect(count($report->rows()))->toBe(count($a03['items']));
+});
+
+it('resolves the per-company report, which previously failed on a column the table does not have', function (): void {
+    // "Por empresa" summed a `balance_cop` column that `monthly_obligations` does not
+    // have — the balance is derived — so every attempt failed before a single row was
+    // produced. The figures now come from `ReceivablesService`, the same source the
+    // Cartera screen uses.
+    $report = app(ReportFactory::class)->make(ReportType::PorEmpresa, []);
+    $rows = $report->rows();
+    $totals = $report->totals();
+
+    expect($rows)->toBeArray()->and($totals)->toBeArray()->not->toBeEmpty();
+
+    // The total equals the sum of the per-company figures it reports.
+    expect($totals[0]['outstanding_balance_cop'])
+        ->toBe(array_sum(array_column($rows, 'outstanding_balance_cop')));
 });
 
 it('treats due today as not overdue, because A03 decides that', function (): void {

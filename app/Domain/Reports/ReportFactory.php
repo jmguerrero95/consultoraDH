@@ -24,7 +24,7 @@ final class ReportFactory
         return match ($type) {
             ReportType::Morosos => PortfolioReport::outstanding($this->receivables, $validated),
             ReportType::Vencidos => PortfolioReport::overdue($this->receivables, $validated),
-            ReportType::PorEmpresa => new CompanyPortfolioReport($validated),
+            ReportType::PorEmpresa => new CompanyPortfolioReport($validated, $this->receivables),
             ReportType::PorEntidad => new EntityReport($validated),
             ReportType::Planillas => new PlanillaSummaryReport($validated),
 

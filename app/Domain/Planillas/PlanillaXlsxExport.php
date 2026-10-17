@@ -81,7 +81,10 @@ final class PlanillaXlsxExport
         // One width per column, from the widest thing it holds: a legal name and a
         // three-letter risk class do not deserve the same 8.43 characters.
         foreach (self::COLUMNS as $index => $column) {
-            $sheet_writer->setColumnWidth(min(self::MAX_WIDTH, max(self::MIN_WIDTH, $column[1])), $index);
+            // OpenSpout's width API is 1-based (`min`/`max` go straight into the XML), while
+            // this list is 0-based: passing `$index` wrote `min="0"` for the first column and
+            // shifted every other one, which strict readers reject outright.
+            $sheet_writer->setColumnWidth(min(self::MAX_WIDTH, max(self::MIN_WIDTH, $column[1])), $index + 1);
         }
 
         $writer->addRow(Row::fromValuesWithStyle(

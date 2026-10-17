@@ -4,24 +4,26 @@ declare(strict_types=1);
 
 namespace App\Domain\Reports;
 
+use App\Domain\Receivables\ReceivablesService;
 use App\Models\Company;
-use Illuminate\Support\Facades\DB;
 
 /**
  * R3 — portfolio/operational summary for one or more companies.
  *
  * Deliberately an **operational** summary: how many people a company has and how many
  * of them currently owe something. It is not a financial report and does not restate
- * A03's arithmetic — where money is involved it asks `ReceivablesService` rather than
- * summing `monthly_obligations` itself, because a per-company sum computed here would be
- * a third place where "how much does this company owe" is answered.
+ * A03's arithmetic — the money comes from `ReceivablesService`, the same derived balance
+ * the Cartera screen reads.
  */
 final class CompanyPortfolioReport implements ReportResult
 {
     /**
      * @param  array<string, mixed>  $filters
      */
-    public function __construct(private readonly array $filters) {}
+    public function __construct(
+        private readonly array $filters,
+        private readonly ReceivablesService $receivables,
+    ) {}
 
     public function type(): ReportType
     {
@@ -58,26 +60,20 @@ final class CompanyPortfolioReport implements ReportResult
 
     public function rows(): array
     {
-        $asOf = now()->toDateString();
-
         $companies = Company::query()
             ->when(isset($this->filters['company_id']), fn ($query) => $query->whereKey((int) $this->filters['company_id']))
             ->orderBy('legal_name')
             ->get();
 
+        // One grouped aggregate over A03's own derived table, rather than a sum per company
+        // over the raw obligations table. The balance column is derived, so the raw table
+        // has no such column to sum.
+        $money = $this->receivables->outstandingByCompany();
+
         $rows = [];
 
         foreach ($companies as $company) {
-            // Money comes from A03's own derived table, grouped by company. This is the
-            // same `balance_cop` `ReceivablesService` reads, reached through one grouped
-            // aggregate rather than a second formula written to match it.
-            $money = DB::query()
-                ->from('monthly_obligations')
-                ->where('company_id', $company->id)
-                ->where('balance_cop', '>', 0)
-                ->selectRaw('coalesce(sum(balance_cop), 0) as outstanding')
-                ->selectRaw('count(distinct client_id) as debtors')
-                ->first();
+            $figures = $money[$company->id] ?? null;
 
             $rows[] = [
                 'legal_name' => $company->legal_name,
@@ -86,12 +82,10 @@ final class CompanyPortfolioReport implements ReportResult
                     ->whereNull('ended_on')
                     ->distinct('client_id')
                     ->count('client_id'),
-                'debtor_clients' => (int) ($money->debtors ?? 0),
-                'outstanding_balance_cop' => (int) ($money->outstanding ?? 0),
+                'debtor_clients' => $figures['debtor_clients'] ?? 0,
+                'outstanding_balance_cop' => $figures['outstanding_cop'] ?? 0,
             ];
         }
-
-        unset($asOf);
 
         return $rows;
     }

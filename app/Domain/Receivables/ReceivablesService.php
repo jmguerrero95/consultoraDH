@@ -806,6 +806,45 @@ final class ReceivablesService
             ->all();
     }
 
+    /**
+     * Outstanding balance and debtor count per company, from the same derived table.
+     *
+     * ## Why this exists
+     *
+     * The "Por empresa" report drew its money with a sum over `monthly_obligations`
+     * grouped by company, reading a `balance_cop` that table does not have — the balance
+     * is derived, not stored (`ObligationTotals`). The query therefore failed on every
+     * run: the report could not be generated at all, in any format.
+     *
+     * Rather than write the arithmetic a second time here, it is exposed from the one
+     * place that already owns it, so the figure this report prints is the same one the
+     * Cartera screen shows.
+     *
+     * @return array<int, array{outstanding_cop: int, debtor_clients: int}> keyed by company id
+     */
+    public function outstandingByCompany(): array
+    {
+        $rows = DB::query()
+            ->fromSub($this->obligationsQuery(), 'obligations')
+            ->where('obligations.balance_cop', '>', 0)
+            ->groupBy('obligations.company_id')
+            ->selectRaw('obligations.company_id as company_id')
+            ->selectRaw('coalesce(sum(obligations.balance_cop), 0) as outstanding_cop')
+            ->selectRaw('count(distinct obligations.client_id) as debtor_clients')
+            ->get();
+
+        $byCompany = [];
+
+        foreach ($rows as $row) {
+            $byCompany[(int) $row->company_id] = [
+                'outstanding_cop' => (int) $row->outstanding_cop,
+                'debtor_clients' => (int) $row->debtor_clients,
+            ];
+        }
+
+        return $byCompany;
+    }
+
     private function obligationsQuery(): QueryBuilder
     {
         return DB::table('monthly_obligations')

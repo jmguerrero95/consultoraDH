@@ -234,7 +234,10 @@ final class XlsxExporter
                 }
             }
 
-            $sheet->setColumnWidth(min(self::MAX_WIDTH, max(self::MIN_WIDTH, $longest + 2)), $index);
+            // OpenSpout's width API is 1-based (`min`/`max` are written to the XML as given),
+            // while `columns()` is a 0-based list: `$index` wrote `min="0"` for the first
+            // column and shifted the rest, which strict readers reject.
+            $sheet->setColumnWidth(min(self::MAX_WIDTH, max(self::MIN_WIDTH, $longest + 2)), $index + 1);
         }
     }
 }
