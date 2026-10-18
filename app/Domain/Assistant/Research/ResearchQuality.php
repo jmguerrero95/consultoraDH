@@ -431,11 +431,17 @@ final class ResearchQuality
     /**
      * Canonicalize a URL for comparison: lowercase, no trailing slash.
      * Query params and fragments are preserved so that invented params/fragments are caught.
+     * Scheme (http/https) is preserved - they are NOT equated.
      */
     private static function canonicalizeUrl(string $url): string
     {
-        $url = mb_strtolower(trim($url));
-        $url = preg_replace('#^https?://#', '', $url);
+        $url = trim($url);
+        // Extract and normalize scheme (http/https)
+        if (preg_match('#^https?://#i', $url, $matches)) {
+            $scheme = strtolower($matches[0]);
+            $url = $scheme.substr($url, strlen($matches[0]));
+        }
+        $url = mb_strtolower($url);
         $url = preg_replace('#/+$#', '', $url);
 
         // Do NOT strip query params or fragments - they must match exactly

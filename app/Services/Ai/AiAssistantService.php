@@ -1078,8 +1078,15 @@ final class AiAssistantService
                                 $this->buildResearchRecoveryPrompt($question, $webSources, $recoveryType, $content)
                             );
 
+                            // For synthesis-only recoveries (citations_missing, dimensions_missing, insufficiency_claimed),
+                            // do NOT offer web search/fetch tools — the evidence is already in hand.
+                            $recoveryOffered = $offered;
+                            if (in_array($recoveryType, ['citations_missing', 'dimensions_missing', 'insufficiency_claimed'], true)) {
+                                unset($recoveryOffered['web_search'], $recoveryOffered['web_fetch']);
+                            }
+
                             try {
-                                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                                $currentResult = $this->resolver->complete($messages, array_values($recoveryOffered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
                             } catch (AiProviderException $e) {
                                 $this->recordTurnSummary(
                                     $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
