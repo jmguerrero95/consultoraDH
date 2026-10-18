@@ -211,11 +211,32 @@ final class AiPrivacyGate
             return false;
         }
 
-        if (preg_match('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/', $text) === 1) {
+        if ($this->carriesPersonalData($text)) {
             return true;
         }
 
-        if (preg_match('/\d{6,}/', $text) === 1) {
+        return preg_match('/\d{6,}/', $text) === 1;
+    }
+
+    /**
+     * Whether a piece of text carries a personal-data *shape* — an email or a
+     * phone number — as opposed to a bare long number.
+     *
+     * This is the floor that still applies to text of public provenance (a web
+     * search result, a fetched page): a public article may legitimately contain an
+     * article id, a URL fragment or a statistic formed of six or more digits, and
+     * A07-R5-R1 showed that treating that number as private excluded every
+     * independent free provider and left a public investigation unanswered. An
+     * email or a phone number, by contrast, is personal data wherever it appears
+     * and still promotes the payload.
+     */
+    public function carriesPersonalData(string $text): bool
+    {
+        if ($text === '') {
+            return false;
+        }
+
+        if (preg_match('/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/', $text) === 1) {
             return true;
         }
 

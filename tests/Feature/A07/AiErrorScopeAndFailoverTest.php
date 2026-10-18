@@ -790,10 +790,24 @@ final class AiErrorScopeAndFailoverTest extends TestCase
         }
 
         $rows = Cache::get('ai.diagnostics.recent', []);
-        $row = $rows[0] ?? null;
+
+        // The newest row is the turn's final result; the provider diagnosis that
+        // explains it sits just below. Both belong to the same turn.
+        $turnRow = $rows[0] ?? null;
+        $this->assertIsArray($turnRow);
+        $this->assertSame('turn', $turnRow['outcome']);
+        $this->assertSame('failed', $turnRow['result']);
+
+        $row = null;
+
+        foreach ($rows as $candidate) {
+            if (($candidate['outcome'] ?? null) === 'no_candidates') {
+                $row = $candidate;
+                break;
+            }
+        }
 
         $this->assertIsArray($row);
-        $this->assertSame('no_candidates', $row['outcome']);
         $this->assertSame('privacy', $row['scope']);
         $this->assertSame(0, $row['eligible']);
         $this->assertContains('client_data', $row['required']);

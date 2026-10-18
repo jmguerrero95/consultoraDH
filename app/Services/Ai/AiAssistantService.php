@@ -181,7 +181,10 @@ final class AiAssistantService
         }
 
         if ($external !== []) {
-            $messages[] = AiMessage::user($this->externalContext($external));
+            // Tagged as public provenance: the block is the server's own public
+            // web fetch, and a long number inside it is an article id or a
+            // statistic, not one of our records (A07-R5-R1).
+            $messages[] = AiMessage::publicWebContext($this->externalContext($external));
         }
 
         // Whether this turn carries real business data. A general question does
@@ -199,9 +202,26 @@ final class AiAssistantService
             $this->markConversationPrivate($conversation);
         }
 
-        $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget);
+        // One id for the whole user turn, shared by every provider round and by the
+        // turn summary, so the diagnostics can be read as one question.
+        $turn = substr(bin2hex(random_bytes(6)), 0, 12);
 
-        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external);
+        // A first call that cannot be served leaves the turn with no result. Its
+        // provider rows say what was tried; the turn summary says what the request
+        // finally produced, so PROVIDER_RESPONSE and TURN_RESULT never look alike.
+        try {
+            $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget, $turn, 1);
+        } catch (AiProviderException $e) {
+            $this->recordTurnSummary(
+                $turn, 0, max(1, (int) config('ai.tool_max_rounds', 4)), 0, [], 0,
+                $requiresClientData, $requiresClientData ? 'internal_request' : null,
+                $requiresClientData, false, false, 'provider_error', 'failed',
+            );
+
+            throw $e;
+        }
+
+        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external, $turn);
     }
 
     /**
@@ -330,11 +350,21 @@ final class AiAssistantService
     private function classifiesAsClientData(AiConversation $conversation, string $question, array $messages, array $passages): bool
     {
         $texts = [];
+        $publicWeb = '';
 
         foreach ($messages as $message) {
             // The system prompt is ours and fixed; only what the person wrote,
             // what the model said and what a tool returned can carry private data.
             if ($message->role === AiMessage::ROLE_SYSTEM) {
+                continue;
+            }
+
+            // The server's own web block is public provenance: a long number in a
+            // public article must not be read as a record (A07-R5-R1). A
+            // personal-data shape in it still promotes the turn.
+            if ($message->provenance === AiMessage::PROVENANCE_PUBLIC_WEB) {
+                $publicWeb .= "\n".$message->content;
+
                 continue;
             }
 
@@ -346,7 +376,7 @@ final class AiAssistantService
             hasPrivateDocuments: $passages !== [],
             requestsInternalData: $this->privacy->requestsInternalData($question),
             texts: $texts,
-        );
+        ) || $this->privacy->carriesPersonalData($publicWeb);
     }
 
     /**
@@ -738,15 +768,38 @@ final class AiAssistantService
      * @param  list<array{kind: string, source: string, data: array<string, mixed>}>  $prefetched
      *                                                                                             results the server fetched for the turn, so the
      *                                                                                             answer and the sources it used are reported together
+     * @param  string|null  $turn  the whole user turn's correlation id, shared by every provider
+     *                             round and the turn summary in the diagnostics
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = []): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = [], ?string $turn = null): array
     {
+        $turn ??= substr(bin2hex(random_bytes(6)), 0, 12);
+
         $proposals = [];
         $toolResults = [];
         $artifacts = [];
         $maxRounds = max(1, (int) config('ai.tool_max_rounds', 4));
         $round = 0;
         $reply = null;
+        $replyProvider = null;
+        $replyModel = null;
+
+        // What the diagnostic summary needs about this turn: how many tool batches
+        // ran, which tools (names only, never arguments), whether the turn crossed
+        // from public to private and why, and how it ended.
+        $toolNames = [];
+        $toolCallCount = 0;
+        $dedupedCount = 0;
+        $privacyReason = $requiresClientData ? 'internal_request' : null;
+        $endedBy = 'answer';
+        $pending = false;
+
+        // Identical calls repeated inside one turn spend quota for a result the
+        // model already holds. Keyed by the tool and its decisive argument, so a
+        // rephrased search or a genuinely new URL is still allowed: this is
+        // deduplication, not a router. Seeded with the server's own prefetch so the
+        // model does not repeat the search the turn already made.
+        $seenCalls = $this->prefetchCallKeys($prefetched);
 
         $currentResult = $result;
 
@@ -772,16 +825,33 @@ final class AiAssistantService
         // and lowered never.
         $turnRequiresClientData = $requiresClientData;
 
-        while ($round < $maxRounds) {
-            // No further request of any kind once the turn has no time left. A
-            // tool call is an outbound request too, so it is refused here rather
-            // than started and abandoned halfway through the turn's budget.
-            if ($budget->outOfTime()) {
+        while (true) {
+            $content = $currentResult->content;
+            $toolCalls = $currentResult->toolCalls;
+
+            // A response with no tool call is the answer. It is consumed *before*
+            // any round or budget check, because it is already in hand and reading
+            // it costs nothing: the A07-R5-R1 defect was that the response produced
+            // after the last permitted batch was discarded unexamined, so five
+            // correct provider answers ended in an error.
+            if (empty($toolCalls)) {
+                $reply = $content;
+                $replyProvider = $currentResult->provider ?? $result->provider;
+                $replyModel = $currentResult->model ?? $result->model;
+
                 break;
             }
 
-            $content = $currentResult->content;
-            $toolCalls = $currentResult->toolCalls;
+            // The model wants another batch. When no batch remains — or the turn
+            // has no time left — it is not executed: the response is left
+            // *pending*, neither run nor mistaken for an answer.
+            if ($round >= $maxRounds || $budget->outOfTime()) {
+                $pending = true;
+                $endedBy = $round >= $maxRounds ? 'round_limit' : 'budget';
+
+                break;
+            }
+
             $round++;
 
             $proposalsThisRound = [];
@@ -804,6 +874,28 @@ final class AiAssistantService
                     $args = $call->arguments;
                     $toolCallId = $call->id;
 
+                    // Deduplication: an identical decisive call already ran this
+                    // turn. Its result is still in the context; running it again
+                    // would spend quota to learn the same thing. Only the calls
+                    // whose repetition is pure waste are keyed (see `dedupeKey`),
+                    // and the server's own prefetch already seeded the search it
+                    // ran, so the model can build on it instead of repeating it.
+                    $dedupeKey = $this->dedupeKey($toolName, $args);
+
+                    if ($dedupeKey !== null && isset($seenCalls[$dedupeKey])) {
+                        $dedupedCount++;
+                        $messages[] = AiMessage::toolResult($toolName, [
+                            'note' => 'Ya ejecutaste esta misma llamada en este turno; el resultado anterior sigue disponible. '
+                                .'No la repitas: usa lo que ya tienes o cambia la consulta.',
+                        ], $toolCallId);
+
+                        continue;
+                    }
+
+                    if ($dedupeKey !== null) {
+                        $seenCalls[$dedupeKey] = true;
+                    }
+
                     // Discovery: the catalogue is not a registry tool. It is
                     // resolved here, and the tools it names are added to the
                     // offered set for the next round, so the model can then call
@@ -822,6 +914,9 @@ final class AiAssistantService
                             'note' => 'Estas herramientas quedan disponibles: invócalas directamente por su nombre para completar la tarea.',
                         ], $toolCallId);
 
+                        $toolNames[$toolName] = true;
+                        $toolCallCount++;
+
                         continue;
                     }
 
@@ -832,6 +927,9 @@ final class AiAssistantService
                     }
 
                     $tool = $this->registry->get($toolName);
+
+                    $toolNames[$toolName] = true;
+                    $toolCallCount++;
 
                     // --- Write tools: propose only, never execute from the model ---
                     if ($tool->isWrite()) {
@@ -901,22 +999,30 @@ final class AiAssistantService
                         // The record is now in hand, and the decision about
                         // whether it may travel is made *here*, before it is
                         // appended to the payload rather than at the end of the
-                        // loop. A tool that answers from our records raises the
-                        // turn immediately; so does one the catalogue has not
-                        // classified (fail closed) and so does a result that
-                        // merely contains an identifier. The conversation is
-                        // persisted at the same moment, so a turn that dies here
-                        // still leaves the thread marked.
-                        if ($this->capabilities->isPrivateTool($toolName) || $this->privacy->looksPrivate($this->scrutableText($output))) {
+                        // loop. Provenance decides: a tool that answers from our
+                        // records raises the turn immediately, and so does one the
+                        // catalogue has not classified (fail closed). Only a tool
+                        // whose provenance is *public* is judged by shape, and then
+                        // only a personal-data shape — an email or a phone — because
+                        // a long number in a public article is an article id, a URL
+                        // fragment or a statistic, not a record of ours (A07-R5-R1).
+                        // The conversation is persisted at the same moment, so a
+                        // turn that dies here still leaves the thread marked.
+                        $outputText = $this->scrutableText($output);
+                        $privateTool = $this->capabilities->isPrivateTool($toolName);
+                        $personalData = $this->privacy->carriesPersonalData($outputText);
+
+                        if ($privateTool || $personalData) {
                             $sawPrivateTool = true;
                             $turnRequiresClientData = true;
+                            $privacyReason ??= $privateTool ? 'private_tool' : 'personal_data';
                             $this->markConversationPrivate($conversation);
 
                             // A private record is now in the turn's context. If a
                             // later round turns it into a search query, the
                             // outbound boundary must recognise its terms as coming
                             // from here.
-                            $this->outbound->addPrivateSource($this->scrutableText($output));
+                            $this->outbound->addPrivateSource($outputText);
                         }
 
                         $toolResultsThisRound[] = [
@@ -962,20 +1068,39 @@ final class AiAssistantService
                         }
                         $reply .= "\n\n".implode("\n", $resultText);
                     }
+                    $replyProvider = $currentResult->provider ?? $result->provider;
+                    $replyModel = $currentResult->model ?? $result->model;
                     break;
                 }
 
-                // If only read tools were called, continue the loop for synthesis.
+                // Only read tools ran, so the turn continues: ask for the next
+                // round with the results now in the payload.
                 //
                 // A provider failure here is an explicit failure of the turn, not
                 // an answer. Turning it into a string and storing it would put a
                 // fabricated assistant message in the conversation that a later
                 // turn would be sent as legitimate history, so it propagates and
-                // nothing is persisted for this turn.
-                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget);
+                // nothing is persisted for this turn. The turn summary records the
+                // failure before it does, so the final result is never inferred
+                // from a provider row that said "ok" earlier.
+                try {
+                    $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                } catch (AiProviderException $e) {
+                    $this->recordTurnSummary(
+                        $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                        $turnRequiresClientData, $privacyReason, $requiresClientData,
+                        false, false, 'provider_error', 'failed',
+                    );
+
+                    throw $e;
+                }
             } else {
-                // No tool calls, we're done
+                // Defensive guard: the loop reads a tool-free response at the top
+                // and never reaches here, but if it ever did, the answer is the
+                // response itself.
                 $reply = $content;
+                $replyProvider = $currentResult->provider ?? $result->provider;
+                $replyModel = $currentResult->model ?? $result->model;
                 break;
             }
         }
@@ -986,11 +1111,33 @@ final class AiAssistantService
             $this->markConversationPrivate($conversation);
         }
 
-        // Reaching here means the model kept asking for tools through every round
-        // without ever producing an answer. Returning whatever the last round said
-        // would be an answer the model never gave, so the turn fails explicitly and
-        // nothing is persisted for it.
+        // A response is in hand but its tool call was not executed, because the
+        // permitted batches ran out or the turn ran out of time. Rather than fail a
+        // turn that already holds the evidence, answer from it with one bounded,
+        // tool-free synthesis. No tool is offered, so it cannot start another
+        // batch; it is skipped when the turn has no time or attempts left, and the
+        // turn then fails explicitly.
+        if ($reply === null && $pending) {
+            $synthesis = $this->synthesizeWithoutTools($messages, $turnRequiresClientData, $budget, $turn, $round + 1);
+
+            if ($synthesis !== null) {
+                $reply = $synthesis['content'];
+                $replyProvider = $synthesis['provider'];
+                $replyModel = $synthesis['model'];
+            }
+        }
+
+        // Reaching here with no reply means the model kept asking for tools and no
+        // bounded synthesis could be made. Returning the last round's tool-call
+        // text would be an answer the model never gave, so the turn fails
+        // explicitly and nothing is persisted for it.
         if ($reply === null) {
+            $this->recordTurnSummary(
+                $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                $turnRequiresClientData, $privacyReason, $requiresClientData,
+                false, $pending, $endedBy === 'answer' ? 'round_limit' : $endedBy, 'failed',
+            );
+
             throw AiTurnFailed::toolRoundsExhausted($maxRounds);
         }
 
@@ -1013,11 +1160,17 @@ final class AiAssistantService
         $hasReply = trim((string) $reply) !== '';
 
         if (! $hasReply && $proposals === [] && $artifacts === []) {
+            $this->recordTurnSummary(
+                $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                $turnRequiresClientData, $privacyReason, $requiresClientData,
+                false, $pending, 'empty', 'failed',
+            );
+
             throw AiTurnFailed::emptyAnswer();
         }
 
-        $provider = $currentResult->provider ?? $result->provider;
-        $model = $currentResult->model ?? $result->model;
+        $provider = $replyProvider ?? $currentResult->provider ?? $result->provider;
+        $model = $replyModel ?? $currentResult->model ?? $result->model;
 
         // Persist user message and assistant reply
         AiMessageModel::query()->create([
@@ -1038,6 +1191,15 @@ final class AiAssistantService
             ]);
         }
 
+        // The turn produced a result: record how it ran so a later reader can tell
+        // a delivered answer from a failed turn without inferring it from the
+        // provider rows alone.
+        $this->recordTurnSummary(
+            $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+            $turnRequiresClientData, $privacyReason, $requiresClientData,
+            true, $pending, $endedBy, 'ok',
+        );
+
         return [
             'reply' => $hasReply ? $reply : '',
             'provider' => $provider,
@@ -1045,6 +1207,147 @@ final class AiAssistantService
             'proposals' => $proposals,
             'tools' => $this->mergePrefetchedTools($toolResults, $prefetched),
             'artifacts' => $artifacts,
+        ];
+    }
+
+    /**
+     * Write the one-row summary of a turn to the shared diagnostics list.
+     *
+     * Counts and safe labels only: how many batches ran, which tools (names, never
+     * arguments), how many repeats were suppressed, whether the turn became
+     * private and why, whether the last provider response was consumed, and how
+     * the turn ended. This is the row that turns "five provider answers, one user
+     * error" into a readable cause.
+     *
+     * @param  array<string, true>  $toolNames
+     */
+    private function recordTurnSummary(
+        string $turn,
+        int $rounds,
+        int $roundLimit,
+        int $toolCalls,
+        array $toolNames,
+        int $deduped,
+        bool $private,
+        ?string $privacyReason,
+        bool $startedPrivate,
+        bool $processed,
+        bool $pending,
+        string $endedBy,
+        string $result,
+    ): void {
+        $this->resolver->recordTurn([
+            'turn' => $turn,
+            'rounds' => $rounds,
+            'round_limit' => $roundLimit,
+            'tool_calls' => $toolCalls,
+            'tools' => array_keys($toolNames),
+            'deduped' => $deduped,
+            'privacy' => $private,
+            'privacy_reason' => $privacyReason,
+            'privacy_changed' => ! $startedPrivate && $private,
+            'processed' => $processed,
+            'pending' => $pending,
+            'ended_by' => $endedBy,
+            'result' => $result,
+        ]);
+    }
+
+    /**
+     * The dedupe keys for the server's own prefetched web searches.
+     *
+     * So a turn that already searched does not pay for the model to search the
+     * same query again.
+     *
+     * @param  list<array{kind: string, source: string, data: array<string, mixed>}>  $prefetched
+     * @return array<string, true>
+     */
+    private function prefetchCallKeys(array $prefetched): array
+    {
+        $keys = [];
+
+        foreach ($prefetched as $block) {
+            if (($block['kind'] ?? null) !== 'search') {
+                continue;
+            }
+
+            $query = $block['data']['query'] ?? null;
+
+            if (! is_string($query)) {
+                continue;
+            }
+
+            $key = $this->dedupeKey('web_search', ['query' => $query]);
+
+            if ($key !== null) {
+                $keys[$key] = true;
+            }
+        }
+
+        return $keys;
+    }
+
+    /**
+     * The key that identifies a repeatable read call within one turn, or null for
+     * a call that must never be deduplicated.
+     *
+     * Only the calls whose repetition is pure waste are keyed — the same search,
+     * the same page, the same catalogue question — by their decisive argument. A
+     * tool outside that list returns null and always runs, so the model keeps its
+     * initiative and a genuinely new step is never suppressed.
+     */
+    private function dedupeKey(string $tool, mixed $args): ?string
+    {
+        if (! is_array($args)) {
+            return null;
+        }
+
+        $decisive = match ($tool) {
+            'web_search' => $args['query'] ?? null,
+            'web_fetch' => $args['url'] ?? null,
+            AiCapabilityCatalog::DISCOVERY_TOOL => $args['query'] ?? '',
+            default => null,
+        };
+
+        if (! is_string($decisive)) {
+            return null;
+        }
+
+        return $tool.'|'.mb_strtolower(trim($decisive));
+    }
+
+    /**
+     * One bounded, tool-free synthesis after the tool batches ran out.
+     *
+     * Offers no tool, so it cannot start another batch; returns null when the turn
+     * has no time or attempts left, or the provider fails or answers nothing, in
+     * which case the caller fails the turn explicitly.
+     *
+     * @param  list<AiMessage>  $messages
+     * @return array{content: string, provider: string|null, model: string|null}|null
+     */
+    private function synthesizeWithoutTools(array $messages, bool $requiresClientData, AiTurnBudget $budget, string $turn, int $round): ?array
+    {
+        if ($budget->outOfTime() || $budget->exhausted()) {
+            return null;
+        }
+
+        try {
+            $response = $this->resolver->complete($messages, [], null, null, $budget->deadline, $requiresClientData, $budget, $turn, $round);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        $content = trim((string) $response->content);
+
+        if ($content === '') {
+            return null;
+        }
+
+        return [
+            'content' => $content,
+            'provider' => $response->provider,
+            'model' => $response->model,
         ];
     }
 

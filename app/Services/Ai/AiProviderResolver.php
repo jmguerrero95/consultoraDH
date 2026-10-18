@@ -83,6 +83,10 @@ class AiProviderResolver
      *                                     (a task, a suggestion) a single-round budget is
      *                                     created, which is the old behaviour for a caller
      *                                     that makes exactly one call.
+     * @param  string|null  $turn  the whole user turn's correlation id; every round of
+     *                             one question shares it, so the diagnostics read as a
+     *                             turn rather than as unrelated events
+     * @param  int|null  $round  which provider round of the turn this call is
      *
      * @throws AiProviderException when no candidate can answer, or when the privacy
      *                             classification is missing (an application fault)
@@ -95,6 +99,8 @@ class AiProviderResolver
         ?float $deadline = null,
         ?bool $requiresClientData = null,
         ?AiTurnBudget $budget = null,
+        ?string $turn = null,
+        ?int $round = null,
     ): AiResponse {
         // The classification is mandatory. A07-R4-R1 fixed today's callers, but
         // the contract still defaulted the argument to "public", so the next
@@ -126,7 +132,9 @@ class AiProviderResolver
         // A short id for this turn's provider cycle. Every row it writes shares
         // it, so the diagnostics can be read as one turn — what was eligible, what
         // was tried, what each attempt did — instead of a flat list of events.
-        $turn = substr(bin2hex(random_bytes(6)), 0, 12);
+        // The assistant service passes the id of the whole user turn, so every
+        // round of one question shares it; a caller that omits it gets its own.
+        $turn ??= substr(bin2hex(random_bytes(6)), 0, 12);
 
         $candidates = $this->ordered($this->pool->supporting($required), $preferred);
 
@@ -151,7 +159,7 @@ class AiProviderResolver
             // provider authorised for private data and there is none right now.
             // Saying so is the honest failure — the record stays on the server.
             if ($requiresClientData) {
-                $this->recordNoCandidates($turn, $task, $required, 'privacy', $poolSize);
+                $this->recordNoCandidates($turn, $task, $required, 'privacy', $poolSize, $round);
 
                 throw AiProviderException::privacyUnavailable(
                     'No hay ningún proveedor autorizado para datos privados en este momento; '
@@ -159,7 +167,7 @@ class AiProviderResolver
                 );
             }
 
-            $this->recordNoCandidates($turn, $task, $required, $tools !== [] ? 'capability' : 'model', $poolSize);
+            $this->recordNoCandidates($turn, $task, $required, $tools !== [] ? 'capability' : 'model', $poolSize, $round);
 
             throw AiProviderException::unavailable(
                 $tools !== []
@@ -242,7 +250,7 @@ class AiProviderResolver
                 // It is not the model's fault, so the model is not cooled down,
                 // and it is not evaded by asking a different provider.
                 if ($e->isTerminal()) {
-                    $this->recordDiagnostic($turn, $task, $candidate, $e, $latency, 'refused', $this->candidateContext($required, $candidates));
+                    $this->recordDiagnostic($turn, $task, $candidate, $e, $latency, 'refused', $this->candidateContext($required, $candidates, $round));
 
                     throw $e;
                 }
@@ -254,7 +262,7 @@ class AiProviderResolver
                 }
 
                 $this->health->recordFailure($candidate, $e, $latency);
-                $this->recordDiagnostic($turn, $task, $candidate, $e, $latency, 'failed', $this->candidateContext($required, $candidates));
+                $this->recordDiagnostic($turn, $task, $candidate, $e, $latency, 'failed', $this->candidateContext($required, $candidates, $round));
 
                 $lastFailure = $e;
                 $budget->countFailover();
@@ -267,7 +275,7 @@ class AiProviderResolver
                 $converted = AiProviderException::unavailable($e::class.': '.$e->getMessage());
                 $latency = $this->latenciesFrom($startedAt);
                 $this->health->recordFailure($candidate, $converted, $latency);
-                $this->recordDiagnostic($turn, $task, $candidate, $converted, $latency, 'failed', $this->candidateContext($required, $candidates));
+                $this->recordDiagnostic($turn, $task, $candidate, $converted, $latency, 'failed', $this->candidateContext($required, $candidates, $round));
                 $lastFailure = $converted;
                 $budget->countFailover();
 
@@ -276,7 +284,7 @@ class AiProviderResolver
 
             $latency = $this->latenciesFrom($startedAt);
             $this->health->recordSuccess($candidate, $latency);
-            $this->recordDiagnostic($turn, $task, $candidate, null, $latency, 'ok', $this->candidateContext($required, $candidates));
+            $this->recordDiagnostic($turn, $task, $candidate, null, $latency, 'ok', $this->candidateContext($required, $candidates, $round));
             $this->rememberLastResult($candidate);
 
             return $response;
@@ -319,28 +327,43 @@ class AiProviderResolver
      *
      * The classification callers pass is about *provenance* (this turn is about
      * a client). This is the content floor: even a turn classified public is
-     * promoted when the exact text about to be sent holds an email, a long digit
-     * run or a grouped phone number. It can only raise the classification, never
-     * lower it.
+     * promoted when the exact text about to be sent holds a personal-data shape.
+     *
+     * It is provenance-aware. Text of the turn's own provenance keeps the full
+     * shape check — an email, a long identifier run — because a record pasted into
+     * the question or the history has no other signal. Text of *public*
+     * provenance (a tool result, the server's own web block) is judged only on a
+     * personal-data shape: a long number inside a public article is an article id,
+     * not a record, and treating it as one is what made a public A07-R5-R1
+     * investigation look private and excluded every independent free provider.
      *
      * @param  list<AiMessage>  $messages
      */
     private function payloadLooksSensitive(array $messages): bool
     {
-        $texts = [];
-
         foreach ($messages as $message) {
-            // The system prompt is written by the application and fixed; only
-            // what the person wrote, the model said or a tool returned can carry
-            // a record.
+            // The system prompt is written by the application and fixed.
             if ($message->role === AiMessage::ROLE_SYSTEM) {
                 continue;
             }
 
-            $texts[] = $message->content;
+            $publicProvenance = $message->role === AiMessage::ROLE_TOOL
+                || $message->provenance === AiMessage::PROVENANCE_PUBLIC_WEB;
+
+            if ($publicProvenance) {
+                if ($this->privacy->carriesPersonalData($message->content)) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if ($this->privacy->looksPrivate($message->content)) {
+                return true;
+            }
         }
 
-        return $this->privacy->payloadRequiresClientData(texts: $texts);
+        return false;
     }
 
     /**
@@ -649,12 +672,13 @@ class AiProviderResolver
      * @param  list<ModelCandidate>  $candidates
      * @return array<string, mixed>
      */
-    private function candidateContext(array $required, array $candidates): array
+    private function candidateContext(array $required, array $candidates, ?int $round = null): array
     {
         return [
             'required' => $required,
             'eligible' => count($candidates),
             'pool' => count($this->pool->all()),
+            'round' => $round,
         ];
     }
 
@@ -674,6 +698,7 @@ class AiProviderResolver
         array $required,
         string $scope,
         int $poolSize,
+        ?int $round = null,
     ): void {
         $rows = $this->diagnostics();
 
@@ -698,7 +723,31 @@ class AiProviderResolver
             'required' => $required,
             'eligible' => 0,
             'pool' => $poolSize,
+            'round' => $round,
         ]);
+
+        Cache::put(self::DIAGNOSTICS_KEY, array_slice($rows, 0, 20), 3600);
+    }
+
+    /**
+     * Record a whole-turn summary, in the same list and shape as a provider row.
+     *
+     * This is the row that answers "why did five successful provider answers end
+     * in an error?": it says how many tool batches ran, which tools, whether the
+     * turn crossed from public to private and why, whether the final provider
+     * response was consumed, and how the turn ended. It carries counts and safe
+     * labels only — never a prompt, an argument, a tool body or a credential.
+     *
+     * @param  array<string, mixed>  $summary
+     */
+    public function recordTurn(array $summary): void
+    {
+        $rows = $this->diagnostics();
+
+        array_unshift($rows, array_merge([
+            'at' => now()->timestamp,
+            'outcome' => 'turn',
+        ], $summary));
 
         Cache::put(self::DIAGNOSTICS_KEY, array_slice($rows, 0, 20), 3600);
     }

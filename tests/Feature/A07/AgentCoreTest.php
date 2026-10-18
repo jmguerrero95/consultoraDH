@@ -23,6 +23,7 @@ use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiTaskRouter;
 use App\Services\Ai\AiToolDeadline;
+use App\Services\Ai\AiTurnFailed;
 use App\Services\Ai\Net\DnsResolver;
 use App\Services\Ai\Tools\SystemStatsTool;
 use App\Services\Ai\Tools\WebFetchTool;
@@ -30,6 +31,7 @@ use App\Services\Ai\Tools\WebSearchTool;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -1078,5 +1080,257 @@ final class AgentCoreTest extends TestCase
         );
         $this->assertContains('receivables_summary', $this->toolNames($sent[1][0]), 'Discovery put it on the wire.');
         $this->assertContains('receivables_summary', array_column($result['tools'], 'tool'));
+    }
+
+    // ------------------------------------------------- T02: the whole research turn
+
+    /**
+     * A tool-heavy turn must deliver the answer that follows its last permitted
+     * batch (A07-R5-R1, the T02 defect).
+     *
+     * With four permitted batches and a fifth response in hand, the loop used to
+     * end before reading it, so five correct provider answers ended in
+     * "the assistant could not answer". The response after the last batch is the
+     * answer and is consumed, not discarded.
+     */
+    public function test_t02_a_text_response_after_the_last_tool_batch_is_delivered(): void
+    {
+        config([
+            'ai.tool_max_rounds' => 4,
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio uno', 'max_results' => 5], 'c1'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio dos', 'max_results' => 5], 'c2'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio tres', 'max_results' => 5], 'c3'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio cuatro', 'max_results' => 5], 'c4'))
+                ->push($this->textBody('Las baterías de sodio avanzan.')),
+            'https://search.test/*' => Http::response(['results' => [[
+                'title' => 'Baterías de sodio',
+                'url' => 'https://energia.test/nota/123456789',
+                'content' => 'Avance reciente.',
+            ]]]),
+        ]);
+
+        $conversation = $this->conversation();
+
+        $result = app(AiAssistantService::class)->ask(
+            $conversation,
+            'Organiza un panorama general del estado del negocio',
+            $this->user,
+        );
+
+        $this->assertSame('Las baterías de sodio avanzan.', $result['reply']);
+
+        $webSearches = array_filter(
+            array_column($result['tools'], 'tool'),
+            static fn (string $tool): bool => $tool === 'web_search',
+        );
+        $this->assertCount(4, $webSearches, 'All four permitted batches ran.');
+
+        // Four batch rounds plus the answer after the fourth.
+        $this->assertCount(5, $this->sentTo(Http::recorded(), self::PROVIDER_URL));
+    }
+
+    /**
+     * A fifth tool request that would exceed the limit is not executed; the turn
+     * answers from the evidence it already gathered with one bounded, tool-free
+     * synthesis.
+     */
+    public function test_t02_a_tool_request_beyond_the_limit_is_not_executed(): void
+    {
+        config([
+            'ai.tool_max_rounds' => 4,
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio uno', 'max_results' => 5], 'c1'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio dos', 'max_results' => 5], 'c2'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio tres', 'max_results' => 5], 'c3'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio cuatro', 'max_results' => 5], 'c4'))
+                // A fifth tool request: beyond the limit, must not run.
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio cinco', 'max_results' => 5], 'c5'))
+                // The bounded, tool-free synthesis.
+                ->push($this->textBody('Con lo reunido: las baterías de sodio avanzan.')),
+            'https://search.test/*' => Http::response(['results' => [[
+                'title' => 'Baterías de sodio',
+                'url' => 'https://energia.test/nota/123456789',
+                'content' => 'Avance reciente.',
+            ]]]),
+        ]);
+
+        $conversation = $this->conversation();
+
+        $result = app(AiAssistantService::class)->ask(
+            $conversation,
+            'Organiza un panorama general del estado del negocio',
+            $this->user,
+        );
+
+        $this->assertSame('Con lo reunido: las baterías de sodio avanzan.', $result['reply']);
+
+        $searchCalls = Http::recorded()->filter(
+            static fn (array $pair): bool => str_starts_with($pair[0]->url(), 'https://search.test'),
+        );
+        $this->assertCount(4, $searchCalls, 'The fifth tool request must not be run.');
+
+        $providerCalls = $this->sentTo(Http::recorded(), self::PROVIDER_URL);
+        $this->assertCount(6, $providerCalls, 'Four batches, the pending response and one synthesis.');
+        $this->assertSame([], $this->toolNames($providerCalls[5]), 'The synthesis offers no tool, so no batch can start.');
+    }
+
+    /**
+     * A public search result that merely contains a long number is not one of our
+     * records, so it must not promote the turn to private and exclude the
+     * independent training-tier provider (the T02 classification defect).
+     */
+    public function test_t02_a_public_search_result_with_a_long_number_is_not_client_data(): void
+    {
+        $this->twoProviders();
+
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake([
+            self::PUBLIC_URL => Http::sequence()
+                ->push($this->toolCallBody('web_search', ['query' => 'baterias de sodio', 'max_results' => 5], 'c1'))
+                ->push($this->textBody('Las baterías de sodio avanzan.')),
+            self::PRIVATE_URL => Http::response($this->textBody('No debería llegar aquí.')),
+            'https://search.test/*' => Http::response(['results' => [[
+                'title' => 'Baterías de sodio',
+                'url' => 'https://energia.test/articulo/123456789',
+                'content' => 'El costo bajó a 123456789 pesos por kWh.',
+            ]]]),
+        ]);
+
+        $conversation = $this->conversation();
+
+        $result = app(AiAssistantService::class)->ask(
+            $conversation,
+            'Organiza un panorama general del estado del negocio',
+            $this->user,
+        );
+
+        $this->assertSame('Las baterías de sodio avanzan.', $result['reply']);
+
+        $sent = Http::recorded();
+        $this->assertCount(2, $this->sentTo($sent, self::PUBLIC_URL), 'Both rounds stay on the public provider.');
+        $this->assertCount(0, $this->sentTo($sent, self::PRIVATE_URL), 'A number in a public article is not a client record.');
+        $this->assertFalse((bool) $conversation->fresh()->contains_client_data);
+    }
+
+    /**
+     * A turn that exhausts its tool batches must explain that in its diagnostic —
+     * the round limit, not a quota wall — and must not present the failed turn as
+     * a completed answer.
+     */
+    public function test_t02_a_turn_that_exhausts_its_batches_reports_the_real_cause(): void
+    {
+        config([
+            'ai.tool_max_rounds' => 4,
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Cache::forget('ai.diagnostics.recent');
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio uno', 'max_results' => 5], 'c1'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio dos', 'max_results' => 5], 'c2'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio tres', 'max_results' => 5], 'c3'))
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio cuatro', 'max_results' => 5], 'c4'))
+                // The fifth response asks for yet another tool.
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio cinco', 'max_results' => 5], 'c5'))
+                // The tool-free synthesis cannot answer without tools here, so the
+                // turn fails — but the diagnostic must say why.
+                ->push($this->toolCallBody('web_search', ['query' => 'sodio seis', 'max_results' => 5], 'c6')),
+            'https://search.test/*' => Http::response(['results' => []]),
+        ]);
+
+        $conversation = $this->conversation();
+
+        try {
+            app(AiAssistantService::class)->ask(
+                $conversation,
+                'Organiza un panorama general del estado del negocio',
+                $this->user,
+            );
+            $this->fail('A turn that never answered must fail rather than fabricate one.');
+        } catch (AiTurnFailed $e) {
+            $this->assertStringContainsString('rounds', strtolower($e->getMessage()));
+        }
+
+        $rows = Cache::get('ai.diagnostics.recent', []);
+        $turnRow = null;
+
+        foreach ($rows as $row) {
+            if (($row['outcome'] ?? null) === 'turn') {
+                $turnRow = $row;
+                break;
+            }
+        }
+
+        $this->assertNotNull($turnRow, 'The turn must leave a summary that explains its result.');
+        $this->assertSame('failed', $turnRow['result']);
+        $this->assertSame('round_limit', $turnRow['ended_by']);
+        $this->assertTrue($turnRow['pending']);
+        $this->assertFalse($turnRow['processed']);
+        $this->assertSame(4, $turnRow['round_limit']);
+        $this->assertContains('web_search', $turnRow['tools']);
+
+        // Nothing was rate limited: no row may claim a quota wall.
+        foreach ($rows as $row) {
+            if (($row['outcome'] ?? null) === 'fail') {
+                $this->assertNotSame('quota', $row['scope'] ?? null);
+            }
+        }
+    }
+
+    /**
+     * The same search asked twice in one turn runs once: the second result is the
+     * one already in the context, not a second call to the engine.
+     */
+    public function test_t02_a_repeated_search_in_one_turn_is_not_run_twice(): void
+    {
+        config([
+            'ai.web_search.enabled' => true,
+            'ai.web_search.base_url' => 'https://search.test',
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('web_search', ['query' => 'baterias de sodio', 'max_results' => 5], 'c1'))
+                ->push($this->toolCallBody('web_search', ['query' => 'baterias de sodio', 'max_results' => 5], 'c2'))
+                ->push($this->textBody('Las baterías de sodio avanzan.')),
+            'https://search.test/*' => Http::response(['results' => [[
+                'title' => 'Baterías de sodio',
+                'url' => 'https://energia.test/nota/1',
+                'content' => 'Avance.',
+            ]]]),
+        ]);
+
+        $conversation = $this->conversation();
+
+        $result = app(AiAssistantService::class)->ask(
+            $conversation,
+            'Organiza un panorama general del estado del negocio',
+            $this->user,
+        );
+
+        $this->assertSame('Las baterías de sodio avanzan.', $result['reply']);
+
+        $searchCalls = Http::recorded()->filter(
+            static fn (array $pair): bool => str_starts_with($pair[0]->url(), 'https://search.test'),
+        );
+        $this->assertCount(1, $searchCalls, 'The same search must not run twice in one turn.');
     }
 }

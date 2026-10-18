@@ -31,6 +31,22 @@ final readonly class AiMessage
     public const ROLE_TOOL = 'tool';
 
     /**
+     * Provenance: the turn's own text — what the person typed, what the model
+     * said, or the private context the turn retrieved. Shape-based checks (an
+     * email, a long identifier run) apply.
+     */
+    public const PROVENANCE_TURN = 'turn';
+
+    /**
+     * Provenance: a public web block the server fetched for the turn.
+     *
+     * Its provenance is public, so a long number inside a search result — an
+     * article id, a URL fragment, a statistic — is not one of our records and
+     * must not, by itself, promote the turn to private (A07-R5-R1).
+     */
+    public const PROVENANCE_PUBLIC_WEB = 'public_web';
+
+    /**
      * @param  array<string, mixed>|null  $toolCalls
      */
     private function __construct(
@@ -42,6 +58,8 @@ final readonly class AiMessage
         public ?string $toolCallId = null,
         /** Set when the assistant wants to call tools. */
         public ?array $toolCalls = null,
+        /** Where this text came from, for provenance-aware privacy checks. */
+        public string $provenance = self::PROVENANCE_TURN,
     ) {}
 
     public static function system(string $content): self
@@ -52,6 +70,18 @@ final readonly class AiMessage
     public static function user(string $content): self
     {
         return new self(self::ROLE_USER, $content);
+    }
+
+    /**
+     * A public web block the server fetched for the turn.
+     *
+     * Delivered in the user position so the model reads it as material about the
+     * question, but tagged with public provenance so a privacy check does not
+     * mistake a number in a public article for a record of ours.
+     */
+    public static function publicWebContext(string $content): self
+    {
+        return new self(self::ROLE_USER, $content, provenance: self::PROVENANCE_PUBLIC_WEB);
     }
 
     /**
