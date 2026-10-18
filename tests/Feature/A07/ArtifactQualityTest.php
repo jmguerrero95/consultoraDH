@@ -12,6 +12,7 @@ use App\Services\Ai\AiTurnContext;
 use App\Services\Ai\Tools\CreateArtifactTool;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Storage;
+use Smalot\PdfParser\Parser;
 use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 
@@ -130,6 +131,31 @@ final class ArtifactQualityTest extends TestCase
         $this->assertStringNotContainsString('---', $text, 'A rule is format, not the literal text "---".');
 
         // The title is printed once, not twice.
+        $this->assertSame(1, substr_count($text, 'Informe de cartera'));
+    }
+
+    public function test_a_pdf_opens_and_carries_its_sections_and_data(): void
+    {
+        $result = $this->create([
+            'format' => 'pdf',
+            'filename' => 'informe-cartera',
+            'title' => 'Informe de cartera',
+            'content' => "# Informe de cartera\n\nSección de gestión de deudas.\n\n| Categoría | Obligación |\n| --- | --- |\n| A | 300000 |\n",
+        ]);
+
+        $artifact = AiArtifact::query()->findOrFail($result['artifact_id']);
+        $bytes = Storage::disk('local')->get($artifact->storage_path);
+
+        $this->assertStringStartsWith('%PDF-', $bytes, 'The artifact must be a real PDF, not an HTML page.');
+
+        $parser = new Parser;
+        $text = $parser->parseFile(Storage::disk('local')->path($artifact->storage_path))->getText();
+
+        $this->assertStringContainsString('Informe de cartera', $text);
+        $this->assertStringContainsString('Sección de gestión de deudas', $text);
+        $this->assertStringContainsString('300000', $text);
+
+        // The duplicate leading heading was stripped: the title is printed once.
         $this->assertSame(1, substr_count($text, 'Informe de cartera'));
     }
 
