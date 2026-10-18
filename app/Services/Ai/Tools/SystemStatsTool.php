@@ -53,7 +53,9 @@ final class SystemStatsTool extends AbstractAiTool
     {
         return 'Cifras agregadas del sistema: total de clientes, activos, inactivos, empresas, '
             .'clientes con deuda y clientes con pagos parciales, con fecha de corte. Usa datos reales '
-            .'de las tablas. Úsala para preguntas de conteo o estadísticas administrativas.';
+            .'de las tablas. Úsala para preguntas de conteo o estadísticas administrativas. '
+            .'Para datos ACTUALES no pases "as_of": se usa la fecha de hoy del servidor. Pasa "as_of" '
+            .'solo cuando el usuario pida explícitamente un corte histórico (por ejemplo «al 2025-12-31»).';
     }
 
     public function parameters(): array
@@ -63,7 +65,7 @@ final class SystemStatsTool extends AbstractAiTool
             'properties' => [
                 'as_of' => [
                     'type' => 'string',
-                    'description' => 'Fecha de corte en formato YYYY-MM-DD. Por defecto, hoy.',
+                    'description' => 'Fecha de corte YYYY-MM-DD, SOLO si el usuario pidió un corte histórico explícito. Si se omite, se usa la fecha de hoy del servidor.',
                 ],
             ],
             'required' => [],
@@ -104,6 +106,12 @@ final class SystemStatsTool extends AbstractAiTool
 
         $payload = [
             'as_of' => ($asOf ?? now())->toDateString(),
+            // Where the cut-off came from. An explicit date that the *user* asked
+            // for is a real historical question; with none, the date is today on
+            // the server, not a date the model invented. Making the origin
+            // explicit is what stops a silently relabelled figure: a caller (and
+            // a test) can tell a requested reconstruction from "now".
+            'as_of_source' => $historical ? 'explicit' : 'server_today',
             'clients' => [
                 'total' => Client::query()->count(),
                 'active' => $counts['active_clients'],

@@ -25,11 +25,18 @@ export interface AiConversationSummary {
 export type AiMessageRole = 'user' | 'assistant' | 'tool';
 
 export interface AiMessagePayload {
+    /** Present on the history endpoint; the id a generated file points at. */
+    id?: number;
     role: AiMessageRole;
     content: string;
     provider: string | null;
     model: string | null;
     created_at: string | null;
+    /**
+     * Files this reply produced, filled in by the interface from the history
+     * endpoint's flat artifact list. Not sent by the server on the message.
+     */
+    artifacts?: AiArtifact[];
 }
 
 /**
@@ -64,6 +71,40 @@ export interface AiArtifact {
     size_bytes: number;
     download_url: string;
     expires_at: string | null;
+    /**
+     * The reply this file was generated in, so it can be rendered beside that
+     * answer rather than piled at the end of the transcript. `null` for a file
+     * with no reply to sit next to (a background task, or a proposal-only turn).
+     */
+    message_id?: number | null;
+}
+
+/**
+ * Pair generated files with the reply they were generated in.
+ *
+ * One place, used by the widget and by the full page, so the two cannot drift:
+ * both render a file beside the message whose id it names. Files with no message
+ * — a background task, or a turn that produced no prose — come back separately as
+ * `orphan`, for the collapsed secondary section.
+ */
+export function groupArtifactsByMessage(artifacts: AiArtifact[]): {
+    byMessage: Map<number, AiArtifact[]>;
+    orphan: AiArtifact[];
+} {
+    const byMessage = new Map<number, AiArtifact[]>();
+    const orphan: AiArtifact[] = [];
+
+    for (const artifact of artifacts) {
+        if (typeof artifact.message_id === 'number') {
+            const list = byMessage.get(artifact.message_id) ?? [];
+            list.push(artifact);
+            byMessage.set(artifact.message_id, list);
+        } else {
+            orphan.push(artifact);
+        }
+    }
+
+    return { byMessage, orphan };
 }
 
 /**

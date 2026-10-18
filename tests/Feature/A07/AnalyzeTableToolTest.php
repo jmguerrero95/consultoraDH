@@ -55,7 +55,7 @@ final class AnalyzeTableToolTest extends TestCase
         ]);
     }
 
-    private function attachCsv(string $contents, string $name = 'cartera.csv'): AiAttachment
+    private function attachCsv(string $contents, string $name = 'cartera.csv', ?AiConversation $conversation = null): AiAttachment
     {
         $path = tempnam(sys_get_temp_dir(), 'cdh-csv').'.csv';
         file_put_contents($path, $contents);
@@ -63,7 +63,7 @@ final class AnalyzeTableToolTest extends TestCase
         $attachment = app(DocumentIngestor::class)->ingest(
             new UploadedFile($path, $name, 'text/csv', null, true),
             $this->user,
-            $this->conversation->id,
+            ($conversation ?? $this->conversation)->id,
         );
 
         @unlink($path);
@@ -153,17 +153,51 @@ final class AnalyzeTableToolTest extends TestCase
         $this->assertSame(700000, $result['computed']['totals']['Saldo pendiente (calculado)']);
     }
 
-    public function test_it_refuses_to_reach_an_attachment_from_another_conversation(): void
+    public function test_a_guessed_attachment_id_uses_this_conversations_table(): void
+    {
+        $attachment = $this->attachCsv(self::CARTERA);
+
+        app(AiTurnContext::class)->set($this->conversation->id, 'turn-1');
+
+        // The model invents an id that does not exist. The id is a hint, not an
+        // authorization, so the tool analyses this conversation's table anyway
+        // rather than telling the person their own file is not there.
+        $result = $this->runTool(['attachment_id' => 999999]);
+
+        $this->assertSame((int) $attachment->id, $result['attachment_id']);
+        $this->assertSame(700000, $result['computed']['totals']['Saldo pendiente (calculado)']);
+    }
+
+    public function test_an_id_from_another_conversation_never_reaches_that_file(): void
     {
         $other = AiConversation::query()->create(['user_id' => $this->user->id, 'title' => 'Otra']);
-        $attachment = $this->attachCsv(self::CARTERA);
+
+        $mine = $this->attachCsv(self::CARTERA);
+        $theirs = $this->attachCsv("Categoria,Obligacion,Pagado\nZ,1000,1000\n", 'otra.csv', $other);
 
         app(AiTurnContext::class)->set($other->id, 'turn-2');
 
+        // Naming the first conversation's attachment from here cannot reach it:
+        // the scope is the conversation, so the tool reads the table that does
+        // belong here.
+        $result = $this->runTool(['attachment_id' => $mine->id]);
+
+        $this->assertSame((int) $theirs->id, $result['attachment_id']);
+        $this->assertSame(0, $result['computed']['totals']['Saldo pendiente (calculado)']);
+    }
+
+    public function test_it_refuses_when_the_conversation_has_no_table(): void
+    {
+        $attachment = $this->attachCsv(self::CARTERA);
+
+        $empty = AiConversation::query()->create(['user_id' => $this->user->id, 'title' => 'Vacía']);
+
+        app(AiTurnContext::class)->set($empty->id, 'turn-3');
+
         $this->expectException(AiToolRejected::class);
 
-        // The attachment belongs to `$this->conversation`; asking from `$other`
-        // must not find it.
+        // Nothing to fall back to in this conversation, and the id points at a
+        // file that is not here.
         $this->runTool(['attachment_id' => $attachment->id]);
     }
 

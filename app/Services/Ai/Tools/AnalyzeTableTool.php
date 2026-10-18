@@ -69,7 +69,8 @@ final class AnalyzeTableTool extends AbstractAiTool
             'properties' => [
                 'attachment_id' => [
                     'type' => 'integer',
-                    'description' => 'Adjunto a analizar. Si se omite, se usa la tabla adjunta más reciente de esta conversación.',
+                    'description' => 'Adjunto a analizar. Omítelo normalmente: se usa la tabla adjunta más reciente de esta conversación. '
+                        .'Un id que no corresponda a un adjunto de esta conversación no da acceso a otro archivo; se usa la tabla más reciente.',
                 ],
                 'export' => [
                     'type' => 'string',
@@ -200,18 +201,27 @@ final class AnalyzeTableTool extends AbstractAiTool
 
     private function resolveAttachment(?int $id, User $user, int $conversationId): AiAttachment
     {
-        $query = AiAttachment::query()
+        // The scope is this person and this conversation, always. `attachment_id`
+        // is only a *hint* the model can add, never an authorization: whatever it
+        // sends, the query cannot leave the conversation, so a guessed or stale
+        // id can fail to match but can never reach somebody else's file.
+        $scoped = AiAttachment::query()
             ->where('user_id', $user->id)
             ->where('ai_conversation_id', $conversationId)
             ->whereIn('extension', self::TABULAR_EXTENSIONS);
 
-        if ($id !== null) {
-            $query->whereKey($id);
-        } else {
-            $query->orderByDesc('id');
-        }
+        $attachment = $id !== null
+            ? (clone $scoped)->whereKey($id)->first()
+            : null;
 
-        $attachment = $query->first();
+        // When the hint does not resolve inside the conversation, fall back to
+        // the newest table rather than refusing. A model that invented an id
+        // should still get the analysis it asked for — the result names the file
+        // it actually read, so nothing is hidden — and failing here is what a
+        // real turn did: the tool was called with an id that did not exist and
+        // the person got "no hay ninguna tabla adjunta" about a table they had
+        // just attached.
+        $attachment ??= (clone $scoped)->orderByDesc('id')->first();
 
         if ($attachment === null) {
             throw new AiToolRejected('No hay ninguna tabla (CSV o Excel) adjunta a esta conversación para analizar.');

@@ -5,7 +5,7 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import SafeMarkdown from '@/components/ui/SafeMarkdown.vue';
 import ArtifactCard from '@/components/assistant/ArtifactCard.vue';
-import { ai } from '@/services/ai';
+import { ai, groupArtifactsByMessage } from '@/services/ai';
 import { useAuthStore } from '@/stores/auth';
 
 import type { AiArtifact, AiProposal, AiStatusPayload, AiToolResult } from '@/services/ai';
@@ -57,6 +57,8 @@ const statusLoaded = ref(false);
 
 interface ChatMessage {
     id: number;
+    /** The server's own message id, when the message came from history. */
+    serverId?: number;
     role: 'user' | 'assistant';
     content: string;
     model: string | null;
@@ -64,13 +66,26 @@ interface ChatMessage {
     failed?: boolean;
     /** Read tools that were consulted to produce this answer. */
     tools?: AiToolResult[];
+    /**
+     * Files this answer produced.
+     *
+     * Kept on the message rather than in one list at the bottom: a PDF belongs
+     * beside the reply that generated it, not three questions further down.
+     */
+    artifacts?: AiArtifact[];
 }
 
 let messageSeq = 0;
 
 const messages = ref<ChatMessage[]>([]);
 const proposals = ref<AiProposal[]>([]);
-/** Files this thread has produced: the PDF, the spreadsheet, the report. */
+/**
+ * Files this thread produced that have no reply to sit beside.
+ *
+ * A background task's file, or one from a turn that only proposed something.
+ * They are shown in a secondary, collapsed section rather than mixed into the
+ * transcript, because there is no answer they belong to.
+ */
 const artifacts = ref<AiArtifact[]>([]);
 const draft = ref('');
 const sending = ref(false);
@@ -99,7 +114,53 @@ interface Attachment {
 
 const attachments = ref<Attachment[]>([]);
 const attachmentTimers = new Map<number, number>();
+/** Local, negative ids for files the server has not named yet. */
+let localAttachmentSeq = -1;
 let restored = false;
+
+/**
+ * Attachments that have not finished ingesting.
+ *
+ * While any of them is in flight the turn waits: the file is not readable yet,
+ * and an answer produced from a half-ingested spreadsheet reads as a wrong
+ * answer about the right file.
+ */
+const pendingAttachments = computed(() =>
+    attachments.value.filter((attachment) => !isFinishedStatus(attachment.status)),
+);
+
+/** A short, factual phrase for an attachment chip: Selected/Uploading/Processing/Ready/Error. */
+function attachmentStateLabel(attachment: Attachment): string {
+    if (attachment.status === 'selected') {
+        return 'Seleccionado';
+    }
+
+    if (attachment.status === 'failed') {
+        return 'Error';
+    }
+
+    if (isFinishedStatus(attachment.status)) {
+        return 'Listo';
+    }
+
+    if (attachment.status === 'queued' || attachment.status === 'pending') {
+        return `Subiendo ${attachment.progress}%`;
+    }
+
+    return `Procesando ${attachment.progress}%`;
+}
+
+function attachmentStateClass(attachment: Attachment): string {
+    if (attachment.status === 'failed') {
+        return 'cdh-assistant__chip--failed';
+    }
+
+    if (isFinishedStatus(attachment.status)) {
+        return 'cdh-assistant__chip--ready';
+    }
+
+    return 'cdh-assistant__chip--busy';
+}
 
 /**
  * BUG-019. The launcher is no longer gated on a successful status call. It used
@@ -252,18 +313,24 @@ async function restoreConversation(): Promise<void> {
     try {
         const history = await ai.history(stored);
 
+        const { byMessage, orphan } = groupArtifactsByMessage(history.artifacts ?? []);
+
         messages.value = history.messages
             .filter((message) => message.role === 'user' || message.role === 'assistant')
             .map((message) => ({
                 id: ++messageSeq,
+                serverId: message.id,
                 role: message.role as 'user' | 'assistant',
                 content: message.content,
                 model: message.model,
+                // The files this reply produced travel with it, so a reload shows
+                // the report where it was asked for rather than at the bottom.
+                artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
             }));
 
-        // The files this thread produced travel with it, so a reload shows the
-        // report where it was asked for rather than in a separate panel.
-        artifacts.value = history.artifacts ?? [];
+        // Files with no reply to sit beside (a task's output, or a proposal-only
+        // turn) go to the secondary section, never into the transcript.
+        artifacts.value = orphan;
 
         // And the files the person attached. Restored from the server, not from
         // memory: a thread that was given a spreadsheet must still show it after
@@ -296,6 +363,15 @@ async function send(retryText?: string): Promise<void> {
         return;
     }
 
+    // A file that is still being ingested cannot be analysed yet: asking now
+    // would answer from a spreadsheet the server has not finished reading, and
+    // the answer would look like a wrong one about the right file.
+    if (pendingAttachments.value.length > 0) {
+        error.value = 'Espera a que el archivo termine de procesarse antes de analizarlo.';
+
+        return;
+    }
+
     sending.value = true;
     error.value = null;
     confirmation.value = null;
@@ -318,18 +394,33 @@ async function send(retryText?: string): Promise<void> {
         conversationId.value = turn.conversation_id;
         persistConversation();
         proposals.value = turn.proposals;
-        mergeArtifacts(turn.artifacts ?? []);
+
+        const turnArtifacts = turn.artifacts ?? [];
 
         // Only append when the server actually produced text: an empty bubble is
         // the failure this widget must not pretend is an answer.
         if (turn.reply && turn.reply.trim() !== '') {
             messages.value = [
                 ...messages.value,
-                { id: ++messageSeq, role: 'assistant', content: turn.reply, model: turn.model, tools: turn.tools ?? [] },
+                {
+                    id: ++messageSeq,
+                    role: 'assistant',
+                    content: turn.reply,
+                    model: turn.model,
+                    tools: turn.tools ?? [],
+                    // The files this answer produced sit with it, not at the end
+                    // of the thread. On reload the server says the same thing via
+                    // `message_id`; here the reply is the one being appended.
+                    artifacts: turnArtifacts,
+                },
             ];
-        } else if (turn.proposals.length === 0 && (turn.artifacts ?? []).length === 0) {
+        } else if (turn.proposals.length === 0 && turnArtifacts.length === 0) {
             markLastUserFailed();
             error.value = 'El asistente no devolvió una respuesta. Intente reformular la pregunta.';
+        } else if (turnArtifacts.length > 0) {
+            // No prose to sit beside (a proposal-only turn): the files go to the
+            // secondary section rather than pretend an answer produced them.
+            mergeArtifacts(turnArtifacts);
         }
 
         scrollToEnd();
@@ -421,22 +512,43 @@ async function onFileSelected(event: Event): Promise<void> {
 
     error.value = null;
 
+    // The file appears at once, before the request is even sent. "Seleccionado"
+    // is what the person just did; waiting for the server to name the upload
+    // before showing anything would read as the picker having done nothing.
+    const localId = localAttachmentSeq--;
+
+    attachments.value = [
+        ...attachments.value,
+        { id: localId, name: file.name, status: 'selected', progress: 0, error: null },
+    ];
+
+    if (!open.value) {
+        open.value = true;
+    }
+
     try {
         const conversation = await ensureConversation();
         const { task } = await ai.uploadTask(file, conversation);
 
-        attachments.value = [
-            ...attachments.value,
-            { id: task.id, name: task.name ?? file.name, status: task.status, progress: task.progress ?? 0, error: null },
-        ];
-
-        if (!open.value) {
-            open.value = true;
-        }
+        // The server's task replaces the local placeholder, carrying the real id
+        // the polling loop follows.
+        attachments.value = attachments.value.map((attachment) =>
+            attachment.id === localId
+                ? { id: task.id, name: task.name ?? file.name, status: task.status, progress: task.progress ?? 0, error: null }
+                : attachment,
+        );
 
         pollAttachment(task.id);
     } catch (e) {
-        error.value = readError(e, 'No fue posible adjuntar el archivo.');
+        const message = readError(e, 'No fue posible adjuntar el archivo.');
+
+        // The failure belongs to the file that failed, not to the panel: the
+        // chip says so and the loop is never started.
+        attachments.value = attachments.value.map((attachment) =>
+            attachment.id === localId ? { ...attachment, status: 'failed', error: message } : attachment,
+        );
+
+        error.value = message;
     }
 }
 
@@ -724,20 +836,6 @@ watch(open, (value) => {
                     <p>Pregúntame lo que necesites. Puedo consultar la cartera, los clientes y los reportes.</p>
                 </div>
 
-                <div v-if="attachments.length" class="cdh-assistant__attachments">
-                    <div v-for="attachment in attachments" :key="attachment.id" class="cdh-assistant__attachment">
-                        <i class="bi bi-paperclip" aria-hidden="true" />
-                        <span class="cdh-assistant__attachment-name">{{ attachment.name }}</span>
-                        <span v-if="!isFinishedStatus(attachment.status)" class="cdh-assistant__attachment-state">
-                            {{ attachment.progress }}%
-                        </span>
-                        <span v-else-if="attachment.status === 'failed'" class="cdh-assistant__attachment-state cdh-assistant__attachment-state--failed">
-                            No se pudo procesar
-                        </span>
-                        <i v-else class="bi bi-check2-circle cdh-assistant__attachment-ok" aria-hidden="true" />
-                    </div>
-                </div>
-
                 <div
                     v-for="message in messages"
                     :key="message.id"
@@ -763,6 +861,12 @@ watch(open, (value) => {
                         <span class="cdh-assistant__tools-title">Datos consultados:</span>
                         <span v-for="tool in message.tools" :key="tool.tool" class="cdh-assistant__tool-chip">{{ tool.tool }}</span>
                     </div>
+                    <div
+                        v-if="message.role === 'assistant' && message.artifacts && message.artifacts.length"
+                        class="cdh-assistant__message-artifacts"
+                    >
+                        <ArtifactCard v-for="artifact in message.artifacts" :key="artifact.id" :artifact="artifact" />
+                    </div>
                 </div>
 
                 <div v-for="proposal in proposals" :key="proposal.id" class="cdh-assistant__proposal">
@@ -782,10 +886,13 @@ watch(open, (value) => {
                     </div>
                 </div>
 
-                <div v-if="artifacts.length" class="cdh-assistant__artifacts">
-                    <p class="cdh-assistant__artifacts-title">Archivos generados</p>
+                <!-- Files with no reply to sit beside — a background task's output,
+                     or a proposal-only turn. Collapsed so the transcript itself
+                     stays chronological, and never mixed into it. -->
+                <details v-if="artifacts.length" class="cdh-assistant__artifacts">
+                    <summary class="cdh-assistant__artifacts-title">Archivos anteriores ({{ artifacts.length }})</summary>
                     <ArtifactCard v-for="artifact in artifacts" :key="artifact.id" :artifact="artifact" />
-                </div>
+                </details>
 
                 <div v-if="sending" class="cdh-assistant__message cdh-assistant__message--assistant">
                     <div class="cdh-assistant__bubble cdh-assistant__bubble--pending">
@@ -797,6 +904,31 @@ watch(open, (value) => {
 
             <AppAlert v-if="confirmation" variant="success" :message="confirmation" class="cdh-assistant__alert" />
             <AppAlert v-if="error" variant="danger" :message="error" class="cdh-assistant__alert" />
+
+            <!-- The files being attached, next to the composer where they were
+                 chosen, each with its own state: Selected, Uploading,
+                 Processing, Ready or Error. While any is still in flight the
+                 turn waits, so an answer is never produced from a half-read
+                 spreadsheet. -->
+            <div v-if="attachments.length" class="cdh-assistant__composer-attachments" data-testid="attachment-chips">
+                <span
+                    v-for="attachment in attachments"
+                    :key="attachment.id"
+                    class="cdh-assistant__chip"
+                    :class="attachmentStateClass(attachment)"
+                    :title="attachment.error ?? attachment.name"
+                >
+                    <i
+                        class="bi"
+                        :class="attachment.status === 'failed'
+                            ? 'bi-exclamation-triangle'
+                            : (isFinishedStatus(attachment.status) ? 'bi-check2-circle' : 'bi-arrow-repeat')"
+                        aria-hidden="true"
+                    />
+                    <span class="cdh-assistant__chip-name">{{ attachment.name }}</span>
+                    <span class="cdh-assistant__chip-state">{{ attachmentStateLabel(attachment) }}</span>
+                </span>
+            </div>
 
             <form class="cdh-assistant__composer" @submit.prevent="send()">
                 <button
@@ -830,7 +962,7 @@ watch(open, (value) => {
                     variant="primary"
                     icon="bi-send"
                     :loading="sending"
-                    :disabled="draft.trim() === ''"
+                    :disabled="draft.trim() === '' || pendingAttachments.length > 0"
                 >
                     <span class="visually-hidden">Enviar</span>
                 </AppButton>
@@ -946,37 +1078,63 @@ watch(open, (value) => {
     font-size: 2rem;
 }
 
-.cdh-assistant__attachments {
+/* Files generated by an answer, shown under it. */
+.cdh-assistant__message-artifacts {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
+    margin-top: 0.35rem;
+    width: 100%;
 }
 
-.cdh-assistant__attachment {
+/* The files being attached, next to the composer. */
+.cdh-assistant__composer-attachments {
     display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-size: 0.78rem;
-    color: var(--cdh-text-muted, #6b7280);
-    background: #fff;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.5rem;
-    padding: 0.35rem 0.55rem;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0 0.75rem 0.4rem;
 }
 
-.cdh-assistant__attachment-name {
-    flex: 1 1 auto;
+.cdh-assistant__chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    max-width: 100%;
+    padding: 0.2rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    color: var(--cdh-text-muted, #6b7280);
+}
+
+.cdh-assistant__chip-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    max-width: 11rem;
 }
 
-.cdh-assistant__attachment-state--failed {
-    color: #b42318;
+.cdh-assistant__chip-state {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
-.cdh-assistant__attachment-ok {
+.cdh-assistant__chip--ready {
+    border-color: #abefc6;
+    background: #ecfdf3;
     color: #067647;
+}
+
+.cdh-assistant__chip--busy {
+    border-color: #d0d5dd;
+    background: #f9fafb;
+}
+
+.cdh-assistant__chip--failed {
+    border-color: #fecdca;
+    background: #fef3f2;
+    color: #b42318;
 }
 
 .cdh-assistant__message {
@@ -1032,6 +1190,7 @@ watch(open, (value) => {
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--cdh-text-muted, #6b7280);
+    cursor: pointer;
 }
 
 .cdh-assistant__meta {

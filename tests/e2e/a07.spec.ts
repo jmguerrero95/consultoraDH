@@ -80,6 +80,14 @@ test.describe('GATE 7: assistant, background work and suggestions', () => {
         // look for it after closing the tab.
         await page.goto('/asistente');
 
+        // The end-to-end stack serves the SPA from the Vite dev server, which
+        // compiles modules on the first request in a fresh browser - the same
+        // reason `playwright.config.ts` raised the global timeout. On the first
+        // journey the shell can still be an empty `#app` when this assertion
+        // starts, so wait for the application to have mounted before looking
+        // inside it. This waits for the product, it does not skip it.
+        await expect(page.getByTestId('task-panel')).toBeVisible({ timeout: 60_000 });
+
         await expect(page.getByTestId('task-row').first()).toBeVisible();
     });
 

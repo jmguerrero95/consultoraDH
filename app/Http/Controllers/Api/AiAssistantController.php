@@ -229,8 +229,11 @@ final class AiAssistantController extends Controller
         $messages = AiMessage::query()
             ->where('ai_conversation_id', $conversation->id)
             ->orderBy('id')
-            ->get(['role', 'content', 'provider', 'model', 'created_at'])
+            ->get(['id', 'role', 'content', 'provider', 'model', 'created_at'])
             ->map(fn ($m): array => [
+                // The id is what an artifact points at, so the interface can put
+                // a generated file beside the reply it was generated in.
+                'id' => $m->id,
                 'role' => $m->role,
                 'content' => $m->content,
                 'provider' => $m->provider,
@@ -288,6 +291,9 @@ final class AiAssistantController extends Controller
                 'size_bytes' => (int) $artifact->size_bytes,
                 'download_url' => route('api.ai.artifacts.download', ['artifact' => $artifact->id]),
                 'expires_at' => $artifact->expires_at?->toDateTimeString(),
+                // The reply this file belongs beside; null for one with no reply
+                // (a background task, or a turn that produced only a proposal).
+                'message_id' => $artifact->message_id !== null ? (int) $artifact->message_id : null,
             ])
             ->all();
     }

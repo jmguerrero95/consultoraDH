@@ -7,6 +7,7 @@ namespace App\Services\Ai;
 use App\Domain\Ai\AiMessage;
 use App\Domain\Ai\AiResponse;
 use App\Domain\Ai\AiToolDefinition;
+use App\Domain\Assistant\Research\ResearchQuality;
 use App\Domain\Documents\DocumentRetriever;
 use App\Models\AiActionProposal;
 use App\Models\AiArtifact;
@@ -212,6 +213,11 @@ final class AiAssistantService
             $this->markConversationPrivate($conversation);
         }
 
+        // Whether this turn is researching the world, decided once and carried
+        // into the loop: it is what lets the turn refuse to stop at "no encontré
+        // nada" while a better query is still affordable.
+        $researchIntent = $this->isResearchTurn($routing);
+
         // One id for the whole user turn, shared by every provider round and by the
         // turn summary, so the diagnostics can be read as one question.
         // (Generated at the top of `runTurn`, where the tools are told about it.)
@@ -231,7 +237,28 @@ final class AiAssistantService
             throw $e;
         }
 
-        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external, $turn);
+        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external, $turn, $researchIntent);
+    }
+
+    /**
+     * Whether this turn is a research one: an answer that depends on public,
+     * external information rather than on our own records.
+     *
+     * Derived from the router's own verdict — a `web` task, or a turn the router
+     * marked as needing the web — and then *held true for the whole turn*, so a
+     * follow-up round that already ran a search keeps the research rules even
+     * though the message it is composing no longer looks like the original
+     * question. A purely internal question is never a research turn.
+     *
+     * @param  array{task: string, web: bool, weather: bool}  $routing
+     */
+    private function isResearchTurn(array $routing): bool
+    {
+        if (($routing['task'] ?? null) === AiTaskRouter::TASK_WEB) {
+            return true;
+        }
+
+        return (bool) ($routing['web'] ?? false) || (bool) ($routing['weather'] ?? false);
     }
 
     /**
@@ -481,7 +508,7 @@ final class AiAssistantService
                 try {
                     $search = $this->registry->executeRead(
                         'web_search',
-                        ['query' => mb_substr($query, 0, 400), 'max_results' => 5],
+                        ['query' => mb_substr(ResearchQuality::searchQuery($query), 0, 400), 'max_results' => 5],
                         $user,
                     );
 
@@ -781,13 +808,16 @@ final class AiAssistantService
      * @param  string|null  $turn  the whole user turn's correlation id, shared by every provider
      *                             round and the turn summary in the diagnostics
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = [], ?string $turn = null): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = [], ?string $turn = null, bool $researchIntent = false): array
     {
         $turn ??= substr(bin2hex(random_bytes(6)), 0, 12);
 
         $proposals = [];
         $toolResults = [];
         $artifacts = [];
+        // The artifact rows linked above, kept so the reply being written can be
+        // stamped on them: a file belongs beside the answer that asked for it.
+        $linkedArtifactIds = [];
         $maxRounds = max(1, (int) config('ai.tool_max_rounds', 4));
         $round = 0;
         $reply = null;
@@ -831,6 +861,16 @@ final class AiAssistantService
         // already been tried. It happens at most once per turn.
         $recoveredFromRefusal = false;
 
+        // Public sources this turn actually retrieved, from the server's prefetch
+        // and from any web_search/web_fetch the model ran. They are what the
+        // research check is judged against — never the model's claim about them.
+        $webSources = $this->webSourcesFromPrefetch($prefetched);
+
+        // Whether the one bounded research correction has already been tried: a
+        // turn that gives up on thin evidence is asked once to search again, and
+        // only once, so a genuinely unanswerable question still ends.
+        $recoveredFromResearch = false;
+
         // The classification is *mutable* across the turn. A turn can begin as a
         // public question, discover a client tool, receive a private record and
         // need one more round to say something about it: at that point the second
@@ -868,6 +908,43 @@ final class AiAssistantService
                         'Sí tienes la herramienta «create_artifact» autorizada: genera el archivo privado '
                         .'(PDF, DOCX, XLSX, CSV, MD o TXT) con el contenido solicitado y entrega el enlace de '
                         .'descarga. No expliques que no puedes; llama a la herramienta ahora.'
+                    );
+
+                    try {
+                        $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                    } catch (AiProviderException $e) {
+                        $this->recordTurnSummary(
+                            $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                            $turnRequiresClientData, $privacyReason, $requiresClientData,
+                            false, false, 'provider_error', 'failed',
+                        );
+
+                        throw $e;
+                    }
+
+                    continue;
+                }
+
+                // A reply that gives up on the search is not an answer when the
+                // evidence it received was thin. This is the T02 defect: one
+                // search, a tangential source, and "no encontré información"
+                // written while the budget still allowed a better query. The
+                // correction is offered once, and only when the recovered
+                // sources are genuinely insufficient — a short research turn
+                // with on-topic sources is never charged an extra round.
+                if (! $recoveredFromResearch
+                    && $researchIntent
+                    && ResearchQuality::admitsInsufficiency($content)
+                    && ! ResearchQuality::sufficiency($question, $webSources)['sufficient']
+                    && $round < $maxRounds
+                    && ! $budget->outOfTime()
+                ) {
+                    $recoveredFromResearch = true;
+                    $round++;
+
+                    $messages[] = AiMessage::assistant($content);
+                    $messages[] = AiMessage::user(
+                        ResearchQuality::reformulationDirective($question, $webSources)
                     );
 
                     try {
@@ -1081,16 +1158,33 @@ final class AiAssistantService
                         ];
 
                         // A generated file belongs to the conversation that asked
-                        // for it. The tool stores it privately and returns the id;
-                        // linking it here is what makes "the PDF I asked for" a
-                        // member of this thread rather than an orphan reachable
-                        // only by whoever happens to hold the id.
-                        if ($toolName === 'create_artifact' && is_array($output) && isset($output['artifact_id'])) {
-                            $artifact = $this->linkArtifact((int) $output['artifact_id'], $conversation);
+                        // for it. Any tool that produces one returns its id, in
+                        // whatever shape it chose; collecting them here — rather
+                        // than naming `create_artifact` — is what keeps an export
+                        // from `analyze_table` in the thread instead of orphaning
+                        // it. Linking validates ownership and refuses to move a
+                        // file that already belongs to another conversation.
+                        foreach ($this->artifactIdsIn($output) as $artifactId) {
+                            // The same file named twice — a repeated call, or a
+                            // tool that both exports and names its export — is one
+                            // card: a document appears once in a thread.
+                            if ($this->artifactAlreadyListed($artifacts, $artifactId)) {
+                                continue;
+                            }
+
+                            $artifact = $this->linkArtifact($artifactId, $conversation);
 
                             if ($artifact !== null) {
                                 $artifacts[] = $artifact;
+                                $linkedArtifactIds[] = $artifactId;
                             }
+                        }
+
+                        // Public web evidence, read from the tool that returned it
+                        // rather than from the model's summary of it, so the
+                        // research check judges what was actually retrieved.
+                        foreach ($this->webSourcesFromTool($toolName, $output) as $source) {
+                            $webSources[] = $source;
                         }
 
                         // Return tool result to model for synthesis
@@ -1232,13 +1326,26 @@ final class AiAssistantService
         ]);
 
         if ($hasReply) {
-            AiMessageModel::query()->create([
+            $assistantMessage = AiMessageModel::query()->create([
                 'ai_conversation_id' => $conversation->id,
                 'role' => AiMessage::ROLE_ASSISTANT,
                 'content' => $reply,
                 'provider' => $provider,
                 'model' => $model,
             ]);
+
+            // The files this reply produced now sit beside it. Stamping happens
+            // here, after the message exists, because the file is written during
+            // the tool loop — before there is any reply to point at. Only files
+            // with no message yet are stamped: a file re-linked from an earlier
+            // turn keeps the reply it was first generated in, so it does not drift
+            // forward every time the model mentions it again.
+            if ($linkedArtifactIds !== []) {
+                AiArtifact::query()
+                    ->whereIn('id', $linkedArtifactIds)
+                    ->whereNull('message_id')
+                    ->update(['message_id' => $assistantMessage->id]);
+            }
         }
 
         // The turn produced a result: record how it ran so a later reader can tell
@@ -1450,6 +1557,136 @@ final class AiAssistantService
     }
 
     /**
+     * Whether an artifact id is already among the turn's files.
+     *
+     * @param  list<array<string, mixed>>  $artifacts
+     */
+    private function artifactAlreadyListed(array $artifacts, int $artifactId): bool
+    {
+        foreach ($artifacts as $artifact) {
+            if ((int) ($artifact['id'] ?? 0) === $artifactId) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Public sources in the server's own prefetch, in the research check's shape.
+     *
+     * @param  list<array{kind: string, source: string, data: array<string, mixed>}>  $prefetched
+     * @return list<array<string, mixed>>
+     */
+    private function webSourcesFromPrefetch(array $prefetched): array
+    {
+        $sources = [];
+
+        foreach ($prefetched as $block) {
+            if (($block['kind'] ?? null) !== 'search') {
+                continue;
+            }
+
+            foreach (($block['data']['results'] ?? []) as $result) {
+                if (is_array($result)) {
+                    $sources[] = $result;
+                }
+            }
+        }
+
+        return $sources;
+    }
+
+    /**
+     * Public sources a web tool returned, in the research check's shape.
+     *
+     * `web_search` returns a list; `web_fetch` returns the one page it read, whose
+     * full text is its evidence. Anything else contributes nothing.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function webSourcesFromTool(string $toolName, mixed $output): array
+    {
+        if (! is_array($output)) {
+            return [];
+        }
+
+        if ($toolName === 'web_search') {
+            $results = [];
+
+            foreach (($output['results'] ?? []) as $result) {
+                if (is_array($result)) {
+                    $results[] = $result;
+                }
+            }
+
+            return $results;
+        }
+
+        if ($toolName === 'web_fetch') {
+            return [[
+                'title' => (string) ($output['title'] ?? ''),
+                'url' => (string) ($output['url'] ?? ''),
+                'domain' => '',
+                'snippet' => (string) ($output['content'] ?? ''),
+            ]];
+        }
+
+        return [];
+    }
+
+    /**
+     * Artifact ids a tool returned, whatever shape it used.
+     *
+     * A tool that produces a private file stores it and returns its id so the
+     * turn can attach it to the conversation. `create_artifact` returns a flat
+     * `artifact_id`; `analyze_table` returns a nested `artifact` object because
+     * it also hands back the verified table. Reading the output generically —
+     * instead of matching the tool by name — is what keeps every producer's
+     * file in the thread. Ownership and conversation are still checked in
+     * `linkArtifact`, so a tool cannot name another user's file.
+     *
+     * @return list<int>
+     */
+    private function artifactIdsIn(mixed $output): array
+    {
+        if (! is_array($output)) {
+            return [];
+        }
+
+        $ids = [];
+
+        $collect = static function (mixed $candidate) use (&$ids): void {
+            if (is_array($candidate) && ! array_is_list($candidate)) {
+                foreach (['artifact_id', 'id'] as $key) {
+                    if (isset($candidate[$key]) && is_numeric($candidate[$key])) {
+                        $ids[] = (int) $candidate[$key];
+
+                        return;
+                    }
+                }
+
+                return;
+            }
+
+            if (is_int($candidate) || (is_string($candidate) && ctype_digit($candidate))) {
+                $ids[] = (int) $candidate;
+            }
+        };
+
+        $collect($output['artifact_id'] ?? null);
+        $collect($output['artifact'] ?? null);
+
+        if (isset($output['artifacts']) && is_array($output['artifacts'])) {
+            foreach ($output['artifacts'] as $entry) {
+                $collect($entry);
+            }
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    /**
      * Attach a generated artifact to the conversation that asked for it.
      *
      * Returns the artifact in the shape the interface renders — a filename, a
@@ -1469,7 +1706,19 @@ final class AiAssistantService
             return null;
         }
 
-        $artifact->forceFill(['conversation_id' => $conversation->id])->save();
+        // A file that already belongs to another thread stays there. A tool
+        // names an id and a confused — or hostile — model could name one from
+        // a conversation that is not this one; adopting it here would move
+        // somebody's document between threads. Only an unassigned artifact is
+        // adopted, and only when its owner is the caller.
+        if ($artifact->conversation_id !== null
+            && (int) $artifact->conversation_id !== (int) $conversation->id) {
+            return null;
+        }
+
+        if ($artifact->conversation_id === null) {
+            $artifact->forceFill(['conversation_id' => $conversation->id])->save();
+        }
 
         return [
             'id' => $artifact->id,
@@ -1619,6 +1868,20 @@ final class AiAssistantService
             '- Diferencia una noticia de una norma vigente. No inventes enlaces: cita solo URLs que aparezcan en',
             '  los resultados. Si las fuentes no bastan, dilo y explica qué falta.',
             '- No uses tu memoria como sustituto de un dato actual cuando existe una herramienta para obtenerlo.',
+            '',
+            'INVESTIGACIÓN (calidad y cobertura):',
+            '- Cuando la petición sea una investigación (varias preguntas en una), sepárala en sus dimensiones y',
+            '  busca cada una con términos concretos. No pegues la pregunta completa en una sola búsqueda.',
+            '- Valora la pertinencia de los resultados: una página que solo menciona una palabra del tema no es',
+            '  evidencia. Si esas fuentes no son pertinentes, reformula con términos más específicos; para temas',
+            '  técnicos, repite también en inglés con language="en" en web_search.',
+            '- Usa web_fetch para leer la fuente más prometedora cuando el fragmento no baste para responder.',
+            '- Contrasta los datos importantes entre al menos dos fuentes cuando sea posible.',
+            '- Solo puedes concluir que "no hay información suficiente" después de haber intentado de verdad:',
+            '  varias formulaciones distintas y, si aplica, una lectura. Si el buscador está caído o devuelve un',
+            '  error, distingue eso de la inexistencia: "no pude consultar el buscador" no es "no existe la',
+            '  información". Explica qué buscaste, qué encontraste y qué quedó sin verificar.',
+            '- Atribuye cada afirmación a la fuente que realmente la contiene. No inventes ni reinterpretes.',
             '',
             'CAPACIDADES:',
             '- Tienes un catálogo de capacidades. Si la tarea necesita algo que no ves entre tus herramientas,',

@@ -16,7 +16,7 @@ import { useAiTasks } from '@/composables/useTasks';
 import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
 import { useRoute } from 'vue-router';
-import { ai } from '@/services/ai';
+import { ai, groupArtifactsByMessage } from '@/services/ai';
 
 import type { AiArtifact, AiAttachmentSummary, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
 import type { AiTaskPayload } from '@/composables/useTasks';
@@ -381,8 +381,18 @@ async function selectConversation(id: number): Promise<void> {
 
     try {
         const payload = await ai.history(id);
-        messages.value = payload.messages;
-        artifacts.value = payload.artifacts ?? [];
+
+        const { byMessage, orphan } = groupArtifactsByMessage(payload.artifacts ?? []);
+
+        messages.value = payload.messages.map((message) => ({
+            ...message,
+            // Files this reply produced, so they render under it rather than at
+            // the foot of the page.
+            artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
+        }));
+
+        // Files with no reply to sit beside go to the collapsed section.
+        artifacts.value = orphan;
         attachments.value = payload.attachments ?? [];
     } catch (e) {
         messages.value = [];
@@ -432,13 +442,25 @@ async function send(): Promise<void> {
         selectedId.value = turn.conversation_id;
         proposals.value = turn.proposals;
         collectSources(turn.tools);
-        mergeArtifacts(turn.artifacts ?? []);
+
+        const turnArtifacts = turn.artifacts ?? [];
 
         if (turn.reply) {
             messages.value = [
                 ...messages.value,
-                { role: 'assistant', content: turn.reply, provider: turn.provider, model: turn.model, created_at: null },
+                {
+                    role: 'assistant',
+                    content: turn.reply,
+                    provider: turn.provider,
+                    model: turn.model,
+                    created_at: null,
+                    // The files this answer produced sit with it.
+                    artifacts: turnArtifacts,
+                },
             ];
+        } else if (turnArtifacts.length > 0) {
+            // No prose to sit beside: the files go to the collapsed section.
+            mergeArtifacts(turnArtifacts);
         }
 
         await loadConversations();
@@ -746,6 +768,14 @@ function formatDate(value: string | null): string {
                                 {{ formatDate(message.created_at) }}
                             </p>
                         </div>
+
+                        <!-- The files this answer produced, right below it. -->
+                        <div
+                            v-if="message.role === 'assistant' && message.artifacts && message.artifacts.length"
+                            class="cdh-ai__message-artifacts"
+                        >
+                            <ArtifactCard v-for="artifact in message.artifacts" :key="artifact.id" :artifact="artifact" />
+                        </div>
                     </div>
 
                     <p v-if="sending" class="cdh-ai__pending">Consultando…</p>
@@ -761,12 +791,13 @@ function formatDate(value: string | null): string {
                     </div>
                 </div>
 
-                <!-- The files this thread produced. A download link here is the
-                     difference between an answer and a proposal to answer. -->
-                <div v-if="artifacts.length > 0" class="cdh-ai__artifacts" data-testid="artifacts">
-                    <h3 class="cdh-ai__artifacts-title">Archivos</h3>
+                <!-- Files with no reply to sit beside — a background task's output,
+                     or a proposal-only turn. Collapsed so the transcript stays the
+                     transcript. -->
+                <details v-if="artifacts.length > 0" class="cdh-ai__artifacts" data-testid="artifacts">
+                    <summary class="cdh-ai__artifacts-title">Archivos anteriores ({{ artifacts.length }})</summary>
                     <ArtifactCard v-for="artifact in artifacts" :key="artifact.id" :artifact="artifact" />
-                </div>
+                </details>
 
                 <!-- Files the person attached. Restored from the server rather
                      than from memory, so a thread that was given a spreadsheet
@@ -785,7 +816,7 @@ function formatDate(value: string | null): string {
 
                 <!-- Background work, kept below the conversation rather than
                      above it, so on a phone the first thing seen is the chat. -->
-                <TaskPanel class="cdh-ai__tasks" :controller="tasks" />
+                <TaskPanel class="cdh-ai__tasks" :controller="tasks" :conversation-id="selectedId" />
 
                 <div v-if="sources.length > 0" class="cdh-ai__sources">
                     <h3 class="cdh-ai__sources-title">Fuentes</h3>
@@ -1019,6 +1050,18 @@ function formatDate(value: string | null): string {
     margin: 0.25rem 0 0;
     font-size: 0.6875rem;
     opacity: 0.75;
+}
+
+/* Files generated by an answer, shown under it. */
+.cdh-ai__message-artifacts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.4rem;
+}
+
+.cdh-ai__artifacts > summary {
+    cursor: pointer;
 }
 
 .cdh-ai__pending {

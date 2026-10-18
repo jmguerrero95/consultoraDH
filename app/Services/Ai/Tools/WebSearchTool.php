@@ -48,9 +48,24 @@ final class WebSearchTool extends AbstractAiTool
         return 'web_search';
     }
 
+    /**
+     * Languages a query may be sent in.
+     *
+     * `es` is the default because the assistant answers in Spanish, but a
+     * technical subject is often documented in English first and Spanish
+     * articles simply restate it. The model may ask for `en` when that would
+     * widen the coverage — and `auto` lets the engine detect the language of
+     * the query itself, which is what an English-language question needs.
+     *
+     * @var list<string>
+     */
+    private const LANGUAGES = ['es', 'en', 'pt', 'auto'];
+
     public function description(): string
     {
-        return 'Búsqueda web informativa con fuentes citadas. Usa un proveedor SearXNG configurable. Devuelve título, URL, dominio, fragmento y fecha cuando está disponible.';
+        return 'Búsqueda web informativa con fuentes citadas. Usa un proveedor SearXNG configurable. Devuelve título, URL, dominio, fragmento y fecha cuando está disponible. '
+            .'Si un tema técnico se documenta primero en inglés, puedes repetir la búsqueda con language="en" para ampliar la cobertura. '
+            .'Reformula con términos concretos cuando una consulta no devuelva resultados pertinentes; nunca mezcles varias preguntas distintas en una sola consulta.';
     }
 
     public function parameters(): array
@@ -58,11 +73,17 @@ final class WebSearchTool extends AbstractAiTool
         return [
             'type' => 'object',
             'properties' => [
-                'query' => ['type' => 'string', 'description' => 'Términos de búsqueda.'],
+                'query' => ['type' => 'string', 'description' => 'Términos de búsqueda, concretos y específicos (no la pregunta completa).'],
                 'max_results' => [
                     'type' => 'integer',
                     'description' => 'Máximo de resultados a devolver (1 a 10).',
                     'default' => 5,
+                ],
+                'language' => [
+                    'type' => 'string',
+                    'enum' => self::LANGUAGES,
+                    'description' => 'Idioma de la búsqueda: "es" (por defecto), "en" para temas técnicos documentados primero en inglés, "pt" o "auto" (detectar).',
+                    'default' => 'es',
                 ],
             ],
             'required' => ['query'],
@@ -83,19 +104,28 @@ final class WebSearchTool extends AbstractAiTool
             throw new AiToolRejected("'max_results' debe ser un entero entre 1 y 10.");
         }
 
+        $language = $arguments['language'] ?? 'es';
+        $language = is_string($language) ? strtolower(trim($language)) : '';
+
+        if (! in_array($language, self::LANGUAGES, true)) {
+            throw new AiToolRejected("'language' debe ser uno de: ".implode(', ', self::LANGUAGES).'.');
+        }
+
         return [
             'query' => $query,
             'max_results' => $maxResults,
+            'language' => $language,
         ];
     }
 
     public function describe(array $arguments): string
     {
         return sprintf(
-            'Buscar en la web: %s (máx. %d resultado%s).',
+            'Buscar en la web: %s (máx. %d resultado%s%s).',
             $arguments['query'],
             $arguments['max_results'],
-            $arguments['max_results'] === 1 ? '' : 's'
+            $arguments['max_results'] === 1 ? '' : 's',
+            ($arguments['language'] ?? 'es') !== 'es' ? ', idioma '.$arguments['language'] : ''
         );
     }
 
@@ -109,6 +139,7 @@ final class WebSearchTool extends AbstractAiTool
 
         $query = $arguments['query'];
         $maxResults = $arguments['max_results'];
+        $language = $arguments['language'] ?? 'es';
 
         // The outbound-query boundary. A search goes to a third party (the
         // engines behind the SearXNG instance), so two questions are asked before
@@ -153,7 +184,7 @@ final class WebSearchTool extends AbstractAiTool
             'q' => $query,
             'format' => 'json',
             'categories' => 'general',
-            'language' => 'es',
+            'language' => $language,
             'safesearch' => 1,
         ];
 
@@ -171,17 +202,31 @@ final class WebSearchTool extends AbstractAiTool
                 ])
                 ->get($url);
         } catch (\Throwable $e) {
-            throw new AiToolRejected('Error de conexión con el proveedor de búsqueda: '.$e->getMessage());
+            // The engine could not be reached. This is the tool failing, not the
+            // subject having no information: the wording says so explicitly, so a
+            // model reading the error cannot report "no existe información" when
+            // the real cause is that nothing was consulted.
+            throw new AiToolRejected(
+                'No se pudo consultar el buscador web (no está disponible: '.$e->getMessage().'). '
+                .'Esto NO significa que la información no exista: la búsqueda no llegó a realizarse.'
+            );
         }
 
         if ($response->failed()) {
-            throw new AiToolRejected('Error en la búsqueda web: '.$response->status().' '.$response->body());
+            throw new AiToolRejected(
+                'El buscador web respondió con un error '.$response->status().', es decir, no está disponible en este momento. '
+                .'Esto NO significa que la información no exista; no se pudo consultar. '
+                .'Intenta con otra formulación y, si el buscador sigue fallando, dilo con esas palabras.'
+            );
         }
 
         $data = $response->json();
 
         if (! is_array($data) || ! isset($data['results'])) {
-            throw new AiToolRejected('Respuesta inválida del proveedor de búsqueda.');
+            throw new AiToolRejected(
+                'El buscador web devolvió una respuesta que no se pudo interpretar; el servicio no está disponible correctamente. '
+                .'Esto NO significa que la información no exista.'
+            );
         }
 
         $results = [];
@@ -238,10 +283,20 @@ final class WebSearchTool extends AbstractAiTool
         // mode this whole tool exists to prevent.
         return [
             'query' => $query,
+            'language' => $language,
             'results' => array_slice($results, 0, $maxResults),
             'source' => 'searxng',
             'total_results' => count($results),
             'found_any' => $results !== [],
+            // The distinction the model must not lose: a search that worked and
+            // found nothing is not the same as an engine that could not be
+            // consulted. This assertion is about the subject being thin, and the
+            // next step is a reformulation, not a claim of non-existence.
+            'note' => $results === []
+                ? 'La búsqueda se ejecutó correctamente pero no devolvió resultados para esta consulta. '
+                    .'No concluyas que la información no existe: reformula con términos más concretos, '
+                    .'nombres propios o, si el tema es técnico, prueba de nuevo con language="en".'
+                : null,
         ];
     }
 }

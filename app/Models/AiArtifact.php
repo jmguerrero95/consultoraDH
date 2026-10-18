@@ -19,6 +19,10 @@ class AiArtifact extends Model
     protected $fillable = [
         'user_id',
         'conversation_id',
+        // The reply it was generated in, so the interface can render it beside
+        // that answer instead of at the end of the transcript. Null when the turn
+        // produced no prose to sit next to.
+        'message_id',
         // Which background task produced it. Listed so a future create() cannot
         // silently drop the link, which is what happened with `ai_task_id` on
         // `ai_attachment`.

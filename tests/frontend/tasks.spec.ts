@@ -231,3 +231,71 @@ describe('TaskPanel', () => {
         expect(wrapper.text()).not.toContain('secret/path');
     });
 });
+
+describe('TaskPanel — el trabajo de esta conversación', () => {
+    it('no mezcla el trabajo de otros hilos', async () => {
+        vi.spyOn(ai, 'tasks').mockResolvedValue({
+            tasks: [
+                task({ id: 1, name: 'de-este-hilo.csv', conversation_id: 7 }),
+                task({ id: 2, name: 'de-otro-hilo.pdf', conversation_id: 8 }),
+            ],
+        });
+
+        const wrapper = mount(TaskPanel, { props: { conversationId: 7 } });
+        await nextTick();
+        await Promise.resolve();
+        await nextTick();
+
+        // This thread's work is on screen.
+        expect(wrapper.get('[data-testid="task-active"]').text()).toContain('de-este-hilo.csv');
+
+        // The other thread's work is not in the visible list...
+        expect(wrapper.find('[data-testid="task-others"]').exists()).toBe(false);
+        expect(wrapper.find('[data-testid="task-active"]').text()).not.toContain('de-otro-hilo.pdf');
+
+        // ...but it is reachable behind an explicit toggle, not deleted.
+        await wrapper.get('[data-testid="task-others-toggle"]').trigger('click');
+
+        expect(wrapper.get('[data-testid="task-others"]').text()).toContain('de-otro-hilo.pdf');
+    });
+
+    it('pliega el historial completado de este hilo', async () => {
+        vi.spyOn(ai, 'tasks').mockResolvedValue({
+            tasks: [
+                task({ id: 1, name: 'en-curso.csv', status: 'running', conversation_id: 7 }),
+                task({ id: 2, name: 'terminado.docx', status: 'succeeded', finished: true, conversation_id: 7 }),
+            ],
+        });
+
+        const wrapper = mount(TaskPanel, { props: { conversationId: 7 } });
+        await nextTick();
+        await Promise.resolve();
+        await nextTick();
+
+        // The running job leads; the completed one is folded into the history.
+        expect(wrapper.get('[data-testid="task-active"]').text()).toContain('en-curso.csv');
+
+        const history = wrapper.get('[data-testid="task-history"]');
+        expect(history.text()).toContain('Trabajos completados');
+        expect(history.text()).toContain('terminado.docx');
+    });
+
+    it('muestra el trabajo terminado cuando no queda nada en curso', async () => {
+        vi.spyOn(ai, 'tasks').mockResolvedValue({
+            tasks: [task({ id: 2, name: 'terminado.docx', status: 'succeeded', finished: true, conversation_id: 7 })],
+        });
+
+        const wrapper = mount(TaskPanel, { props: { conversationId: 7 } });
+        await nextTick();
+        await Promise.resolve();
+        await nextTick();
+
+        // With nothing running, the finished work is the panel's content: it is
+        // shown, not hidden behind a disclosure that would make the panel look
+        // empty to somebody asking whether their job finished.
+        const history = wrapper.get('[data-testid="task-history"]');
+        expect(history.element.tagName.toLowerCase()).not.toBe('details');
+        expect(history.get('[data-testid="task-row"]').text()).toContain('terminado.docx');
+        expect(wrapper.find('[data-testid="task-active"]').exists()).toBe(false);
+    });
+});

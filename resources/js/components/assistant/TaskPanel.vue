@@ -14,6 +14,16 @@
  * A toast disappears. This is a list of things that either happened or did not,
  * and somebody who closed the app for ten minutes needs to find out which.
  *
+ * ## Scope: this thread's work, not every thread's
+ *
+ * The server answers with everything this person has, which is right for "did
+ * my job finish" and wrong for the panel under a conversation: five documents
+ * from three other threads sitting under the one being read is noise, and it
+ * makes a finished job from elsewhere look like an answer to what was just
+ * asked. So the panel shows the current conversation's work, its completed
+ * history folded away, and the other threads behind a toggle that has to be
+ * asked for. Nothing is hidden for good and nothing is deleted.
+ *
  * ## What it deliberately does not do
  *
  * It does not offer a retry button for a failure. A retry here would need the
@@ -21,10 +31,10 @@
  * and until that exists the honest thing is to show the failure and let the
  * person go and do it again deliberately - which does create a new task, visibly.
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
+import TaskRow from '@/components/assistant/TaskRow.vue';
 import { useAiTasks } from '@/composables/useTasks';
-import type { useAiTasks as AiTasksController } from '@/composables/useTasks';
 
 /**
  * Takes the task controller from its parent rather than creating one.
@@ -37,52 +47,42 @@ import type { useAiTasks as AiTasksController } from '@/composables/useTasks';
  *
  * The fallback keeps the component usable on its own, and is what the unit
  * tests drive.
+ *
+ * `conversationId` is the thread the panel belongs to. When it is absent - the
+ * standalone usage, and the page before a conversation exists - no scoping is
+ * applied, which is the panel's original behaviour.
  */
-const props = defineProps<{ controller?: ReturnType<typeof useAiTasks> }>();
+const props = defineProps<{
+    controller?: ReturnType<typeof useAiTasks>;
+    conversationId?: number | null;
+}>();
 
 const own = props.controller === undefined ? useAiTasks() : null;
 
-const { tasks, pending, loading, refresh, cancel } = own ?? (props.controller as NonNullable<typeof props.controller>);
+const { tasks, loading, refresh, cancel } = own ?? (props.controller as NonNullable<typeof props.controller>);
 
-const finished = computed(() => tasks.value.filter((task) => task.finished));
+/** Whether the panel is scoped to one thread at all. */
+const scoped = computed(() => props.conversationId !== undefined && props.conversationId !== null);
 
-function statusLabel(task: { status: string }): string {
-    switch (task.status) {
-        case 'queued':
-            return 'En cola';
-        case 'running':
-            return 'En proceso';
-        case 'succeeded':
-            return 'Listo';
-        case 'failed':
-            return 'Falló';
-        case 'cancelled':
-            return 'Cancelado';
-        default:
-            return task.status;
-    }
-}
+const currentTasks = computed(() =>
+    scoped.value ? tasks.value.filter((task) => task.conversation_id === props.conversationId) : tasks.value,
+);
 
-/** Only a queued task can be cancelled; anything else is past that point. */
-function canCancel(task: { status: string }): boolean {
-    return task.status === 'queued';
-}
+/** Work still running in this thread: the reason the panel is on screen. */
+const active = computed(() => currentTasks.value.filter((task) => !task.finished));
 
-function resultSummary(task: { result: Record<string, unknown> | null }): string | null {
-    const result = task.result;
+/** Work that already happened in this thread, folded away. */
+const finished = computed(() => currentTasks.value.filter((task) => task.finished));
 
-    if (!result) {
-        return null;
-    }
+/** Work in other threads, shown only when asked for. */
+const otherThreads = computed(() =>
+    scoped.value ? tasks.value.filter((task) => task.conversation_id !== props.conversationId) : [],
+);
 
-    if (typeof result.chunks === 'number' && typeof result.characters === 'number') {
-        // Grouped the Colombian way, like every other figure in the assistant.
-        // A raw `45012` next to a `$45.000.000` elsewhere on the same screen
-        // reads as a different quantity to anybody who has seen either before.
-        return `${result.chunks} fragmentos · ${result.characters.toLocaleString('es-CO')} caracteres`;
-    }
+const showOtherThreads = ref(false);
 
-    return null;
+function onCancel(id: number): void {
+    void cancel(id);
 }
 </script>
 
@@ -102,65 +102,54 @@ function resultSummary(task: { result: Record<string, unknown> | null }): string
             </button>
         </header>
 
-        <p v-if="tasks.length === 0" class="text-sm text-slate-500" data-testid="task-empty">
+        <p v-if="currentTasks.length === 0" class="text-sm text-slate-500" data-testid="task-empty">
             No hay trabajos en curso.
         </p>
 
-        <ul v-else class="space-y-3">
-            <li
-                v-for="task in tasks"
-                :key="task.id"
-                class="rounded border border-slate-200 p-3"
-                data-testid="task-row"
-            >
-                <div class="flex items-baseline justify-between gap-2">
-                    <span class="truncate text-sm font-medium text-slate-800" data-testid="task-name">
-                        {{ task.name ?? 'Trabajo' }}
-                    </span>
-
-                    <span class="shrink-0 text-xs text-slate-500" data-testid="task-status">
-                        {{ statusLabel(task) }}
-                    </span>
-                </div>
-
-                <div
-                    v-if="!task.finished"
-                    class="mt-2 h-1.5 w-full overflow-hidden rounded bg-slate-200"
-                    role="progressbar"
-                    :aria-valuenow="task.progress"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                    :aria-label="task.name ?? 'Trabajo'"
-                >
-                    <div class="h-full bg-indigo-600 transition-all" :style="{ width: `${task.progress}%` }"></div>
-                </div>
-
-                <p v-if="task.stage && !task.finished" class="mt-1 text-xs text-slate-500" data-testid="task-stage">
-                    {{ task.stage }} · {{ task.progress }}%
-                </p>
-
-                <p v-if="task.status === 'succeeded'" class="mt-1 text-xs text-emerald-700" data-testid="task-result">
-                    {{ resultSummary(task) ?? 'Listo para consultar.' }}
-                </p>
-
-                <p v-if="task.error" class="mt-1 text-xs text-red-700" data-testid="task-error">
-                    {{ task.error }}
-                </p>
-
-                <button
-                    v-if="canCancel(task)"
-                    type="button"
-                    class="mt-2 rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
-                    data-testid="task-cancel"
-                    @click="cancel(task.id)"
-                >
-                    Cancelar
-                </button>
-            </li>
+        <ul v-if="active.length" class="space-y-3" data-testid="task-active">
+            <TaskRow v-for="task in active" :key="task.id" :task="task" @cancel="onCancel" />
         </ul>
 
-        <p v-if="pending().length === 0 && finished.length > 0" class="mt-3 text-xs text-slate-500" data-testid="task-done">
+        <!-- Completed work in this thread. Folded away while something is still
+             running, so the panel leads with what is happening; shown directly
+             when it is all this thread has, because then it is the answer to
+             "did my job finish?" and hiding it behind a click would leave the
+             panel looking empty. -->
+        <details v-if="finished.length && active.length" class="mt-3" data-testid="task-history">
+            <summary class="cursor-pointer text-xs text-slate-500">
+                Trabajos completados ({{ finished.length }})
+            </summary>
+            <ul class="mt-3 space-y-3">
+                <TaskRow v-for="task in finished" :key="task.id" :task="task" @cancel="onCancel" />
+            </ul>
+        </details>
+
+        <div v-else-if="finished.length" class="mt-3" data-testid="task-history">
+            <p class="text-xs text-slate-500">Trabajos completados ({{ finished.length }})</p>
+            <ul class="mt-3 space-y-3">
+                <TaskRow v-for="task in finished" :key="task.id" :task="task" @cancel="onCancel" />
+            </ul>
+        </div>
+
+        <p v-if="active.length === 0 && finished.length > 0" class="mt-3 text-xs text-slate-500" data-testid="task-done">
             No hay trabajos pendientes.
         </p>
+
+        <!-- Work from other threads. Behind a toggle: it belongs to this person
+             and must stay reachable, but it is not this conversation's work. -->
+        <div v-if="otherThreads.length" class="mt-3 border-t border-slate-100 pt-2">
+            <button
+                type="button"
+                class="text-xs text-slate-600 underline hover:text-slate-800"
+                data-testid="task-others-toggle"
+                @click="showOtherThreads = !showOtherThreads"
+            >
+                {{ showOtherThreads ? 'Ocultar' : 'Ver' }} trabajos de otras conversaciones ({{ otherThreads.length }})
+            </button>
+
+            <ul v-if="showOtherThreads" class="mt-3 space-y-3" data-testid="task-others">
+                <TaskRow v-for="task in otherThreads" :key="task.id" :task="task" @cancel="onCancel" />
+            </ul>
+        </div>
     </section>
 </template>
