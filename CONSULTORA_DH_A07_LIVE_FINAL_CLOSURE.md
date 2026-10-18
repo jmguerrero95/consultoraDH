@@ -420,3 +420,53 @@ AI_ALLOW_TRAINING_PROVIDERS=false
 REAL_CLIENT_DATA_SENT=none
 FINAL_RESULT=PASS
 ```
+
+---
+
+## Addendum A — Corrección de la contradicción numérica del escenario T08
+
+> Añadido por el bloque **A07-ACCEPTANCE-EXACT** (BASE_SHA `6cff9a1`). El texto original
+> de este informe **se conserva íntegro**; el addendum corrige un dato, no lo borra.
+
+**Qué afirmaba el original (§6, «totales exactos 1 050 000 / 350 000 / 700 000»).** El
+escenario T08 se ejecutó con un CSV cuyas cifras por cliente eran `1050000 / 350000 /
+700000` y se presentaron como totales por cliente:
+
+```
+Persona Demo A,1050000,0,1050000
+Persona Demo B,350000,350000,0
+Persona Demo C,700000,0,700000
+```
+
+**La contradicción.** En la matriz original esos tres números son **agregados** del
+conjunto, no obligaciones por cliente:
+
+- `obligacion_cop` total = **1 050 000**
+- `pagado_cop` total = **350 000**
+- pendiente total = **700 000**
+
+El CSV correcto reparte esos agregados entre tres clientes:
+
+```
+cliente,empresa,obligacion_cop,pagado_cop
+Persona Demo A,Empresa Ficticia,300000,100000
+Persona Demo B,Empresa Ficticia,250000,250000
+Persona Demo C,Empresa Modelo,500000,0
+```
+
+Sumas reales: 300 000 + 250 000 + 500 000 = **1 050 000**;
+100 000 + 250 000 + 0 = **350 000**; pendiente 200 000 + 0 + 500 000 = **700 000**;
+saldo de *Persona Demo B* = **0**.
+
+El informe original validó, por tanto, un fixture **distinto** del prescrito: usó los
+agregados como si fueran obligaciones por cliente (A = 1 050 000, B = 350 000,
+C = 700 000), con un pendiente total resultante de 1 750 000 en lugar de 700 000.
+
+**Corrección.** El escenario T08 en su forma exacta se revalidó en
+`CONSULTORA_DH_A07_EXACT_ACCEPTANCE.md` con el CSV de la matriz. Conclusión numérica
+correcta: **obligaciones 1 050 000, pagado 350 000, pendiente 700 000, saldo de B 0**.
+
+Además, T02, T04 y T12 del original se ejecutaron con **enunciados distintos** a los de
+la matriz. Su revalidación exacta está en el informe de aceptación, que **no** ratifica
+los `PASS` de T02/T04/T12 del presente informe. La condición **T09 (`PASS`) no se repite
+y se conserva**.
