@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiTurnBudget;
+use App\Services\Ai\AiTurnContext;
 use App\Services\Ai\Tools\CreateArtifactTool;
 use Illuminate\Support\Facades\Log;
 
@@ -51,6 +52,7 @@ final class GenerateDocumentTask implements AiTaskHandler
     public function __construct(
         private readonly CreateArtifactTool $artifacts,
         private readonly AiProviderResolver $providers,
+        private readonly AiTurnContext $turnContext,
     ) {}
 
     public function kind(): string
@@ -88,15 +90,26 @@ final class GenerateDocumentTask implements AiTaskHandler
 
         // The real writer. It authorizes, stores privately, and returns the
         // artifact row - the same path a conversation-generated file takes.
-        $produced = $this->artifacts->execute(
-            [
-                'format' => $format,
-                'filename' => $filename,
-                'content' => $content,
-                'title' => $title,
-            ],
-            $user,
-        );
+        //
+        // The turn context is set to this task's own conversation so the
+        // writer's short-lived idempotency window is scoped here: two identical
+        // documents generated for two different conversations are two files, and
+        // only a repeated call *within this task* is treated as the same one.
+        $this->turnContext->set($task->ai_conversation_id, 'task-'.$task->id);
+
+        try {
+            $produced = $this->artifacts->execute(
+                [
+                    'format' => $format,
+                    'filename' => $filename,
+                    'content' => $content,
+                    'title' => $title,
+                ],
+                $user,
+            );
+        } finally {
+            $this->turnContext->reset();
+        }
 
         $artifact = AiArtifact::query()->findOrFail($produced['artifact_id']);
 

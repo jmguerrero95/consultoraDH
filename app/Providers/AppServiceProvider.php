@@ -12,9 +12,11 @@ use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiToolDeadline;
 use App\Services\Ai\AiToolRegistry;
+use App\Services\Ai\AiTurnContext;
 use App\Services\Ai\Net\DnsResolver;
 use App\Services\Ai\Net\SystemDnsResolver;
 use App\Services\Ai\Tools\ActivateAutomationRuleTool;
+use App\Services\Ai\Tools\AnalyzeTableTool;
 use App\Services\Ai\Tools\AutomationVocabularyTool;
 use App\Services\Ai\Tools\ClientAccountTool;
 use App\Services\Ai\Tools\ClientSearchTool;
@@ -30,6 +32,7 @@ use App\Services\Ai\Tools\OperationalTasksTool;
 use App\Services\Ai\Tools\ReceivablesSummaryTool;
 use App\Services\Ai\Tools\ReportPreviewTool;
 use App\Services\Ai\Tools\SupportSummaryTool;
+use App\Services\Ai\Tools\TeamDirectoryTool;
 use App\Services\Ai\Tools\WebFetchTool;
 use App\Services\Ai\Tools\WebSearchTool;
 use Illuminate\Cache\RateLimiting\Limit;
@@ -60,6 +63,12 @@ final class AppServiceProvider extends ServiceProvider
         // null and the search boundary would lose its provenance.
         $this->app->singleton(AiOutboundContext::class);
 
+        // The turn's own scope: which conversation a tool is serving this turn,
+        // and the turn id. Set by the assistant, read by the tools that need to
+        // find the conversation's own material rather than take it from the
+        // model's arguments.
+        $this->app->singleton(AiTurnContext::class);
+
         // AI Tools - bind as singletons so AiToolRegistry::make() can resolve them
         $this->app->singleton(ClientSearchTool::class);
         $this->app->singleton(ClientSummaryTool::class);
@@ -69,10 +78,12 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->singleton(ReportPreviewTool::class);
         $this->app->singleton(SupportSummaryTool::class);
         $this->app->singleton(CreateOperationalTaskTool::class);
+        $this->app->singleton(TeamDirectoryTool::class);
         $this->app->singleton(CreateReportTool::class);
         $this->app->singleton(WebSearchTool::class);
         $this->app->singleton(WebFetchTool::class);
         $this->app->singleton(CreateArtifactTool::class);
+        $this->app->singleton(AnalyzeTableTool::class);
         $this->app->singleton(DocumentSearchTool::class);
         $this->app->singleton(DocumentReadTool::class);
         $this->app->singleton(AutomationVocabularyTool::class);

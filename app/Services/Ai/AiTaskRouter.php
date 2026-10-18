@@ -78,12 +78,12 @@ final class AiTaskRouter
         'receivables' => ['receivables_summary', 'client_account'],
         'stats' => ['system_stats'],
         'reports' => ['report_preview', 'create_report'],
-        'tasks' => ['operational_tasks', 'create_operational_task'],
+        'tasks' => ['operational_tasks', 'create_operational_task', 'team_directory'],
         'support' => ['support_summary'],
-        'documents' => ['document_search', 'document_read'],
+        'documents' => ['document_search', 'document_read', 'analyze_table'],
         'automations' => ['automation_vocabulary', 'create_automation_rule', 'activate_automation_rule', 'deactivate_automation_rule'],
         'web' => ['web_search', 'web_fetch', 'weather_current'],
-        'artifacts' => ['create_artifact'],
+        'artifacts' => ['create_artifact', 'analyze_table'],
     ];
 
     /**

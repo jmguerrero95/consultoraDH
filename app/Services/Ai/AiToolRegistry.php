@@ -9,6 +9,7 @@ use App\Domain\Ai\AiToolDefinition;
 use App\Domain\Ai\AiToolRejected;
 use App\Models\User;
 use App\Services\Ai\Tools\ActivateAutomationRuleTool;
+use App\Services\Ai\Tools\AnalyzeTableTool;
 use App\Services\Ai\Tools\AutomationVocabularyTool;
 use App\Services\Ai\Tools\ClientAccountTool;
 use App\Services\Ai\Tools\ClientSearchTool;
@@ -25,6 +26,7 @@ use App\Services\Ai\Tools\ReceivablesSummaryTool;
 use App\Services\Ai\Tools\ReportPreviewTool;
 use App\Services\Ai\Tools\SupportSummaryTool;
 use App\Services\Ai\Tools\SystemStatsTool;
+use App\Services\Ai\Tools\TeamDirectoryTool;
 use App\Services\Ai\Tools\WeatherTool;
 use App\Services\Ai\Tools\WebFetchTool;
 use App\Services\Ai\Tools\WebSearchTool;
@@ -90,11 +92,13 @@ class AiToolRegistry
             app(ReportPreviewTool::class),
             app(SupportSummaryTool::class),
             app(CreateOperationalTaskTool::class),
+            app(TeamDirectoryTool::class),
             app(CreateReportTool::class),
             app(WebSearchTool::class),
             app(WebFetchTool::class),
             app(WeatherTool::class),
             app(CreateArtifactTool::class),
+            app(AnalyzeTableTool::class),
             app(DocumentSearchTool::class),
             app(DocumentReadTool::class),
             app(AutomationVocabularyTool::class),

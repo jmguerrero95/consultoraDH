@@ -106,6 +106,12 @@ final class AiCapabilityCatalog
             'private' => true, 'internet' => false,
             'keywords' => ['crear tarea', 'asignar tarea', 'nueva tarea', 'agendar'],
         ],
+        'team_directory' => [
+            'purpose' => 'Listar el personal activo al que se puede asignar una tarea, con nombre e id.',
+            'when' => 'Cuando haya que resolver por nombre el responsable de una tarea antes de proponerla.',
+            'private' => true, 'internet' => false,
+            'keywords' => ['responsable', 'asignar a', 'a quien', 'equipo', 'personal', 'colaborador', 'usuario de la tarea'],
+        ],
         'report_preview' => [
             'purpose' => 'Previsualizar un informe del sistema sin generarlo.',
             'when' => 'Cuando pidan ver un informe antes de producirlo.',
@@ -183,6 +189,12 @@ final class AiCapabilityCatalog
             'when' => 'Cuando pidan un documento, informe, hoja de cálculo o exportación.',
             'private' => false, 'internet' => false,
             'keywords' => ['pdf', 'word', 'docx', 'excel', 'xlsx', 'csv', 'documento', 'informe', 'archivo', 'descargar', 'exportar'],
+        ],
+        'analyze_table' => [
+            'purpose' => 'Leer una tabla adjunta (CSV/Excel) y devolver sus datos verificados: filas, saldo pendiente calculado y totales, pudiendo exportarla.',
+            'when' => 'Cuando pidan analizar, resumir o convertir a Excel/CSV una tabla que adjuntaron a la conversación.',
+            'private' => true, 'internet' => false,
+            'keywords' => ['tabla', 'adjunto', 'csv', 'excel', 'analizar', 'saldo pendiente', 'totales', 'cartera', 'obligaciones', 'pagos', 'exportar'],
         ],
     ];
 

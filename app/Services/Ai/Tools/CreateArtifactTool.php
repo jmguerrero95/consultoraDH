@@ -7,17 +7,22 @@ namespace App\Services\Ai\Tools;
 use App\Domain\Ai\AiToolRejected;
 use App\Models\AiArtifact;
 use App\Models\User;
+use App\Services\Ai\AiTurnContext;
 use Dompdf\Dompdf;
 use Dompdf\Options;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use PhpOffice\PhpWord\Element\Section;
 use PhpOffice\PhpWord\IOFactory;
 use PhpOffice\PhpWord\PhpWord;
 use PhpOffice\PhpWord\SimpleType\Jc;
+use PhpOffice\PhpWord\Style\ListItem;
 
 /**
  * Creates private artifacts (PDF, DOCX, XLSX, CSV, MD, TXT) for the user.
@@ -43,6 +48,8 @@ use PhpOffice\PhpWord\SimpleType\Jc;
  */
 final class CreateArtifactTool extends AbstractAiTool
 {
+    public function __construct(private readonly AiTurnContext $turnContext) {}
+
     public function name(): string
     {
         return 'create_artifact';
@@ -150,6 +157,51 @@ final class CreateArtifactTool extends AbstractAiTool
         $slug = $slug !== '' ? $slug : 'documento';
         $displayName = Str::limit($slug, 160, '').'.'.$format;
 
+        // Idempotency, bounded in time.
+        //
+        // The reported defect was three identical `create_artifact` calls in one
+        // turn producing three copies of the same file. A transport retry, a
+        // double click and a model that emits the same call twice all look like
+        // that. The fingerprint is the user, the conversation, the format, the
+        // name, the title and the exact bytes: if the same request was served
+        // moments ago, the existing artifact is returned instead of a second file.
+        //
+        // The window is deliberately short. A person who asks again later — or
+        // deliberately asks to regenerate — gets a fresh file once the entry has
+        // expired, so this deduplicates a *repeated* request, never a later one.
+        $fingerprint = hash('sha256', implode("\n", [
+            (string) $user->id,
+            (string) ($this->turnContext->conversationId() ?? 0),
+            $format,
+            $displayName,
+            (string) $title,
+            $content,
+        ]));
+        $cacheKey = 'ai:artifact:'.$fingerprint;
+
+        $remembered = Cache::get($cacheKey);
+
+        if ($remembered !== null) {
+            $existing = AiArtifact::query()
+                ->whereKey((int) $remembered)
+                ->where('user_id', $user->id)
+                ->first();
+
+            if ($existing !== null) {
+                return [
+                    'created' => false,
+                    'deduplicated' => true,
+                    'artifact_id' => $existing->id,
+                    'filename' => $existing->display_filename,
+                    'format' => $existing->format,
+                    'size_bytes' => $existing->size_bytes,
+                    'download_url' => route('api.ai.artifacts.download', ['artifact' => $existing->id]),
+                    'expires_at' => $existing->expires_at?->toDateTimeString(),
+                    'message' => 'Ese archivo ya se había generado en este mismo turno; entrega el enlace existente.',
+                ];
+            }
+        }
+
         // Generate the artifact content
         $fileContent = $this->generateContent($format, $content, $title);
 
@@ -173,6 +225,10 @@ final class CreateArtifactTool extends AbstractAiTool
             'size_bytes' => $size,
             'expires_at' => now()->addDays(config('ai.artifact_ttl_days', 30)),
         ]);
+
+        // Remember it for a short while so an identical repeat of this request is
+        // answered with this same row rather than a second copy of the file.
+        Cache::put($cacheKey, $artifact->id, now()->addSeconds(300));
 
         return [
             'created' => true,
@@ -206,7 +262,8 @@ final class CreateArtifactTool extends AbstractAiTool
 
         $dompdf = new Dompdf($options);
 
-        $body = $this->markdownToHtml($content);
+        // A leading heading that only repeats the title would print it twice.
+        $body = $this->markdownToHtml($this->stripDuplicateLeadingTitle($content, $title));
         $safeTitle = htmlspecialchars($title, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 
         $html = <<<HTML
@@ -267,7 +324,7 @@ final class CreateArtifactTool extends AbstractAiTool
         $section->addTitle($title, 1);
         $section->addTextBreak();
 
-        $this->writeDocxBlocks($section, $content);
+        $this->writeDocxBlocks($section, $this->stripDuplicateLeadingTitle($content, $title));
 
         $objWriter = IOFactory::createWriter($phpWord, 'Word2007');
         $tempFile = tempnam(sys_get_temp_dir(), 'docx_');
@@ -281,43 +338,225 @@ final class CreateArtifactTool extends AbstractAiTool
     /**
      * Turn simple Markdown into real DOCX structure.
      *
-     * @param  \PhpOffice\PhpWord\Element\Section  $section
+     * ## What was wrong
+     *
+     * The previous version wrote a paragraph only when the line had no `|`, so
+     * every Markdown table was silently dropped — the document arrived with its
+     * heading and then nothing, and the section the table belonged to looked
+     * empty. A `---` rule was written out as the literal text "---". And the
+     * title printed twice whenever the model repeated it as the first heading.
+     *
+     * A pipe table is now a real Word table, a rule is a rule, and a leading
+     * heading that merely repeats the document title is removed before a writer
+     * sees it.
+     *
+     * @param  Section  $section
      */
     private function writeDocxBlocks($section, string $content): void
     {
         $lines = preg_split('/\r\n|\r|\n/', $content) ?: [];
+        $total = count($lines);
+        $index = 0;
 
-        foreach ($lines as $line) {
-            $trimmed = trim($line);
+        while ($index < $total) {
+            $trimmed = trim($lines[$index]);
 
             if ($trimmed === '') {
                 $section->addTextBreak();
+                $index++;
 
                 continue;
             }
 
-            if (preg_match('/^(#{1,3})\s+(.*)$/', $trimmed, $m)) {
+            // A run of pipe rows becomes one real Word table.
+            if ($this->isDocxTableRow($trimmed)) {
+                $buffer = [];
+
+                while ($index < $total && $this->isDocxTableRow(trim($lines[$index]))) {
+                    $buffer[] = trim($lines[$index]);
+                    $index++;
+                }
+
+                $this->writeDocxTable($section, $buffer);
+
+                continue;
+            }
+
+            if (preg_match('/^(#{1,4})\s+(.*)$/', $trimmed, $m)) {
                 $section->addTitle($this->stripInlineMarkdown($m[2]), min(4, mb_strlen($m[1]) + 1));
+                $index++;
 
                 continue;
             }
 
             if (preg_match('/^\s*[-*•]\s+(.*)$/u', $trimmed, $m)) {
                 $section->addListItem($this->stripInlineMarkdown($m[1]), 0);
+                $index++;
 
                 continue;
             }
 
             if (preg_match('/^\s*(\d+)[.)]\s+(.*)$/', $trimmed, $m)) {
-                $section->addListItem($this->stripInlineMarkdown($m[2]), 0, null, null, ['listType' => \PhpOffice\PhpWord\Style\ListItem::TYPE_NUMBER]);
+                $section->addListItem($this->stripInlineMarkdown($m[2]), 0, null, null, ['listType' => ListItem::TYPE_NUMBER]);
+                $index++;
 
                 continue;
             }
 
-            if (! str_contains($trimmed, '|')) {
-                $section->addText($this->stripInlineMarkdown($trimmed), [], ['alignment' => Jc::BOTH]);
+            if (preg_match('/^>\s?(.*)$/', $trimmed, $m)) {
+                $section->addText($this->stripInlineMarkdown($m[1]), ['italic' => true, 'color' => '475569'], ['indentation' => ['left' => 360]]);
+                $index++;
+
+                continue;
+            }
+
+            // A horizontal rule is format, not text.
+            if (preg_match('/^(-{3,}|\*{3,}|_{3,})$/', $trimmed)) {
+                $section->addText('', [], ['borderBottomSize' => 6, 'borderBottomColor' => 'D0D7DE', 'spaceAfter' => 120]);
+                $index++;
+
+                continue;
+            }
+
+            $section->addText($this->stripInlineMarkdown($trimmed), [], ['alignment' => Jc::BOTH]);
+            $index++;
+        }
+    }
+
+    /**
+     * A line that is part of a Markdown pipe table.
+     *
+     * Two pipes is the minimum for a table row (`| a |`), which is the same rule
+     * the PDF writer uses, so a DOCX and a PDF of the same content agree on what
+     * a table is.
+     */
+    private function isDocxTableRow(string $line): bool
+    {
+        return str_contains($line, '|') && substr_count($line, '|') >= 2;
+    }
+
+    /**
+     * Write buffered pipe rows as one real Word table.
+     *
+     * @param  Section  $section
+     * @param  list<string>  $rows
+     */
+    private function writeDocxTable($section, array $rows): void
+    {
+        $parsed = [];
+
+        foreach ($rows as $row) {
+            $cells = array_map('trim', explode('|', trim($row, " \t|")));
+
+            // A separator row (`|---|---|`) is not data.
+            if ($this->isDocxTableSeparator($cells)) {
+                continue;
+            }
+
+            $parsed[] = $cells;
+        }
+
+        if ($parsed === []) {
+            return;
+        }
+
+        $columns = max(array_map('count', $parsed));
+
+        if ($columns === 0) {
+            return;
+        }
+
+        $table = $section->addTable([
+            'borderSize' => 6,
+            'borderColor' => 'C7CDD6',
+            'cellMargin' => 60,
+        ]);
+
+        // A4 portrait with the section's own margins leaves roughly 9400 twips.
+        $cellWidth = intdiv(9400, $columns);
+
+        foreach ($parsed as $r => $cells) {
+            $isHeader = $r === 0;
+            $table->addRow();
+
+            for ($c = 0; $c < $columns; $c++) {
+                $cell = $table->addCell($cellWidth, $isHeader ? ['bgColor' => 'EEF2F7'] : null);
+                $cell->addText(
+                    $this->stripInlineMarkdown((string) ($cells[$c] ?? '')),
+                    $isHeader ? ['bold' => true, 'color' => '123A5E'] : [],
+                );
             }
         }
+
+        $section->addTextBreak();
+    }
+
+    /**
+     * @param  list<string>  $cells
+     */
+    private function isDocxTableSeparator(array $cells): bool
+    {
+        $seen = false;
+
+        foreach ($cells as $cell) {
+            $cell = trim($cell);
+
+            if ($cell === '') {
+                continue;
+            }
+
+            if (! preg_match('/^:?-{2,}:?$/', $cell)) {
+                return false;
+            }
+
+            $seen = true;
+        }
+
+        return $seen;
+    }
+
+    /**
+     * Remove a leading heading that only repeats the document title.
+     *
+     * The model is asked to write the body, but it frequently starts with the
+     * title again as an H1; both writers would then print it twice — once as the
+     * document title and once as the first heading.
+     */
+    private function stripDuplicateLeadingTitle(string $content, ?string $title): string
+    {
+        $title = trim((string) $title);
+
+        if ($title === '') {
+            return $content;
+        }
+
+        $normalise = static function (string $value): string {
+            $collapsed = preg_replace('/\s+/u', ' ', $value) ?? $value;
+
+            return mb_strtolower(trim($collapsed));
+        };
+
+        $target = $normalise($title);
+        $lines = preg_split('/\r\n|\r|\n/', $content) ?: [];
+
+        foreach ($lines as $index => $line) {
+            $trimmed = trim($line);
+
+            if ($trimmed === '') {
+                continue;
+            }
+
+            if (preg_match('/^#{1,6}\s+(.*)$/', $trimmed, $m) && $normalise($m[1]) === $target) {
+                unset($lines[$index]);
+
+                return implode("\n", array_values($lines));
+            }
+
+            // Only a *leading* duplicate is removed.
+            break;
+        }
+
+        return $content;
     }
 
     private function generateXlsx(string $content): string
@@ -356,7 +595,7 @@ final class CreateArtifactTool extends AbstractAiTool
             // Header styling on the first row.
             $sheet->getStyle('A1:'.$lastColumn.'1')->getFont()->setBold(true);
             $sheet->getStyle('A1:'.$lastColumn.'1')->getFill()
-                ->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)
+                ->setFillType(Fill::FILL_SOLID)
                 ->getStartColor()->setRGB('EEF2F7');
             $sheet->getStyle('A1:'.$lastColumn.'1')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
             $sheet->freezePane('A2');
