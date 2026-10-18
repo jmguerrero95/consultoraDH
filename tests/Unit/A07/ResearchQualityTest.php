@@ -137,4 +137,40 @@ final class ResearchQualityTest extends TestCase
         $this->assertStringContainsString('https://ejemplo.test/congreso', $directive);
         $this->assertStringContainsString('[0.00]', $directive);
     }
+
+    public function test_cited_urls_extracts_http_links_from_text(): void
+    {
+        $text = 'Según https://energia.test/sodio y https://mineria.test/litio, el sodio avanza.';
+        $urls = ResearchQuality::citedUrls($text);
+
+        $this->assertCount(2, $urls);
+        $this->assertContains('https://energia.test/sodio', $urls);
+        $this->assertContains('https://mineria.test/litio', $urls);
+    }
+
+    public function test_cites_sources_detects_recovered_url_in_response(): void
+    {
+        $sources = [
+            ['url' => 'https://energia.test/sodio', 'title' => 'Sodio'],
+            ['url' => 'https://mineria.test/litio', 'title' => 'Litio'],
+        ];
+
+        $this->assertTrue(ResearchQuality::citesSources('Ver https://energia.test/sodio para detalles.', $sources));
+        $this->assertTrue(ResearchQuality::citesSources('Fuentes: https://mineria.test/litio y https://energia.test/sodio.', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('El sodio es mejor que el litio.', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('Ver https://otro.test/no-recuperado.', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('Sin fuentes.', []));
+    }
+
+    public function test_covers_dimensions_checks_each_question_part(): void
+    {
+        $question = 'Avances de sodio y diferencias con litio';
+
+        $this->assertTrue(ResearchQuality::coversDimensions($question, 'El sodio avanza y difiere del litio.'));
+        $this->assertTrue(ResearchQuality::coversDimensions($question, 'Sodio: avances. Litio: comparación.'));
+        $this->assertFalse(ResearchQuality::coversDimensions($question, 'Solo sodio avanza.'));
+        $this->assertFalse(ResearchQuality::coversDimensions($question, 'Nada sobre litio aquí.'));
+        $this->assertTrue(ResearchQuality::coversDimensions('¿qué es?', 'Respuesta corta.'), 'No dimensions to cover.');
+    }
 }

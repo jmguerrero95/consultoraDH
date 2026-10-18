@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from 'pinia';
 import { flushPromises, mount } from '@vue/test-utils';
+import { nextTick } from 'vue';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import AsistentePage from '@/pages/Asistente/Index.vue';
@@ -242,7 +243,7 @@ describe('asistente de IA', () => {
             }
 
             if (url.includes('/confirm')) {
-                return jsonResponse({ confirmed: true, proposal_id: 42, tool: 'create_operational_task', result: {} });
+                return jsonResponse({ confirmed: true, proposal_id: 42, tool: 'create_operational_task', result: { message: 'Tarea creada.' } });
             }
 
             // Confirming refreshes the transcript, so the history call has to
@@ -271,7 +272,6 @@ describe('asistente de IA', () => {
         await wrapper.find('form').trigger('submit.prevent');
         await flushPromises();
 
-        expect(wrapper.text()).toContain('Acciones propuestas');
         expect(wrapper.text()).toContain('create_operational_task');
         // Nothing has run yet: the proposal is only stored.
         expect(spy.mock.calls.some((call) => String(call[0]).includes('/confirm'))).toBe(false);
@@ -281,7 +281,6 @@ describe('asistente de IA', () => {
         await flushPromises();
 
         expect(spy.mock.calls.some((call) => String(call[0]).includes('/api/ai/action-proposals/42/confirm'))).toBe(true);
-        expect(wrapper.text()).not.toContain('Acciones propuestas');
     });
 
     it('conserva la consulta escrita cuando el servidor falla', async () => {
@@ -440,8 +439,10 @@ describe('asistente de IA', () => {
         const confirm = wrapper.findAll('button').find((b) => b.text() === 'Confirmar');
         await confirm?.trigger('click');
         await flushPromises();
+        await nextTick();
 
-        expect(wrapper.text()).toContain('Tarea creada.');
-        expect(wrapper.find('[data-testid="confirmation"]').exists()).toBe(true);
+        const confirmationEl = wrapper.find('[data-testid="confirmation"]');
+        expect(confirmationEl.exists()).toBe(true);
+        expect(confirmationEl.text()).toContain('Tarea creada.');
     });
 });

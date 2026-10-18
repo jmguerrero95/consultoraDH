@@ -16,7 +16,7 @@ import { useAiTasks } from '@/composables/useTasks';
 import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
 import { useRoute } from 'vue-router';
-import { ai, groupArtifactsByMessage } from '@/services/ai';
+import { ai, groupArtifactsByMessage, groupProposalsByMessage } from '@/services/ai';
 
 import type { AiArtifact, AiAttachmentSummary, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
 import type { AiTaskPayload } from '@/composables/useTasks';
@@ -37,7 +37,8 @@ import type { AiTaskPayload } from '@/composables/useTasks';
 const conversations = ref<AiConversationSummary[]>([]);
 const selectedId = ref<number | null>(null);
 const messages = ref<AiMessagePayload[]>([]);
-const proposals = ref<AiProposal[]>([]);
+/** Proposals with no message to sit beside (created before this migration). */
+const orphanProposals = ref<AiProposal[]>([]);
 /** Files this conversation has produced, shown in the thread that asked for them. */
 const artifacts = ref<AiArtifact[]>([]);
 /** Files the person attached to this thread, rebuilt from the server on reload. */
@@ -366,7 +367,7 @@ async function loadConversations(): Promise<void> {
 
 async function selectConversation(id: number): Promise<void> {
     selectedId.value = id;
-    proposals.value = [];
+    orphanProposals.value = [];
     sources.value = [];
     artifacts.value = [];
     attachments.value = [];
@@ -383,20 +384,27 @@ async function selectConversation(id: number): Promise<void> {
         const payload = await ai.history(id);
 
         const { byMessage, orphan } = groupArtifactsByMessage(payload.artifacts ?? []);
+        const { byMessage: proposalsByMessage, orphan: orphanProposalsLoaded } = groupProposalsByMessage(payload.proposals ?? []);
 
         messages.value = payload.messages.map((message) => ({
             ...message,
             // Files this reply produced, so they render under it rather than at
             // the foot of the page.
             artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
+            // Proposals this question asked for, inline with it.
+            proposals: typeof message.id === 'number' ? (proposalsByMessage.get(message.id) ?? []) : [],
         }));
 
         // Files with no reply to sit beside go to the collapsed section.
         artifacts.value = orphan;
+        // Proposals with no message to sit beside (created before this migration)
+        // go to the secondary section.
+        orphanProposals.value = orphanProposalsLoaded;
         attachments.value = payload.attachments ?? [];
     } catch (e) {
         messages.value = [];
         artifacts.value = [];
+        orphanProposals.value = [];
         attachments.value = [];
         error.value = readError(e, 'No fue posible cargar la conversación.');
     }
@@ -405,7 +413,7 @@ async function selectConversation(id: number): Promise<void> {
 function startNewConversation(): void {
     selectedId.value = null;
     messages.value = [];
-    proposals.value = [];
+    orphanProposals.value = [];
     sources.value = [];
     artifacts.value = [];
     attachments.value = [];
@@ -434,13 +442,13 @@ async function send(): Promise<void> {
 
     // Rendered immediately so the question stays on screen while the model
     // works; the reload below replaces it with the persisted copy.
-    messages.value = [...messages.value, { role: 'user', content: question, provider: null, model: null, created_at: null }];
+    // Include proposals array so they render inline with the question.
+    messages.value = [...messages.value, { role: 'user', content: question, provider: null, model: null, created_at: null, proposals: [] }];
 
     try {
         const turn = await ai.ask(question, selectedId.value);
 
         selectedId.value = turn.conversation_id;
-        proposals.value = turn.proposals;
         collectSources(turn.tools);
 
         const turnArtifacts = turn.artifacts ?? [];
@@ -458,6 +466,16 @@ async function send(): Promise<void> {
                     artifacts: turnArtifacts,
                 },
             ];
+        }
+
+        // Attach any proposals to the user message that asked for them,
+        // whether or not the turn produced a textual reply.
+        if (turn.proposals.length > 0) {
+            messages.value = messages.value.map((message) =>
+                message.role === 'user' && message.content === question
+                    ? { ...message, proposals: turn.proposals }
+                    : message,
+            );
         } else if (turnArtifacts.length > 0) {
             // No prose to sit beside: the files go to the collapsed section.
             mergeArtifacts(turnArtifacts);
@@ -515,7 +533,15 @@ async function confirmProposal(id: number): Promise<void> {
 
     try {
         const result = await ai.confirmProposal(id);
-        proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+
+        // Remove from orphan proposals
+        orphanProposals.value = orphanProposals.value.filter((proposal) => proposal.id !== id);
+        // Also remove from inline proposals on messages
+        messages.value = messages.value.map((message) => ({
+            ...message,
+            proposals: (message.proposals ?? []).filter((proposal) => proposal.id !== id),
+        }));
+
         confirmation.value = describeResult(result.tool, result.result);
         await refreshIfSelected();
     } catch (e) {
@@ -528,7 +554,14 @@ async function rejectProposal(id: number): Promise<void> {
 
     try {
         await ai.rejectProposal(id);
-        proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+
+        // Remove from orphan proposals
+        orphanProposals.value = orphanProposals.value.filter((proposal) => proposal.id !== id);
+        // Also remove from inline proposals on messages
+        messages.value = messages.value.map((message) => ({
+            ...message,
+            proposals: (message.proposals ?? []).filter((proposal) => proposal.id !== id),
+        }));
     } catch (e) {
         error.value = readError(e, 'No fue posible rechazar la propuesta.');
     }
@@ -776,6 +809,24 @@ function formatDate(value: string | null): string {
                         >
                             <ArtifactCard v-for="artifact in message.artifacts" :key="artifact.id" :artifact="artifact" />
                         </div>
+                        <!-- Proposals this question asked for, inline with it. -->
+                        <div
+                            v-if="message.role === 'user' && message.proposals && message.proposals.length"
+                            class="cdh-ai__message-proposals"
+                        >
+                            <div
+                                v-for="proposal in message.proposals"
+                                :key="proposal.id"
+                                class="cdh-ai__proposal cdh-ai__proposal--inline"
+                            >
+                                <p class="cdh-ai__proposal-tool">{{ proposal.tool }}</p>
+                                <pre class="cdh-ai__proposal-args">{{ JSON.stringify(proposal.arguments, null, 2) }}</pre>
+                                <div class="d-flex gap-2">
+                                    <AppButton size="sm" @click="confirmProposal(proposal.id)">Confirmar</AppButton>
+                                    <AppButton size="sm" variant="secondary" @click="rejectProposal(proposal.id)">Descartar</AppButton>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <p v-if="sending" class="cdh-ai__pending">Consultando…</p>
@@ -797,6 +848,23 @@ function formatDate(value: string | null): string {
                 <details v-if="artifacts.length > 0" class="cdh-ai__artifacts" data-testid="artifacts">
                     <summary class="cdh-ai__artifacts-title">Archivos anteriores ({{ artifacts.length }})</summary>
                     <ArtifactCard v-for="artifact in artifacts" :key="artifact.id" :artifact="artifact" />
+                </details>
+
+                <!-- Proposals with no message to sit beside (created before this migration). -->
+                <details v-if="orphanProposals.length > 0" class="cdh-ai__proposals" data-testid="orphan-proposals">
+                    <summary class="cdh-ai__proposals-title">Propuestas anteriores ({{ orphanProposals.length }})</summary>
+                    <div
+                        v-for="proposal in orphanProposals"
+                        :key="proposal.id"
+                        class="cdh-ai__proposal"
+                    >
+                        <p class="cdh-ai__proposal-tool">{{ proposal.tool }}</p>
+                        <pre class="cdh-ai__proposal-args">{{ JSON.stringify(proposal.arguments, null, 2) }}</pre>
+                        <div class="d-flex gap-2">
+                            <AppButton size="sm" @click="confirmProposal(proposal.id)">Confirmar</AppButton>
+                            <AppButton size="sm" variant="secondary" @click="rejectProposal(proposal.id)">Descartar</AppButton>
+                        </div>
+                    </div>
                 </details>
 
                 <!-- Files the person attached. Restored from the server rather
@@ -826,20 +894,6 @@ function formatDate(value: string | null): string {
                             <span v-if="source.domain" class="cdh-ai__source-domain">{{ source.domain }}</span>
                         </li>
                     </ul>
-                </div>
-
-                <div v-if="proposals.length > 0" class="cdh-ai__proposals">
-                    <h3 class="cdh-ai__proposals-title">Acciones propuestas</h3>
-                    <p class="cdh-ai__proposals-note">Nada se ejecuta hasta que lo confirmes.</p>
-
-                    <div v-for="proposal in proposals" :key="proposal.id" class="cdh-ai__proposal">
-                        <p class="cdh-ai__proposal-tool">{{ proposal.tool }}</p>
-                        <pre class="cdh-ai__proposal-args">{{ JSON.stringify(proposal.arguments, null, 2) }}</pre>
-                        <div class="d-flex gap-2">
-                            <AppButton size="sm" @click="confirmProposal(proposal.id)">Confirmar</AppButton>
-                            <AppButton size="sm" variant="secondary" @click="rejectProposal(proposal.id)">Rechazar</AppButton>
-                        </div>
-                    </div>
                 </div>
 
                 <form class="cdh-ai__composer" @submit.prevent="send">

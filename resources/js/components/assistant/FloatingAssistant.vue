@@ -5,7 +5,7 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import SafeMarkdown from '@/components/ui/SafeMarkdown.vue';
 import ArtifactCard from '@/components/assistant/ArtifactCard.vue';
-import { ai, groupArtifactsByMessage } from '@/services/ai';
+import { ai, groupArtifactsByMessage, groupProposalsByMessage } from '@/services/ai';
 import { useAuthStore } from '@/stores/auth';
 
 import type { AiArtifact, AiProposal, AiStatusPayload, AiToolResult } from '@/services/ai';
@@ -314,6 +314,7 @@ async function restoreConversation(): Promise<void> {
         const history = await ai.history(stored);
 
         const { byMessage, orphan } = groupArtifactsByMessage(history.artifacts ?? []);
+        const { byMessage: proposalsByMessage, orphan: orphanProposals } = groupProposalsByMessage(history.proposals ?? []);
 
         messages.value = history.messages
             .filter((message) => message.role === 'user' || message.role === 'assistant')
@@ -326,11 +327,16 @@ async function restoreConversation(): Promise<void> {
                 // The files this reply produced travel with it, so a reload shows
                 // the report where it was asked for rather than at the bottom.
                 artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
+                // Proposals this question asked for, so they sit inline with it.
+                proposals: typeof message.id === 'number' ? (proposalsByMessage.get(message.id) ?? []) : [],
             }));
 
         // Files with no reply to sit beside (a task's output, or a proposal-only
         // turn) go to the secondary section, never into the transcript.
         artifacts.value = orphan;
+        // Proposals with no message to sit beside (created before this migration)
+        // go to the secondary section.
+        proposals.value = orphanProposals;
 
         // And the files the person attached. Restored from the server, not from
         // memory: a thread that was given a spreadsheet must still show it after
@@ -378,11 +384,11 @@ async function send(retryText?: string): Promise<void> {
 
     if (retryText === undefined) {
         draft.value = '';
-        messages.value = [...messages.value, { id: ++messageSeq, role: 'user', content: question, model: null }];
+        messages.value = [...messages.value, { id: ++messageSeq, role: 'user', content: question, model: null, proposals: [] }];
     } else {
         // A retry reuses the bubble that failed rather than adding a duplicate.
         messages.value = messages.value.map((message) =>
-            message.role === 'user' && message.failed && message.content === question ? { ...message, failed: false } : message,
+            message.role === 'user' && message.failed && message.content === question ? { ...message, failed: false, proposals: message.proposals ?? [] } : message,
         );
     }
 
@@ -393,7 +399,6 @@ async function send(retryText?: string): Promise<void> {
 
         conversationId.value = turn.conversation_id;
         persistConversation();
-        proposals.value = turn.proposals;
 
         const turnArtifacts = turn.artifacts ?? [];
 
@@ -417,6 +422,14 @@ async function send(retryText?: string): Promise<void> {
         } else if (turn.proposals.length === 0 && turnArtifacts.length === 0) {
             markLastUserFailed();
             error.value = 'El asistente no devolvió una respuesta. Intente reformular la pregunta.';
+        } else if (turn.proposals.length > 0) {
+            // Proposal-only turn: attach proposals to the last user message so they
+            // sit inline with the question that asked for them.
+            messages.value = messages.value.map((message) =>
+                message.role === 'user' && !message.failed && message.content === question
+                    ? { ...message, proposals: turn.proposals }
+                    : message,
+            );
         } else if (turnArtifacts.length > 0) {
             // No prose to sit beside (a proposal-only turn): the files go to the
             // secondary section rather than pretend an answer produced them.
@@ -598,7 +611,14 @@ async function confirmProposal(id: number): Promise<void> {
 
     try {
         const result = await ai.confirmProposal(id);
+
+        // Remove from orphan proposals
         proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+        // Also remove from inline proposals on messages
+        messages.value = messages.value.map((message) => ({
+            ...message,
+            proposals: (message.proposals ?? []).filter((proposal) => proposal.id !== id),
+        }));
 
         // Use the server's own account of what ran. Removing the card and saying
         // nothing left the person unsure whether the action had happened.
@@ -613,7 +633,14 @@ async function rejectProposal(id: number): Promise<void> {
 
     try {
         await ai.rejectProposal(id);
+
+        // Remove from orphan proposals
         proposals.value = proposals.value.filter((proposal) => proposal.id !== id);
+        // Also remove from inline proposals on messages
+        messages.value = messages.value.map((message) => ({
+            ...message,
+            proposals: (message.proposals ?? []).filter((proposal) => proposal.id !== id),
+        }));
     } catch (e) {
         error.value = readError(e, 'No fue posible rechazar la propuesta.');
     }
@@ -867,31 +894,58 @@ watch(open, (value) => {
                     >
                         <ArtifactCard v-for="artifact in message.artifacts" :key="artifact.id" :artifact="artifact" />
                     </div>
-                </div>
-
-                <div v-for="proposal in proposals" :key="proposal.id" class="cdh-assistant__proposal">
-                    <p class="cdh-assistant__proposal-title">
-                        <i class="bi bi-shield-exclamation" aria-hidden="true" />
-                        Acción propuesta: {{ proposal.tool }}
-                    </p>
-                    <p class="cdh-assistant__proposal-args">{{ describeArguments(proposal.arguments) }}</p>
-                    <p class="cdh-assistant__proposal-note">No se ha cambiado nada. Confirme para aplicarlo.</p>
-                    <div class="cdh-assistant__proposal-actions">
-                        <AppButton variant="primary" size="sm" @click="confirmProposal(proposal.id)">
-                            Confirmar
-                        </AppButton>
-                        <AppButton variant="secondary" size="sm" @click="rejectProposal(proposal.id)">
-                            Descartar
-                        </AppButton>
+                    <!-- Proposals this question asked for, inline with it. -->
+                    <div
+                        v-if="message.role === 'user' && message.proposals && message.proposals.length"
+                        class="cdh-assistant__message-proposals"
+                    >
+                        <div
+                            v-for="proposal in message.proposals"
+                            :key="proposal.id"
+                            class="cdh-assistant__proposal cdh-assistant__proposal--inline"
+                        >
+                            <p class="cdh-assistant__proposal-title">
+                                <i class="bi bi-shield-exclamation" aria-hidden="true" />
+                                Acción propuesta: {{ proposal.tool }}
+                            </p>
+                            <p class="cdh-assistant__proposal-args">{{ describeArguments(proposal.arguments) }}</p>
+                            <p class="cdh-assistant__proposal-note">No se ha cambiado nada. Confirme para aplicarlo.</p>
+                            <div class="cdh-assistant__proposal-actions">
+                                <AppButton variant="primary" size="sm" @click="confirmProposal(proposal.id)">
+                                    Confirmar
+                                </AppButton>
+                                <AppButton variant="secondary" size="sm" @click="rejectProposal(proposal.id)">
+                                    Descartar
+                                </AppButton>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
-                <!-- Files with no reply to sit beside — a background task's output,
-                     or a proposal-only turn. Collapsed so the transcript itself
-                     stays chronological, and never mixed into it. -->
-                <details v-if="artifacts.length" class="cdh-assistant__artifacts">
-                    <summary class="cdh-assistant__artifacts-title">Archivos anteriores ({{ artifacts.length }})</summary>
-                    <ArtifactCard v-for="artifact in artifacts" :key="artifact.id" :artifact="artifact" />
+                <!-- Orphan proposals (no message to sit beside) in a secondary section. -->
+                <details v-if="proposals.length" class="cdh-assistant__proposals">
+                    <summary class="cdh-assistant__proposals-title">Propuestas anteriores ({{ proposals.length }})</summary>
+                    <div
+                        v-for="proposal in proposals"
+                        :key="proposal.id"
+                        class="cdh-assistant__proposal"
+                    >
+                        <p class="cdh-assistant__proposal-title">
+                            <i class="bi bi-shield-exclamation" aria-hidden="true" />
+                            Acción propuesta: {{ proposal.tool }}
+                        </p>
+                        <p class="cdh-assistant__proposal-args">{{ describeArguments(proposal.arguments) }}</p>
+                        <p class="cdh-assistant__proposal-note">No se ha cambiado nada. Confirme para aplicarlo.</p>
+                        <div class="cdh-assistant__proposal-actions">
+                            <AppButton variant="primary" size="sm" @click="confirmProposal(proposal.id)">
+                                Confirmar
+                            </AppButton>
+                            <AppButton variant="secondary" size="sm" @click="rejectProposal(proposal.id)">
+                                Descartar
+                            </AppButton>
+                        </div>
+                    </div>
+
                 </details>
 
                 <div v-if="sending" class="cdh-assistant__message cdh-assistant__message--assistant">

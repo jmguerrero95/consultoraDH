@@ -49,6 +49,12 @@ export interface AiProposal {
     arguments: Record<string, unknown>;
     expires_at: string;
     pending: true;
+    /**
+     * The message this proposal belongs beside, so it can be rendered inline
+     * rather than piled in a separate panel. `null` for proposals created
+     * before this migration.
+     */
+    message_id?: number | null;
 }
 
 /** What a read tool returned during the turn. */
@@ -101,6 +107,34 @@ export function groupArtifactsByMessage(artifacts: AiArtifact[]): {
             byMessage.set(artifact.message_id, list);
         } else {
             orphan.push(artifact);
+        }
+    }
+
+    return { byMessage, orphan };
+}
+
+/**
+ * Pair proposals with the message that asked for them.
+ *
+ * Shared by the widget and the full page so proposals render inline with the
+ * user question that triggered them. Proposals with no message_id — created
+ * before this migration — are returned as `orphan` for a collapsed secondary
+ * section.
+ */
+export function groupProposalsByMessage(proposals: AiProposal[]): {
+    byMessage: Map<number, AiProposal[]>;
+    orphan: AiProposal[];
+} {
+    const byMessage = new Map<number, AiProposal[]>();
+    const orphan: AiProposal[] = [];
+
+    for (const proposal of proposals) {
+        if (typeof proposal.message_id === 'number') {
+            const list = byMessage.get(proposal.message_id) ?? [];
+            list.push(proposal);
+            byMessage.set(proposal.message_id, list);
+        } else {
+            orphan.push(proposal);
         }
     }
 
@@ -322,8 +356,8 @@ export const ai = {
         return request<{ conversation_id: number; title: string | null; created_at: string | null }>('POST', '/api/ai/conversations/open');
     },
 
-    history(conversationId: number): Promise<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[]; attachments?: AiAttachmentSummary[] }> {
-        return request<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[]; attachments?: AiAttachmentSummary[] }>(
+    history(conversationId: number): Promise<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[]; attachments?: AiAttachmentSummary[]; proposals?: AiProposal[] }> {
+        return request<{ conversation_id: number; messages: AiMessagePayload[]; artifacts?: AiArtifact[]; attachments?: AiAttachmentSummary[]; proposals?: AiProposal[] }>(
             'GET',
             `/api/ai/conversations/${conversationId}`,
         );

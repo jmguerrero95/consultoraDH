@@ -410,6 +410,109 @@ final class ResearchQuality
     }
 
     /**
+     * Extract URLs from a text that look like citations.
+     *
+     * @return list<string>
+     */
+    public static function citedUrls(string $text): array
+    {
+        $urls = [];
+        preg_match_all('#https?://[^\s\)\]"\'>]+#', $text, $matches);
+        foreach ($matches[0] as $url) {
+            $clean = rtrim($url, '.,;:!?)\]\'">');
+            if ($clean !== '') {
+                $urls[] = $clean;
+            }
+        }
+
+        return array_values(array_unique($urls));
+    }
+
+    /**
+     * Check whether a response cites any of the recovered sources.
+     *
+     * Returns true if at least one URL from the recovered sources appears in
+     * the response text. This is a lexical check — it does not validate that
+     * the citation is used correctly, only that the model referenced something
+     * it was given.
+     */
+    public static function citesSources(string $response, array $sources): bool
+    {
+        $cited = self::citedUrls($response);
+
+        if ($cited === []) {
+            return false;
+        }
+
+        $recovered = [];
+        foreach ($sources as $source) {
+            $url = trim((string) ($source['url'] ?? ''));
+            if ($url !== '') {
+                $recovered[] = $url;
+            }
+        }
+
+        if ($recovered === []) {
+            return false;
+        }
+
+        foreach ($cited as $citedUrl) {
+            foreach ($recovered as $recoveredUrl) {
+                // Match by exact URL or by the recovered URL being a prefix
+                // (in case the cited URL has trailing path that was truncated)
+                if ($citedUrl === $recoveredUrl || str_starts_with($citedUrl, $recoveredUrl)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether a research answer covers the main dimensions of the question.
+     *
+     * A lexical approximation: for each dimension extracted from the question,
+     * check if the response contains at least one term from that dimension.
+     * This is a floor, not a guarantee of quality. A dimension with no valid
+     * terms (e.g. "qué es") is considered covered automatically.
+     */
+    public static function coversDimensions(string $question, string $response): bool
+    {
+        $dimensions = self::dimensions($question);
+
+        if ($dimensions === []) {
+            return true;
+        }
+
+        $normalisedResponse = self::normalise($response);
+
+        foreach ($dimensions as $dimension) {
+            $dimTerms = self::terms($dimension);
+
+            // A dimension with no valid terms has nothing to cover.
+            if ($dimTerms === []) {
+                continue;
+            }
+
+            $found = false;
+
+            foreach ($dimTerms as $term) {
+                if (str_contains($normalisedResponse, $term)) {
+                    $found = true;
+                    break;
+                }
+            }
+
+            if (! $found) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Remove the command words that prefix a clause of a research request.
      */
     private static function stripCommandWords(string $part): string

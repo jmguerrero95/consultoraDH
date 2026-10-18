@@ -834,6 +834,11 @@ final class AiAssistantService
         $endedBy = 'answer';
         $pending = false;
 
+        // Track proposal IDs created in this turn so they can be linked to the
+        // user message once it is persisted. The proposal belongs to the turn
+        // that asked for it, which is the user's question.
+        $createdProposalIds = [];
+
         // Identical calls repeated inside one turn spend quota for a result the
         // model already holds. Keyed by the tool and its decisive argument, so a
         // rephrased search or a genuinely new URL is still allowed: this is
@@ -960,6 +965,50 @@ final class AiAssistantService
                     }
 
                     continue;
+                }
+
+                // A reply that has sufficient sources but fails to cite them, or
+                // incorrectly declares insufficiency when evidence exists, is not an
+                // answer when the budget still allows a bounded correction. The model
+                // has the evidence; it just needs to be told to use it properly.
+                if (! $recoveredFromResearch
+                    && $researchIntent
+                    && $round < $maxRounds
+                    && ! $budget->outOfTime()
+                ) {
+                    $sufficiency = ResearchQuality::sufficiency($question, $webSources);
+                    $hasCitations = ResearchQuality::citesSources($content, $webSources);
+                    $incorrectlyAdmitsInsufficiency = ResearchQuality::admitsInsufficiency($content) && $sufficiency['sufficient'];
+
+                    // Missing citations or falsely claiming "I couldn't find enough" when
+                    // the sources were actually sufficient are the two clear defects we
+                    // correct. A partial answer that covers some dimensions but not
+                    // others is the model's choice and does not force a recovery on
+                    // its own; the reformulation directive already encourages the
+                    // model to split multi-part questions.
+                    if ($sufficiency['sufficient'] && (! $hasCitations || $incorrectlyAdmitsInsufficiency)) {
+                        $recoveredFromResearch = true;
+                        $round++;
+
+                        $messages[] = AiMessage::assistant($content);
+                        $messages[] = AiMessage::user(
+                            ResearchQuality::reformulationDirective($question, $webSources)
+                        );
+
+                        try {
+                            $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                        } catch (AiProviderException $e) {
+                            $this->recordTurnSummary(
+                                $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                                $turnRequiresClientData, $privacyReason, $requiresClientData,
+                                false, false, 'provider_error', 'failed',
+                            );
+
+                            throw $e;
+                        }
+
+                        continue;
+                    }
                 }
 
                 $reply = $content;
@@ -1097,6 +1146,8 @@ final class AiAssistantService
                             'status' => AiActionProposal::PENDING,
                             'expires_at' => now()->addMinutes(config('ai.proposal_ttl_minutes', 15)),
                         ]);
+
+                        $createdProposalIds[] = $proposal->id;
 
                         $proposalsThisRound[] = [
                             'id' => $proposal->id,
@@ -1317,13 +1368,28 @@ final class AiAssistantService
         $model = $replyModel ?? $currentResult->model ?? $result->model;
 
         // Persist user message and assistant reply
-        AiMessageModel::query()->create([
+        $userMessage = AiMessageModel::query()->create([
             'ai_conversation_id' => $conversation->id,
             'role' => AiMessage::ROLE_USER,
             'content' => $question,
             'provider' => $provider,
             'model' => $model,
         ]);
+
+        // Link proposals created in this turn to the user message that asked for them.
+        if ($createdProposalIds !== []) {
+            AiActionProposal::query()
+                ->whereIn('id', $createdProposalIds)
+                ->whereNull('message_id')
+                ->update(['message_id' => $userMessage->id]);
+
+            // Also stamp the in-memory proposals array so the response carries it.
+            foreach ($proposals as &$proposal) {
+                if (in_array($proposal['id'], $createdProposalIds, true)) {
+                    $proposal['message_id'] = (int) $userMessage->id;
+                }
+            }
+        }
 
         if ($hasReply) {
             $assistantMessage = AiMessageModel::query()->create([

@@ -253,7 +253,37 @@ final class AiAssistantController extends Controller
             // spreadsheet came back looking empty. The server is the source of
             // truth, so they are rebuilt from here rather than from memory.
             'attachments' => $this->attachmentsFor($conversation),
+            // Proposals (pending write actions) belonging to this conversation,
+            // each linked to the message that asked for it so the interface can
+            // show them inline. Expired/rejected proposals are excluded.
+            'proposals' => $this->proposalsFor($conversation),
         ]);
+    }
+
+    /**
+     * The pending proposals belonging to a conversation, oldest first.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function proposalsFor(AiConversation $conversation): array
+    {
+        return AiActionProposal::query()
+            ->where('ai_conversation_id', $conversation->id)
+            ->where('user_id', $conversation->user_id)
+            ->where('status', AiActionProposal::PENDING)
+            ->where('expires_at', '>', now())
+            ->orderBy('id')
+            ->get()
+            ->map(fn (AiActionProposal $proposal): array => [
+                'id' => $proposal->id,
+                'tool' => $proposal->tool,
+                'arguments' => $proposal->arguments,
+                'expires_at' => $proposal->expires_at?->toDateTimeString(),
+                // The message this proposal belongs beside; null for proposals
+                // created before this migration.
+                'message_id' => $proposal->message_id !== null ? (int) $proposal->message_id : null,
+            ])
+            ->all();
     }
 
     /**

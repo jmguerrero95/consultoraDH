@@ -37,6 +37,7 @@ class AiActionProposal extends Model
 
     protected $fillable = [
         'ai_conversation_id',
+        'message_id',
         'user_id',
         'tool',
         'arguments',
@@ -54,6 +55,11 @@ class AiActionProposal extends Model
     public function conversation(): BelongsTo
     {
         return $this->belongsTo(AiConversation::class, 'ai_conversation_id');
+    }
+
+    public function message(): BelongsTo
+    {
+        return $this->belongsTo(AiMessage::class, 'message_id');
     }
 
     public function user(): BelongsTo

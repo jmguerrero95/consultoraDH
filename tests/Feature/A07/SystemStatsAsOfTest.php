@@ -6,6 +6,7 @@ namespace Tests\Feature\A07;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Domain\Documents\DocumentIngestor;
+use App\Domain\Receivables\ReceivablesService;
 use App\Models\AiConversation;
 use App\Models\Client;
 use App\Models\Company;
@@ -116,7 +117,7 @@ final class SystemStatsAsOfTest extends TestCase
 
         // The historical balance cannot include an obligation raised two years
         // after the cut-off; the current one can.
-        $current = app(\App\Domain\Receivables\ReceivablesService::class)->clientBalanceCounts();
+        $current = app(ReceivablesService::class)->clientBalanceCounts();
         $this->assertGreaterThan(
             0,
             $current['clients_with_debt'],
