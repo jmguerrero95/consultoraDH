@@ -30,11 +30,12 @@ namespace App\Services\Ai;
  * ## Provenance first, patterns second
  *
  * The decision is driven by *where the data came from* — a conversation already
- * marked private, a retrieved document, a non-public task, a tool that reads our
- * records — because a business name or a client's balance has no shape a regular
- * expression can recognise. Patterns only add a conservative floor: an email or
- * a long digit run is treated as private even when nothing else says so. A regex
- * match can promote a payload to private; a missing match never demotes it.
+ * marked private, a retrieved document, a question about our own records, a tool
+ * that reads our records — because a business name or a client's balance has no
+ * shape a regular expression can recognise. Patterns only add a conservative
+ * floor: an email or a long digit run is treated as private even when nothing
+ * else says so. A regex match can promote a payload to private; a missing match
+ * never demotes it.
  */
 final class AiPrivacyGate
 {
@@ -56,23 +57,82 @@ final class AiPrivacyGate
     private const TOKEN_MIN = 5;
 
     /**
+     * Words that mean "our own organisation or records", never a public subject.
+     *
+     * A first-person plural possessive is the one unambiguous marker that the
+     * question is about us and not about the world: "nuestros clientes", "nuestra
+     * cartera", "nuestras empresas". It is a stronger signal than any keyword,
+     * and it is why "Explícame las relaciones entre tablas" stays public while
+     * "Consulta las relaciones de nuestros clientes" does not.
+     *
+     * @var list<string>
+     */
+    private const INTERNAL_POSSESSIVES = ['nuestra', 'nuestro', 'nuestras', 'nuestros'];
+
+    /**
+     * Phrases that name an internal resource or the running system itself.
+     *
+     * @var list<string>
+     */
+    private const INTERNAL_PHRASES = [
+        'del sistema', 'en el sistema', 'en la plataforma', 'de la plataforma',
+        'de consultora', 'en consultora', 'el portafolio', 'la cartera', 'la afiliacion',
+    ];
+
+    /**
+     * Nouns that name a record this application owns.
+     *
+     * Deliberately *not* the router's subject terms: "novedad" is absent because
+     * "las novedades de la reforma laboral" is a public question, and ambiguous
+     * words must not, on their own, turn a public request private. A noun from
+     * this list only raises the classification when it is paired with a
+     * data-request marker below, so "Explícame un documento conceptual" stays
+     * public while "Revisa los datos del cliente" does not.
+     *
+     * @var list<string>
+     */
+    private const INTERNAL_NOUNS = [
+        'cliente', 'clienta', 'empresa', 'cartera', 'saldo', 'recaudo', 'cobro',
+        'deuda', 'factura', 'facturacion', 'obligacion', 'pago', 'afiliacion',
+        'portafolio', 'contrato', 'cotizacion', 'usuario', 'sede', 'tarea',
+        'ticket', 'soporte', 'conversacion', 'planilla', 'informe', 'documento',
+        'cedula', 'nit',
+    ];
+
+    /**
+     * Ways of *asking the system for its records* rather than for an explanation.
+     *
+     * An explanatory verb ("explícame", "qué es", "diferencia entre") is never
+     * one of these, which is what keeps conceptual questions public.
+     *
+     * @var list<string>
+     */
+    private const DATA_REQUEST_MARKERS = [
+        'revisa', 'revisar', 'consulta', 'consultar', 'lista', 'listar', 'dame',
+        'muestrame', 'muestra', 'mostrar', 'calcula', 'calcular', 'indica',
+        'indicame', 'dime', 'cuantos', 'cuantas', 'cuanto', 'cuanta', 'total',
+        'resumen', 'actualiza', 'modifica', 'necesito', 'quiero', 'cual es',
+        'cuales son',
+    ];
+
+    /**
      * Whether a payload about to be sent to a model requires a provider
      * authorised for private data.
      *
      * @param  bool  $conversationFlagged  the conversation already held private data
      * @param  bool  $hasPrivateDocuments  retrieved passages from an attachment are in the payload
-     * @param  bool  $nonPublicTask  the turn routed to a task that is not general/web
+     * @param  bool  $requestsInternalData  the request is about our own records (see {@see requestsInternalData()})
      * @param  bool  $privateToolRan  a tool that reads our records (or is unclassified) ran
      * @param  list<string>  $texts  the exact outgoing text: question, history, tool results, briefs
      */
     public function payloadRequiresClientData(
         bool $conversationFlagged = false,
         bool $hasPrivateDocuments = false,
-        bool $nonPublicTask = false,
+        bool $requestsInternalData = false,
         bool $privateToolRan = false,
         array $texts = [],
     ): bool {
-        if ($conversationFlagged || $hasPrivateDocuments || $nonPublicTask || $privateToolRan) {
+        if ($conversationFlagged || $hasPrivateDocuments || $requestsInternalData || $privateToolRan) {
             return true;
         }
 
@@ -83,6 +143,58 @@ final class AiPrivacyGate
         }
 
         return false;
+    }
+
+    /**
+     * Whether a question is about this organisation's own records rather than
+     * about the world.
+     *
+     * This is the privacy decision, and it is deliberately separate from the
+     * router's tool selection. The router returns a *hint* about which tools a
+     * turn might need; a match there is not a statement that the turn holds
+     * private data. A07-R5 T01 proved the difference: "Explícame la diferencia
+     * entre una base de datos relacional y una documental" is a public question
+     * that the router also matched to the clients group, and treating the router
+     * match as a privacy signal pushed it to a private provider — which excluded
+     * every independent free provider and left the turn unanswered.
+     *
+     * Two independent shapes raise it, and only these:
+     *
+     *   - a first-person plural possessive ("nuestros clientes") or a named
+     *     internal resource ("del sistema", "la cartera"); or
+     *   - a record noun ("cliente", "saldo", "factura") *together with* a request
+     *     marker ("revisa", "dame", "cuántos"). The conjunction is what keeps
+     *     "Explícame un documento conceptual" public while "Revisa los datos del
+     *     cliente ficticio" is protected.
+     *
+     * It fails closed on doubt: a noun with a request marker is enough, and a
+     * possessive is enough on its own.
+     */
+    public function requestsInternalData(string $text): bool
+    {
+        $haystack = $this->normaliseText($text);
+
+        if ($haystack === '') {
+            return false;
+        }
+
+        foreach (self::INTERNAL_POSSESSIVES as $word) {
+            if ($this->mentions($haystack, $word)) {
+                return true;
+            }
+        }
+
+        foreach (self::INTERNAL_PHRASES as $phrase) {
+            if (str_contains($haystack, $phrase)) {
+                return true;
+            }
+        }
+
+        if (! $this->mentionsAny($haystack, self::INTERNAL_NOUNS)) {
+            return false;
+        }
+
+        return $this->mentionsAny($haystack, self::DATA_REQUEST_MARKERS);
     }
 
     /**
@@ -358,6 +470,58 @@ final class AiPrivacyGate
         }
 
         return $tokens;
+    }
+
+    /**
+     * Whether any of the given terms appears as a whole word (or phrase).
+     *
+     * @param  list<string>  $terms
+     */
+    private function mentionsAny(string $haystack, array $terms): bool
+    {
+        foreach ($terms as $term) {
+            if ($this->mentions($haystack, $term)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether a term appears at a word edge, never inside another word.
+     *
+     * The same rule the router uses, for the same reason: a stem must not match a
+     * longer unrelated word ("cliente" must not match "clientela"), while Spanish
+     * inflection still works ("cliente" matches "clientes", "factura" matches
+     * "facturas").
+     */
+    private function mentions(string $haystack, string $term): bool
+    {
+        $needle = trim($term);
+
+        if ($needle === '') {
+            return false;
+        }
+
+        $pattern = '/(?<![\p{L}\p{N}])'.preg_quote($needle, '/').'(?:s|es|mente)?(?![\p{L}\p{N}])/u';
+
+        return preg_match($pattern, $haystack) === 1;
+    }
+
+    /**
+     * The lower-cased, accent-stripped form the content checks compare against.
+     */
+    private function normaliseText(string $text): string
+    {
+        $lower = mb_strtolower($text);
+
+        return strtr($lower, [
+            'á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u',
+            'à' => 'a', 'è' => 'e', 'ì' => 'i', 'ò' => 'o', 'ù' => 'u',
+            'ä' => 'a', 'ë' => 'e', 'ï' => 'i', 'ö' => 'o', 'ü' => 'u',
+            'ñ' => 'n', 'ç' => 'c',
+        ]);
     }
 
     /**

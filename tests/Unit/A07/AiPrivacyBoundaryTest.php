@@ -94,8 +94,57 @@ final class AiPrivacyBoundaryTest extends TestCase
 
         $this->assertTrue($gate->payloadRequiresClientData(conversationFlagged: true));
         $this->assertTrue($gate->payloadRequiresClientData(hasPrivateDocuments: true));
-        $this->assertTrue($gate->payloadRequiresClientData(nonPublicTask: true));
+        $this->assertTrue($gate->payloadRequiresClientData(requestsInternalData: true));
         $this->assertTrue($gate->payloadRequiresClientData(privateToolRan: true));
+    }
+
+    /**
+     * A07-R5 T01: the classification must not follow the router's tool hint.
+     *
+     * These are public questions. "relacional" is not "relación de clientes",
+     * "documento" in "un documento conceptual" is not an internal file, and "las
+     * novedades de la reforma laboral" is the world's news, not ours. None of them
+     * may require a provider authorised for private data, because requiring one
+     * excludes every independent free provider.
+     */
+    public function test_a_public_conceptual_question_does_not_require_a_private_provider(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $questions = [
+            'Explícame la diferencia entre una base de datos relacional y una documental.',
+            'Diferencia entre SQL y MongoDB.',
+            'Explícame las relaciones entre tablas.',
+            'Explícame un documento conceptual.',
+            '¿Cuáles son las novedades de la reforma laboral de 2026?',
+        ];
+
+        foreach ($questions as $question) {
+            $this->assertFalse($gate->requestsInternalData($question), "Public question flagged: {$question}");
+            $this->assertFalse(
+                $gate->payloadRequiresClientData(
+                    requestsInternalData: $gate->requestsInternalData($question),
+                    texts: [$question],
+                ),
+                "Public question required a private provider: {$question}",
+            );
+        }
+    }
+
+    public function test_a_question_about_our_records_requires_a_private_provider(): void
+    {
+        $gate = new AiPrivacyGate;
+
+        $questions = [
+            'Consulta las relaciones de nuestros clientes.',
+            'Revisa los datos del cliente ficticio de pruebas.',
+            '¿Cuántos clientes hay?',
+            'Dame el saldo de cartera por empresa.',
+        ];
+
+        foreach ($questions as $question) {
+            $this->assertTrue($gate->requestsInternalData($question), "Internal question missed: {$question}");
+        }
     }
 
     public function test_a_clean_public_payload_does_not_require_a_private_provider(): void

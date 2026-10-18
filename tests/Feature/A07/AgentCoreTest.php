@@ -244,6 +244,93 @@ final class AgentCoreTest extends TestCase
         );
     }
 
+    // ------------------------------------------------------ A07-R5 T01 (relacional)
+
+    /**
+     * T01: "Explícame la diferencia entre una base de datos relacional y una
+     * documental…" is a public, conversational question.
+     *
+     * The word "relacional" contains "relacion", which the router's substring
+     * match treated as a clients subject and the turn's privacy check then treated
+     * as private data. That excluded every independent free provider and left the
+     * turn to a single account whose daily free quota was spent — no answer. Here
+     * the turn must be public (so a training provider may answer) and must carry
+     * no administrative tool, so no tool round can spend quota either.
+     */
+    public function test_t01_a_conceptual_question_is_public_and_carries_no_tools(): void
+    {
+        $this->twoProviders();
+
+        Http::fake([
+            self::PUBLIC_URL => Http::response($this->textBody('Una base relacional usa tablas; una documental, documentos.')),
+            self::PRIVATE_URL => Http::response($this->textBody('No debería usarse.')),
+        ]);
+
+        $conversation = $this->conversation();
+        $result = app(AiAssistantService::class)->ask(
+            $conversation,
+            'Explícame la diferencia entre una base de datos relacional y una documental. '
+                .'Pon un ejemplo real de cuándo conviene utilizar cada una y sus desventajas.',
+            $this->user,
+        );
+
+        $this->assertStringContainsString('relacional', $result['reply']);
+
+        $sent = Http::recorded();
+        $this->assertCount(1, $this->sentTo($sent, self::PUBLIC_URL), 'A public conceptual question must be answerable by a training provider.');
+        $this->assertCount(0, $this->sentTo($sent, self::PRIVATE_URL));
+
+        // "relacional" is not "relación de clientes": no administrative tool may
+        // be offered for a theory question.
+        $this->assertSame([], $this->toolNames($sent[0][0]));
+
+        $this->assertFalse(
+            (bool) $conversation->fresh()->contains_client_data,
+            'T01 is a public question and must not be classified as private data.',
+        );
+    }
+
+    /**
+     * The safeguard the T01 fix must not weaken: a question about our own records
+     * stays private, and with no authorised provider it never leaves the server.
+     */
+    public function test_an_administrative_question_still_requires_an_authorised_provider(): void
+    {
+        config([
+            'ai.primary' => ['base_url' => null, 'api_key' => null, 'model' => null],
+            'ai.fallback' => ['base_url' => null, 'api_key' => null, 'model' => null],
+            'ai.providers' => [
+                'publico' => [
+                    'enabled' => true,
+                    'base_url' => 'https://public.test/v1',
+                    'api_key' => 'pub-key',
+                    'models' => ['pub-model'],
+                    'priority' => 1,
+                    'data_policy' => 'training',
+                    'capabilities' => ['chat', 'tools'],
+                ],
+            ],
+            'ai.privacy.allow_training_providers' => false,
+        ]);
+
+        Http::fake();
+
+        $conversation = $this->conversation();
+
+        try {
+            app(AiAssistantService::class)->ask($conversation, 'Consulta las relaciones de nuestros clientes.', $this->user);
+            $this->fail('An internal question must not reach a training provider.');
+        } catch (AiProviderException $e) {
+            $this->assertStringContainsString('autorizado', $e->publicMessage());
+        }
+
+        Http::assertNothingSent();
+        $this->assertTrue(
+            (bool) $conversation->fresh()->contains_client_data,
+            'The thread is marked private even though the turn failed.',
+        );
+    }
+
     public function test_a_data_turn_marks_the_conversation_and_the_mark_survives_a_public_follow_up(): void
     {
         Http::fake([self::PROVIDER_URL => Http::response($this->textBody('Listo.'))]);

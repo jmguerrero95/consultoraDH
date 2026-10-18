@@ -136,11 +136,11 @@ const notice = computed<{ variant: 'danger' | 'warning'; message: string } | nul
     }
 
     if (status.value.state === 'quota_limited') {
-        return { variant: 'warning', message: 'El proveedor de IA alcanzó su límite de uso. Puede reintentar en unos minutos.' };
+        return { variant: 'warning', message: 'El servicio de inteligencia artificial alcanzó temporalmente su límite de uso. Puedes reintentar cuando vuelva a estar disponible.' };
     }
 
     if (status.value.state === 'unavailable') {
-        return { variant: 'warning', message: 'Los proveedores de IA están temporalmente indisponibles. Puede reintentar en unos minutos.' };
+        return { variant: 'warning', message: 'No hay un proveedor de inteligencia artificial disponible en este momento. Puedes reintentar cuando vuelva a estarlo.' };
     }
 
     return null;
@@ -160,8 +160,13 @@ const statusLabel = computed(() => {
             return 'Límite de uso alcanzado';
         case 'fallback':
             return `Respaldo${status.value.active_model ? ` · ${status.value.active_model}` : ''}`;
+        case 'available':
+            // Only a recent, observed answer is "available". A configured pool
+            // that has not answered is not claimed to be working.
+            return status.value.active_model ? `Disponible · ${status.value.active_model}` : 'Disponible';
         default:
-            return status.value.active_model ? `Operativo · ${status.value.active_model}` : 'Operativo';
+            // `unchecked`: configured, but with no recent proof it answers.
+            return 'Disponibilidad sin comprobar';
     }
 });
 

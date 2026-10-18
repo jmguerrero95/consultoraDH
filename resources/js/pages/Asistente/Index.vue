@@ -274,13 +274,18 @@ const availability = computed(() => {
         case 'none':
             return 'No hay ningún proveedor de IA configurado.';
         case 'unavailable':
-            return 'Los proveedores de IA no están disponibles en este momento; se reintentará automáticamente.';
+            return 'No hay un proveedor de inteligencia artificial disponible en este momento; se reintentará automáticamente.';
         case 'quota_limited':
-            return 'El proveedor de IA alcanzó su límite de uso. Puede reintentar en unos minutos.';
+            return 'El servicio de inteligencia artificial alcanzó temporalmente su límite de uso. Puedes reintentar cuando vuelva a estar disponible.';
         case 'fallback':
             return `Operativo con el proveedor de respaldo${model.value !== '—' ? ` (${model.value})` : ''}.`;
+        case 'available':
+            // Only a recent, observed answer is "disponible".
+            return `Disponible${model.value !== '—' ? ` con ${model.value}` : ''}.`;
         default:
-            return `Operativo${model.value !== '—' ? ` con ${model.value}` : ''}.`;
+            // `unchecked`: configured, but with no recent proof it answers, so the
+            // screen does not claim it is working.
+            return 'Disponibilidad del servicio sin comprobar todavía.';
     }
 });
 

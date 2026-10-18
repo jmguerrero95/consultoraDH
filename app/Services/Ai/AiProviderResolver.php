@@ -123,6 +123,11 @@ class AiProviderResolver
             $required[] = 'client_data';
         }
 
+        // A short id for this turn's provider cycle. Every row it writes shares
+        // it, so the diagnostics can be read as one turn — what was eligible, what
+        // was tried, what each attempt did — instead of a flat list of events.
+        $turn = substr(bin2hex(random_bytes(6)), 0, 12);
+
         $candidates = $this->ordered($this->pool->supporting($required), $preferred);
 
         // A model that refused tool calling keeps its place for conversation but
@@ -136,7 +141,9 @@ class AiProviderResolver
         }
 
         if ($candidates === []) {
-            if ($this->pool->all() === []) {
+            $poolSize = count($this->pool->all());
+
+            if ($poolSize === 0) {
                 throw AiProviderException::notConfigured();
             }
 
@@ -144,11 +151,15 @@ class AiProviderResolver
             // provider authorised for private data and there is none right now.
             // Saying so is the honest failure — the record stays on the server.
             if ($requiresClientData) {
-                throw AiProviderException::unavailable(
+                $this->recordNoCandidates($turn, $task, $required, 'privacy', $poolSize);
+
+                throw AiProviderException::privacyUnavailable(
                     'No hay ningún proveedor autorizado para datos privados en este momento; '
-                    .'la información no salió del servidor. Vuelve a intentarlo en unos minutos.'
+                    .'la información no salió del servidor.'
                 );
             }
+
+            $this->recordNoCandidates($turn, $task, $required, $tools !== [] ? 'capability' : 'model', $poolSize);
 
             throw AiProviderException::unavailable(
                 $tools !== []
@@ -231,7 +242,7 @@ class AiProviderResolver
                 // It is not the model's fault, so the model is not cooled down,
                 // and it is not evaded by asking a different provider.
                 if ($e->isTerminal()) {
-                    $this->recordDiagnostic($task, $candidate, $e, $latency, 'refused');
+                    $this->recordDiagnostic($turn, $task, $candidate, $e, $latency, 'refused', $this->candidateContext($required, $candidates));
 
                     throw $e;
                 }
@@ -243,7 +254,7 @@ class AiProviderResolver
                 }
 
                 $this->health->recordFailure($candidate, $e, $latency);
-                $this->recordDiagnostic($task, $candidate, $e, $latency, 'failed');
+                $this->recordDiagnostic($turn, $task, $candidate, $e, $latency, 'failed', $this->candidateContext($required, $candidates));
 
                 $lastFailure = $e;
                 $budget->countFailover();
@@ -256,7 +267,7 @@ class AiProviderResolver
                 $converted = AiProviderException::unavailable($e::class.': '.$e->getMessage());
                 $latency = $this->latenciesFrom($startedAt);
                 $this->health->recordFailure($candidate, $converted, $latency);
-                $this->recordDiagnostic($task, $candidate, $converted, $latency, 'failed');
+                $this->recordDiagnostic($turn, $task, $candidate, $converted, $latency, 'failed', $this->candidateContext($required, $candidates));
                 $lastFailure = $converted;
                 $budget->countFailover();
 
@@ -265,7 +276,7 @@ class AiProviderResolver
 
             $latency = $this->latenciesFrom($startedAt);
             $this->health->recordSuccess($candidate, $latency);
-            $this->recordDiagnostic($task, $candidate, null, $latency, 'ok');
+            $this->recordDiagnostic($turn, $task, $candidate, null, $latency, 'ok', $this->candidateContext($required, $candidates));
             $this->rememberLastResult($candidate);
 
             return $response;
@@ -583,16 +594,21 @@ class AiProviderResolver
     }
 
     private function recordDiagnostic(
+        string $turn,
         ?string $task,
         ModelCandidate $candidate,
         ?AiProviderException $error,
         int $latencyMs,
         string $outcome,
+        array $context = [],
     ): void {
         $rows = $this->diagnostics();
 
-        array_unshift($rows, [
+        array_unshift($rows, array_merge([
             'at' => now()->timestamp,
+            // Every row of one provider cycle shares this, so the diagnostics can
+            // be read as a turn rather than as unrelated events.
+            'turn' => $turn,
             'task' => $task,
             'model' => $candidate->model,
             'provider' => $candidate->providerHost(),
@@ -601,9 +617,9 @@ class AiProviderResolver
             'http' => $error?->status,
             // Where the fault lies and what the resolver did about it. `scope` is
             // the classified failure scope (model, credential, quota_model,
-            // quota_account, capability, policy, internal); `action` says whether
-            // the turn moved on or stopped, which is what turns a bare 503 into a
-            // diagnosis.
+            // quota_account, capability, policy, privacy, internal); `action` says
+            // whether the turn moved on or stopped, which is what turns a bare 503
+            // into a diagnosis.
             'scope' => $error?->scope,
             'account_wide' => $error?->accountWide === true ?: null,
             'action' => match (true) {
@@ -611,11 +627,77 @@ class AiProviderResolver
                 $error->isTerminal() => 'stopped',
                 default => 'failed_over',
             },
-            // The provider's own reason for refusing, truncated. It describes the
-            // shape of the request, never the person's text or the credential, and
-            // it is what turns "malformed (400)" into something actionable.
-            'detail' => $error === null ? null : mb_substr($error->getMessage(), 0, 200),
+            // A safe description of the failure, built from its classification and
+            // never from the provider's own words: the diagnostics are exposed
+            // through `/api/ai/status`, so they must not carry a payment prompt,
+            // a credential or a record.
+            'detail' => $error?->safeDetail(),
             'latency_ms' => $latencyMs,
+        ], $context));
+
+        Cache::put(self::DIAGNOSTICS_KEY, array_slice($rows, 0, 20), 3600);
+    }
+
+    /**
+     * Why a turn was eligible for a given set of candidates, for the diagnostics.
+     *
+     * Reading a turn's rows next to `required` and `eligible` answers the question
+     * that was previously invisible: was a provider skipped because the turn was
+     * classified private, or because it was tried and refused the payload?
+     *
+     * @param  list<string>  $required
+     * @param  list<ModelCandidate>  $candidates
+     * @return array<string, mixed>
+     */
+    private function candidateContext(array $required, array $candidates): array
+    {
+        return [
+            'required' => $required,
+            'eligible' => count($candidates),
+            'pool' => count($this->pool->all()),
+        ];
+    }
+
+    /**
+     * Record that no candidate was eligible, before any request was made.
+     *
+     * This is the row that distinguishes "Gemini was never tried because the turn
+     * was classified as holding private data and Gemini may train on it" from "the
+     * turn was public and every eligible provider refused". It carries counts and
+     * the reason only — never a prompt.
+     *
+     * @param  list<string>  $required
+     */
+    private function recordNoCandidates(
+        string $turn,
+        ?string $task,
+        array $required,
+        string $scope,
+        int $poolSize,
+    ): void {
+        $rows = $this->diagnostics();
+
+        array_unshift($rows, [
+            'at' => now()->timestamp,
+            'turn' => $turn,
+            'task' => $task,
+            'model' => null,
+            'provider' => null,
+            'outcome' => 'no_candidates',
+            'kind' => null,
+            'http' => null,
+            'scope' => $scope,
+            'account_wide' => null,
+            'action' => 'stopped',
+            'detail' => match ($scope) {
+                'privacy' => 'Ningún proveedor autorizado para datos privados; no se envió nada.',
+                'capability' => 'Ningún modelo disponible admite herramientas.',
+                default => 'Ningún modelo disponible.',
+            },
+            'latency_ms' => 0,
+            'required' => $required,
+            'eligible' => 0,
+            'pool' => $poolSize,
         ]);
 
         Cache::put(self::DIAGNOSTICS_KEY, array_slice($rows, 0, 20), 3600);

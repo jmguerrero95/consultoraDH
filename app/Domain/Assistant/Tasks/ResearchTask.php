@@ -331,6 +331,7 @@ final class ResearchTask implements AiTaskHandler
         $requiresClientData = $this->privacy->payloadRequiresClientData(
             conversationFlagged: (bool) ($task->input['contains_client_data'] ?? false) || $this->conversationIsPrivate($task),
             hasPrivateDocuments: $this->hasAttachmentSources($sources),
+            requestsInternalData: $this->privacy->requestsInternalData($question),
             texts: $texts,
         );
 

@@ -105,8 +105,11 @@ final class AiAssistantService
         // One budget for the whole turn, created *before* anything spends time.
         // The A07-R4 defect was that document retrieval ran before the budget
         // existed and was therefore outside it; now retrieval, the external
-        // prefetch and every provider round share one wall clock. A turn always
-        // offers at least the discovery tool, so the tool-aware budget applies.
+        // prefetch and every provider round share one wall clock. A turn may
+        // offer no tool at all (a plainly general question), but the attempt
+        // ceiling here is only a ceiling: an empty toolset already prevents any
+        // tool round, so a larger number cannot spend quota it has nothing to
+        // spend it on.
         $budget = AiTurnBudget::forTurn(
             true,
             microtime(true) + max(5, (int) config('ai.total_budget_seconds', 110)),
@@ -190,7 +193,7 @@ final class AiAssistantService
         // The classification considers the whole payload actually about to be
         // sent, not only the current question, and the conversation remembers
         // that it once held private data.
-        $requiresClientData = $this->classifiesAsClientData($conversation, $routing, $messages, $passages);
+        $requiresClientData = $this->classifiesAsClientData($conversation, $question, $messages, $passages);
 
         if ($requiresClientData) {
             $this->markConversationPrivate($conversation);
@@ -261,11 +264,25 @@ final class AiAssistantService
      * else exists and then call it; the registry and each tool's own
      * authorization remain the only authority on whether a call may run.
      *
-     * @param  array{tools: list<AiToolDefinition>}  $routing
+     * A purely conversational request is the exception: it is offered *no* tool at
+     * all. T01 ("explícame la diferencia entre una base de datos relacional y una
+     * documental") needs nothing but prose, and sending it the core tools plus the
+     * discovery tool forced a tool-capable model and a tool round that had no tool
+     * to call — which is quota the free pool cannot spare. With no tool offered,
+     * the resolver needs only `chat`, so a chat-only model may answer and no tool
+     * round can happen. A request that may still need a capability is unaffected:
+     * "organiza un panorama del negocio" keeps the discovery tool, so the
+     * LLM-directed route to any tool stays open.
+     *
+     * @param  array{task: string, tools: list<AiToolDefinition>, conversational?: bool}  $routing
      * @return list<AiToolDefinition>
      */
     private function initialToolSet(array $routing): array
     {
+        if (($routing['conversational'] ?? false) === true) {
+            return [];
+        }
+
         $byName = [];
 
         foreach ($routing['tools'] as $definition) {
@@ -290,18 +307,27 @@ final class AiAssistantService
      *
      * Conservative by design: it is better to route a public question to a
      * provider that is safe for private data than to send one private record to a
-     * provider whose free tier may train on it. Three signals are combined:
+     * provider whose free tier may train on it. The signals are provenance and
+     * content, never the router's tool hint:
      *
      *   1. The conversation has already held private data.
-     *   2. This turn retrieved documents, or routed to a non-public task.
-     *   3. The exact outgoing text contains something private by nature (an email
+     *   2. This turn retrieved documents.
+     *   3. The question asks about our own records ({@see AiPrivacyGate::requestsInternalData()}).
+     *   4. The exact outgoing text contains something private by nature (an email
      *      or a long identifier run) anywhere in history, question or retrieval.
      *
-     * @param  array{task: string}  $routing
+     * The router's task is deliberately absent. It is a hint about which tools a
+     * turn might need, and a match there is not a statement about sensitivity:
+     * "Explícame las relaciones entre tablas" and "Explícame la diferencia entre
+     * una base de datos relacional y una documental" both matched the clients
+     * group without being about a client at all. Using that match as the privacy
+     * decision excluded every independent free provider and left the T01 turn
+     * unanswered (A07-R5).
+     *
      * @param  list<AiMessage>  $messages
      * @param  list<array<string, mixed>>  $passages
      */
-    private function classifiesAsClientData(AiConversation $conversation, array $routing, array $messages, array $passages): bool
+    private function classifiesAsClientData(AiConversation $conversation, string $question, array $messages, array $passages): bool
     {
         $texts = [];
 
@@ -318,7 +344,7 @@ final class AiAssistantService
         return $this->privacy->payloadRequiresClientData(
             conversationFlagged: (bool) $conversation->contains_client_data,
             hasPrivateDocuments: $passages !== [],
-            nonPublicTask: ! in_array($routing['task'], [AiTaskRouter::TASK_GENERAL, AiTaskRouter::TASK_WEB], true),
+            requestsInternalData: $this->privacy->requestsInternalData($question),
             texts: $texts,
         );
     }

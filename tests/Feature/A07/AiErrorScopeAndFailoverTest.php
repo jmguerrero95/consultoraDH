@@ -10,12 +10,17 @@ use App\Models\AiConversation;
 use App\Models\AiMessage as AiMessageModel;
 use App\Models\User;
 use App\Services\Ai\AiAssistantService;
+use App\Services\Ai\AiModelHealth;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\AiTurnBudget;
+use App\Services\Ai\ModelCandidate;
+use App\Services\Ai\ModelPool;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
@@ -639,5 +644,160 @@ final class AiErrorScopeAndFailoverTest extends TestCase
         $this->assertCount(1, $toolMessages);
         $this->assertSame('call_keep', $toolMessages[0]['tool_call_id']);
         $this->assertSame('automation_vocabulary', $toolMessages[0]['name']);
+    }
+
+    // ----------------------------------------- A07-R5 daily quota & safe errors
+
+    private function candidateFor(string $host): ModelCandidate
+    {
+        return collect(app(ModelPool::class)->all())
+            ->firstOrFail(static fn (ModelCandidate $candidate): bool => $candidate->providerHost() === $host);
+    }
+
+    /**
+     * A *daily* account limit is not the ordinary cooldown.
+     *
+     * OpenRouter's `free-models-per-day` cannot move until the day rolls over, so
+     * re-probing the account every thirty minutes only spends a request to learn
+     * the same thing. The account is set aside for the rest of the UTC day, and an
+     * independent provider — a different account — is untouched.
+     */
+    public function test_a_daily_account_quota_suspends_only_that_account(): void
+    {
+        $this->travelTo(Carbon::parse('2026-06-15 10:00:00', 'UTC'));
+
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1),
+            'gemini' => $this->provider(self::GEMINI, 'gemini-key', ['gemini-model'], 2),
+        ]);
+
+        Http::fake([
+            $this->url(self::GROQ) => Http::response(
+                $this->errorBody('Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day'),
+                429,
+            ),
+            $this->url(self::GEMINI) => Http::response($this->text('Otra cuenta responde.')),
+        ]);
+
+        $result = $this->ask();
+
+        $this->assertSame('gemini-model', $result['model'], 'An independent account is unaffected by another account daily limit.');
+
+        $health = app(AiModelHealth::class);
+        $groq = $this->candidateFor('groq');
+
+        $this->assertTrue($health->endpointRateLimited($groq));
+        $this->assertGreaterThan(3600, $health->endpointRateLimitedRemaining($groq), 'A daily limit is not a 30-minute cooldown.');
+        $this->assertFalse($health->endpointRateLimited($this->candidateFor('gemini')), 'The independent account is not suspended.');
+    }
+
+    public function test_a_per_minute_quota_is_not_extended_to_the_day(): void
+    {
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1),
+            'gemini' => $this->provider(self::GEMINI, 'gemini-key', ['gemini-model'], 2),
+        ]);
+
+        Http::fake([
+            $this->url(self::GROQ) => Http::response(
+                $this->errorBody('Rate limit reached for requests on free models.'),
+                429,
+                ['Retry-After' => '30'],
+            ),
+            $this->url(self::GEMINI) => Http::response($this->text('Otra cuenta responde.')),
+        ]);
+
+        $this->ask();
+
+        $remaining = app(AiModelHealth::class)->endpointRateLimitedRemaining($this->candidateFor('groq'));
+
+        $this->assertGreaterThan(0, $remaining);
+        $this->assertLessThanOrEqual(120, $remaining, 'A per-minute limit clears in seconds, not hours.');
+    }
+
+    /**
+     * The provider's own words invite a payment; the interface is never shown them.
+     */
+    public function test_the_public_message_never_carries_the_provider_commercial_text(): void
+    {
+        $e = AiProviderException::rateLimited(
+            'The AI provider is rate limiting this deployment. (Rate limit exceeded: free-models-per-day. '
+                .'Add 10 credits to unlock 1000 free model requests per day)',
+            30,
+            true,
+            true,
+        );
+
+        $this->assertStringContainsString('límite', $e->publicMessage());
+        $this->assertStringNotContainsStringIgnoringCase('credit', $e->publicMessage());
+        $this->assertStringNotContainsStringIgnoringCase('free-models', $e->publicMessage());
+        $this->assertStringNotContainsStringIgnoringCase('credit', $e->safeDetail());
+        $this->assertStringContainsString('HTTP 429', $e->safeDetail());
+    }
+
+    public function test_a_commercial_quota_message_never_reaches_the_interface(): void
+    {
+        config(['ai.privacy.allow_training_providers' => false]);
+
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1),
+        ]);
+
+        Http::fake([
+            $this->url(self::GROQ) => Http::response(
+                $this->errorBody('Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day'),
+                429,
+            ),
+        ]);
+
+        $response = $this->actingAs($this->user)->postJson('/api/ai/conversations', [
+            'question' => 'Explica en una frase qué es una EPS en Colombia.',
+        ]);
+
+        $response->assertStatus(503);
+
+        $payload = json_encode($response->json(), JSON_UNESCAPED_UNICODE);
+
+        $this->assertIsString($payload);
+        $this->assertStringNotContainsStringIgnoringCase('credit', $payload);
+        $this->assertStringNotContainsStringIgnoringCase('free-models', $payload);
+        $this->assertStringNotContainsStringIgnoringCase('payment', $payload);
+    }
+
+    /**
+     * The diagnostics must say *why* a provider was skipped.
+     *
+     * "Gemini was never tried because the question was classified as private" and
+     * "Gemini was tried and refused the payload" are different diagnoses. The turn
+     * record distinguishes them and carries no prompt text.
+     */
+    public function test_diagnostics_distinguish_a_privacy_exclusion_from_a_refusal(): void
+    {
+        config(['ai.privacy.allow_training_providers' => false]);
+
+        $this->useProviders([
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1, ['chat', 'tools'], 'training'),
+        ]);
+
+        Http::fake();
+        Cache::forget('ai.diagnostics.recent');
+
+        try {
+            $this->ask('Consulta las relaciones de nuestros clientes.');
+            $this->fail('A private turn with no authorised provider must fail.');
+        } catch (AiProviderException) {
+            // Expected: the record stays on the server.
+        }
+
+        $rows = Cache::get('ai.diagnostics.recent', []);
+        $row = $rows[0] ?? null;
+
+        $this->assertIsArray($row);
+        $this->assertSame('no_candidates', $row['outcome']);
+        $this->assertSame('privacy', $row['scope']);
+        $this->assertSame(0, $row['eligible']);
+        $this->assertContains('client_data', $row['required']);
+        $this->assertArrayHasKey('turn', $row);
+        $this->assertStringNotContainsString('nuestros clientes', json_encode($rows, JSON_UNESCAPED_UNICODE));
     }
 }

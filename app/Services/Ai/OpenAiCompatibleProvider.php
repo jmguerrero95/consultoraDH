@@ -139,10 +139,9 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             // the evasion the privacy rules forbid, so the turn stops here and
             // says why. Checked before 401/403 so a content filter expressed as a
             // 403 is not mistaken for a credential problem.
-            in_array($status, [400, 403, 422], true) && $this->messageMentionsContentPolicy($body)
-                => AiProviderException::contentPolicy(
-                    'The AI provider refused the content under its safety policy.'.$detail
-                ),
+            in_array($status, [400, 403, 422], true) && $this->messageMentionsContentPolicy($body) => AiProviderException::contentPolicy(
+                'The AI provider refused the content under its safety policy.'.$detail
+            ),
 
             $status === 401 || $status === 403 => AiProviderException::authentication(
                 'The AI provider rejected the configured credentials.'.$detail
@@ -152,6 +151,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
                 'The AI provider is rate limiting this deployment.'.$detail,
                 $this->retryAfterSeconds($headers),
                 $this->looksAccountWide($body),
+                $this->looksDailyLimit($body),
             ),
 
             // A model the host does not know is not an outage: it is a catalogue
@@ -304,6 +304,30 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         $text = mb_strtolower($text);
 
         foreach (['free-models', 'free model', 'free models', 'daily limit', 'insufficient credits', 'requires more credits', 'add credits'] as $marker) {
+            if (str_contains($text, $marker)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether a 429 is a *daily* account limit rather than a per-minute one.
+     *
+     * The distinction is the whole difference between a wall that clears in
+     * seconds and one that clears tomorrow: OpenRouter's `free-models-per-day`
+     * cannot be escaped by switching to another free model of the same account,
+     * and re-probing it after the ordinary cooldown only spends a request to
+     * learn the same thing. The test is on the provider's own wording.
+     *
+     * @param  array<string, mixed>|null  $body
+     */
+    private function looksDailyLimit(?array $body): bool
+    {
+        $text = mb_strtolower($this->providerMessage($body));
+
+        foreach (['per-day', 'per day', 'daily limit', 'daily_limit', 'free-models-per-day', 'requests per day'] as $marker) {
             if (str_contains($text, $marker)) {
                 return true;
             }
@@ -513,8 +537,6 @@ class OpenAiCompatibleProvider implements CloudAiProvider
 
     /**
      * Whether a choice's `finish_reason` says the content was filtered.
-     *
-     * @param  mixed  $reason
      */
     private function finishReasonIsContentFilter(mixed $reason): bool
     {

@@ -68,9 +68,20 @@ final class AiAssistantController extends Controller
      */
     private function unavailable(\Throwable $e): JsonResponse
     {
-        $message = $e instanceof AiTurnFailed
-            ? 'El asistente no pudo completar la respuesta esta vez. Vuelve a intentarlo en un momento.'
-            : $e->getMessage();
+        // The provider's own words are never surfaced. The exception message can
+        // quote the refusal — which for a quota is often a commercial invitation
+        // ("Add credits to unlock…") — so the interface is given the classified,
+        // safe sentence instead, and the details stay in the log.
+        $message = match (true) {
+            $e instanceof AiTurnFailed => 'El asistente no pudo completar la respuesta esta vez. Vuelve a intentarlo en un momento.',
+            $e instanceof AiProviderException => $e->publicMessage(),
+            default => 'No hay un proveedor de inteligencia artificial disponible en este momento.',
+        };
+
+        // The turn just changed what the pool knows about its providers. Drop the
+        // cached status so the next read of `/api/ai/status` — which runs no
+        // inference — reports the new state instead of a stale "operativo".
+        Cache::forget('ai.status');
 
         return response()->json([
             'error' => $message,

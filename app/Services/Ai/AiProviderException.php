@@ -70,6 +70,15 @@ class AiProviderException extends RuntimeException
     public const SCOPE_INTERNAL = 'internal';
 
     /**
+     * No provider is authorised to receive this payload's private data.
+     *
+     * Separate from a generic transport failure because the honest message is
+     * different: the record did not leave the server, and no retry to another
+     * provider can make an unauthorised provider safe.
+     */
+    public const SCOPE_PRIVACY = 'privacy';
+
+    /**
      * Whether another candidate may be asked. Derived from `scope`, never set
      * independently, so the two can never disagree.
      */
@@ -88,10 +97,17 @@ class AiProviderException extends RuntimeException
          * model keeps serving conversation but is not offered that work again.
          */
         public readonly ?string $missingCapability = null,
+        /**
+         * Whether a provider quota refusal is a *daily* account limit rather than
+         * a per-minute one. A per-minute limit clears in seconds; a daily limit
+         * does not, and suspending the account for the ordinary cooldown would
+         * re-probe a wall that cannot move until the next day (A07-R5).
+         */
+        public readonly bool $dailyLimit = false,
     ) {
         parent::__construct($message);
 
-        $this->retryable = ! in_array($scope, [self::SCOPE_POLICY, self::SCOPE_INTERNAL], true);
+        $this->retryable = ! in_array($scope, [self::SCOPE_POLICY, self::SCOPE_INTERNAL, self::SCOPE_PRIVACY], true);
     }
 
     /**
@@ -155,7 +171,7 @@ class AiProviderException extends RuntimeException
      * whole (a free-tier account limit), because switching models behind a
      * shared account limit is the same wall, not a recovery.
      */
-    public static function rateLimited(string $message, ?int $retryAfterSeconds = null, bool $accountWide = false): self
+    public static function rateLimited(string $message, ?int $retryAfterSeconds = null, bool $accountWide = false, bool $dailyLimit = false): self
     {
         return new self(
             $message,
@@ -164,6 +180,7 @@ class AiProviderException extends RuntimeException
             retryAfterSeconds: $retryAfterSeconds,
             accountWide: $accountWide,
             scope: $accountWide ? self::SCOPE_QUOTA_ACCOUNT : self::SCOPE_QUOTA_MODEL,
+            dailyLimit: $dailyLimit,
         );
     }
 
@@ -231,5 +248,72 @@ class AiProviderException extends RuntimeException
     public static function misclassified(string $message): self
     {
         return new self($message, status: 500, kind: 'privacy_contract', scope: self::SCOPE_INTERNAL);
+    }
+
+    /**
+     * No provider authorised for private data is available right now.
+     *
+     * Kept distinct from a plain transport failure so the public message is the
+     * privacy one: the record stayed on the server and retrying elsewhere is not a
+     * recovery. Terminal for the same reason.
+     */
+    public static function privacyUnavailable(string $message): self
+    {
+        return new self($message, status: 503, kind: 'privacy', scope: self::SCOPE_PRIVACY);
+    }
+
+    /**
+     * The message a person may be shown, in Spanish, carrying no provider text.
+     *
+     * The exception's own `getMessage()` is written for a log: it can quote the
+     * provider's refusal, which may invite a payment ("Add credits to unlock…")
+     * or name internals. That prose must never reach the interface, so the
+     * user-facing sentence is derived here from the *classification* — kind and
+     * scope — and never from the provider's own words. The interface is told what
+     * happened and whether retrying is worthwhile, and nothing more.
+     */
+    public function publicMessage(): string
+    {
+        if ($this->scope === self::SCOPE_PRIVACY) {
+            return 'No hay un proveedor autorizado para procesar esta información de forma segura.';
+        }
+
+        if ($this->kind === 'rate_limited' || $this->scope === self::SCOPE_QUOTA_ACCOUNT || $this->scope === self::SCOPE_QUOTA_MODEL) {
+            return 'El servicio de inteligencia artificial alcanzó temporalmente su límite de uso. Puedes reintentar cuando vuelva a estar disponible.';
+        }
+
+        return match ($this->scope) {
+            self::SCOPE_CAPABILITY => 'Esta operación necesita una función que no está disponible temporalmente.',
+            self::SCOPE_POLICY => 'El proveedor de inteligencia artificial no pudo procesar esta solicitud.',
+            default => 'No hay un proveedor de inteligencia artificial disponible en este momento.',
+        };
+    }
+
+    /**
+     * A short, safe description of the failure for the status diagnostics.
+     *
+     * Built from the classified shape (HTTP status, scope, missing capability) and
+     * never from the provider's own message, so the diagnostics that are exposed
+     * through `/api/ai/status` cannot carry a payment prompt, a credential or a
+     * record. It is enough to tell "attempted Gemini and it refused the payload"
+     * from "Gemini was never tried because the turn was classified private".
+     */
+    public function safeDetail(): string
+    {
+        $scope = match ($this->scope) {
+            self::SCOPE_CREDENTIAL => 'credencial rechazada',
+            self::SCOPE_QUOTA_ACCOUNT => $this->dailyLimit ? 'cuota de cuenta (límite diario)' : 'cuota de cuenta',
+            self::SCOPE_QUOTA_MODEL => 'cuota del modelo',
+            self::SCOPE_CAPABILITY => $this->missingCapability === 'tools'
+                ? 'capacidad de herramientas no admitida'
+                : 'petición rechazada (formato)',
+            self::SCOPE_POLICY => 'contenido rechazado por política',
+            self::SCOPE_MODEL => 'modelo no disponible',
+            self::SCOPE_PRIVACY => 'sin proveedor autorizado para datos privados',
+            self::SCOPE_INTERNAL => 'fallo interno o de configuración',
+            default => 'error de transporte',
+        };
+
+        return $this->status === null ? $scope : 'HTTP '.$this->status.' — '.$scope;
     }
 }

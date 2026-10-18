@@ -145,6 +145,26 @@ final class AiTaskRouter
     ];
 
     /**
+     * The subset of general markers that ask for an explanation, not an action.
+     *
+     * A07-R5 separates "answer me in prose" from "do something for me". A question
+     * in this subset ("qué es", "diferencia entre", "cómo funciona") needs no tool
+     * at all, so it can be served by a chat-only model and must not spend a tool
+     * round. General markers outside it — "organiza", "redacta", "genera" — may
+     * still need a capability the router cannot foresee, so their turns keep the
+     * discovery tool and are not silently stripped. The distinction is lexical and
+     * free: no second model call decides it.
+     *
+     * @var list<string>
+     */
+    private const CONVERSATIONAL_TERMS = [
+        'que es', 'qué es', 'que significa', 'qué significa', 'explica', 'explícame', 'explicame',
+        'definicion', 'definición', 'define', 'diferencia entre', 'como funciona', 'cómo funciona',
+        'ventajas y desventajas', 'que opinas', 'qué opinas', 'cuentame sobre', 'cuéntame sobre',
+        'explica en',
+    ];
+
+    /**
      * Greetings and meta questions that clearly want no system data.
      *
      * @var list<string>
@@ -259,7 +279,7 @@ final class AiTaskRouter
     /**
      * @param  list<string>  $recentUserQuestions  most recent last; used only to
      *                                             resolve a follow-up
-     * @return array{task: string, tools: list<AiToolDefinition>, web: bool, weather: bool, search_query: string|null, location: string|null}
+     * @return array{task: string, tools: list<AiToolDefinition>, web: bool, weather: bool, search_query: string|null, location: string|null, conversational: bool}
      */
     public function route(string $question, bool $hasDocumentContext, array $recentUserQuestions = []): array
     {
@@ -366,6 +386,7 @@ final class AiTaskRouter
                 'weather' => $weather && $prefetch && $this->registry->has('weather_current'),
                 'search_query' => $searchQuery,
                 'location' => $location,
+                'conversational' => false,
             ];
         }
 
@@ -379,6 +400,7 @@ final class AiTaskRouter
                 'weather' => $weather && $prefetch && $this->registry->has('weather_current'),
                 'search_query' => $searchQuery,
                 'location' => $location,
+                'conversational' => false,
             ];
         }
 
@@ -395,6 +417,7 @@ final class AiTaskRouter
                 'weather' => $weather && $prefetch && $this->registry->has('weather_current'),
                 'search_query' => $searchQuery,
                 'location' => $location,
+                'conversational' => false,
             ];
         }
 
@@ -406,6 +429,11 @@ final class AiTaskRouter
                 'weather' => false,
                 'search_query' => null,
                 'location' => null,
+                // Only a genuinely conversational request (an explanation or a
+                // greeting) is served without any tool. A broader general marker
+                // ("organiza…") keeps the discovery tool so a capability the
+                // router did not foresee is still reachable.
+                'conversational' => $this->looksConversational($haystack),
             ];
         }
 
@@ -419,6 +447,7 @@ final class AiTaskRouter
             'weather' => false,
             'search_query' => null,
             'location' => null,
+            'conversational' => false,
         ];
     }
 
@@ -445,12 +474,46 @@ final class AiTaskRouter
     private function matchesAny(string $haystack, array $terms): bool
     {
         foreach ($terms as $term) {
-            if (str_contains($haystack, $this->normalise($term))) {
+            if ($this->matchesTerm($haystack, $term)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * Whether a whole word or phrase appears, never inside another word.
+     *
+     * The keyword tables used raw `str_contains`, so a stem matched any longer
+     * word that merely ended with it: "relacional" contains "relacion" and turned
+     * a theoretical question about databases into an administrative *clients*
+     * turn, which is the A07-R5 T01 defect. "documental" contained "documento"
+     * and "cartagena" contained "carta" for the same reason.
+     *
+     * The match is now anchored to word edges, so "relacional" no longer matches
+     * "relacion" while "relacion" still matches "relaciones".
+     *
+     * Spanish inflection is handled generically rather than by listing every
+     * surface form: a term may be followed by a plural or adverbial ending
+     * (`s`, `es`, `mente`). That turns "cliente" into "clientes", "novedad" into
+     * "novedades" and "actual" into "actualmente" without re-opening the
+     * substring hole — "relacional" is not "relacion" plus one of those endings.
+     *
+     * A term that is a phrase is matched as a whole phrase with the same edges,
+     * so "que es" does not match across an unrelated "esque".
+     */
+    private function matchesTerm(string $haystack, string $term): bool
+    {
+        $needle = trim($this->normalise($term));
+
+        if ($needle === '') {
+            return false;
+        }
+
+        $pattern = '/(?<![\p{L}\p{N}])'.preg_quote($needle, '/').'(?:s|es|mente)?(?![\p{L}\p{N}])/u';
+
+        return preg_match($pattern, $haystack) === 1;
     }
 
     private function previousQuestion(array $recentUserQuestions): ?string
@@ -481,7 +544,7 @@ final class AiTaskRouter
         }
 
         foreach (self::FOLLOWUP_TERMS as $term) {
-            if (str_contains($haystack, $this->normalise($term))) {
+            if ($this->matchesTerm($haystack, $term)) {
                 return true;
             }
         }
@@ -514,7 +577,7 @@ final class AiTaskRouter
     private function isFresh(string $haystack): bool
     {
         foreach (self::FRESHNESS_TERMS as $term) {
-            if (str_contains($haystack, $this->normalise($term))) {
+            if ($this->matchesTerm($haystack, $term)) {
                 return true;
             }
         }
@@ -536,7 +599,7 @@ final class AiTaskRouter
     private function isWeather(string $haystack): bool
     {
         foreach (self::WEATHER_TERMS as $term) {
-            if (str_contains($haystack, $this->normalise($term))) {
+            if ($this->matchesTerm($haystack, $term)) {
                 return true;
             }
         }
@@ -583,7 +646,7 @@ final class AiTaskRouter
 
         foreach (self::SUBJECT_TERMS as $group => $terms) {
             foreach ($terms as $term) {
-                if (str_contains($haystack, $this->normalise($term))) {
+                if ($this->matchesTerm($haystack, $term)) {
                     $matched[] = $group;
 
                     break;
@@ -597,18 +660,28 @@ final class AiTaskRouter
     private function looksGeneral(string $haystack): bool
     {
         foreach (self::GENERAL_TERMS as $term) {
-            if (str_contains($haystack, $this->normalise($term))) {
+            if ($this->matchesTerm($haystack, $term)) {
                 return true;
             }
         }
 
         foreach (self::GREETING_TERMS as $term) {
-            if (str_contains($haystack, $this->normalise($term))) {
+            if ($this->matchesTerm($haystack, $term)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * Whether a general request is purely conversational — an explanation or a
+     * greeting — and therefore needs no tool at all.
+     */
+    private function looksConversational(string $haystack): bool
+    {
+        return $this->matchesAny($haystack, self::CONVERSATIONAL_TERMS)
+            || $this->matchesAny($haystack, self::GREETING_TERMS);
     }
 
     /**

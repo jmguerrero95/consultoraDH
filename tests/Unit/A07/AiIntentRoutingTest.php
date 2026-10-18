@@ -125,6 +125,69 @@ final class AiIntentRoutingTest extends TestCase
         $this->assertSame([], $routing['tools']);
     }
 
+    /**
+     * A07-R5 T01: "relacional" must not be read as "relación".
+     *
+     * The router matched keyword stems with `str_contains`, so the database
+     * question matched the *clients* subject through "relacion" and was routed to
+     * an administrative task. It is a general question and must offer no
+     * administrative tool.
+     */
+    public function test_t01_relational_database_question_is_general_and_offers_no_admin_tool(): void
+    {
+        $routing = $this->router()->route(
+            'Explícame la diferencia entre una base de datos relacional y una documental. '
+                .'Pon un ejemplo real de cuándo conviene utilizar cada una y sus desventajas.',
+            false,
+        );
+
+        $this->assertSame(AiTaskRouter::TASK_GENERAL, $routing['task']);
+        $this->assertFalse($routing['web']);
+        $this->assertSame([], $this->toolNames($routing));
+        $this->assertTrue($routing['conversational'], 'A theory question is purely conversational.');
+    }
+
+    /**
+     * The T01 fix must not strip capability from a broad request that may still
+     * need a tool: only explanations and greetings are conversational.
+     */
+    public function test_a_broad_general_request_is_not_conversational(): void
+    {
+        $routing = $this->router()->route('Organiza un panorama general del estado del negocio', false);
+
+        $this->assertSame(AiTaskRouter::TASK_GENERAL, $routing['task']);
+        $this->assertFalse($routing['conversational']);
+    }
+
+    public function test_a_stem_does_not_match_inside_a_longer_word(): void
+    {
+        $router = $this->router();
+
+        // "relacional" contains "relacion"; "documental" contains "documento". A
+        // substring match turned both theory questions into administrative ones.
+        $this->assertSame(
+            AiTaskRouter::TASK_GENERAL,
+            $router->route('¿Qué es una base de datos relacional?', false)['task'],
+        );
+
+        $this->assertSame(
+            AiTaskRouter::TASK_GENERAL,
+            $router->route('Explícame qué es un modelo documental.', false)['task'],
+        );
+    }
+
+    /**
+     * The safeguard the T01 fix must not weaken: a question about our own records
+     * still routes to the system and still offers the client tools.
+     */
+    public function test_a_real_administrative_question_still_routes_to_the_system(): void
+    {
+        $routing = $this->router()->route('Consulta las relaciones de nuestros clientes.', false);
+
+        $this->assertSame(AiTaskRouter::TASK_DATA, $routing['task']);
+        $this->assertContains('client_search', $this->toolNames($routing));
+    }
+
     public function test_generating_a_cv_offers_the_artifact_tool(): void
     {
         $routing = $this->router()->route('Genera un currículum profesional en PDF con estos datos.', false);

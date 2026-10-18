@@ -118,8 +118,19 @@ class AiModelHealth
         // choosing another model behind the same account limit is the same wall.
         // A 429 scoped to one model or one upstream provider cools that model
         // down and leaves the rest of the pool usable.
+        //
+        // A *daily* account limit is not the ordinary cooldown. OpenRouter's
+        // `free-models-per-day` cannot move until the day rolls over, so the
+        // account is suspended for the rest of the UTC day (or the provider's
+        // Retry-After, if it is longer) instead of being re-probed every half
+        // hour. Independent providers are unaffected: the flag is keyed by the
+        // endpoint (URL + credential), not the pool.
         if ($error->kind === 'rate_limited' && $error->accountWide) {
-            $this->markEndpointRateLimited($candidate, $seconds);
+            $window = $error->dailyLimit
+                ? max($seconds, $this->secondsUntilDailyReset())
+                : $seconds;
+
+            $this->markEndpointRateLimited($candidate, $window);
         }
 
         return $seconds;
@@ -168,6 +179,18 @@ class AiModelHealth
     public function endpointRateLimited(ModelCandidate $candidate): bool
     {
         return (int) Cache::get($this->rateLimitedKey($candidate), 0) > now()->timestamp;
+    }
+
+    /**
+     * How long the endpoint stays set aside for an account quota, in seconds.
+     *
+     * Exposed so a caller can tell a per-minute wait (seconds) from a daily one
+     * (hours) without reading the cache key, and so the status can report the
+     * difference.
+     */
+    public function endpointRateLimitedRemaining(ModelCandidate $candidate): int
+    {
+        return max(0, (int) Cache::get($this->rateLimitedKey($candidate), 0) - now()->timestamp);
     }
 
     public function markEndpointDisabled(ModelCandidate $candidate, int $seconds): void
@@ -287,6 +310,23 @@ class AiModelHealth
         Cache::put($key, $fails, 172800);
 
         return $seconds;
+    }
+
+    /**
+     * How long to set the endpoint aside for a *daily* account quota.
+     *
+     * A daily limit resets on a fixed clock, not a rolling one. OpenRouter counts
+     * free-model requests against the UTC day, so the suspension runs to the next
+     * UTC midnight — the honest reading of "per day" — with a floor of one minute
+     * so a clock skew cannot produce a zero-length window. Nothing is invented
+     * beyond that: if the provider sent a Retry-After, the caller takes whichever
+     * is longer.
+     */
+    private function secondsUntilDailyReset(): int
+    {
+        $now = now('UTC');
+
+        return max(60, $now->copy()->endOfDay()->getTimestamp() - $now->getTimestamp());
     }
 
     private function cooldownFor(AiProviderException $error, int $fails): int
