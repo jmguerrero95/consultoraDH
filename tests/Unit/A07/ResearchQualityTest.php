@@ -173,4 +173,66 @@ final class ResearchQualityTest extends TestCase
         $this->assertFalse(ResearchQuality::coversDimensions($question, 'Nada sobre litio aquí.'));
         $this->assertTrue(ResearchQuality::coversDimensions('¿qué es?', 'Respuesta corta.'), 'No dimensions to cover.');
     }
+
+    public function test_all_cited_urls_verified_requires_all_urls_to_match_recovered(): void
+    {
+        $sources = [
+            ['url' => 'https://energia.test/sodio', 'title' => 'Sodio'],
+            ['url' => 'https://mineria.test/litio', 'title' => 'Litio'],
+        ];
+
+        // All cited URLs match recovered sources exactly
+        $this->assertTrue(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio y https://mineria.test/litio.', $sources));
+        $this->assertTrue(ResearchQuality::allCitedUrlsVerified('Fuente: https://mineria.test/litio', $sources));
+
+        // One cited URL is invented
+        $this->assertFalse(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio y https://inventado.test/falso.', $sources));
+
+        // Cited URL has different path (not exact match)
+        $this->assertFalse(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio/otro', $sources));
+
+        // Cited URL has query params (not exact match after canonicalization)
+        $this->assertFalse(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio?foo=bar', $sources));
+
+        // No citations at all
+        $this->assertFalse(ResearchQuality::allCitedUrlsVerified('El sodio es mejor.', $sources));
+
+        // Empty sources
+        $this->assertFalse(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio', []));
+    }
+
+    public function test_all_cited_urls_verified_rejects_non_exact_matches(): void
+    {
+        $sources = [
+            ['url' => 'https://energia.test/sodio', 'title' => 'Sodio'],
+        ];
+
+        // Query params should not match (canonicalization strips them from recovered but cited has them)
+        $this->assertFalse(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio?foo=bar', $sources));
+
+        // Fragment should not match
+        $this->assertFalse(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio#section', $sources));
+
+        // Trailing slash should match (canonicalization normalizes both)
+        $this->assertTrue(ResearchQuality::allCitedUrlsVerified('Ver https://energia.test/sodio/', $sources));
+
+        // Uppercase should match (canonicalization lowercases)
+        $this->assertTrue(ResearchQuality::allCitedUrlsVerified('Ver https://ENERGIA.TEST/SODIO', $sources));
+    }
+
+    public function test_cites_sources_legacy_still_works_for_backward_compat(): void
+    {
+        $sources = [
+            ['url' => 'https://energia.test/sodio', 'title' => 'Sodio'],
+            ['url' => 'https://mineria.test/litio', 'title' => 'Litio'],
+        ];
+
+        // Legacy method still returns true if ANY recovered URL is cited
+        $this->assertTrue(ResearchQuality::citesSources('Ver https://energia.test/sodio para detalles.', $sources));
+        $this->assertTrue(ResearchQuality::citesSources('Fuentes: https://mineria.test/litio y https://energia.test/sodio.', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('El sodio es mejor que el litio.', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('Ver https://otro.test/no-recuperado.', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('', $sources));
+        $this->assertFalse(ResearchQuality::citesSources('Sin fuentes.', []));
+    }
 }

@@ -281,12 +281,18 @@ final class AdaptiveResearchTest extends TestCase
         Http::fake([
             self::PROVIDER_URL => Http::sequence()
                 ->push($this->toolCallBody('web_search', ['query' => 'baterías de sodio', 'max_results' => 5], 'c1'))
-                ->push($this->textBody('El costo bajó a 123456789 pesos por kWh, según https://energia.test/sodio.')),
-            self::SEARCH_URL => Http::response(['results' => [[
-                'title' => 'Baterías de sodio',
-                'url' => 'https://energia.test/sodio',
-                'content' => 'El costo bajó a 123456789 pesos por kWh.',
-            ]]]),
+                // First answer: covers sodium but not lithium, so dimensions check triggers recovery
+                ->push($this->textBody('El costo bajó a 123456789 pesos por kWh, según https://energia.test/sodio.'))
+                // Recovery: model is asked to cover missing dimension (lithium)
+                ->push($this->toolCallBody('web_search', ['query' => 'litio diferencias sodio', 'language' => 'en', 'max_results' => 5], 'c2'))
+                ->push($this->textBody('El litio sigue dominando, el sodio es alternativa. Fuente: https://energia.test/sodio https://mineria.test/litio')),
+            self::SEARCH_URL => Http::sequence()
+                // The server's own prefetch
+                ->push(['results' => [['title' => 'Baterías de sodio', 'url' => 'https://energia.test/sodio', 'content' => 'El costo bajó a 123456789 pesos por kWh.']]])
+                // The model's first search
+                ->push(['results' => [['title' => 'Baterías de sodio', 'url' => 'https://energia.test/sodio', 'content' => 'El costo bajó a 123456789 pesos por kWh.']]])
+                // The recovery search
+                ->push(['results' => [['title' => 'Litio vs sodio', 'url' => 'https://mineria.test/litio', 'content' => 'El litio domina.']]]),
         ]);
 
         app(AiAssistantService::class)->ask($this->conversation, self::QUESTION, $this->user);

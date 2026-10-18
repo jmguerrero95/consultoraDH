@@ -676,6 +676,74 @@ final class AiAssistantService
     }
 
     /**
+     * Build a targeted recovery prompt for a research turn that has sufficient
+     * evidence but produced a deficient answer.
+     *
+     * Three distinct recovery scenarios are handled differently:
+     *
+     * - 'citations_missing': Evidence is sufficient but the model failed to cite
+     *   recovered URLs (or cited invented URLs). We ask for a synthesis using
+     *   ONLY the recovered sources, without a new search.
+     * - 'dimensions_missing': Evidence covers the question but the answer omitted
+     *   one or more dimensions. We ask the model to address the missing parts
+     *   using the same sources.
+     * - 'insufficiency_claimed': The model incorrectly said "I couldn't find
+     *   enough" when the evidence was actually sufficient. We ask it to answer
+     *   from the evidence it already has.
+     *
+     * In all cases we reuse the already-retrieved sources and do NOT request
+     * a new web_search — the evidence is already in hand.
+     */
+    private function buildResearchRecoveryPrompt(string $question, array $sources, string $recoveryType, string $previousAnswer): string
+    {
+        $lines = [
+            'Tu respuesta anterior no utilizó correctamente la evidencia que ya tienes.',
+        ];
+
+        switch ($recoveryType) {
+            case 'citations_missing':
+                $lines[] = 'Tienes fuentes suficientes y pertinentes, pero no las citaste (o citaste URLs que no provienen de los resultados).';
+                $lines[] = 'Responde de nuevo SIN hacer otra búsqueda: usa exclusivamente las fuentes ya recuperadas y cita cada afirmación con la URL exacta del resultado que la respalda.';
+                break;
+
+            case 'dimensions_missing':
+                $lines[] = 'La evidencia cubre la pregunta completa, pero tu respuesta omitió una o más dimensiones de la pregunta original.';
+                $lines[] = 'Responde de nuevo SIN hacer otra búsqueda: aborda todas las partes de la pregunta usando las fuentes ya recuperadas, y cita las URLs que usaste.';
+                break;
+
+            case 'insufficiency_claimed':
+                $lines[] = 'Dijiste que no encontraste información suficiente, pero las fuentes recuperadas SÍ cubren la pregunta.';
+                $lines[] = 'Responde de nuevo SIN hacer otra búsqueda: responde a la pregunta usando la evidencia que ya tienes y cita las URLs correspondientes.';
+                break;
+
+            default:
+                $lines[] = 'Revisa la evidencia recuperada y responde con citas exactas de las URLs recuperadas.';
+        }
+
+        if ($sources !== []) {
+            $lines[] = '';
+            $lines[] = 'Fuentes disponibles (usa SOLO estas URLs):';
+            foreach (array_slice($sources, 0, 8) as $source) {
+                $title = trim((string) ($source['title'] ?? '')) ?: 'sin título';
+                $url = trim((string) ($source['url'] ?? ''));
+                if ($url !== '') {
+                    $lines[] = '- '.$title.' — '.$url;
+                }
+            }
+            $lines[] = 'NO inventes URLs. NO busques de nuevo. Cita solo las URLs de arriba.';
+        }
+
+        $lines[] = '';
+        $lines[] = 'Reglas estrictas:';
+        $lines[] = '- NO uses web_search ni web_fetch de nuevo.';
+        $lines[] = '- NO inventes URLs ni atribuciones.';
+        $lines[] = '- Cada afirmación factual debe tener su URL de la lista de arriba.';
+        $lines[] = '- Si una fuente no dice algo, no lo afirmes: di que no está en las fuentes.';
+
+        return implode("\n", $lines);
+    }
+
+    /**
      * The retrieved text, framed as data.
      *
      * ## Why this is so insistent about the framing
@@ -967,7 +1035,7 @@ final class AiAssistantService
                     continue;
                 }
 
-                // A reply that has sufficient sources but fails to cite them, or
+                // A reply that has sufficient sources but fails to cite them properly, or
                 // incorrectly declares insufficiency when evidence exists, is not an
                 // answer when the budget still allows a bounded correction. The model
                 // has the evidence; it just needs to be told to use it properly.
@@ -977,16 +1045,55 @@ final class AiAssistantService
                     && ! $budget->outOfTime()
                 ) {
                     $sufficiency = ResearchQuality::sufficiency($question, $webSources);
-                    $hasCitations = ResearchQuality::citesSources($content, $webSources);
+                    $allUrlsVerified = ResearchQuality::allCitedUrlsVerified($content, $webSources);
+                    $coversDimensions = ResearchQuality::coversDimensions($question, $content);
                     $incorrectlyAdmitsInsufficiency = ResearchQuality::admitsInsufficiency($content) && $sufficiency['sufficient'];
 
-                    // Missing citations or falsely claiming "I couldn't find enough" when
-                    // the sources were actually sufficient are the two clear defects we
-                    // correct. A partial answer that covers some dimensions but not
-                    // others is the model's choice and does not force a recovery on
-                    // its own; the reformulation directive already encourages the
-                    // model to split multi-part questions.
-                    if ($sufficiency['sufficient'] && (! $hasCitations || $incorrectlyAdmitsInsufficiency)) {
+                    if ($sufficiency['sufficient']) {
+                        $needsRecovery = false;
+                        $recoveryType = '';
+
+                        // Case 1: Evidence sufficient but model incorrectly claims insufficiency
+                        if ($incorrectlyAdmitsInsufficiency) {
+                            $needsRecovery = true;
+                            $recoveryType = 'insufficiency_claimed';
+                        }
+                        // Case 2: Evidence sufficient but URLs not properly verified (invented or missing)
+                        elseif (! $allUrlsVerified) {
+                            $needsRecovery = true;
+                            $recoveryType = 'citations_missing';
+                        }
+                        // Case 3: Evidence sufficient but dimensions omitted
+                        elseif (! $coversDimensions) {
+                            $needsRecovery = true;
+                            $recoveryType = 'dimensions_missing';
+                        }
+
+                        if ($needsRecovery) {
+                            $recoveredFromResearch = true;
+                            $round++;
+
+                            $messages[] = AiMessage::assistant($content);
+                            $messages[] = AiMessage::user(
+                                $this->buildResearchRecoveryPrompt($question, $webSources, $recoveryType, $content)
+                            );
+
+                            try {
+                                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                            } catch (AiProviderException $e) {
+                                $this->recordTurnSummary(
+                                    $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                                    $turnRequiresClientData, $privacyReason, $requiresClientData,
+                                    false, false, 'provider_error', 'failed',
+                                );
+
+                                throw $e;
+                            }
+
+                            continue;
+                        }
+                    } elseif (! $sufficiency['sufficient'] && ResearchQuality::admitsInsufficiency($content)) {
+                        // Evidence genuinely insufficient and model admits it - allow one reformulation
                         $recoveredFromResearch = true;
                         $round++;
 

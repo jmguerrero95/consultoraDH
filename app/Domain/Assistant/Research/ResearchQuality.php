@@ -429,12 +429,69 @@ final class ResearchQuality
     }
 
     /**
-     * Check whether a response cites any of the recovered sources.
+     * Canonicalize a URL for comparison: lowercase, no trailing slash.
+     * Query params and fragments are preserved so that invented params/fragments are caught.
+     */
+    private static function canonicalizeUrl(string $url): string
+    {
+        $url = mb_strtolower(trim($url));
+        $url = preg_replace('#^https?://#', '', $url);
+        $url = preg_replace('#/+$#', '', $url);
+
+        // Do NOT strip query params or fragments - they must match exactly
+        return $url;
+    }
+
+    /**
+     * Check whether a response cites ONLY recovered sources (no invented URLs).
      *
-     * Returns true if at least one URL from the recovered sources appears in
-     * the response text. This is a lexical check — it does not validate that
-     * the citation is used correctly, only that the model referenced something
-     * it was given.
+     * Returns true only if EVERY cited URL matches a recovered source exactly
+     * (canonicalized comparison). Invented URLs or URLs from other domains
+     * cause this to return false.
+     */
+    public static function allCitedUrlsVerified(string $response, array $sources): bool
+    {
+        $cited = self::citedUrls($response);
+
+        if ($cited === []) {
+            return false;
+        }
+
+        $recovered = [];
+        foreach ($sources as $source) {
+            $url = trim((string) ($source['url'] ?? ''));
+            if ($url !== '') {
+                $recovered[] = self::canonicalizeUrl($url);
+            }
+        }
+
+        if ($recovered === []) {
+            return false;
+        }
+
+        // Every cited URL must match a recovered URL exactly (canonicalized)
+        foreach ($cited as $citedUrl) {
+            $canonicalCited = self::canonicalizeUrl($citedUrl);
+            $matched = false;
+            foreach ($recovered as $recoveredUrl) {
+                if ($canonicalCited === $recoveredUrl) {
+                    $matched = true;
+                    break;
+                }
+            }
+            if (! $matched) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Legacy method: checks if at least one recovered URL is cited.
+     * Kept for backward compatibility but not used for verification.
+     *
+     * @deprecated Use allCitedUrlsVerified() for strict verification.
      */
     public static function citesSources(string $response, array $sources): bool
     {
@@ -458,8 +515,6 @@ final class ResearchQuality
 
         foreach ($cited as $citedUrl) {
             foreach ($recovered as $recoveredUrl) {
-                // Match by exact URL or by the recovered URL being a prefix
-                // (in case the cited URL has trailing path that was truncated)
                 if ($citedUrl === $recoveredUrl || str_starts_with($citedUrl, $recoveredUrl)) {
                     return true;
                 }
