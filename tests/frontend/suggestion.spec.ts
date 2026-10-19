@@ -98,7 +98,11 @@ describe('useSuggestion', () => {
         const { refresh } = useSuggestion();
         await refresh('imports', 'issues');
 
-        expect(spy).toHaveBeenCalledWith('imports', 'issues');
+        // `useSuggestion` forwards the optional client context as the third
+        // argument whether or not there is one. On this screen there is none,
+        // and the call must still name the module and operation it is asking
+        // about rather than a generic request.
+        expect(spy).toHaveBeenCalledWith('imports', 'issues', undefined);
     });
 
     it('keeps quiet when the request fails', async () => {

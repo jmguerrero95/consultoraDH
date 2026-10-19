@@ -85,7 +85,7 @@ test.describe('GATE 7: suggestions on the screens they belong to', () => {
         const answer = await apiRequest<{ suggestion: { explanation: string; evidence: { outstanding_cop: number; client_name: string } } | null }>(
             page,
             'GET',
-            `/api/ai/suggestion?module=receivables&operation=client_account`,
+            `/api/ai/suggestion?module=receivables&operation=client_account&client_id=${clientId}`,
         );
 
         expect(answer.status).toBe(200);
@@ -97,7 +97,13 @@ test.describe('GATE 7: suggestions on the screens they belong to', () => {
 
         const hint = page.getByTestId('suggestion-hint');
 
-        await expect(hint).toBeVisible({ timeout: 20_000 });
+        // The first visit to this screen in a fresh run compiles its module
+        // graph on the Vite dev server. Measured at roughly 8s per module on a
+        // cold cache, and the account page pulls three of them in series
+        // before it can mount. Thirty seconds matches the neighbouring
+        // journeys in this file; a screen that genuinely never renders still
+        // fails.
+        await expect(hint).toBeVisible({ timeout: 30_000 });
         // On the figures, not on the wording.
         //
         // The explanation is written by the reasoner and it rewords the same
