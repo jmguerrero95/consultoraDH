@@ -33,11 +33,11 @@ use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\SocialSecurityEntityController;
 use App\Http\Controllers\Api\SuggestionController;
+use App\Http\Controllers\Api\SupportAgentController;
 use App\Http\Controllers\Api\SupportConversationController;
 use App\Http\Controllers\Api\SupportInboundEmailController;
 use App\Http\Controllers\Api\SupportInboxController;
 use App\Http\Controllers\Api\SupportPresenceController;
-use App\Http\Controllers\Api\SupportAgentController;
 use App\Http\Controllers\Api\SupportQueueController;
 use App\Http\Controllers\Api\TaskController;
 use App\Http\Controllers\Api\TelegramController;
@@ -916,6 +916,13 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
             ->name('api.ai.conversations.open');
         Route::get('/ai/conversations/{conversation}', [AiAssistantController::class, 'show'])
             ->name('api.ai.conversations.show');
+        // Rename and delete. Both are owner-scoped inside the controller: the
+        // route binding does not decide ownership, so a guessed id is refused
+        // rather than served.
+        Route::patch('/ai/conversations/{conversation}', [AiAssistantController::class, 'rename'])
+            ->name('api.ai.conversations.rename');
+        Route::delete('/ai/conversations/{conversation}', [AiAssistantController::class, 'destroy'])
+            ->name('api.ai.conversations.destroy');
         Route::post('/ai/conversations/{conversation}/messages', [AiAssistantController::class, 'messages'])
             ->name('api.ai.conversations.messages');
 

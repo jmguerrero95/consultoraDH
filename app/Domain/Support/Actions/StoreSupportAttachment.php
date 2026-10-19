@@ -72,7 +72,7 @@ final class StoreSupportAttachment
 
     /**
      * @param  string  $sourceChannel  `portal` or `staff`, recorded on the row so a reviewer can
-     *                                see which side uploaded it.
+     *                                 see which side uploaded it.
      */
     public function store(
         UploadedFile $file,

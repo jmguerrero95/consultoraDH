@@ -141,44 +141,44 @@ final class TaskController extends Controller
     }
 
     /**
- * The values a task form needs: priorities, statuses, and who it can be assigned to.
- *
- * ## Why the assignees are here
- *
- * "Crear tarea" asked for `Responsable (id)` in a number field. The list of people a task may
- * be assigned to is part of the same form's vocabulary as its priority and its due date, and
- * this endpoint already answered for those — so it answers for this too rather than the form
- * growing a second lookup that would only ever return the same kind of list.
- *
- * `tasks.view` is the permission the route requires, and the list is **active staff only, by
- * name and id**. Naming who may be made responsible for work is what `tasks.view` already
- * discloses through every task row's `assignee_name`; this adds no authority, and it exposes
- * no client account.
- */
-public function vocabulary(Request $request): JsonResponse
-{
-    return response()->json([
-        'priorities' => TaskPriority::options(),
-        'statuses' => TaskStatus::options(),
-        'assignees' => User::query()
-            ->where('account_type', 'staff')
-            // `status = active` through the model's scope — the column is `status`, not
-            // `is_active`. A deactivated user cannot sign in to do the task, so offering them
-            // as somebody to assign it to would be offering work nobody can pick up.
-            ->active()
-            ->orderBy('name')
-            ->get(['id', 'name'])
-            ->map(static fn (User $user): array => [
-                'id' => (int) $user->id,
-                'name' => $user->name,
-            ])
-            ->values(),
-        // The operator signed in, so the form can offer them as the initial responsible party.
-        // Only a default: assignment rules are unchanged, and whoever holds `tasks.manage` may
-        // still choose somebody else.
-        'current_user_id' => $request->user()?->id,
-    ]);
-}
+     * The values a task form needs: priorities, statuses, and who it can be assigned to.
+     *
+     * ## Why the assignees are here
+     *
+     * "Crear tarea" asked for `Responsable (id)` in a number field. The list of people a task may
+     * be assigned to is part of the same form's vocabulary as its priority and its due date, and
+     * this endpoint already answered for those — so it answers for this too rather than the form
+     * growing a second lookup that would only ever return the same kind of list.
+     *
+     * `tasks.view` is the permission the route requires, and the list is **active staff only, by
+     * name and id**. Naming who may be made responsible for work is what `tasks.view` already
+     * discloses through every task row's `assignee_name`; this adds no authority, and it exposes
+     * no client account.
+     */
+    public function vocabulary(Request $request): JsonResponse
+    {
+        return response()->json([
+            'priorities' => TaskPriority::options(),
+            'statuses' => TaskStatus::options(),
+            'assignees' => User::query()
+                ->where('account_type', 'staff')
+                // `status = active` through the model's scope — the column is `status`, not
+                // `is_active`. A deactivated user cannot sign in to do the task, so offering them
+                // as somebody to assign it to would be offering work nobody can pick up.
+                ->active()
+                ->orderBy('name')
+                ->get(['id', 'name'])
+                ->map(static fn (User $user): array => [
+                    'id' => (int) $user->id,
+                    'name' => $user->name,
+                ])
+                ->values(),
+            // The operator signed in, so the form can offer them as the initial responsible party.
+            // Only a default: assignment rules are unchanged, and whoever holds `tasks.manage` may
+            // still choose somebody else.
+            'current_user_id' => $request->user()?->id,
+        ]);
+    }
 
     /**
      * @return array<string, mixed>

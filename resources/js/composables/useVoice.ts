@@ -1,6 +1,7 @@
 import { getCurrentInstance, onBeforeUnmount, ref, shallowRef } from 'vue';
 
 import { stripMarkdown } from '@/utils/markdown';
+import { normalizeForSpeech } from '@/utils/speech';
 
 import type { Ref } from 'vue';
 
@@ -119,6 +120,11 @@ export interface VoicePlayback {
     pause(): void;
     resume(): void;
     stop(): void;
+    /**
+     * Whether this browser implements `speechSynthesis.pause()` at all. When it
+     * is false the control is hidden rather than shown doing nothing.
+     */
+    pausable: Readonly<Ref<boolean>>;
 }
 
 /** Wording shown to the person, rather than a raw vendor error code. */
@@ -294,6 +300,19 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
     const playbackError = ref<string | null>(null);
     const voiceList = ref<SpeechSynthesisVoice[]>([]);
 
+    // Some browsers expose `speechSynthesis` without a working `pause()`. Saying
+    // so lets the control be hidden instead of looking functional and doing
+    // nothing when pressed.
+    const pausable = ref(
+        playbackSupported.value && typeof window.speechSynthesis.pause === 'function',
+    );
+
+    // A pause asked for before the browser has actually started speaking.
+    // `onstart` fires asynchronously, and the browser ignores a pause on an
+    // utterance that has not begun, so the intent is remembered and applied the
+    // moment the first word is due.
+    let pauseRequested = false;
+
     function loadVoices(): void {
         if (!playbackSupported.value) {
             return;
@@ -319,6 +338,7 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
         speaking.value = false;
         queued.value = false;
         paused.value = false;
+        pauseRequested = false;
     }
 
     function speak(text: string, lang = 'es-CO'): void {
@@ -331,8 +351,10 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
         // The reply is read as a person would read it, not as the Markdown it is
         // stored in: `**cartera**` is spoken "cartera", not "asterisk asterisk
         // cartera asterisk asterisk". `stripMarkdown` leaves ordinary prose
-        // untouched, so a plain reply is spoken exactly as written.
-        const content = stripMarkdown(text);
+        // untouched, so a plain reply is spoken exactly as written, and dates
+        // and marked amounts are then read the way they are said:
+        // "15.000 COP" becomes "quince mil pesos colombianos".
+        const content = normalizeForSpeech(stripMarkdown(text));
 
         if (content === '') {
             return;
@@ -362,6 +384,17 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
         utterance.onstart = () => {
             speaking.value = true;
             queued.value = false;
+
+            // A pause asked for before the browser began is applied now: the
+            // engine ignores `pause()` on an utterance it has not started, so
+            // pressing pause immediately used to do nothing at all.
+            if (pauseRequested && pausable.value) {
+                window.speechSynthesis.pause();
+                paused.value = true;
+
+                return;
+            }
+
             paused.value = false;
         };
 
@@ -369,12 +402,14 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
             speaking.value = false;
             queued.value = false;
             paused.value = false;
+            pauseRequested = false;
         };
 
         utterance.onerror = () => {
             speaking.value = false;
             queued.value = false;
             paused.value = false;
+            pauseRequested = false;
         };
 
         queued.value = true;
@@ -391,10 +426,15 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
      | intent is tracked from the moment the utterance is handed over.
      */
     function pausePlayback(): void {
-        if (!playbackSupported.value || paused.value || !queued.value) {
+        if (!playbackSupported.value || paused.value || !pausable.value) {
             return;
         }
 
+        // The intent is recorded first, then applied. `pause()` is called now,
+        // and again in `onstart` when the engine had not begun: the engine
+        // ignores a pause on an utterance it has not started, so the second call
+        // is what makes an immediate press actually hold the first word.
+        pauseRequested = true;
         window.speechSynthesis.pause();
         paused.value = true;
     }
@@ -404,6 +444,7 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
             return;
         }
 
+        pauseRequested = false;
         window.speechSynthesis.resume();
         paused.value = false;
     }
@@ -450,6 +491,7 @@ export function useVoice(): { dictation: VoiceDictation; playback: VoicePlayback
             pause: pausePlayback,
             resume: resumePlayback,
             stop: stopPlayback,
+            pausable,
         },
     };
 }

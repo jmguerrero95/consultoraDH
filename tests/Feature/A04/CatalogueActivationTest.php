@@ -243,19 +243,19 @@ it('leaves Liberty inactive and refuses a real new affiliation right after loadi
         'lower(unaccent(name)) like ?', ['%liberty%']
     )->firstOrFail();
 
-    expect($liberty->status)->toBe(App\Domain\Shared\RecordStatus::Inactive);
+    expect($liberty->status)->toBe(RecordStatus::Inactive);
 
     // The other nine are untouched: "nobody documented an exit" is not "this one exited".
     expect(SocialSecurityEntity::query()
-        ->where('type', 'ARL')->where('status', App\Domain\Shared\RecordStatus::Active->value)
+        ->where('type', 'ARL')->where('status', RecordStatus::Active->value)
         ->count())->toBe(9);
 
     // **The real signature.** The previous version passed a `SocialSecurityEntityType` where a
     // `User` belongs, so PHP raised a `TypeError`, and a `catch (Throwable)` swallowed it and
     // reported success. A test that cannot fail is worse than no test: it announced that Liberty
     // was refused when nothing about Liberty had been exercised at all.
-    $manager = app(App\Domain\Affiliations\ManageAffiliations::class);
-    $client = App\Models\Client::factory()->create();
+    $manager = app(ManageAffiliations::class);
+    $client = Client::factory()->create();
 
     expect(fn () => $manager->create(
         $client,
@@ -266,7 +266,7 @@ it('leaves Liberty inactive and refuses a real new affiliation right after loadi
         ->toThrow(DomainException::class, 'está inactiva');
 
     // And the refusal is a refusal, not a type error wearing one.
-    expect(App\Models\ClientAffiliation::query()
+    expect(ClientAffiliation::query()
         ->where('social_security_entity_id', $liberty->getKey())->count())->toBe(0);
 });
 
@@ -275,20 +275,20 @@ it('still accepts an affiliation to an active administrator, so the guard is not
     app(ActivateNationalCatalogues::class)->run($this->actor, apply: true);
 
     $activa = SocialSecurityEntity::query()->where('type', 'ARL')
-        ->where('status', App\Domain\Shared\RecordStatus::Active->value)
+        ->where('status', RecordStatus::Active->value)
         ->whereRaw('lower(unaccent(name)) like ?', ['%equidad%'])->firstOrFail();
 
-    $client = App\Models\Client::factory()->create();
+    $client = Client::factory()->create();
 
-    $afiliacion = app(App\Domain\Affiliations\ManageAffiliations::class)->create(
+    $afiliacion = app(ManageAffiliations::class)->create(
         $client,
         $activa,
         $this->actor,
         new DateTimeImmutable('2026-01-01'),
     );
 
-    expect($afiliacion)->toBeInstanceOf(App\Models\ClientAffiliation::class);
-    expect(App\Models\ClientAffiliation::query()
+    expect($afiliacion)->toBeInstanceOf(ClientAffiliation::class);
+    expect(ClientAffiliation::query()
         ->where('social_security_entity_id', $activa->getKey())->count())->toBe(1);
 });
 
@@ -298,15 +298,15 @@ it('refuses moving an existing affiliation onto Liberty', function (): void {
     app(ActivateNationalCatalogues::class)->run($this->actor, apply: true);
 
     $activa = SocialSecurityEntity::query()->where('type', 'ARL')
-        ->where('status', App\Domain\Shared\RecordStatus::Active->value)->firstOrFail();
+        ->where('status', RecordStatus::Active->value)->firstOrFail();
 
     $liberty = SocialSecurityEntity::query()->where('type', 'ARL')->whereRaw(
         'lower(unaccent(name)) like ?', ['%liberty%']
     )->firstOrFail();
 
-    $client = App\Models\Client::factory()->create();
+    $client = Client::factory()->create();
 
-    $manager = app(App\Domain\Affiliations\ManageAffiliations::class);
+    $manager = app(ManageAffiliations::class);
     $actual = $manager->create($client, $activa, $this->actor, new DateTimeImmutable('2024-01-01'));
 
     expect(fn () => $manager->changeEntity(

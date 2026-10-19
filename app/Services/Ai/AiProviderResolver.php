@@ -421,7 +421,7 @@ class AiProviderResolver
 
         $usable = array_values(array_filter(
             $ordered,
-            fn (ModelCandidate $c): bool => ! $this->blocked($c),
+            fn (ModelCandidate $c): bool => ! $this->isBlocked($c),
         ));
 
         if ($usable === []) {
@@ -434,7 +434,7 @@ class AiProviderResolver
             return 'unavailable';
         }
 
-        $topUsable = ! $this->blocked($ordered[0]);
+        $topUsable = ! $this->isBlocked($ordered[0]);
         $firstUsable = $usable[0];
 
         if ($this->health->recentSuccess($firstUsable)) {
@@ -452,7 +452,7 @@ class AiProviderResolver
         $ordered = $this->ordered($this->pool->all());
 
         foreach ($ordered as $candidate) {
-            if (! $this->blocked($candidate)) {
+            if (! $this->isBlocked($candidate)) {
                 return $candidate->model;
             }
         }
@@ -512,6 +512,44 @@ class AiProviderResolver
         $stored = Cache::get(self::LAST_RESULT_KEY);
 
         return is_array($stored) ? $stored : null;
+    }
+
+    /**
+     * The candidates that support exactly the capabilities an operation needs.
+     *
+     * Public because availability reporting must ask the same pool the resolver
+     * uses: a second, hand-maintained list of "which models can do what" would
+     * drift from the one that actually answers.
+     *
+     * @param  list<string>  $required
+     * @return list<ModelCandidate>
+     */
+    public function candidatesFor(array $required): array
+    {
+        return $this->ordered($this->pool->supporting($required));
+    }
+
+    /**
+     * Whether a candidate cannot be attempted right now.
+     */
+    public function blocked(ModelCandidate $candidate): bool
+    {
+        return $this->isBlocked($candidate);
+    }
+
+    /**
+     * How long a blocked candidate stays blocked, in seconds.
+     *
+     * Zero means "blocked for a reason that is not a timer" (a rejected
+     * credential with no known retry, or a model parked as missing), so the
+     * caller reports "unavailable" rather than inventing a countdown.
+     */
+    public function blockedFor(ModelCandidate $candidate): int
+    {
+        return max(
+            $this->health->cooldownRemaining($candidate),
+            $this->health->endpointRateLimitedRemaining($candidate),
+        );
     }
 
     /**
@@ -593,7 +631,7 @@ class AiProviderResolver
         return [2, (int) $snapshot['fails'], $candidate->priority];
     }
 
-    private function blocked(ModelCandidate $candidate): bool
+    private function isBlocked(ModelCandidate $candidate): bool
     {
         return $this->health->endpointDisabled($candidate)
             || $this->health->endpointRateLimited($candidate)

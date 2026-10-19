@@ -375,7 +375,7 @@ final class ApplyImportPlan
                 ];
 
                 continue;
-            } catch (\RuntimeException | \DomainException $refusal) {
+            } catch (\RuntimeException|\DomainException $refusal) {
                 // A02's and A03's own invariants, reached through their actions.
                 //
                 // `DuplicateOpenRelationship` is a `RuntimeException`, and A04-R1 let it escape
@@ -559,7 +559,7 @@ final class ApplyImportPlan
      * refuses to.
      *
      * @param  string  $naturalKey  the action's own key, for the one type whose record is
-     *                               identified by it rather than by its payload
+     *                              identified by it rather than by its payload
      */
     private function targetExists(?ImportActionType $type, ImportActionPayload $payload, string $naturalKey = ''): ?bool
     {

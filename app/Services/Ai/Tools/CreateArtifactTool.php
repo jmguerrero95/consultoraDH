@@ -100,13 +100,20 @@ final class CreateArtifactTool extends AbstractAiTool
     public function validate(array $arguments): array
     {
         $format = $this->requireOneOf($arguments, 'format', ['pdf', 'docx', 'xlsx', 'csv', 'md', 'txt']);
-        $filename = $this->requireString($arguments, 'filename', 200);
+        // The raw name is read with a generous abuse cap only; the *download*
+        // name is bounded by humanFilename() below. A model that writes a long
+        // descriptive name still gets a usable file (truncated), rather than the
+        // whole call failing on a length check a person never sees.
+        $filename = $this->requireString($arguments, 'filename', 1000);
         $content = $this->requireString($arguments, 'content', 1000000);
         $title = $this->optionalString($arguments, 'title', 200);
 
-        // Sanitize filename
-        $filename = preg_replace('/[^a-zA-Z0-9_\-\.]/', '_', $filename);
-        $filename = Str::limit($filename, 180, '');
+        // Keep the name readable. The old sanitiser replaced every accented
+        // letter and ñ with an underscore, so "Guía básica de seguridad
+        // informática.pdf" became "Gu_a_b_sica_de_seguridad_inform_tica.pdf".
+        // The stored path is a uuid, so the name itself carries no traversal
+        // risk; it only has to be a safe, legible download name.
+        $filename = $this->humanFilename($filename, $format);
 
         return [
             'format' => $format,
@@ -114,6 +121,48 @@ final class CreateArtifactTool extends AbstractAiTool
             'content' => $content,
             'title' => $title,
         ];
+    }
+
+    /**
+     * A safe, legible download name.
+     *
+     * Unicode letters (á, é, í, ó, ú, ü, ñ and friends) are preserved, because
+     * the download endpoint sends the name as RFC 5987 (`filename*=UTF-8''…`)
+     * with an ASCII fallback. Only the characters that are genuinely unsafe in a
+     * filename are removed: path separators, control characters, the Windows
+     * reserved set, and a trailing dot or space. A repeated extension is
+     * stripped so `informe.pdf` plus the `pdf` format does not become
+     * `informe.pdf.pdf`.
+     */
+    private function humanFilename(string $raw, string $format): string
+    {
+        // Remove any extension the model already added, in the target format.
+        $raw = preg_replace('/\.'.preg_quote($format, '/').'$/iu', '', trim($raw)) ?? $raw;
+
+        // Control characters and the reserved filename set become spaces.
+        $raw = preg_replace('/[\p{C}]/u', ' ', $raw) ?? $raw;
+        $raw = str_replace(
+            ['/', '\\', '<', '>', ':', '"', '|', '?', '*'],
+            ' ',
+            $raw,
+        );
+
+        // Collapse whitespace, and stop a run of dots becoming a traversal.
+        $raw = preg_replace('/\s+/u', ' ', $raw) ?? $raw;
+        $raw = preg_replace('/\.{2,}/u', '.', $raw) ?? $raw;
+        $raw = trim($raw, " \t.");
+
+        if ($raw === '') {
+            $raw = 'documento';
+        }
+
+        // Bound the *stem* so the extension always fits and no name is truncated
+        // mid-way leaving a dangling extension.
+        if (mb_strlen($raw) > 150) {
+            $raw = rtrim(mb_substr($raw, 0, 150));
+        }
+
+        return $raw.'.'.$format;
     }
 
     public function describe(array $arguments): string
@@ -151,11 +200,10 @@ final class CreateArtifactTool extends AbstractAiTool
 
         $mime = $mimeTypes[$format];
 
-        // Human-readable filenames are kept for the download; the stored path is
-        // a uuid, so the name can never be a path traversal.
-        $slug = Str::slug($filename, '-');
-        $slug = $slug !== '' ? $slug : 'documento';
-        $displayName = Str::limit($slug, 160, '').'.'.$format;
+        // The validated name already carries the correct single extension and
+        // keeps its accents for the download; the stored path is a uuid, so the
+        // name can never be a path traversal.
+        $displayName = $filename;
 
         // Idempotency, bounded in time.
         //

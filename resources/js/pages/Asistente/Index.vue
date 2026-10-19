@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
@@ -17,6 +17,8 @@ import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
 import { useRoute } from 'vue-router';
 import { ai, groupArtifactsByMessage, groupProposalsByMessage } from '@/services/ai';
+import { useAuthStore } from '@/stores/auth';
+import { readDraft, writeDraft } from '@/utils/drafts';
 
 import type { AiArtifact, AiAttachmentSummary, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
 import type { AiTaskPayload } from '@/composables/useTasks';
@@ -53,6 +55,30 @@ const status = ref<AiStatusPayload | null>(null);
 const error = ref<string | null>(null);
 /** The server's own account of a confirmed write, shown in green. */
 const confirmation = ref<string | null>(null);
+
+/** The conversation being renamed inline, and the title being typed. */
+const editingId = ref<number | null>(null);
+const editTitle = ref('');
+
+/** The transcript element, so a new turn can be brought into view. */
+const transcriptEl = ref<HTMLElement | null>(null);
+
+/**
+ * Whether the person has deliberately scrolled up.
+ *
+ * While they read an earlier answer, a new message must not drag them back to
+ * the bottom. The flag is reset the moment they return to the latest turn.
+ */
+const pinnedUp = ref(false);
+
+const auth = useAuthStore();
+
+// Every keystroke is kept for this person and this thread, so an F5 — or an
+// accidental navigation — does not throw away what was typed. Scoped to the
+// user id and the conversation id, so nothing crosses accounts or threads.
+watch(draft, (value) => {
+    writeDraft(currentUserId(), selectedId.value, value);
+});
 
 // --- Background work -------------------------------------------------------
 //
@@ -259,6 +285,20 @@ const { context: suggestionContext } = useSuggestionContext();
 const enabled = computed(() => status.value?.ai_enabled === true);
 const model = computed(() => status.value?.active_model ?? '—');
 
+/**
+ * What the assistant can do right now, per kind of operation.
+ *
+ * The single `state` cannot answer "can it read my spreadsheet?", which needs a
+ * tool-capable provider *and* one authorised for private data. When the server
+ * sends the per-operation report, this is the sentence the header shows.
+ */
+const capabilityRows = computed(() => Object.values(status.value?.capabilities ?? {}));
+
+/** Operations the person should be warned about, if any. */
+const limitedOperations = computed(() =>
+    capabilityRows.value.filter((row) => !row.available),
+);
+
 /** An unconfigured provider is reported plainly rather than as a failure. */
 const availability = computed(() => {
     if (!status.value) {
@@ -269,11 +309,43 @@ const availability = computed(() => {
         return 'Asistente desactivado en este entorno.';
     }
 
-    // BUG-017: say which provider is answering *now*, and name the model, rather
-    // than reporting whether a slot was ever configured.
+    if (status.value.state === 'none') {
+        return 'No hay ningún proveedor de IA configurado.';
+    }
+
+    // When the server reports availability per operation, that is more truthful
+    // than the pool-wide state: it says whether the thing the person is about to
+    // ask can actually be done.
+    if (capabilityRows.value.length > 0) {
+        const privateReady = status.value.capabilities?.internal_data;
+
+        if (privateReady && !privateReady.available) {
+            return privateReady.reason
+                ?? 'La consulta de datos internos está limitada en este momento.';
+        }
+
+        const degraded = limitedOperations.value.length > 0;
+
+        if (status.value.state === 'quota_limited' || status.value.state === 'unavailable') {
+            return status.value.state === 'quota_limited'
+                ? 'El servicio de inteligencia artificial alcanzó temporalmente su límite de uso. Puedes reintentar cuando vuelva a estar disponible.'
+                : 'No hay un proveedor de inteligencia artificial disponible en este momento; se reintentará automáticamente.';
+        }
+
+        if (status.value.state === 'unchecked') {
+            return degraded
+                ? 'Servicio disponible para conversación; algunas operaciones están limitadas temporalmente.'
+                : 'Servicio configurado; comprobando su disponibilidad con la primera consulta.';
+        }
+
+        const providers = status.value.independent_providers ?? 0;
+        const backup = providers > 1 ? ' con respaldo automático' : '';
+
+        return `Disponible${model.value !== '—' ? ` con ${model.value}` : ''}${backup}.`;
+    }
+
+    // Fallback for a server that does not yet send the capability report.
     switch (status.value.state) {
-        case 'none':
-            return 'No hay ningún proveedor de IA configurado.';
         case 'unavailable':
             return 'No hay un proveedor de inteligencia artificial disponible en este momento; se reintentará automáticamente.';
         case 'quota_limited':
@@ -298,6 +370,9 @@ onMounted(async () => {
 
     if (fromQuery !== null && fromQuery !== selectedId.value) {
         await selectConversation(fromQuery);
+    } else {
+        // No thread named: restore whatever was typed for "new conversation".
+        loadDraft();
     }
 
     loading.value = false;
@@ -365,7 +440,119 @@ async function loadConversations(): Promise<void> {
     }
 }
 
+/** This person's id, for scoping a draft to them. */
+function currentUserId(): number | null {
+    return auth.user?.id ?? null;
+}
+
+/**
+ * Bring the latest turn into view, unless the person has scrolled up to read.
+ *
+ * `force` is used when the person themselves acted (sent a message), because
+ * then following the newest turn is what they asked for.
+ */
+async function scrollToLatest(force = false): Promise<void> {
+    await nextTick();
+
+    const el = transcriptEl.value;
+
+    if (el === null) {
+        return;
+    }
+
+    if (force || !pinnedUp.value) {
+        el.scrollTop = el.scrollHeight;
+        pinnedUp.value = false;
+    }
+}
+
+/** Remember whether the person is reading earlier in the transcript. */
+function onTranscriptScroll(): void {
+    const el = transcriptEl.value;
+
+    if (el === null) {
+        return;
+    }
+
+    pinnedUp.value = el.scrollHeight - el.scrollTop - el.clientHeight > 48;
+}
+
+/** Load the draft this person had for the thread now selected. */
+function loadDraft(): void {
+    draft.value = readDraft(currentUserId(), selectedId.value);
+}
+
+/** Persist the composer for the thread now selected, or clear it when empty. */
+function persistDraft(): void {
+    writeDraft(currentUserId(), selectedId.value, draft.value);
+}
+
+/**
+ * Begin renaming a conversation in place.
+ *
+ * Renaming is presentation only: it changes no message and no proposal.
+ */
+function startRename(conversation: AiConversationSummary): void {
+    editingId.value = conversation.id;
+    editTitle.value = conversation.title ?? '';
+}
+
+function cancelRename(): void {
+    editingId.value = null;
+    editTitle.value = '';
+}
+
+async function saveRename(conversation: AiConversationSummary): Promise<void> {
+    const title = editTitle.value.trim();
+
+    if (title === '') {
+        error.value = 'El título no puede estar vacío.';
+        return;
+    }
+
+    try {
+        const result = await ai.renameConversation(conversation.id, title);
+        conversations.value = conversations.value.map((entry) =>
+            entry.id === conversation.id ? { ...entry, title: result.title } : entry,
+        );
+        cancelRename();
+    } catch (e) {
+        error.value = readError(e, 'No fue posible renombrar la conversación.');
+    }
+}
+
+/**
+ * Delete a conversation after an explicit confirmation.
+ *
+ * The confirmation names the thread so it is unambiguous which one goes, and
+ * the deletion is the server's: it removes this thread's files and nothing that
+ * belongs to a business record.
+ */
+async function removeConversation(conversation: AiConversationSummary): Promise<void> {
+    const label = conversation.title || 'esta conversación';
+
+    if (!window.confirm(`¿Eliminar «${label}»? Esta acción no se puede deshacer.`)) {
+        return;
+    }
+
+    try {
+        await ai.deleteConversation(conversation.id);
+
+        writeDraft(currentUserId(), conversation.id, '');
+        conversations.value = conversations.value.filter((entry) => entry.id !== conversation.id);
+
+        if (selectedId.value === conversation.id) {
+            startNewConversation();
+        }
+    } catch (e) {
+        error.value = readError(e, 'No fue posible eliminar la conversación.');
+    }
+}
+
 async function selectConversation(id: number): Promise<void> {
+    // A draft typed for the thread being left is saved before it is replaced.
+    persistDraft();
+
     selectedId.value = id;
     orphanProposals.value = [];
     sources.value = [];
@@ -408,9 +595,16 @@ async function selectConversation(id: number): Promise<void> {
         attachments.value = [];
         error.value = readError(e, 'No fue posible cargar la conversación.');
     }
+
+    // The draft this person had for this thread, and the latest turn in view.
+    loadDraft();
+    void scrollToLatest();
 }
 
 function startNewConversation(): void {
+    // Keep the text typed for the thread being left.
+    persistDraft();
+
     selectedId.value = null;
     messages.value = [];
     orphanProposals.value = [];
@@ -422,6 +616,7 @@ function startNewConversation(): void {
     drawerOpen.value = false;
 
     dictation.abandon();
+    loadDraft();
 }
 
 /**
@@ -439,11 +634,16 @@ async function send(): Promise<void> {
     error.value = null;
     confirmation.value = null;
     draft.value = '';
+    // The question is on its way, so the stored draft is no longer pending. The
+    // previous thread's key is cleared too: the id may change below.
+    persistDraft();
+    writeDraft(currentUserId(), selectedId.value, '');
 
     // Rendered immediately so the question stays on screen while the model
     // works; the reload below replaces it with the persisted copy.
     // Include proposals array so they render inline with the question.
     messages.value = [...messages.value, { role: 'user', content: question, provider: null, model: null, created_at: null, proposals: [] }];
+    void scrollToLatest(true);
 
     try {
         const turn = await ai.ask(question, selectedId.value);
@@ -482,10 +682,14 @@ async function send(): Promise<void> {
         }
 
         await loadConversations();
+        void scrollToLatest();
     } catch (e) {
         // Keep the question in the draft: dropping it loses what was typed on a
         // failure the user can retry, which is the moment it matters most.
         draft.value = question;
+        // Stored under the thread it was asked in, which is the one that will
+        // still be selected after a reload so the retry lands where it belongs.
+        writeDraft(currentUserId(), selectedId.value, question);
         error.value = readError(e, 'No fue posible completar la consulta.');
     } finally {
         sending.value = false;
@@ -758,23 +962,71 @@ function formatDate(value: string | null): string {
                 <AppEmptyState v-if="conversations.length === 0" title="Sin conversaciones" icon="bi-chat-square-text" />
 
                 <ul v-else class="cdh-ai__conversations">
-                    <li v-for="conversation in conversations" :key="conversation.id">
-                        <button
-                            type="button"
-                            class="cdh-ai__conversation"
-                            :class="{ 'cdh-ai__conversation--active': conversation.id === selectedId }"
-                            :aria-current="conversation.id === selectedId ? 'true' : undefined"
-                            @click="selectConversation(conversation.id)"
+                    <li v-for="conversation in conversations" :key="conversation.id" class="cdh-ai__conversation-row">
+                        <form
+                            v-if="editingId === conversation.id"
+                            class="cdh-ai__conversation-edit"
+                            @submit.prevent="saveRename(conversation)"
                         >
-                            <span class="cdh-ai__conversation-title">{{ conversation.title || 'Sin título' }}</span>
-                            <span class="cdh-ai__conversation-date">{{ formatDate(conversation.created_at) }}</span>
-                        </button>
+                            <input
+                                v-model="editTitle"
+                                type="text"
+                                class="form-control form-control-sm"
+                                :aria-label="`Nuevo título para ${conversation.title || 'la conversación'}`"
+                                data-test="conversation-title-input"
+                                @keydown.esc="cancelRename"
+                            />
+                            <AppButton type="submit" size="sm" variant="primary" data-test="conversation-save">Guardar</AppButton>
+                            <AppButton type="button" size="sm" variant="link" @click="cancelRename">Cancelar</AppButton>
+                        </form>
+
+                        <div v-else class="cdh-ai__conversation-item">
+                            <button
+                                type="button"
+                                class="cdh-ai__conversation"
+                                :class="{ 'cdh-ai__conversation--active': conversation.id === selectedId }"
+                                :aria-current="conversation.id === selectedId ? 'true' : undefined"
+                                @click="selectConversation(conversation.id)"
+                            >
+                                <span class="cdh-ai__conversation-title">{{ conversation.title || 'Sin título' }}</span>
+                                <span class="cdh-ai__conversation-date">{{ formatDate(conversation.created_at) }}</span>
+                            </button>
+
+                            <div class="cdh-ai__conversation-actions">
+                                <button
+                                    type="button"
+                                    class="cdh-ai__conversation-action"
+                                    :aria-label="`Renombrar ${conversation.title || 'la conversación'}`"
+                                    title="Renombrar"
+                                    data-test="conversation-rename"
+                                    @click="startRename(conversation)"
+                                >
+                                    <i class="bi bi-pencil" aria-hidden="true" />
+                                </button>
+                                <button
+                                    type="button"
+                                    class="cdh-ai__conversation-action cdh-ai__conversation-action--danger"
+                                    :aria-label="`Eliminar ${conversation.title || 'la conversación'}`"
+                                    title="Eliminar"
+                                    data-test="conversation-delete"
+                                    @click="removeConversation(conversation)"
+                                >
+                                    <i class="bi bi-trash" aria-hidden="true" />
+                                </button>
+                            </div>
+                        </div>
                     </li>
                 </ul>
             </aside>
 
             <section class="cdh-ai__main" aria-label="Conversación">
-                <div class="cdh-ai__transcript" role="log" aria-live="polite">
+                <div
+                    ref="transcriptEl"
+                    class="cdh-ai__transcript"
+                    role="log"
+                    aria-live="polite"
+                    @scroll="onTranscriptScroll"
+                >
                     <AppEmptyState
                         v-if="messages.length === 0"
                         title="Empieza una conversación"

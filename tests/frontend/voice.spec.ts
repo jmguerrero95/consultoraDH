@@ -164,11 +164,20 @@ function installSynthesis(
         { lang: 'es-CO', name: 'Monica', default: true },
         { lang: 'en-US', name: 'Alex', default: false },
     ],
-): { spoken: string[]; langs: string[]; voices: Array<unknown>; paused: number; resumed: number; cancelled: number } {
+): {
+    spoken: string[];
+    langs: string[];
+    voices: Array<unknown>;
+    paused: number;
+    resumed: number;
+    cancelled: number;
+    utterances: Array<{ text: string; onstart: (() => void) | null; onend: (() => void) | null }>;
+} {
     const spoken: string[] = [];
     const langs: string[] = [];
     const chosen: Array<unknown> = [];
-    const tally = { spoken, langs, voices: chosen, paused: 0, resumed: 0, cancelled: 0 };
+    const utterances: Array<{ text: string; onstart: (() => void) | null; onend: (() => void) | null }> = [];
+    const tally = { spoken, langs, voices: chosen, paused: 0, resumed: 0, cancelled: 0, utterances };
 
     /*
      | The utterance is captured by value at construction time, not read off the
@@ -202,10 +211,11 @@ function installSynthesis(
     );
 
     vi.stubGlobal('speechSynthesis', {
-        speak(utterance: { text: string; lang: string; voice: unknown }) {
+        speak(utterance: { text: string; lang: string; voice: unknown; onstart: (() => void) | null; onend: (() => void) | null }) {
             spoken.push(utterance.text);
             langs.push(utterance.lang);
             chosen.push(utterance.voice);
+            utterances.push(utterance);
         },
         pause: () => {
             tally.paused += 1;
@@ -467,6 +477,39 @@ describe('useVoice — playback', () => {
         // Two cancels: `speak()` cancels whatever was playing before queueing,
         // and `stop()` cancels the utterance under test. Both are deliberate.
         expect(tally.cancelled).toBe(2);
+    });
+
+    it('applies a pause asked for before the browser started speaking', async () => {
+        const tally = installSynthesis();
+        const { playback } = useVoice();
+
+        playback.speak('una respuesta larga que se quiere pausar de inmediato');
+
+        // The person presses pause before `onstart` fires. The engine ignores a
+        // pause on an utterance it has not begun, so the intent must be applied
+        // when the first word is due.
+        playback.pause();
+        expect(playback.paused.value).toBe(true);
+
+        const pauseCallsBeforeStart = tally.paused;
+
+        tally.utterances[0]?.onstart?.();
+        await nextTick();
+
+        expect(tally.paused).toBeGreaterThan(pauseCallsBeforeStart);
+        expect(playback.paused.value).toBe(true);
+
+        playback.resume();
+        expect(playback.paused.value).toBe(false);
+
+        tally.utterances[0]?.onend?.();
+    });
+
+    it('reports whether the browser can pause at all', () => {
+        installSynthesis();
+        const { playback } = useVoice();
+
+        expect(playback.pausable.value).toBe(true);
     });
 
     it('replaces the current reading rather than queueing it', () => {

@@ -916,6 +916,12 @@ final class AiAssistantService
         // model does not repeat the search the turn already made.
         $seenCalls = $this->prefetchCallKeys($prefetched);
 
+        // The deterministic supervisor. It counts rounds that produced nothing
+        // usable and, after two in a row, steers the next call to a tool-free
+        // synthesis instead of letting the model ask for another tool. See
+        // AiTurnSupervisor for the rule and why it is not a second model.
+        $supervisor = new AiTurnSupervisor();
+
         $currentResult = $result;
 
         // The tools currently offered to the model. It begins as this turn's
@@ -1494,6 +1500,11 @@ final class AiAssistantService
 
                 $toolResults = array_merge($toolResults, $toolResultsThisRound);
 
+                // Tell the supervisor what this round actually produced. Two
+                // consecutive rounds with nothing new switch the next call to a
+                // bounded, tool-free synthesis.
+                $supervisor->recordRound($toolResultsThisRound, $proposalsThisRound !== []);
+
                 // If there were proposals, we don't continue the loop for synthesis
                 // The model already knows proposals were created
                 if (! empty($proposalsThisRound)) {
@@ -1513,6 +1524,17 @@ final class AiAssistantService
                 // Only read tools ran, so the turn continues: ask for the next
                 // round with the results now in the payload.
                 //
+                // When the supervisor has seen two unproductive rounds, the next
+                // call is offered *no* tools: the model must answer from the
+                // evidence it already holds instead of asking for one more tool.
+                // Everything else — the messages, the retrieved passages, the
+                // tool results — is unchanged, so nothing recovered is lost.
+                $nextTools = $supervisor->shouldForceSynthesis() ? [] : array_values($offered);
+
+                if ($nextTools === [] && $supervisor->shouldForceSynthesis()) {
+                    $endedBy = 'synthesis';
+                }
+
                 // A provider failure here is an explicit failure of the turn, not
                 // an answer. Turning it into a string and storing it would put a
                 // fabricated assistant message in the conversation that a later
@@ -1521,7 +1543,7 @@ final class AiAssistantService
                 // failure before it does, so the final result is never inferred
                 // from a provider row that said "ok" earlier.
                 try {
-                    $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                    $currentResult = $this->resolver->complete($messages, $nextTools, null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
                 } catch (AiProviderException $e) {
                     $this->recordTurnSummary(
                         $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,

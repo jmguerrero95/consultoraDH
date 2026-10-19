@@ -11,6 +11,8 @@ use App\Models\AiConversation;
 use App\Models\AiMessage;
 use App\Models\User;
 use App\Services\Ai\AiAssistantService;
+use App\Services\Ai\AiAvailability;
+use App\Services\Ai\AiConversationManager;
 use App\Services\Ai\AiProposalNotConfirmable;
 use App\Services\Ai\AiProposalService;
 use App\Services\Ai\AiProviderException;
@@ -39,6 +41,8 @@ final class AiAssistantController extends Controller
         private readonly AiProviderResolver $resolver,
         private readonly AiToolRegistry $registry,
         private readonly AiProposalService $proposalService,
+        private readonly AiAvailability $availability,
+        private readonly AiConversationManager $conversations,
     ) {}
 
     /**
@@ -112,18 +116,70 @@ final class AiAssistantController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
+        // Most recent activity first. The conversation is touched when a turn
+        // succeeds, so a thread continued today rises above one that was merely
+        // created earlier and left alone.
         $conversations = AiConversation::query()
             ->where('user_id', $request->user()->id)
-            ->orderBy('created_at', 'desc')
-            ->get(['id', 'title', 'created_at'])
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->get(['id', 'title', 'created_at', 'updated_at'])
             ->map(fn ($c): array => [
                 'id' => $c->id,
                 'title' => $c->title,
                 'created_at' => $c->created_at?->toDateTimeString(),
+                'updated_at' => $c->updated_at?->toDateTimeString(),
             ]);
 
         return response()->json([
             'conversations' => $conversations,
+        ]);
+    }
+
+    /**
+     * Rename a conversation the caller owns.
+     *
+     * A title is presentation, never content: the history is untouched, so
+     * renaming cannot change what was said or what a proposal will do.
+     */
+    public function rename(Request $request, AiConversation $conversation): JsonResponse
+    {
+        if ($conversation->user_id !== $request->user()->id) {
+            return $this->fail('No es tu conversación.', 403);
+        }
+
+        $title = (string) $request->input('title', '');
+
+        try {
+            $clean = $this->conversations->rename($conversation, $title);
+        } catch (\InvalidArgumentException $e) {
+            return $this->fail($e->getMessage(), 422);
+        }
+
+        return response()->json([
+            'conversation_id' => $conversation->id,
+            'title' => $clean,
+        ]);
+    }
+
+    /**
+     * Delete a conversation the caller owns.
+     *
+     * The files it generated are removed with it; the operational tasks a
+     * confirmed proposal may have created are not, because they are business
+     * records that do not belong to the conversation.
+     */
+    public function destroy(Request $request, AiConversation $conversation): JsonResponse
+    {
+        if ($conversation->user_id !== $request->user()->id) {
+            return $this->fail('No es tu conversación.', 403);
+        }
+
+        $this->conversations->delete($conversation);
+
+        return response()->json([
+            'deleted' => true,
+            'conversation_id' => $conversation->id,
         ]);
     }
 
@@ -159,7 +215,7 @@ final class AiAssistantController extends Controller
 
         $conversation = AiConversation::query()->create([
             'user_id' => $request->user()->id,
-            'title' => 'Conversación '.now()->format('Y-m-d H:i'),
+            'title' => $this->conversations->placeholderTitle(),
         ]);
 
         return response()->json([
@@ -196,7 +252,7 @@ final class AiAssistantController extends Controller
         } else {
             $conversation = AiConversation::query()->create([
                 'user_id' => $request->user()->id,
-                'title' => 'Conversación '.now()->format('Y-m-d H:i'),
+                'title' => $this->conversations->placeholderTitle(),
             ]);
         }
 
@@ -206,8 +262,14 @@ final class AiAssistantController extends Controller
             return $this->unavailable($e);
         }
 
+        // The first real question names the thread. A title the person chose is
+        // never overwritten, and the derivation costs no provider call.
+        $this->conversations->applyDerivedTitle($conversation, $data['question']);
+        $conversation->touch();
+
         return response()->json([
             'conversation_id' => $conversation->id,
+            'title' => $conversation->title,
             'reply' => $result['reply'],
             'provider' => $result['provider'],
             'model' => $result['model'],
@@ -243,6 +305,7 @@ final class AiAssistantController extends Controller
 
         return response()->json([
             'conversation_id' => $conversation->id,
+            'title' => $conversation->title,
             'messages' => $messages,
             // The files this thread produced. They are part of the conversation,
             // not of a separate panel: after a reload the person sees the PDF
@@ -350,8 +413,14 @@ final class AiAssistantController extends Controller
             return $this->unavailable($e);
         }
 
+        // A thread opened empty (to attach a file first) takes its title from
+        // the first question asked in it.
+        $this->conversations->applyDerivedTitle($conversation, $data['message']);
+        $conversation->touch();
+
         return response()->json([
             'conversation_id' => $conversation->id,
+            'title' => $conversation->title,
             'reply' => $result['reply'],
             'provider' => $result['provider'],
             'model' => $result['model'],
@@ -456,11 +525,20 @@ final class AiAssistantController extends Controller
             $fallback = $this->resolver->fallback();
             $state = $this->resolver->state();
 
+            // Availability per kind of operation. The single `state` above can be
+            // "available" while no provider authorised for private data is ready,
+            // so the interface uses this map to say what can actually be done.
+            $capabilities = $this->availability->report();
+
             return [
                 'ai_enabled' => config('ai.enabled', false),
                 'state' => $state,
                 'available' => $this->resolver->anyConfigured()
                     && in_array($state, ['available', 'fallback', 'unchecked'], true),
+                // Safe, additive report: per-operation state, counts and model ids.
+                // No key, URL, prompt or record.
+                'capabilities' => $capabilities,
+                'independent_providers' => $this->availability->independentPrivateProviders(),
                 // The JSON key stays `active_model`; the method is `activeModel()`.
                 // Calling the snake_case name meant `/api/ai/status` threw
                 // `Call to undefined method` and answered 500 — so the whole

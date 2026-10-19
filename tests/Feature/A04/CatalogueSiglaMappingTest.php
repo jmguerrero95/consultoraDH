@@ -13,6 +13,7 @@ use App\Domain\Imports\SourceEntityToken;
 use App\Models\SocialSecurityEntity;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Spatie\Permission\PermissionRegistrar;
 
 /**
  * The sigla gap between the CCF catalogue and the importer.
@@ -47,7 +48,7 @@ beforeEach(function (): void {
     // The loaders now check permissions, so the actor has to actually hold them. 'Operations'
     // holds neither the catalogue permission nor the review one.
     userWithRole('Administrator');
-    app(Spatie\Permission\PermissionRegistrar::class)->forgetCachedPermissions();
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
 });
 
 /** Load both catalogues into this test's database. */

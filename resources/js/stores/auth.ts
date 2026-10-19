@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 
 import { api } from '@/services/api';
 import { onUnauthorized, resetCsrfState } from '@/services/http';
+import { clearDrafts } from '@/utils/drafts';
 
 import type { AuthUser } from '@/types/api';
 
@@ -52,6 +53,9 @@ export const useAuthStore = defineStore('auth', () => {
     function clear(): void {
         user.value = null;
         resetCsrfState();
+        // Drafts are scoped to the person, so ending the session removes them:
+        // nothing typed by the previous account survives the logout.
+        clearDrafts();
     }
 
     /**

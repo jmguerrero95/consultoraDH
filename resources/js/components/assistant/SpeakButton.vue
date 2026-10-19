@@ -19,6 +19,10 @@ const emit = defineEmits<{
 const supported = computed(() => props.playback.supported.value);
 const speaking = computed(() => props.playback.speaking.value);
 const paused = computed(() => props.playback.paused.value);
+
+// A browser without a working `pause()` shows only play/stop, rather than a
+// pause control that would silently do nothing.
+const pausable = computed(() => props.playback.pausable.value);
 </script>
 
 <template>
@@ -37,7 +41,7 @@ const paused = computed(() => props.playback.paused.value);
 
         <template v-else>
             <button
-                v-if="!paused"
+                v-if="pausable && !paused"
                 type="button"
                 class="cdh-speak__button"
                 aria-label="Pausar la lectura"
@@ -49,7 +53,7 @@ const paused = computed(() => props.playback.paused.value);
             </button>
 
             <button
-                v-else
+                v-else-if="pausable"
                 type="button"
                 class="cdh-speak__button"
                 aria-label="Continuar la lectura"

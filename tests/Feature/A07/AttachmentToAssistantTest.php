@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Domain\Documents\DocumentIngestor;
 use App\Domain\Documents\DocumentRetriever;
+use App\Models\AiAttachment;
 use App\Models\AiConversation;
 use App\Models\User;
 use App\Services\Ai\AiAssistantService;
@@ -397,7 +398,7 @@ final class AttachmentToAssistantTest extends TestCase
         $this->assertIsArray($attachments);
         $this->assertCount(1, $attachments);
         $this->assertSame('marcadores.xlsx', $attachments[0]['name']);
-        $this->assertSame(\App\Models\AiAttachment::STATUS_PROCESSED, $attachments[0]['status']);
+        $this->assertSame(AiAttachment::STATUS_PROCESSED, $attachments[0]['status']);
     }
 
     public function test_attachments_of_another_persons_conversation_are_not_delivered_by_show(): void

@@ -5,8 +5,11 @@ import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
 import SafeMarkdown from '@/components/ui/SafeMarkdown.vue';
 import ArtifactCard from '@/components/assistant/ArtifactCard.vue';
+import MicButton from '@/components/assistant/MicButton.vue';
+import { useVoice } from '@/composables/useVoice';
 import { ai, groupArtifactsByMessage, groupProposalsByMessage } from '@/services/ai';
 import { useAuthStore } from '@/stores/auth';
+import { readDraft, writeDraft } from '@/utils/drafts';
 
 import type { AiArtifact, AiProposal, AiStatusPayload, AiToolResult } from '@/services/ai';
 
@@ -43,6 +46,11 @@ import type { AiArtifact, AiProposal, AiStatusPayload, AiToolResult } from '@/se
  */
 
 const auth = useAuthStore();
+
+/** The draft belongs to a person and a thread, exactly as on the full page. */
+function draftOwnerId(): number | null {
+    return auth.user?.id ?? null;
+}
 
 const canUse = computed(() => auth.can('ai.use'));
 
@@ -88,8 +96,35 @@ const proposals = ref<AiProposal[]>([]);
  */
 const artifacts = ref<AiArtifact[]>([]);
 const draft = ref('');
+
+// Every keystroke is kept for this person and this thread, so an F5 does not
+// throw away what was typed; the key carries both ids, so nothing crosses an
+// account or a conversation.
+watch(draft, (value) => {
+    writeDraft(draftOwnerId(), conversationId.value, value);
+});
+
 const sending = ref(false);
 const error = ref<string | null>(null);
+
+/**
+ * The same dictation engine the full page uses, not a second one. The widget is
+ * a view of the assistant, so its microphone must behave identically: the
+ * recognised text is offered for editing and never sent on its own.
+ */
+const { dictation } = useVoice();
+
+/** Append dictated words to whatever is already typed, without sending. */
+function appendDictation(text: string): void {
+    const spoken = text.trim();
+
+    if (spoken === '') {
+        return;
+    }
+
+    draft.value = draft.value.trim() === '' ? spoken : `${draft.value.trim()} ${spoken}`;
+    void nextTick(() => input.value?.focus());
+}
 /**
  * The server's own account of what a confirmed action did.
  *
@@ -204,6 +239,13 @@ const notice = computed<{ variant: 'danger' | 'warning'; message: string } | nul
         return { variant: 'warning', message: 'No hay un proveedor de inteligencia artificial disponible en este momento. Puedes reintentar cuando vuelva a estarlo.' };
     }
 
+    // The pool-wide state can be "unchecked" while the operations that need a
+    // provider authorised for private data are not ready. Saying so is honest;
+    // claiming it is simply "sin comprobar" is not.
+    if (status.value.capabilities?.internal_data && !status.value.capabilities.internal_data.available) {
+        return { variant: 'warning', message: 'La conversación general está disponible, pero las operaciones con datos internos están limitadas en este momento.' };
+    }
+
     return null;
 });
 
@@ -226,8 +268,15 @@ const statusLabel = computed(() => {
             // that has not answered is not claimed to be working.
             return status.value.active_model ? `Disponible · ${status.value.active_model}` : 'Disponible';
         default:
-            // `unchecked`: configured, but with no recent proof it answers.
-            return 'Disponibilidad sin comprobar';
+            // `unchecked`: configured, but with no recent proof it answers. Say
+            // something useful rather than leaving a permanent "sin comprobar":
+            // what the pool is configured for, and whether private work is
+            // currently limited.
+            if (status.value.capabilities?.internal_data && !status.value.capabilities.internal_data.available) {
+                return 'Disponibilidad limitada';
+            }
+
+            return 'Listo · sin verificar';
     }
 });
 
@@ -277,6 +326,8 @@ function toggleFullscreen(): void {
 }
 
 function newConversation(): void {
+    // Recording belongs to the thread being left, not to the widget.
+    dictation.abandon();
     conversationId.value = null;
     messages.value = [];
     proposals.value = [];
@@ -284,8 +335,9 @@ function newConversation(): void {
     attachments.value = [];
     error.value = null;
     confirmation.value = null;
-    draft.value = '';
     persistConversation();
+    // Whatever was typed for a new conversation is restored, not discarded.
+    draft.value = readDraft(draftOwnerId(), null);
     void nextTick(() => input.value?.focus());
 }
 
@@ -305,10 +357,13 @@ async function restoreConversation(): Promise<void> {
     const stored = storedConversation();
 
     if (stored === null) {
+        draft.value = readDraft(draftOwnerId(), null);
+
         return;
     }
 
     conversationId.value = stored;
+    draft.value = readDraft(draftOwnerId(), stored);
 
     try {
         const history = await ai.history(stored);
@@ -1011,6 +1066,7 @@ watch(open, (value) => {
                     aria-label="Pregunta para el asistente"
                     :disabled="sending"
                 />
+                <MicButton :dictation="dictation" @send="appendDictation" />
                 <AppButton
                     type="submit"
                     variant="primary"

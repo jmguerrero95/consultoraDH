@@ -20,6 +20,8 @@ export interface AiConversationSummary {
     id: number;
     title: string | null;
     created_at: string | null;
+    /** Last activity, used to order the list. Optional for older servers. */
+    updated_at?: string | null;
 }
 
 export type AiMessageRole = 'user' | 'assistant' | 'tool';
@@ -199,6 +201,32 @@ export interface AiModelHealth {
     last_latency_ms: number | null;
 }
 
+/**
+ * Availability of one kind of operation.
+ *
+ * The single `state` on the status cannot answer "can it read my spreadsheet?":
+ * that needs a tool-capable provider *and* one authorised for private data. This
+ * is that answer, per operation, derived on the server from the real pool.
+ */
+export interface AiCapabilityAvailability {
+    label: string;
+    /**
+     * `available` (a proven provider can answer, with a backup),
+     * `degraded` (works, but with a single independent provider),
+     * `unverified` (configured, nothing has answered recently),
+     * `quota_limited`, `unavailable`, `blocked` or `unconfigured`.
+     */
+    state: 'available' | 'degraded' | 'unverified' | 'quota_limited' | 'unavailable' | 'blocked' | 'unconfigured';
+    available: boolean;
+    eligible: number;
+    ready: number;
+    independent_providers: number;
+    preferred_model: string | null;
+    last_success: string | null;
+    retry_after_seconds: number | null;
+    reason: string | null;
+}
+
 /** One provider attempt, kept so a failure can be explained rather than guessed. */
 export interface AiDiagnostic {
     at: number;
@@ -238,6 +266,10 @@ export interface AiStatusPayload {
     cooldowns: Record<string, number>;
     /** Every candidate, in the order the resolver would try it. */
     models?: AiModelHealth[];
+    /** Availability per kind of operation, so the UI stops over-promising. */
+    capabilities?: Record<string, AiCapabilityAvailability>;
+    /** How many independent providers can serve private tool work right now. */
+    independent_providers?: number;
     /** The most recent attempts, newest first. */
     diagnostics?: AiDiagnostic[];
     primary: { configured: boolean; model: string | null };
@@ -328,6 +360,27 @@ export const ai = {
 
     conversations(): Promise<{ conversations: AiConversationSummary[] }> {
         return request<{ conversations: AiConversationSummary[] }>('GET', '/api/ai/conversations');
+    },
+
+    /**
+     * Rename a conversation the caller owns.
+     *
+     * Presentation only: the server changes the title and nothing else.
+     */
+    renameConversation(conversationId: number, title: string): Promise<{ conversation_id: number; title: string }> {
+        return request<{ conversation_id: number; title: string }>('PATCH', `/api/ai/conversations/${conversationId}`, {
+            body: { title },
+        });
+    },
+
+    /**
+     * Delete a conversation the caller owns.
+     *
+     * The server removes the thread and the files it generated; business
+     * records a confirmed proposal created are untouched.
+     */
+    deleteConversation(conversationId: number): Promise<{ deleted: boolean; conversation_id: number }> {
+        return request<{ deleted: boolean; conversation_id: number }>('DELETE', `/api/ai/conversations/${conversationId}`);
     },
 
     /**

@@ -8,10 +8,11 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportQueue;
 use App\Models\SupportQueueMember;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Spatie\Permission\Models\Role;
 
 /**
  * FIX-LOCAL-01 / B.3 — the staff attachment endpoint.
@@ -94,7 +95,7 @@ it('refuses a type outside the allowed list', function (): void {
 
 it('refuses a caller with no authority over the conversation', function (): void {
     $other = User::factory()->create();
-    $other->assignRole(\Spatie\Permission\Models\Role::query()->firstOrCreate(['name' => 'Read Only']));
+    $other->assignRole(Role::query()->firstOrCreate(['name' => 'Read Only']));
 
     $this->actingAs($other)
         ->post('/api/support/conversations/'.$this->conversation->id.'/attachments', [
@@ -189,7 +190,7 @@ it('refuses a download from somebody outside the conversation', function (): voi
     Storage::disk('local')->put($attachment->stored_path, 'contenido');
 
     $other = User::factory()->create();
-    $other->assignRole(\Spatie\Permission\Models\Role::query()->firstOrCreate(['name' => 'Support']));
+    $other->assignRole(Role::query()->firstOrCreate(['name' => 'Support']));
 
     // Same role and a valid session, but never a member of this queue and not the assignee —
     // which is exactly the shape `authorizeConversationAccess()` exists to refuse.
