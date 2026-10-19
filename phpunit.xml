@@ -32,6 +32,26 @@
         <env name="DB_CONNECTION" value="testing" force="true"/>
         <env name="DB_TEST_DATABASE" value="consultora_dh_test" force="true"/>
 
+        <!--
+            A dedicated Redis namespace for the suite.
+
+            Tests that prove the real queue use the deployment's real Redis and
+            the real `Worker`; that guarantee is kept. What must NOT be shared is
+            the *namespace*: the development stack uses database 0/1 with prefix
+            `consultora-dh-`, and the E2E stack uses database 2/3 with prefix
+            `consultora-dh-e2e-`. The running `consultora-dh-queue` worker listens
+            on `ai-tasks` in database 0, so a test job written there could be
+            popped by that worker and executed against the development database.
+
+            Database 4 (queue/default) and 5 (cache) plus the `consultora-dh-test-`
+            prefix are reserved for this suite. No production, development or E2E
+            process reads them, so a test job can only be consumed by the Worker
+            the test itself drives, inside the test's own transaction.
+        -->
+        <env name="REDIS_DB" value="4" force="true"/>
+        <env name="REDIS_CACHE_DB" value="5" force="true"/>
+        <env name="REDIS_PREFIX" value="consultora-dh-test-" force="true"/>
+
         <env name="BROADCAST_CONNECTION" value="null" force="true"/>
         <env name="CACHE_STORE" value="array" force="true"/>
         <env name="MAIL_MAILER" value="array" force="true"/>

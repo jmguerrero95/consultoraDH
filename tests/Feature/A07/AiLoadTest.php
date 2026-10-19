@@ -6,6 +6,7 @@ namespace Tests\Feature\A07;
 
 use App\Models\McpToken;
 use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\Models\Permission;
@@ -37,6 +38,8 @@ use Tests\TestCase;
  */
 final class AiLoadTest extends TestCase
 {
+    use RefreshDatabase;
+
     private const ITERATIONS = 20;
 
     private User $user;

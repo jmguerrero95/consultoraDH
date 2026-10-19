@@ -76,6 +76,13 @@ final class TaskCompletionPushTest extends TestCase
         ]);
     }
 
+    protected function tearDown(): void
+    {
+        $this->redisQueue()->clear(self::QUEUE);
+
+        parent::tearDown();
+    }
+
     private function redisQueue(): RedisQueue
     {
         $queue = app('queue')->connection('redis');

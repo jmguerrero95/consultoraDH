@@ -11,6 +11,7 @@ use App\Services\Ai\Net\DnsResolver;
 use App\Services\Ai\Net\DownloadTooLarge;
 use App\Services\Ai\Net\PinnedTransport;
 use App\Services\Ai\Tools\WebFetchTool;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Spatie\Permission\Models\Permission;
@@ -30,6 +31,8 @@ use Tests\TestCase;
  */
 final class WebFetchSsrfTest extends TestCase
 {
+    use RefreshDatabase;
+
     /**
      * A resolver that answers with whatever the test decides, and records how
      * many times it was asked — which is how rebinding is observed.

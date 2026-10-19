@@ -13,6 +13,7 @@ use App\Services\Ai\Tools\WebFetchTool;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Psr7\Utils;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\Group;
 use Psr\Http\Message\StreamInterface;
@@ -54,6 +55,8 @@ use Tests\TestCase;
 #[Group('a07')]
 final class WebFetchHttpIntegrationTest extends TestCase
 {
+    use RefreshDatabase;
+
     /** @var resource|null */
     private static $serverProcess = null;
 

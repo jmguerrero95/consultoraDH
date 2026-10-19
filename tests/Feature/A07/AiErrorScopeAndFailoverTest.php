@@ -17,6 +17,7 @@ use App\Services\Ai\AiTurnBudget;
 use App\Services\Ai\ModelCandidate;
 use App\Services\Ai\ModelPool;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
@@ -39,6 +40,8 @@ use Tests\TestCase;
  */
 final class AiErrorScopeAndFailoverTest extends TestCase
 {
+    use RefreshDatabase;
+
     private const GROQ = 'https://groq.test/v1';
 
     private const GEMINI = 'https://gemini.test/v1';

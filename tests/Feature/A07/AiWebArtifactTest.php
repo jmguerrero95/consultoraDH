@@ -6,6 +6,7 @@ namespace Tests\Feature\A07;
 
 use App\Models\User;
 use App\Services\Ai\AiToolRegistry;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 
@@ -14,6 +15,8 @@ use Tests\TestCase;
  */
 final class AiWebArtifactTest extends TestCase
 {
+    use RefreshDatabase;
+
     protected function setUp(): void
     {
         parent::setUp();

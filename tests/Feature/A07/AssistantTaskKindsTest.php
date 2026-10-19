@@ -85,6 +85,17 @@ final class AssistantTaskKindsTest extends TestCase
         $this->redisQueue()->clear(self::QUEUE);
     }
 
+    protected function tearDown(): void
+    {
+        // The suite owns this queue and only this queue. Clearing it on the way
+        // out keeps a job that a test deliberately left waiting (to assert its
+        // depth) from surviving into the next case or the next run. `clear()`
+        // removes the ready, delayed, reserved and notify keys in one call.
+        $this->redisQueue()->clear(self::QUEUE);
+
+        parent::tearDown();
+    }
+
     private function redisQueue(): RedisQueue
     {
         $queue = app('queue')->connection('redis');

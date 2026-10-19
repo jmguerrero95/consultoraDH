@@ -86,6 +86,16 @@ final class TaskRetryAndIsolationTest extends TestCase
         $this->redisQueue()->clear(self::QUEUE);
     }
 
+    protected function tearDown(): void
+    {
+        // Some cases upload without draining the queue, because their subject
+        // is the dedupe key rather than the work. Clear the suite's own queue so
+        // that job cannot be picked up by a later case.
+        $this->redisQueue()->clear(self::QUEUE);
+
+        parent::tearDown();
+    }
+
     private function redisQueue(): RedisQueue
     {
         $queue = app('queue')->connection('redis');

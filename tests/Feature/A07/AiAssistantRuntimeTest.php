@@ -15,6 +15,7 @@ use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiTurnFailed;
 use App\Services\Ai\ModelPool;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -32,6 +33,8 @@ use Tests\TestCase;
  */
 final class AiAssistantRuntimeTest extends TestCase
 {
+    use RefreshDatabase;
+
     private const PROVIDER_URL = 'https://provider.test/v1/chat/completions';
 
     private User $user;

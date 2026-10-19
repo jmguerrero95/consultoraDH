@@ -28,6 +28,7 @@ use App\Services\Ai\Net\DnsResolver;
 use App\Services\Ai\Tools\SystemStatsTool;
 use App\Services\Ai\Tools\WebFetchTool;
 use App\Services\Ai\Tools\WebSearchTool;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
@@ -58,6 +59,8 @@ use Tests\TestCase;
  */
 final class AgentCoreTest extends TestCase
 {
+    use RefreshDatabase;
+
     private const PROVIDER_URL = 'https://provider.test/v1/chat/completions';
 
     /** A provider whose free tier may train on the content: public turns only. */

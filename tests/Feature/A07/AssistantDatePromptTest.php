@@ -6,6 +6,7 @@ namespace Tests\Feature\A07;
 
 use App\Domain\Ai\AiMessage;
 use App\Services\Ai\AiAssistantService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 use Tests\TestCase;
 
@@ -19,6 +20,8 @@ use Tests\TestCase;
  */
 final class AssistantDatePromptTest extends TestCase
 {
+    use RefreshDatabase;
+
     private function systemPrompt(): string
     {
         $service = app(AiAssistantService::class);

@@ -99,6 +99,17 @@ final class DocumentPipelineTest extends TestCase
         $this->redisQueue()->clear(self::QUEUE);
     }
 
+    protected function tearDown(): void
+    {
+        // A test that asserts the queue's depth on purpose leaves that job
+        // waiting. Clearing the suite's own queue afterwards means the next case
+        // - and the next run - starts from a known depth instead of inheriting
+        // somebody else's work.
+        $this->redisQueue()->clear(self::QUEUE);
+
+        parent::tearDown();
+    }
+
     private function redisQueue(): RedisQueue
     {
         $queue = app('queue')->connection('redis');
