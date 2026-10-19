@@ -87,6 +87,10 @@ class AiProviderResolver
      *                             one question shares it, so the diagnostics read as a
      *                             turn rather than as unrelated events
      * @param  int|null  $round  which provider round of the turn this call is
+     * @param  string|null  $avoidModel  a model to put last for this one call. Used
+     *                                   by a bounded recovery to move past the model
+     *                                   that just declined a capability the turn
+     *                                   offered, without penalising it anywhere else
      *
      * @throws AiProviderException when no candidate can answer, or when the privacy
      *                             classification is missing (an application fault)
@@ -101,6 +105,7 @@ class AiProviderResolver
         ?AiTurnBudget $budget = null,
         ?string $turn = null,
         ?int $round = null,
+        ?string $avoidModel = null,
     ): AiResponse {
         // The classification is mandatory. A07-R4-R1 fixed today's callers, but
         // the contract still defaulted the argument to "public", so the next
@@ -136,7 +141,7 @@ class AiProviderResolver
         // round of one question shares it; a caller that omits it gets its own.
         $turn ??= substr(bin2hex(random_bytes(6)), 0, 12);
 
-        $candidates = $this->ordered($this->pool->supporting($required), $preferred);
+        $candidates = $this->ordered($this->pool->supporting($required), $preferred, $tools !== [], $avoidModel);
 
         // A model that refused tool calling keeps its place for conversation but
         // is not offered a tool payload again, so the same 400 is not repeated
@@ -284,6 +289,16 @@ class AiProviderResolver
 
             $latency = $this->latenciesFrom($startedAt);
             $this->health->recordSuccess($candidate, $latency);
+
+            // A structured tool call is positive evidence the model can use the
+            // catalogue, so a later tool-bearing turn prefers it. A model that
+            // answered with prose — including one that declined — is not marked:
+            // the point is to promote what has been seen working, never to punish
+            // a single ambiguous turn.
+            if ($tools !== [] && $response->toolCalls !== []) {
+                $this->health->markToolsDemonstrated($candidate);
+            }
+
             $this->recordDiagnostic($turn, $task, $candidate, null, $latency, 'ok', $this->candidateContext($required, $candidates, $round));
             $this->rememberLastResult($candidate);
 
@@ -514,25 +529,43 @@ class AiProviderResolver
      * re-read inside the comparator: a comparator runs O(n log n) times and each
      * read is a cache round trip.
      *
+     * Two optional refinements serve a *tool-bearing* turn:
+     *
+     *   - `$preferToolProven` puts candidates that have actually emitted a
+     *     structured tool call ahead of those that have only been seen talking,
+     *     so the pool is not spent discovering again that a chatty model will not
+     *     use its tools.
+     *   - `$avoidModel` moves one named model to the end for this single call. A
+     *     bounded recovery uses it to move past the model that just declined a
+     *     capability, without any lasting penalty: the next ordinary call orders
+     *     it exactly as before.
+     *
      * @param  list<ModelCandidate>  $candidates
      * @return list<ModelCandidate>
      */
-    private function ordered(array $candidates, ?CloudAiProvider $preferred = null): array
-    {
+    private function ordered(
+        array $candidates,
+        ?CloudAiProvider $preferred = null,
+        bool $preferToolProven = false,
+        ?string $avoidModel = null,
+    ): array {
         $wanted = $preferred?->model();
         $decorated = [];
 
         foreach ($candidates as $candidate) {
-            $key = $this->orderKey($candidate);
-
-            if (is_string($wanted) && $wanted !== '' && $candidate->model === $wanted) {
-                $key = [-1, 0, 0];
-            }
-
-            $decorated[] = ['key' => $key, 'candidate' => $candidate];
+            $decorated[] = [
+                'preferred' => (is_string($wanted) && $wanted !== '' && $candidate->model === $wanted) ? 0 : 1,
+                'avoid' => ($avoidModel !== null && $avoidModel !== '' && $candidate->model === $avoidModel) ? 1 : 0,
+                'tools' => $preferToolProven && ! $this->health->toolsDemonstrated($candidate) ? 1 : 0,
+                'key' => $this->orderKey($candidate),
+                'candidate' => $candidate,
+            ];
         }
 
-        usort($decorated, static fn (array $a, array $b): int => $a['key'] <=> $b['key']);
+        usort($decorated, static function (array $a, array $b): int {
+            return [$a['preferred'], $a['avoid'], $a['tools'], $a['key']]
+                <=> [$b['preferred'], $b['avoid'], $b['tools'], $b['key']];
+        });
 
         return array_map(static fn (array $row): ModelCandidate => $row['candidate'], $decorated);
     }

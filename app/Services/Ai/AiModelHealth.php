@@ -41,6 +41,14 @@ class AiModelHealth
     private const RECORD_TTL = 86400;
 
     /**
+     * How long a model keeps the credit for having used a tool.
+     *
+     * Long enough to order a session's tool turns, short enough that yesterday's
+     * evidence does not outrank a model that is answering tools today.
+     */
+    private const TOOLS_DEMONSTRATED_TTL = 3600;
+
+    /**
      * @return array{fails: int, last_kind: ?string, last_scope: ?string, last_at: ?int, cooldown_until: int, last_ok_at: ?int, last_latency_ms: ?int, last_status: ?int}
      */
     public function snapshot(ModelCandidate $candidate): array
@@ -211,6 +219,7 @@ class AiModelHealth
         Cache::forget($this->rateLimitedKey($candidate));
         Cache::forget($this->credentialFailsKey($candidate));
         Cache::forget($this->toolsUnsupportedKey($candidate));
+        Cache::forget($this->toolsDemonstratedKey($candidate));
     }
 
     /**
@@ -237,6 +246,29 @@ class AiModelHealth
     public function markEndpointRateLimited(ModelCandidate $candidate, int $seconds): void
     {
         Cache::put($this->rateLimitedKey($candidate), now()->timestamp + max(1, $seconds), max(1, $seconds));
+    }
+
+    /**
+     * Remember that this model actually emitted a structured tool call.
+     *
+     * Distinct from a cooldown and from the negative `toolsUnsupported` flag:
+     * this is *positive* evidence that the model can use the tool catalogue when
+     * the turn needs one, so a tool-bearing turn knows which candidates are worth
+     * trying first. It is deliberately a plain, expiring observation — not a
+     * ranking the model cannot lose — so a model that miscarries once on one
+     * turn is not marked for it.
+     */
+    public function markToolsDemonstrated(ModelCandidate $candidate): void
+    {
+        Cache::put($this->toolsDemonstratedKey($candidate), now()->timestamp, self::TOOLS_DEMONSTRATED_TTL);
+    }
+
+    /**
+     * Whether this model has been seen using tools rather than only talking.
+     */
+    public function toolsDemonstrated(ModelCandidate $candidate): bool
+    {
+        return Cache::get($this->toolsDemonstratedKey($candidate)) !== null;
     }
 
     /**
@@ -373,5 +405,10 @@ class AiModelHealth
     private function toolsUnsupportedKey(ModelCandidate $candidate): string
     {
         return 'ai.model.no_tools.'.substr(sha1($candidate->key()), 0, 24);
+    }
+
+    private function toolsDemonstratedKey(ModelCandidate $candidate): string
+    {
+        return 'ai.model.tools_ok.'.substr(sha1($candidate->key()), 0, 24);
     }
 }

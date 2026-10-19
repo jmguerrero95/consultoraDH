@@ -6,6 +6,7 @@ namespace App\Services\Ai;
 
 use App\Domain\Ai\AiMessage;
 use App\Domain\Ai\AiResponse;
+use App\Domain\Ai\AiToolCall;
 use App\Domain\Ai\AiToolDefinition;
 use App\Domain\Assistant\Research\ResearchQuality;
 use App\Domain\Documents\DocumentRetriever;
@@ -934,6 +935,24 @@ final class AiAssistantService
         // already been tried. It happens at most once per turn.
         $recoveredFromRefusal = false;
 
+        // Whether the one bounded correction for a tool call the model printed as
+        // text has already been tried. Also once per turn.
+        $recoveredFromMalformed = false;
+
+        // Whether the question asked for a file the assistant can generate. It
+        // is what lets a *generic* refusal ("no puedo cumplir con esa solicitud")
+        // be recognised as declining a capability rather than answering, without
+        // pushing a request for a verbal summary into making a file.
+        $deliverableRequested = RefusalClassifier::requestsFileDeliverable($question);
+
+        // Whether this turn both offered and *authorised* the tool a recovery
+        // would use. The tool is in the offered set for every non-conversational
+        // turn, so being offered is not enough: the person must actually hold
+        // `artifacts.create`, or the recovery would ask the model to call a tool
+        // the registry will refuse — the "no authorised tool" case, which is not
+        // a recoverable refusal at all.
+        $artifactCapabilityOffered = isset($offered['create_artifact']) && $user->can('artifacts.create');
+
         // Public sources this turn actually retrieved, from the server's prefetch
         // and from any web_search/web_fetch the model ran. They are what the
         // research check is judged against — never the model's claim about them.
@@ -956,20 +975,91 @@ final class AiAssistantService
             $content = $currentResult->content;
             $toolCalls = $currentResult->toolCalls;
 
+            // A model that printed its tool call as text instead of returning it
+            // as a structured call is recognised here, never shown raw. A
+            // complete, unambiguous envelope becomes a structured call so the
+            // *existing* registry path validates and runs it — the tool must be
+            // one this turn offered, its arguments go through the tool's own
+            // validator, and RBAC, SSRF, deduplication and the budget all apply
+            // exactly as they do to a provider-returned call. An incomplete or
+            // ambiguous envelope is an invalid model result, not an answer.
+            $invalidToolCall = false;
+
+            if ($toolCalls === []) {
+                $leak = AiToolCallLeak::extract($content, array_keys($offered));
+
+                if ($leak['status'] === AiToolCallLeak::COMPLETE) {
+                    $toolCalls = $this->withWireIds($leak['calls']);
+                    $content = $leak['prose'];
+                } elseif ($leak['status'] === AiToolCallLeak::MALFORMED) {
+                    $invalidToolCall = true;
+                    $content = $leak['prose'];
+                }
+            }
+
             // A response with no tool call is the answer. It is consumed *before*
             // any round or budget check, because it is already in hand and reading
             // it costs nothing: the A07-R5-R1 defect was that the response produced
             // after the last permitted batch was discarded unexamined, so five
             // correct provider answers ended in an error.
             if (empty($toolCalls)) {
+                // A leaked call that could not be normalised is not an answer.
+                // One bounded correction asks the model to call the tool through
+                // the structured mechanism, or to answer from what it already
+                // has; the text itself is never delivered.
+                if ($invalidToolCall) {
+                    if (! $recoveredFromMalformed
+                        && $round < $maxRounds
+                        && ! $budget->outOfTime()
+                    ) {
+                        $recoveredFromMalformed = true;
+                        $round++;
+
+                        if (trim($content) !== '') {
+                            $messages[] = AiMessage::assistant($content);
+                        }
+
+                        $messages[] = AiMessage::user(AiToolCallLeak::correctionDirective());
+
+                        try {
+                            $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                        } catch (AiProviderException $e) {
+                            $this->recordTurnSummary(
+                                $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                                $turnRequiresClientData, $privacyReason, $requiresClientData,
+                                false, false, 'provider_error', 'failed',
+                            );
+
+                            throw $e;
+                        }
+
+                        continue;
+                    }
+
+                    // No room to correct: answer from what the turn already
+                    // holds if it can, and otherwise fail explicitly. The
+                    // malformed envelope is never returned as the answer.
+                    $pending = true;
+                    $endedBy = 'invalid_tool_call';
+
+                    break;
+                }
+
                 // A refusal to do what a tool can do is not an answer. The model
-                // said "no puedo crear archivos" while holding an authorised
+                // said "no puedo crear archivos" — or a generic "no puedo
+                // cumplir con esa solicitud" — while holding an authorised
                 // `create_artifact`; one bounded correction asks it again with the
-                // tool explicitly in hand. If it refuses again, that text is
-                // delivered, and nothing loops.
+                // tool explicitly in hand. A refusal that *states* a content
+                // policy is delivered rather than recovered, and a second refusal
+                // is delivered too, so nothing loops.
+                $refusal = RefusalClassifier::classify(
+                    $content,
+                    $artifactCapabilityOffered,
+                    $deliverableRequested,
+                );
+
                 if (! $recoveredFromRefusal
-                    && isset($offered['create_artifact'])
-                    && $this->looksLikeCapabilityRefusal($content)
+                    && ($refusal === RefusalClassifier::CAPABILITY || $refusal === RefusalClassifier::UNPRODUCTIVE)
                     && $round < $maxRounds
                     && ! $budget->outOfTime()
                 ) {
@@ -984,7 +1074,12 @@ final class AiAssistantService
                     );
 
                     try {
-                        $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                        // The model that just declined is put last for this one
+                        // recovery, so a tool-proven model is preferred when the
+                        // pool has one. It is not a penalty: the demotion lasts
+                        // only this call, and the model keeps its place in the
+                        // conversation for everything else.
+                        $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1, $currentResult->model);
                     } catch (AiProviderException $e) {
                         $this->recordTurnSummary(
                             $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
@@ -1911,7 +2006,45 @@ final class AiAssistantService
     }
 
     /**
+     * Give a normalized leaked tool call an id the wire can carry.
+     *
+     * A call the model printed as text has no provider-assigned id, and an empty
+     * `tool_call_id` on the following round is a 400 on several endpoints. The id
+     * is synthetic and local to this turn; it exists only so the assistant
+     * message and its tool result can be paired on the wire.
+     *
+     * @param  list<AiToolCall>  $calls
+     * @return list<AiToolCall>
+     */
+    private function withWireIds(array $calls): array
+    {
+        $out = [];
+
+        foreach ($calls as $index => $call) {
+            $out[] = $call->id !== null && $call->id !== ''
+                ? $call
+                : new AiToolCall($call->name, $call->arguments, 'leak_'.($index + 1));
+        }
+
+        return $out;
+    }
+
+    /**
      * Remove a trailing function-call envelope a model leaked into its text.
+     *
+     * Two shapes are known: the JSON object the providers use on the wire (a
+     * `name` with `parameters` or `arguments`) and the XML envelope some models
+     * print instead, `<tool_call><function=…><parameter=…>…</parameter></function>
+     * </tool_call>`. Both are removed from the visible answer; ordinary prose —
+     * including a sentence that merely mentions `<tool_call>` — is untouched.
+     */
+    public static function stripToolCallLeak(string $reply): string
+    {
+        return AiToolCallLeak::strip(self::stripJsonToolCallLeak($reply));
+    }
+
+    /**
+     * Remove a trailing *JSON* function-call envelope a model leaked into text.
      *
      * The envelope shape is exactly the one the providers use on the wire: an
      * object with a `name` and either `parameters` or `arguments`. Only a
@@ -1919,7 +2052,7 @@ final class AiAssistantService
      * actually decodes to that shape, so ordinary prose that ends in a brace or
      * a legitimately generated JSON document the person asked for is untouched.
      */
-    public static function stripToolCallLeak(string $reply): string
+    private static function stripJsonToolCallLeak(string $reply): string
     {
         $text = rtrim($reply);
 
@@ -1970,28 +2103,6 @@ final class AiAssistantService
         }
 
         return rtrim(substr($text, 0, $start));
-    }
-
-    /**
-     * Does this reply decline work that an offered tool can actually do?
-     *
-     * The reported defect was a turn that answered "no puedo crear archivos" while
-     * `create_artifact` was authorised and offered. The prompt already forbids the
-     * reflexive refusal, so this is the check that lets the turn notice the
-     * contradiction and correct it once. It is deliberately about *capability*
-     * refusals concerning a deliverable, not about any "no": a refusal to invent
-     * data, or one with no file in it, is a correct answer and is left alone.
-     */
-    private function looksLikeCapabilityRefusal(string $reply): bool
-    {
-        $text = mb_strtolower(strip_tags($reply));
-
-        if (! preg_match('/no puedo|no tengo|no me es posible|no soy capaz|no estoy (en capacidad|capacitado)|carezco de/u', $text)) {
-            return false;
-        }
-
-        return (bool) preg_match('/(crear|generar|producir|exportar|elaborar|redactar|convertir)[^.]{0,60}(archivo|documento|pdf|excel|word|xlsx|docx|csv|informe|hoja)/u', $text)
-            || (bool) preg_match('/(archivos|documentos|pdfs?|excels?|docx|xlsx)[^.]{0,60}(no puedo|no tengo|no me es posible|no soy capaz)/u', $text);
     }
 
     /**
@@ -2070,6 +2181,15 @@ final class AiAssistantService
             '- Elige tú las herramientas y encadénalas. No preguntes al usuario qué herramienta usar; decide y ejecuta.',
             '- Las herramientas que modifican datos devuelven una propuesta: en ese caso explica que hace falta',
             '  confirmación. Leer, investigar y generar un archivo propio no requieren confirmación.',
+            '',
+            'RESPONSABLE DE UNA TAREA:',
+            '- Una tarea operativa (create_operational_task) exige un responsable. Si la petición no nombra a',
+            '  ninguno, ese dato no se deduce del contexto: pregunta a quién asignarla. No elijas tú un',
+            '  responsable, no la asignes a la persona que está pidiendo la tarea y no la dejes sin responsable.',
+            '- Cuando la persona nombre al responsable, resuélvelo con team_directory por nombre y propón la tarea',
+            '  con el id que devuelva esa lista.',
+            '- Esa pregunta es la única que se hace por un dato que solo la persona tiene; no convierte la regla',
+            '  ACTÚA, NO ANUNCIES en una petición de permiso.',
             '',
             'INFORMACIÓN INTERNA DE CONSULTORA DH:',
             '- Para clientes, empresas, cartera, pagos, planillas, tareas, soporte, documentos o cifras del',
