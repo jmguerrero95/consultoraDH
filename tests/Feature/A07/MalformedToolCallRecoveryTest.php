@@ -22,11 +22,12 @@ use Tests\TestCase;
  * </tool_call>`. It was delivered verbatim because a response with no structured
  * call is read as the answer, and the sanitiser did not know that shape.
  *
- * These drive the real service over a faked provider and pin the replacement:
- * a complete, unambiguous envelope is executed through the *existing* registry
- * path and never shown; an incomplete one, one naming a tool the turn did not
- * offer, one with a non-parameter body, or one aimed at an unsafe URL is refused,
- * never displayed, and answered from what the turn holds — or fails cleanly.
+ * These drive the real service over a faked provider and pin the replacement: an
+ * envelope that *is* the whole message is executed through the *existing*
+ * registry path and never shown; prose around one, a fenced example, an
+ * incomplete one, one naming a tool the turn did not offer, one with a
+ * non-parameter body, or one aimed at an unsafe URL is refused, never displayed,
+ * and answered from what the turn holds — or fails cleanly.
  */
 final class MalformedToolCallRecoveryTest extends TestCase
 {
@@ -280,6 +281,60 @@ final class MalformedToolCallRecoveryTest extends TestCase
 
         $this->assertSame($prose, $result['reply']);
         $this->assertCount(1, $this->providerRequests());
+    }
+
+    // A complete envelope fenced as an example is not an invocation: not executed,
+    // not shown, and answered by the bounded correction.
+    public function test_an_envelope_fenced_as_an_example_is_never_executed(): void
+    {
+        $example = "Así se escribe una llamada:\n```xml\n"
+            .$this->completeLeak('web_search', ['query' => 'plan comercial', 'max_results' => 5])
+            ."\n```";
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->textBody($example))
+                ->push($this->textBody('El plan del equipo comercial ordena objetivos y responsables.')),
+            self::SEARCH_URL => Http::response(self::SEARCH_BODY),
+        ]);
+
+        $result = app(AiAssistantService::class)->ask($this->conversation, self::QUESTION, $this->user);
+
+        // Nothing ran: an example is not a call.
+        $this->assertSame([], $this->searchQueries());
+
+        // The example is not the answer either, and the turn was corrected once.
+        $this->assertStringNotContainsString('<tool_call', $result['reply']);
+        $this->assertStringContainsString('ordena objetivos y responsables', $result['reply']);
+
+        $requests = $this->providerRequests();
+        $this->assertCount(2, $requests);
+        $this->assertStringContainsString(
+            'no llegó como una llamada de herramienta válida',
+            $this->promptOf($requests[1])
+        );
+    }
+
+    // The audit's exact finding: a complete envelope accompanied by prose used to
+    // be normalised and run. It is a quotation, so it is not.
+    public function test_an_envelope_preceded_by_prose_is_never_executed(): void
+    {
+        $leaked = "Voy a buscar referencias.\n\n"
+            .$this->completeLeak('web_search', ['query' => 'plan comercial', 'max_results' => 5]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->textBody($leaked))
+                ->push($this->textBody('El plan del equipo comercial ordena objetivos y responsables.')),
+            self::SEARCH_URL => Http::response(self::SEARCH_BODY),
+        ]);
+
+        $result = app(AiAssistantService::class)->ask($this->conversation, self::QUESTION, $this->user);
+
+        $this->assertSame([], $this->searchQueries(), 'Prose plus a call is not a call.');
+        $this->assertStringNotContainsString('<tool_call', $result['reply']);
+        $this->assertStringNotContainsString('Voy a buscar referencias', $result['reply']);
+        $this->assertCount(2, $this->providerRequests());
     }
 
     // Rounds exhausted: answer from the sources already in hand, without tools.

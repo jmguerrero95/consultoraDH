@@ -11,11 +11,13 @@ use Tests\TestCase;
  * A07-RUNTIME-RELIABILITY — the textual tool-call envelope, recognised safely.
  *
  * The T02 live run ended with the model's own `<tool_call>` envelope delivered as
- * the answer. These pin the recognition: a complete, unambiguous envelope becomes
- * a structured call so the existing registry path can validate and run it; an
- * incomplete one, one naming a tool the turn did not offer, or one with a
- * non-parameter body is reported as malformed and is never an answer; and
- * ordinary prose that merely mentions the tag is left untouched.
+ * the answer. These pin the recognition — and its strictness. The envelope must
+ * be **the whole message**: only then does it become a structured call for the
+ * existing registry path to validate and run. An envelope carried in prose, in a
+ * fenced block, in a quotation, mixed with other text inside the wrapper, or
+ * naming a tool the turn did not offer is reported as malformed: it is never
+ * executed and never an answer. Ordinary prose that merely mentions the tag is
+ * left untouched.
  */
 final class AiToolCallLeakTest extends TestCase
 {
@@ -95,14 +97,47 @@ final class AiToolCallLeakTest extends TestCase
         $this->assertSame('sodio litio', $leak['calls'][0]->arguments['query']);
     }
 
-    public function test_prose_around_a_complete_envelope_is_kept_as_the_answer_text(): void
+    public function test_prose_around_a_complete_envelope_is_malformed_and_never_executed(): void
     {
         $content = "Voy a buscar.\n\n".self::COMPLETE;
 
         $leak = AiToolCallLeak::extract($content, self::OFFERED);
 
-        $this->assertSame(AiToolCallLeak::COMPLETE, $leak['status']);
-        $this->assertSame('Voy a buscar.', $leak['prose']);
+        // Prose plus an invocation is text *about* a call, not a call: it is
+        // neither normalised nor shown, and the prose holds no envelope.
+        $this->assertSame(AiToolCallLeak::MALFORMED, $leak['status']);
+        $this->assertSame([], $leak['calls']);
+        $this->assertStringNotContainsString('<tool_call', $leak['prose']);
+    }
+
+    public function test_an_envelope_fenced_as_an_example_is_malformed_and_never_executed(): void
+    {
+        $content = "Así se escribe una llamada:\n```xml\n".self::COMPLETE."\n```";
+
+        $leak = AiToolCallLeak::extract($content, self::OFFERED);
+
+        $this->assertSame(AiToolCallLeak::MALFORMED, $leak['status']);
+        $this->assertSame([], $leak['calls']);
+    }
+
+    public function test_an_envelope_quoted_from_a_document_is_malformed_and_never_executed(): void
+    {
+        $content = 'La guía muestra `'.self::COMPLETE.'` como ejemplo de invocación.';
+
+        $leak = AiToolCallLeak::extract($content, self::OFFERED);
+
+        $this->assertSame(AiToolCallLeak::MALFORMED, $leak['status']);
+        $this->assertSame([], $leak['calls']);
+    }
+
+    public function test_text_inside_the_wrapper_beside_the_function_is_malformed(): void
+    {
+        $content = "<tool_call>\nBusco esto por ti.\n<function=web_search><parameter=query>sodio</parameter></function>\n</tool_call>";
+
+        $leak = AiToolCallLeak::extract($content, self::OFFERED);
+
+        $this->assertSame(AiToolCallLeak::MALFORMED, $leak['status']);
+        $this->assertSame([], $leak['calls']);
     }
 
     public function test_strip_removes_the_envelope_but_leaves_a_mention_and_prose(): void

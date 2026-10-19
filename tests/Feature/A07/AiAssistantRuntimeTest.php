@@ -17,6 +17,7 @@ use App\Services\Ai\ModelPool;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 
@@ -47,7 +48,12 @@ final class AiAssistantRuntimeTest extends TestCase
             Permission::firstOrCreate(['name' => $permission, 'guard_name' => 'web']);
         }
 
-        $this->assignee = User::factory()->create();
+        // This file runs against the test database without refreshing it, so
+        // earlier runs leave rows behind. The responsible party therefore needs a
+        // name no earlier run could have used: the assignee rule treats a
+        // duplicated full name as ambiguous, and asking would be the right answer
+        // for two real colleagues called the same thing.
+        $this->assignee = User::factory()->create(['name' => 'Laura Sintetica QA '.Str::random(8)]);
         $this->user = User::factory()->create();
         $this->user->givePermissionTo(['ai.use', 'tasks.create']);
 
@@ -70,6 +76,18 @@ final class AiAssistantRuntimeTest extends TestCase
         ]);
 
         return app(AiAssistantService::class)->ask($this->conversation, $question, $this->user);
+    }
+
+    /**
+     * A request that names the responsible party.
+     *
+     * A model may not choose who owns a task, and the person asking is never
+     * assumed to be the owner, so the valid-write cases have to name somebody —
+     * exactly as a person would.
+     */
+    private function taskQuestion(): string
+    {
+        return 'Crea una tarea para '.$this->assignee->name;
     }
 
     /**
@@ -151,7 +169,7 @@ final class AiAssistantRuntimeTest extends TestCase
     {
         $this->fakeToolCall('create_operational_task', $this->validTaskArguments());
 
-        $result = $this->ask('Crea una tarea');
+        $result = $this->ask($this->taskQuestion());
 
         $this->assertCount(1, $result['proposals'], 'A valid write call produces exactly one proposal.');
 
@@ -189,7 +207,7 @@ final class AiAssistantRuntimeTest extends TestCase
     {
         $this->fakeToolCall('create_operational_task', $this->validTaskArguments());
 
-        $this->ask('Crea una tarea');
+        $this->ask($this->taskQuestion());
 
         $this->assertSame(0, $this->myTasks()->count(), 'The model asking is not the work being done.');
     }
@@ -198,7 +216,7 @@ final class AiAssistantRuntimeTest extends TestCase
     {
         $this->fakeToolCall('create_operational_task', $this->validTaskArguments());
 
-        $this->ask('Crea una tarea');
+        $this->ask($this->taskQuestion());
 
         $proposal = $this->myProposals()->sole();
         $this->assertSame(0, $this->myTasks()->count());
@@ -220,7 +238,7 @@ final class AiAssistantRuntimeTest extends TestCase
     {
         $this->fakeToolCall('create_operational_task', $this->validTaskArguments());
 
-        $this->ask('Crea una tarea');
+        $this->ask($this->taskQuestion());
         $proposal = $this->myProposals()->sole();
 
         $this->user->revokePermissionTo('tasks.create');
@@ -263,7 +281,7 @@ final class AiAssistantRuntimeTest extends TestCase
                 ]),
         ]);
 
-        $this->ask('Crea una tarea');
+        $this->ask($this->taskQuestion());
 
         $sent = Http::recorded();
 

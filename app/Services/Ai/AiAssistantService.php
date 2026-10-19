@@ -91,6 +91,7 @@ final class AiAssistantService
         private readonly AiToolDeadline $deadline,
         private readonly AiOutboundContext $outbound,
         private readonly AiTurnContext $turnContext,
+        private readonly TaskAssigneeGuard $assigneeGuard,
     ) {}
 
     public function ask(AiConversation $conversation, string $question, User $user): array
@@ -976,13 +977,15 @@ final class AiAssistantService
             $toolCalls = $currentResult->toolCalls;
 
             // A model that printed its tool call as text instead of returning it
-            // as a structured call is recognised here, never shown raw. A
-            // complete, unambiguous envelope becomes a structured call so the
-            // *existing* registry path validates and runs it — the tool must be
-            // one this turn offered, its arguments go through the tool's own
-            // validator, and RBAC, SSRF, deduplication and the budget all apply
-            // exactly as they do to a provider-returned call. An incomplete or
-            // ambiguous envelope is an invalid model result, not an answer.
+            // as a structured call is recognised here, never shown raw. A textual
+            // envelope that *is* the whole message — and nothing else — becomes a
+            // structured call so the *existing* registry path validates and runs
+            // it: the tool must be one this turn offered, its arguments go through
+            // the tool's own validator, and RBAC, SSRF, deduplication and the
+            // budget all apply exactly as they do to a provider-returned call.
+            // Anything else that merely contains a call — prose around it, a
+            // fenced example, a quotation, an incomplete or mixed envelope — is an
+            // invalid model result, not an answer and not a call.
             $invalidToolCall = false;
 
             if ($toolCalls === []) {
@@ -1345,6 +1348,30 @@ final class AiAssistantService
                             continue;
                         }
 
+                        // The responsible party has to be justified by what the
+                        // person asked for, not chosen by the model. Validation and
+                        // permissions have already run; this is the invariant
+                        // *after* them, and it holds on the server so it does not
+                        // depend on the model obeying an instruction. A refusal
+                        // stores nothing and tells the model to ask.
+                        $assigneeViolation = $this->assigneeGuard->violation(
+                            $toolName, $normalized, $user, $conversation, $question,
+                        );
+
+                        if ($assigneeViolation !== null) {
+                            $toolResultsThisRound[] = [
+                                'tool' => $toolName,
+                                'output' => 'Error: '.$assigneeViolation['error'],
+                            ];
+                            $messages[] = AiMessage::toolResult($toolName, ['error' => $assigneeViolation['error']], $toolCallId);
+
+                            if ($assigneeViolation['directive'] !== null) {
+                                $messages[] = AiMessage::user($assigneeViolation['directive']);
+                            }
+
+                            continue;
+                        }
+
                         $proposal = AiActionProposal::query()->create([
                             'user_id' => $user->id,
                             'ai_conversation_id' => $conversation->id,
@@ -1355,6 +1382,12 @@ final class AiAssistantService
                             'status' => AiActionProposal::PENDING,
                             'expires_at' => now()->addMinutes(config('ai.proposal_ttl_minutes', 15)),
                         ]);
+
+                        // A second proposal for the same task is a correction.
+                        // The earlier one is closed here, so two pending rows for
+                        // one task can never both be confirmed and do the work
+                        // twice. A different task is never touched.
+                        $this->supersedeSameTaskProposals($proposal);
 
                         $createdProposalIds[] = $proposal->id;
 
@@ -2027,6 +2060,51 @@ final class AiAssistantService
         }
 
         return $out;
+    }
+
+    /**
+     * Close the pending proposals for the same task that this one replaces.
+     *
+     * Two proposals for one task, both confirmable, would let a person confirm
+     * the same work twice and create the task twice. The task is identified by
+     * its title — the only identity the write carries — and *only* proposals of
+     * the same tool in the same conversation are considered, so a proposal for a
+     * different task is never affected.
+     */
+    private function supersedeSameTaskProposals(AiActionProposal $proposal): void
+    {
+        if ($proposal->tool !== TaskAssigneeGuard::TOOL) {
+            return;
+        }
+
+        $arguments = $proposal->arguments;
+        $identity = is_array($arguments) ? TaskAssigneeGuard::identity($arguments) : null;
+
+        if ($identity === null) {
+            return;
+        }
+
+        $siblings = AiActionProposal::query()
+            ->where('ai_conversation_id', $proposal->ai_conversation_id)
+            ->where('tool', $proposal->tool)
+            ->where('status', AiActionProposal::PENDING)
+            ->where('id', '!=', $proposal->id)
+            ->get();
+
+        foreach ($siblings as $sibling) {
+            $siblingArguments = $sibling->arguments;
+
+            if (! is_array($siblingArguments) || TaskAssigneeGuard::identity($siblingArguments) !== $identity) {
+                continue;
+            }
+
+            // Superseded, not performed: the row is closed so the confirmation
+            // endpoint refuses it, and it stops being listed as an action.
+            $sibling->forceFill([
+                'status' => AiActionProposal::EXPIRED,
+                'expires_at' => now(),
+            ])->save();
+        }
     }
 
     /**

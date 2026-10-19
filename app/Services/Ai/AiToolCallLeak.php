@@ -30,22 +30,28 @@ use App\Domain\Ai\AiToolCall;
  *
  * ## What this does, and what it deliberately does not
  *
- * It recognises exactly this structural envelope — a `<tool_call>` wrapper
- * around a single `<function=NAME>` element whose body is nothing but
- * `<parameter=KEY>value</parameter>` children — and nothing looser. Ordinary
- * prose that merely mentions `<tool_call>` has no function element and is left
- * untouched, so a question about the syntax is never mistaken for a call.
+ * Recognition is deliberately strict: the envelope must be **the whole
+ * message**. A model that returns a tool call returns *only* that call, so the
+ * entire content — after surrounding whitespace — has to be one `<tool_call>`
+ * wrapper around a single `<function=NAME>` element whose body is nothing but
+ * `<parameter=KEY>value</parameter>` children, or a bare `<function=…>` element
+ * of that same shape. Nothing looser counts.
  *
- * A fully formed envelope is returned as a structured {@see AiToolCall} so the
+ * That strictness is the whole security property. A textual call that arrives
+ * wrapped in prose, inside a fenced block, quoted from a document, shown as an
+ * example, or mixed with other content is indistinguishable from text the model
+ * merely *wrote about* a call, and executing it would be executing a quotation.
+ * Those cases are reported as {@see self::MALFORMED}: never executed, never
+ * shown as an answer. Ordinary prose that merely mentions `<tool_call>` has no
+ * function element at all and is left untouched, so a question about the syntax
+ * is never mistaken for a call.
+ *
+ * A pure envelope is returned as a structured {@see AiToolCall} so the
  * *existing* registry path validates and runs it: the tool must be one the turn
  * actually offered, its arguments go through the tool's own validator, and SSRF,
  * RBAC, deduplication and the turn budget all apply exactly as they do to a call
- * the provider returned properly. Nothing here executes anything.
- *
- * An envelope that is incomplete, mixes other content into the function body,
- * or names a tool the turn did not offer cannot be normalised safely and is
- * reported as {@see self::MALFORMED}: the caller must not show it as an answer
- * and must not run it.
+ * the provider returned properly. Nothing here executes anything, and a
+ * structured call from the provider is always preferred.
  */
 final class AiToolCallLeak
 {
@@ -58,9 +64,26 @@ final class AiToolCallLeak
     /** An invocation was attempted but cannot be normalised safely. */
     public const MALFORMED = 'malformed';
 
-    private const BLOCK = '/<\s*tool_call\b[^>]*>(.*?)<\s*\/\s*tool_call\s*>/is';
+    /**
+     * The whole message is one `<tool_call>` wrapper. Anchored on purpose: a
+     * wrapper with anything outside it is not an invocation this turn may run.
+     */
+    private const PURE_WRAPPER = '/^<\s*tool_call\b[^>]*>(.*)<\s*\/\s*tool_call\s*>$/is';
 
-    private const OPENER = '/<\s*tool_call\b/i';
+    /**
+     * The whole message is one bare `<function=NAME>` element. Anchored for the
+     * same reason: a function element with text around it is prose about a call.
+     */
+    private const PURE_FUNCTION = '/^<\s*function\s*=\s*([^\s>\/]+)\s*>(.*)<\s*\/\s*function\s*>$/is';
+
+    /**
+     * Text that still carries an invocation somewhere. Combined with the pure
+     * checks above, a match here means the call is present but cannot be
+     * vouched for, so it is neither an answer nor a call.
+     */
+    private const INVOCATION = '/<\s*function\s*=/i';
+
+    private const BLOCK = '/<\s*tool_call\b[^>]*>(.*?)<\s*\/\s*tool_call\s*>/is';
 
     private const FUNCTION = '/<\s*function\s*=\s*([^\s>\/]+)\s*>(.*)<\s*\/\s*function\s*>/is';
 
@@ -79,64 +102,38 @@ final class AiToolCallLeak
     {
         $offered = array_fill_keys($offeredNames, true);
 
-        if (trim($content) === '') {
+        $trimmed = trim($content);
+
+        if ($trimmed === '') {
             return self::none($content);
         }
 
-        // Complete wrappers. A wrapper whose body has no function element is a
-        // mention, not a call, so it is kept as prose rather than treated as a
-        // candidate.
-        $candidates = [];
+        // The pure envelope: the whole message is one call and nothing else.
+        $body = null;
 
-        $prose = preg_replace_callback(self::BLOCK, static function (array $match) use (&$candidates): string {
-            if (preg_match('/<\s*function\s*=/i', $match[1]) !== 1) {
-                return $match[0];
-            }
-
-            $candidates[] = $match[1];
-
-            return '';
-        }, $content) ?? $content;
-
-        $prose = trim($prose);
-
-        if ($candidates === []) {
-            // An opener followed by a function but never closed: an attempted
-            // invocation that cannot be read unambiguously.
-            if (preg_match(self::FUNCTION_IN_A_WRAPPER, $prose) === 1) {
-                return self::malformed(self::strip($content));
-            }
-
-            // A bare envelope, with no wrapper at all.
-            if (self::looksLikeBareInvocation($content)) {
-                $call = self::parseFunction(trim($content), $offered);
-
-                return $call === null
-                    ? self::malformed(self::strip($content))
-                    : self::complete([$call], '');
-            }
-
-            return self::none($content);
+        if (preg_match(self::PURE_WRAPPER, $trimmed, $wrapper) === 1
+            && preg_match(self::PURE_FUNCTION, trim($wrapper[1])) === 1) {
+            $body = trim($wrapper[1]);
+        } elseif (preg_match(self::PURE_FUNCTION, $trimmed) === 1) {
+            $body = $trimmed;
         }
 
-        // A complete envelope plus a second, incomplete one is ambiguous.
-        if (preg_match(self::FUNCTION_IN_A_WRAPPER, $prose) === 1 || self::looksLikeBareInvocation($prose)) {
+        if ($body !== null) {
+            $call = self::parseFunction($body, $offered);
+
+            return $call === null
+                ? self::malformed(self::strip($content))
+                : self::complete([$call], '');
+        }
+
+        // An invocation signal anywhere else — prose around the envelope, a
+        // fenced block, a quotation, an incomplete or mixed envelope — is an
+        // invalid model result: never an answer, and never executed.
+        if (preg_match(self::INVOCATION, $content) === 1) {
             return self::malformed(self::strip($content));
         }
 
-        $calls = [];
-
-        foreach ($candidates as $body) {
-            $call = self::parseFunction($body, $offered);
-
-            if ($call === null) {
-                return self::malformed(self::strip($content));
-            }
-
-            $calls[] = $call;
-        }
-
-        return self::complete($calls, $prose);
+        return self::none($content);
     }
 
     /**
