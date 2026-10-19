@@ -554,4 +554,185 @@ final class TaskAssigneeGuardTest extends TestCase
         $this->assertSame([], $result['proposals'], 'Another conversation justifies nothing here.');
         $this->assertSame(0, $this->proposals()->count());
     }
+
+    // ---- edge case 1: "for me" is not an assignment --------------------------
+
+    public function test_preparing_a_task_for_oneself_is_not_an_assignment(): void
+    {
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Seguimiento de cartera',
+                    'assigned_to' => $this->requester->id,
+                    'priority' => 'normal',
+                ], 'c1'))
+                ->push($this->textBody('¿A quién asigno la tarea? Necesito el responsable.')),
+        ]);
+
+        $result = $this->ask('Prepara para mí una tarea de seguimiento de cartera.');
+
+        $this->assertSame([], $result['proposals'], '"Para mí" says who the work is for, not who owns it.');
+        $this->assertSame(0, $this->proposals()->count());
+        $this->assertSame(0, OperationalTask::query()->count());
+        $this->assertStringContainsString('A quién', $result['reply']);
+
+        // Asked to ask, as data — not left to the model's judgement.
+        $requests = $this->providerRequests();
+        $this->assertCount(2, $requests);
+        $this->assertStringContainsString('Falta el responsable', $this->promptOf($requests[1]));
+    }
+
+    public function test_mentioning_oneself_is_not_an_assignment(): void
+    {
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Seguimiento de cartera',
+                    'assigned_to' => $this->requester->id,
+                    'priority' => 'normal',
+                ], 'c1'))
+                ->push($this->textBody('¿Quién es el responsable de la tarea?')),
+        ]);
+
+        $result = $this->ask(
+            'Prepara una tarea de seguimiento de cartera y muéstramela a mí antes de registrarla.'
+        );
+
+        $this->assertSame([], $result['proposals'], 'Mentioning "a mí" assigns nothing.');
+        $this->assertSame(0, $this->proposals()->count());
+    }
+
+    public function test_ponme_como_responsable_is_an_assignment_instruction(): void
+    {
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Seguimiento de cartera',
+                    'assigned_to' => $this->requester->id,
+                    'priority' => 'normal',
+                ], 'c1'))
+                ->push($this->textBody('Preparé la propuesta.')),
+        ]);
+
+        $result = $this->ask("Crea una tarea titulada 'Seguimiento de cartera' y ponme como responsable.");
+
+        $this->assertCount(1, $result['proposals'], 'An explicit assignment instruction is valid.');
+        $this->assertSame((int) $this->requester->id, (int) $this->proposals()->sole()->arguments['assigned_to']);
+
+        // Valid, but still only a proposal.
+        $this->assertSame(0, OperationalTask::query()->count());
+    }
+
+    public function test_asignala_a_mi_is_an_assignment_instruction(): void
+    {
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Seguimiento de cartera',
+                    'assigned_to' => $this->requester->id,
+                    'priority' => 'normal',
+                ], 'c1'))
+                ->push($this->textBody('Preparé la propuesta.')),
+        ]);
+
+        $result = $this->ask("Crea una tarea titulada 'Seguimiento de cartera' y asígnala a mí.");
+
+        $this->assertCount(1, $result['proposals']);
+        $this->assertSame((int) $this->requester->id, (int) $this->proposals()->sole()->arguments['assigned_to']);
+    }
+
+    // ---- edge case 2: only a live proposal, and only for a correction ---------
+
+    public function test_an_expired_proposal_does_not_justify_a_new_proposal(): void
+    {
+        // Status still reads `pending`, but the window in which it could have
+        // been confirmed has closed, so it justifies nothing.
+        $stale = AiActionProposal::query()->create([
+            'user_id' => $this->requester->id,
+            'ai_conversation_id' => $this->conversation->id,
+            'tool' => 'create_operational_task',
+            'arguments' => ['title' => 'Revisión de cartera', 'assigned_to' => $this->laura->id],
+            'status' => AiActionProposal::PENDING,
+            'expires_at' => now()->subMinutes(5),
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Revisión de cartera',
+                    'assigned_to' => $this->laura->id,
+                    'priority' => 'normal',
+                ], 'c1'))
+                ->push($this->textBody('¿A quién asigno la tarea?')),
+        ]);
+
+        // A genuine correction of the *same* task, so identity and context both
+        // match: the only thing standing in the way is the expiry.
+        $result = $this->ask('Corrige la propuesta y ponla en prioridad normal.');
+
+        $this->assertSame([], $result['proposals'], 'An expired proposal justifies nothing.');
+        $this->assertSame(1, $this->proposals()->count(), 'No new proposal was stored.');
+        $this->assertSame(AiActionProposal::PENDING, $stale->fresh()->status, 'The stale row is left untouched.');
+        $this->assertSame(0, OperationalTask::query()->count());
+    }
+
+    public function test_a_repeated_title_without_a_correction_inherits_no_assignee(): void
+    {
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Revisión de cartera',
+                    'assigned_to' => $this->laura->id,
+                    'priority' => 'high',
+                ], 'c1'))
+                // Same title, same assignee, but this is another task and the
+                // request says nothing about correcting the one on the table.
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Revisión de cartera',
+                    'assigned_to' => $this->laura->id,
+                    'priority' => 'normal',
+                ], 'c2'))
+                ->push($this->textBody('¿A quién asigno esta tarea nueva?')),
+        ]);
+
+        $this->ask("Crea una tarea titulada 'Revisión de cartera' para Laura Sintetica QA con prioridad alta.");
+
+        $result = $this->ask("Crea otra tarea titulada 'Revisión de cartera'.");
+
+        $this->assertSame([], $result['proposals'], 'A repeated title inherits no responsible party.');
+        $this->assertSame(1, $this->proposals()->count());
+        $this->assertSame(AiActionProposal::PENDING, $this->proposals()->sole()->status);
+    }
+
+    public function test_an_expired_proposal_is_neither_inherited_nor_replaced(): void
+    {
+        // The only proposal on the table carries the title the correction names,
+        // but its window has closed and its status still reads `pending`. It is
+        // not a correction target: the new proposal is refused, and the stale row
+        // is neither superseded nor confirmed.
+        AiActionProposal::query()->create([
+            'user_id' => $this->requester->id,
+            'ai_conversation_id' => $this->conversation->id,
+            'tool' => 'create_operational_task',
+            'arguments' => ['title' => 'Revisión de cartera', 'assigned_to' => $this->laura->id],
+            'status' => AiActionProposal::PENDING,
+            'expires_at' => now()->subMinute(),
+        ]);
+
+        Http::fake([
+            self::PROVIDER_URL => Http::sequence()
+                ->push($this->toolCallBody('create_operational_task', [
+                    'title' => 'Revisión de cartera',
+                    'assigned_to' => $this->laura->id,
+                    'priority' => 'normal',
+                ], 'c1'))
+                ->push($this->textBody('¿A quién asigno la tarea?')),
+        ]);
+
+        $result = $this->ask('Actualiza la propuesta y ponla en prioridad normal.');
+
+        $this->assertSame([], $result['proposals']);
+        $this->assertSame(1, $this->proposals()->count());
+        $this->assertSame(AiActionProposal::PENDING, $this->proposals()->sole()->status);
+    }
 }
