@@ -152,8 +152,8 @@ si la celda está tipada explícitamente como `formula` y pasa el validador.
 
 | Prueba | Resultado |
 |---|---|
-| `php artisan test tests/Feature/A07 tests/Unit/A07` | **553 passed, 1950 assertions** (208,43 s) |
-| `XlsxWorkbookTest` | **12 passed, 95 assertions** |
+| `php artisan test tests/Feature/A07 tests/Unit/A07` | **554 passed, 1952 assertions** (216,33 s) |
+| `XlsxWorkbookTest` | **13 passed, 97 assertions** |
 | `FormulaValidatorTest` | **24 passed, 24 assertions** |
 | `vendor/bin/pint --test` sobre los 6 archivos modificados | **PASS** |
 | `git diff --check` | sin errores |
@@ -272,7 +272,7 @@ RECALCULATED_BALANCE=800000
 RECALCULATED_DISCOUNT=80000
 RECALCULATED_ADJUSTED=720000
 
-TARGETED_TESTS=553 passed, 1950 assertions (A07 completo)
+TARGETED_TESTS=554 passed, 1952 assertions (A07 completo)
 PINT=PASS
 EXTERNAL_LLM_CALLS=0
 OTHER_MODULES_MODIFIED=NO
@@ -285,6 +285,7 @@ CODE_RESULT=PASS
 PRODUCT_ACCEPTANCE=PENDING_USER
 ```
 
-`FINAL_CODE_SHA` identifica el commit funcional. El commit que añade este informe
-es posterior y constituye el tip documental de la rama; `main` permanece en
+`FINAL_CODE_SHA` identifica el commit funcional. Los commits posteriores añaden
+la prueba de rechazo de CSV mal formado y la actualización de este informe; el tip
+de la rama contiene todo lo anterior. `main` permanece en
 `d20195eb601392e802cb8908ebe466262368b32c` hasta la aceptación del propietario.
