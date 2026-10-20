@@ -8,16 +8,12 @@ use App\Domain\Ai\AiToolRejected;
 use App\Models\AiArtifact;
 use App\Models\User;
 use App\Services\Ai\AiTurnContext;
+use App\Services\Ai\Xlsx\XlsxWorkbookBuilder;
 use Dompdf\Dompdf;
 use Dompdf\Options;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
-use PhpOffice\PhpSpreadsheet\Spreadsheet;
-use PhpOffice\PhpSpreadsheet\Style\Alignment;
-use PhpOffice\PhpSpreadsheet\Style\Fill;
-use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use PhpOffice\PhpWord\Element\Section;
 use PhpOffice\PhpWord\IOFactory;
 use PhpOffice\PhpWord\PhpWord;
@@ -59,7 +55,15 @@ final class CreateArtifactTool extends AbstractAiTool
     {
         return 'Genera y guarda un archivo privado del usuario (PDF, DOCX, XLSX, CSV, MD, TXT) y devuelve su enlace de descarga. '
             .'Úsala siempre que pidan crear, exportar o convertir un documento o una hoja de cálculo. El contenido puede escribirse '
-            .'en Markdown simple para PDF/DOCX (títulos con #, listas con -, tablas con |) o como JSON de filas para XLSX/CSV.';
+            .'en Markdown simple para PDF/DOCX (títulos con #, listas con -, tablas con |) o como JSON para XLSX/CSV. '
+            .'XLSX admite el formato anterior [["Cliente","Saldo"],["Ana",1000]] (una hoja Datos) y el formato avanzado v2: '
+            .'{"version":2,"sheets":[{"name":"Cartera","rows":[["Cliente","Saldo"],["Ana",1000]],'
+            .'"column_formats":{"B":"currency_cop"},"cell_formats":{"B8":"percentage"},"freeze_pane":"A2"}]}. '
+            .'Cada celda puede ser un valor o {"type":"formula","expression":"=B2-C2"}. Usa fórmulas con =, comas y referencias '
+            .'como Cartera!B5 o SUM(B2:B4). Fórmulas permitidas: + - * / ^, comparaciones, SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, '
+            .'COUNTIF, SUMIF, IF, IFERROR, ROUND, ABS, AND, OR, NOT. Para varias hojas, fórmulas o referencias entre hojas usa '
+            .'este formato v2; para una tabla plana puedes usar analyze_table. No envíes fórmulas como texto: '
+            .'márcalas con {"type":"formula","expression":"=..."}.';
     }
 
     public function parameters(): array
@@ -79,7 +83,10 @@ final class CreateArtifactTool extends AbstractAiTool
                 'content' => [
                     'type' => 'string',
                     'description' => 'Contenido del archivo. Para PDF/DOCX/MD/TXT es texto (se admite Markdown simple). '
-                        .'Para XLSX/CSV es un arreglo JSON de filas, la primera con los encabezados.',
+                        .'Para CSV es un arreglo JSON de filas, la primera con los encabezados. Para XLSX es ese mismo '
+                        .'arreglo (hoja Datos) o un objeto v2 con «version»:2, «sheets», «column_formats», «cell_formats» '
+                        .'y «freeze_pane». En v2 una celda con fórmula se escribe '
+                        .'{"type":"formula","expression":"=SUM(B2:B4)"}; el resto de celdas son valores normales.',
                 ],
                 'title' => [
                     'type' => 'string',
@@ -609,74 +616,12 @@ final class CreateArtifactTool extends AbstractAiTool
 
     private function generateXlsx(string $content): string
     {
-        $data = json_decode($content, true);
-
-        if (! is_array($data)) {
-            // A model occasionally sends the rows as a Markdown table or CSV.
-            // Rather than failing the file, read what it sent.
-            $data = $this->rowsFromText($content);
-        }
-
-        if ($data === []) {
-            throw new AiToolRejected('El contenido para XLSX debe ser un arreglo JSON de filas.');
-        }
-
-        $spreadsheet = new Spreadsheet;
-        $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle('Datos');
-
-        $rows = [];
-
-        foreach ($data as $row) {
-            $rows[] = is_array($row)
-                ? array_map(fn ($cell): string|int|float => $this->safeCell($cell), array_values($row))
-                : [$this->safeCell($row)];
-        }
-
-        $sheet->fromArray($rows, null, 'A1', true);
-
-        $columns = max(array_map('count', $rows));
-
-        if ($columns > 0) {
-            $lastColumn = Coordinate::stringFromColumnIndex($columns);
-
-            // Header styling on the first row.
-            $sheet->getStyle('A1:'.$lastColumn.'1')->getFont()->setBold(true);
-            $sheet->getStyle('A1:'.$lastColumn.'1')->getFill()
-                ->setFillType(Fill::FILL_SOLID)
-                ->getStartColor()->setRGB('EEF2F7');
-            $sheet->getStyle('A1:'.$lastColumn.'1')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-            $sheet->freezePane('A2');
-
-            // Readable widths, bounded so a long column cannot make a 3000px sheet.
-            for ($index = 1; $index <= $columns; $index++) {
-                $letter = Coordinate::stringFromColumnIndex($index);
-                $sheet->getColumnDimension($letter)->setAutoSize(true);
-            }
-
-            $sheet->getStyle('A1:'.$lastColumn.(string) count($rows))->getFont()->setSize(11);
-        }
-
-        $writer = new Xlsx($spreadsheet);
-        $tempFile = tempnam(sys_get_temp_dir(), 'xlsx_');
-        $writer->save($tempFile);
-        $fileContent = (string) file_get_contents($tempFile);
-        unlink($tempFile);
-
-        return $fileContent;
+        return app(XlsxWorkbookBuilder::class)->build($content);
     }
 
     private function generateCsv(string $content): string
     {
-        $data = json_decode($content, true);
-
-        if (! is_array($data)) {
-            $data = $this->rowsFromText($content);
-        }
-
-        if ($data === []) {
-            throw new AiToolRejected('El contenido para CSV debe ser un arreglo JSON de filas.');
-        }
+        $data = app(XlsxWorkbookBuilder::class)->legacyRows($content, 'CSV');
 
         $output = fopen('php://memory', 'w');
         fwrite($output, "\xEF\xBB\xBF"); // UTF-8 BOM so Excel reads accents.
@@ -691,36 +636,6 @@ final class CreateArtifactTool extends AbstractAiTool
         fclose($output);
 
         return $csvContent;
-    }
-
-    /**
-     * Read rows out of a Markdown table or a plain CSV body.
-     *
-     * @return list<array<int, mixed>>
-     */
-    private function rowsFromText(string $content): array
-    {
-        $rows = [];
-
-        foreach (preg_split('/\r\n|\r|\n/', $content) ?: [] as $line) {
-            $trimmed = trim($line);
-
-            if ($trimmed === '' || preg_match('/^\|?[\s:\-|]+\|?$/', $trimmed)) {
-                continue;
-            }
-
-            if (str_contains($trimmed, '|')) {
-                $cells = array_map('trim', explode('|', trim($trimmed, " \t|")));
-            } else {
-                $cells = str_getcsv($trimmed);
-            }
-
-            if ($cells !== []) {
-                $rows[] = $cells;
-            }
-        }
-
-        return $rows;
     }
 
     /**
