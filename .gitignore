@@ -48,10 +48,15 @@
 # every test and out of the review archive.
 /.local-fixtures/
 
-# --- Local archives ----------------------------------------------------------
+# --- Local archives and backups ---------------------------------------------
 # A full project snapshot (including node_modules and build output) must never
 # enter the repository.
 *.zip
+
+# Database/storage dumps are operational data, not source.
+/backups/
+/backups-offsite/
+/docker/secrets/
 
 # --- Test and analysis artefacts -------------------------------------------
 # Screenshots taken while inspecting the interface are local evidence, not

@@ -1,118 +1,195 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # ===========================================================================
-# Restore Proof — Verificación de backup en entorno disposable
+# Restore Proof - verify a backup in a disposable database
 # ===========================================================================
-# Uso: ./scripts/restore_proof.sh /backups/consultora_dh_20261011_020000
+# Usage (inside the backup sidecar, which has PostgreSQL 18 client tools):
+#   docker compose --profile ops run --rm backup /scripts/restore_proof.sh \
+#     /backups/consultora_dh_20261011_020000
+#
+# It never restores over PGDATABASE. It creates consultora_dh_restore_<utc>,
+# restores there, compares table counts with COUNTS.tsv, verifies storage file
+# count and drops the disposable database/directory on exit.
+#
+# PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE and the encryption variables
+# are the same as scripts/backup.sh. PGUSER must have CREATEDB.
 # ===========================================================================
+set -Eeuo pipefail
 
 BACKUP_PATH="${1:-}"
 if [[ -z "${BACKUP_PATH}" || ! -d "${BACKUP_PATH}" ]]; then
-  echo "Uso: $0 <backup_directory>"
+  echo "Uso: $0 <backup_directory>" >&2
   exit 1
 fi
+
+PG_HOST="${PGHOST:-${PG_HOST:-postgres}}"
+PG_PORT="${PGPORT:-${PG_PORT:-5432}}"
+PG_USER="${PGUSER:-${PG_USER:-consultora_dh_backup}}"
+PG_DB="${PGDATABASE:-${PG_DB:-consultora_dh}}"
+BACKUP_ENCRYPTION_PASSPHRASE="${BACKUP_ENCRYPTION_PASSPHRASE:-}"
+BACKUP_ENCRYPTION_KEY_FILE="${BACKUP_ENCRYPTION_KEY_FILE:-}"
+RESTORE_REQUIRED_DIRS="${RESTORE_REQUIRED_DIRS:-ai-artifacts clients imports}"
 
 TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
 DISPOSABLE_DB="consultora_dh_restore_${TIMESTAMP}"
 DISPOSABLE_DIR="/tmp/restore_${TIMESTAMP}"
 
-# Trap para limpieza garantizada incluso en caso de error
+if [[ "${DISPOSABLE_DB}" == "${PG_DB}" ]]; then
+  echo "[ERROR] El nombre disposable coincide con la base operativa; abortando." >&2
+  exit 1
+fi
+
 cleanup() {
   echo "[${TIMESTAMP}] Limpiando recursos disposable..."
-  dropdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}" 2>/dev/null || true
+  dropdb \
+    --host="${PG_HOST}" \
+    --port="${PG_PORT}" \
+    --username="${PG_USER}" \
+    --maintenance-db=postgres \
+    --if-exists \
+    "${DISPOSABLE_DB}" 2>/dev/null || true
   rm -rf "${DISPOSABLE_DIR}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-echo "[${TIMESTAMP}] Iniciando restore proof desde: ${BACKUP_PATH}"
-
-# 1. Verificar manifest
-echo "[${TIMESTAMP}] Verificando checksums..."
-cd "${BACKUP_PATH}"
-sha256sum -c MANIFEST.sha256 || {
-  echo "[ERROR] Checksums no coinciden" >&2
-  exit 1
+psql_db() {
+  local database="$1"
+  shift
+  psql \
+    --host="${PG_HOST}" \
+    --port="${PG_PORT}" \
+    --username="${PG_USER}" \
+    --dbname="${database}" \
+    --no-psqlrc \
+    --set=ON_ERROR_STOP=1 \
+    "$@"
 }
 
-# 2. Crear BD disposable
-echo "[${TIMESTAMP}] Creando BD disposable: ${DISPOSABLE_DB}"
-createdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}"
+echo "[${TIMESTAMP}] Iniciando restore proof desde: ${BACKUP_PATH}"
 
-# 3. Restaurar PostgreSQL
+# 1. Verify checksums before decrypting anything.
+echo "[${TIMESTAMP}] Verificando checksums..."
+(
+  cd "${BACKUP_PATH}"
+  sha256sum -c MANIFEST.sha256
+)
+
+mkdir -p "${DISPOSABLE_DIR}"
+
+# 2. Decrypt payload when the backup was encrypted.
+DUMP_PATH="${BACKUP_PATH}/postgres.dump"
+STORAGE_PATH="${BACKUP_PATH}/private_storage.tar.gz"
+COUNTS_PATH="${BACKUP_PATH}/COUNTS.tsv"
+
+if [[ -f "${DUMP_PATH}.gpg" || -f "${STORAGE_PATH}.gpg" ]]; then
+  if [[ -z "${BACKUP_ENCRYPTION_PASSPHRASE}" && ( -z "${BACKUP_ENCRYPTION_KEY_FILE}" || ! -f "${BACKUP_ENCRYPTION_KEY_FILE}" ) ]]; then
+    echo "[ERROR] El backup está cifrado y no hay passphrase ni key file." >&2
+    exit 1
+  fi
+
+  echo "[${TIMESTAMP}] Descifrando backup..."
+  for file in postgres.dump private_storage.tar.gz COUNTS.tsv; do
+    source="${BACKUP_PATH}/${file}.gpg"
+    [[ -f "${source}" ]] || continue
+
+    if [[ -n "${BACKUP_ENCRYPTION_PASSPHRASE}" ]]; then
+      gpg --batch --yes --pinentry-mode loopback --decrypt \
+        --passphrase-fd 3 \
+        --output "${DISPOSABLE_DIR}/${file}" \
+        "${source}" 3<<<"${BACKUP_ENCRYPTION_PASSPHRASE}"
+    else
+      gpg --batch --yes --pinentry-mode loopback --decrypt \
+        --passphrase-file "${BACKUP_ENCRYPTION_KEY_FILE}" \
+        --output "${DISPOSABLE_DIR}/${file}" \
+        "${source}"
+    fi
+  done
+
+  DUMP_PATH="${DISPOSABLE_DIR}/postgres.dump"
+  STORAGE_PATH="${DISPOSABLE_DIR}/private_storage.tar.gz"
+  COUNTS_PATH="${DISPOSABLE_DIR}/COUNTS.tsv"
+fi
+
+if [[ ! -f "${DUMP_PATH}" || ! -f "${STORAGE_PATH}" || ! -f "${COUNTS_PATH}" ]]; then
+  echo "[ERROR] El backup no contiene postgres.dump, private_storage.tar.gz y COUNTS.tsv." >&2
+  exit 1
+fi
+
+# 3. Create the disposable database as the backup role (CREATEDB), never the
+#    application role and never the operational database.
+echo "[${TIMESTAMP}] Creando BD disposable: ${DISPOSABLE_DB}"
+createdb \
+  --host="${PG_HOST}" \
+  --port="${PG_PORT}" \
+  --username="${PG_USER}" \
+  --maintenance-db=postgres \
+  "${DISPOSABLE_DB}"
+
+# 4. Restore atomically.
 echo "[${TIMESTAMP}] Restaurando PostgreSQL..."
 pg_restore \
-  --host="${PG_HOST:-postgres}" \
-  --port="${PG_PORT:-5432}" \
-  --username="${PG_USER:-postgres}" \
+  --host="${PG_HOST}" \
+  --port="${PG_PORT}" \
+  --username="${PG_USER}" \
   --dbname="${DISPOSABLE_DB}" \
   --no-owner \
   --no-privileges \
-  "${BACKUP_PATH}/postgres.dump"
+  --single-transaction \
+  --exit-on-error \
+  "${DUMP_PATH}"
 
-if [[ $? -ne 0 ]]; then
-  echo "[ERROR] pg_restore falló" >&2
-  exit 1
-fi
+# 5. Compare every backed-up table count with the restored database.
+echo "[${TIMESTAMP}] Verificando esquema y conteos..."
+while IFS=$'\t' read -r table expected; do
+  [[ -n "${table}" ]] || continue
 
-# 4. Verificar esquema esperado
-echo "[${TIMESTAMP}] Verificando esquema..."
-EXPECTED_TABLES=(
-  "users" "clients" "companies" "ai_conversations" "ai_messages"
-  "ai_action_proposals" "ai_artifacts" "mcp_tokens" "audit_events"
-)
-for table in "${EXPECTED_TABLES[@]}"; do
-  COUNT=$(psql -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" -d "${DISPOSABLE_DB}" -t -c "SELECT COUNT(*) FROM ${table};")
-  echo "  ${table}: ${COUNT} rows"
-done
+  if [[ "${expected}" == "missing" ]]; then
+    echo "  ${table}: missing in source (skipped)"
+    continue
+  fi
 
-# 5. Verificar datos críticos
-echo "[${TIMESTAMP}] Verificando datos críticos..."
-psql -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" -d "${DISPOSABLE_DB}" -c "
-  SELECT 'users' as table, COUNT(*) as count FROM users
-  UNION ALL SELECT 'ai_conversations', COUNT(*) FROM ai_conversations
-  UNION ALL SELECT 'ai_artifacts', COUNT(*) FROM ai_artifacts
-  UNION ALL SELECT 'mcp_tokens', COUNT(*) FROM mcp_tokens;
-"
+  exists=$(psql_db "${DISPOSABLE_DB}" --tuples-only --no-align \
+    --command="SELECT to_regclass('public.${table}') IS NOT NULL")
 
-# 6. Extraer y verificar almacenamiento privado
+  if [[ "${exists}" != "t" ]]; then
+    echo "[ERROR] Tabla ausente en el restore: ${table}" >&2
+    exit 1
+  fi
+
+  actual=$(psql_db "${DISPOSABLE_DB}" --tuples-only --no-align \
+    --command="SELECT count(*) FROM public.${table}")
+
+  if [[ "${actual}" != "${expected}" ]]; then
+    echo "[ERROR] ${table}: backup=${expected}, restore=${actual}" >&2
+    exit 1
+  fi
+
+  echo "  ${table}: ${actual} rows"
+done < "${COUNTS_PATH}"
+
+# 6. Extract and verify private storage.
 echo "[${TIMESTAMP}] Verificando almacenamiento privado..."
-mkdir -p "${DISPOSABLE_DIR}"
-tar -xzf "${BACKUP_PATH}/private_storage.tar.gz" -C "${DISPOSABLE_DIR}"
+EXTRACTED_STORAGE="${DISPOSABLE_DIR}/storage"
+mkdir -p "${EXTRACTED_STORAGE}"
+tar -xzf "${STORAGE_PATH}" -C "${EXTRACTED_STORAGE}"
 
-# Verificar la ruta real extraída (el archivo puede tener el directorio como entrada de nivel superior)
-EXTRACTED_STORAGE="${DISPOSABLE_DIR}/private"
-if [[ ! -d "${EXTRACTED_STORAGE}" ]]; then
-  # Buscar el directorio real extraído
-  EXTRACTED_STORAGE=$(find "${DISPOSABLE_DIR}" -mindepth 1 -maxdepth 1 -type d -name "private" | head -1)
+EXPECTED_FILES=$(awk -F': ' '/^# StorageFiles:/ {print $2}' "${BACKUP_PATH}/MANIFEST.sha256")
+if [[ -n "${EXPECTED_FILES}" ]]; then
+  ACTUAL_FILES=$(find "${EXTRACTED_STORAGE}" -type f | wc -l | tr -d ' ')
+  if [[ "${ACTUAL_FILES}" != "${EXPECTED_FILES}" ]]; then
+    echo "[ERROR] Archivos de storage: backup=${EXPECTED_FILES}, restore=${ACTUAL_FILES}" >&2
+    exit 1
+  fi
+  echo "  storage files: ${ACTUAL_FILES}"
 fi
 
-if [[ -z "${EXTRACTED_STORAGE}" || ! -d "${EXTRACTED_STORAGE}" ]]; then
-  echo "[ERROR] Estructura de almacenamiento privado no encontrada en el backup" >&2
-  exit 1
-fi
-
-echo "[${TIMESTAMP}] Almacenamiento extraído en: ${EXTRACTED_STORAGE}"
-
-# Verificar archivos esperados (directorios obligatorios)
-MANDATORY_DIRS=("ai-artifacts" "clients" "imports")
-for dir in "${MANDATORY_DIRS[@]}"; do
-  if [[ -d "${EXTRACTED_STORAGE}/${dir}" ]]; then
-    FILE_COUNT=$(find "${EXTRACTED_STORAGE}/${dir}" -type f | wc -l)
-    echo "  ${dir}: ${FILE_COUNT} files"
-  else
+for dir in ${RESTORE_REQUIRED_DIRS}; do
+  if [[ ! -d "${EXTRACTED_STORAGE}/${dir}" ]]; then
     echo "[ERROR] Directorio obligatorio no encontrado: ${dir}" >&2
     exit 1
   fi
 done
 
-# 7. Verificar checksums de archivos críticos (ej. ai_artifacts)
-echo "[${TIMESTAMP}] Verificando integridad archivos..."
-if [[ -d "${EXTRACTED_STORAGE}/ai-artifacts" ]]; then
-  find "${EXTRACTED_STORAGE}/ai-artifacts" -type f -name "*.pdf" -exec sha256sum {} \; | head -5
-fi
-
-echo "[${TIMESTAMP}] ✅ RESTORE PROOF EXITOSO"
+echo "[${TIMESTAMP}] RESTORE PROOF EXITOSO"
 echo "  Backup verificado: ${BACKUP_PATH}"
 echo "  BD disposable eliminada: ${DISPOSABLE_DB}"
 echo "  Directorio disposable eliminado: ${DISPOSABLE_DIR}"

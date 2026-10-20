@@ -1,389 +1,186 @@
-# Backup & Restore — Consultora DH (A07)
+# Backup & Restore — Consultora DH (A01/DR-01)
 
 ## Resumen
 
-Estrategia de backup y restore para PostgreSQL + almacenamiento privado de la aplicación. Incluye scripts versionados, runbook, y prueba de restore obligatoria.
+El backup corre en un **sidecar dedicado** (`docker/backup/Dockerfile`,
+`postgres:18.6`) y no en la imagen PHP. La imagen de la aplicación tiene
+`pdo_pgsql`, pero no `pg_dump`, `pg_restore`, `createdb`, `dropdb` ni `psql`; y
+un cliente PostgreSQL 15 no puede volcar un servidor 18.
+
+| Componente | Qué incluye | Cuándo |
+| --- | --- | --- |
+| PostgreSQL | Esquema + datos, formato custom comprimido | Diario, 02:00 UTC |
+| Almacenamiento privado | `storage/app/private/` completo | Junto al dump |
+| Conteos | `COUNTS.tsv` de tablas críticas en el instante del dump | Junto al dump |
+| Manifest | SHA-256 de los bytes almacenados | Junto al dump |
+
+El backup es **cifrado AES-256** por defecto (`BACKUP_REQUIRE_ENCRYPTION=true`).
+Se guarda en `${BACKUP_HOST_DIR:-./backups}`, un bind persistente que en
+producción debe apuntar a un disco externo. `BACKUP_OFFSITE_DIR` permite una
+segunda copia en otro montaje.
 
 ---
 
-## 1. Qué se respalda
+## 1. Requisitos y credenciales
 
-| Componente | Qué incluye | Frecuencia |
-|------------|-------------|------------|
-| **PostgreSQL** | Esquema + datos de todas las tablas (incl. `audit_events`, `ai_conversations`, `ai_messages`, `ai_action_proposals`, `ai_artifacts`, `mcp_tokens`, etc.) | Diaria (02:00 UTC) |
-| **Almacenamiento Privado** | `storage/app/private/` — documentos subidos, artefactos AI generados, archivos de importación | Diaria (02:30 UTC) |
-| **Configuración** | `.env` (excluyendo secrets), `compose.yaml`, scripts de despliegue | En cada cambio (git) |
+El rol de aplicación (`consultora_dh_app`) es **NOCREATEDB** y no se eleva.
+El backup usa un rol separado:
 
----
+| Rol | Atributos | Uso |
+| --- | --- | --- |
+| `POSTGRES_USER` | superusuario | Sólo bootstrap de PostgreSQL |
+| `DB_USERNAME` | `NOSUPERUSER NOCREATEDB NOCREATEROLE` | Laravel |
+| `BACKUP_DB_USER` | `LOGIN CREATEDB NOSUPERUSER`, miembro de `pg_read_all_data` | Backup y restore proof |
 
-## 2. Scripts de Backup
-
-### `scripts/backup.sh`
+En un volumen nuevo, `docker/postgres/init/02-create-backup-role.sh` crea el rol
+si `BACKUP_DB_PASSWORD` está definido. En un volumen existente, ejecute una vez:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# ===========================================================================
-# Backup Consultora DH — PostgreSQL + Private Storage
-# ===========================================================================
-# Ejecutar como cron diario: 0 2 * * * /var/www/html/scripts/backup.sh
-# ===========================================================================
-
-# Configuración (ajustar via env vars)
-BACKUP_DIR="${BACKUP_DIR:-/backups}"
-PG_HOST="${PG_HOST:-postgres}"
-PG_PORT="${PG_PORT:-5432}"
-PG_USER="${PG_USER:-consultora_dh_app}"
-PG_DB="${PG_DB:-consultora_dh}"
-PRIVATE_STORAGE="${PRIVATE_STORAGE:-/var/www/html/storage/app/private}"
-RETENTION_DAYS="${RETENTION_DAYS:-30}"
-TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
-BACKUP_NAME="consultora_dh_${TIMESTAMP}"
-
-# Directorio de trabajo
-WORK_DIR="${BACKUP_DIR}/${BACKUP_NAME}"
-mkdir -p "${WORK_DIR}"
-
-echo "[${TIMESTAMP}] Iniciando backup: ${BACKUP_NAME}"
-
-# 1. PostgreSQL — dump custom format (comprimido, paralelo)
-echo "[${TIMESTAMP}] Dumping PostgreSQL..."
-pg_dump \
-  --host="${PG_HOST}" \
-  --port="${PG_PORT}" \
-  --username="${PG_USER}" \
-  --dbname="${PG_DB}" \
-  --format=custom \
-  --compress=9 \
-  --jobs=4 \
-  --no-owner \
-  --no-privileges \
-  --file="${WORK_DIR}/postgres.dump"
-
-if [[ $? -ne 0 ]]; then
-  echo "[ERROR] pg_dump falló" >&2
-  exit 1
-fi
-
-# 2. Almacenamiento privado — tar.gz
-echo "[${TIMESTAMP}] Archiving private storage..."
-tar -czf "${WORK_DIR}/private_storage.tar.gz" \
-  -C "$(dirname "${PRIVATE_STORAGE}")" \
-  "$(basename "${PRIVATE_STORAGE}")"
-
-if [[ $? -ne 0 ]]; then
-  echo "[ERROR] tar falló" >&2
-  exit 1
-fi
-
-# 3. Manifest con checksums
-echo "[${TIMESTAMP}] Generando manifest..."
-{
-  echo "# Backup: ${BACKUP_NAME}"
-  echo "# Timestamp: ${TIMESTAMP}"
-  echo "# PostgreSQL: ${PG_DB}@${PG_HOST}:${PG_PORT}"
-  echo "# Storage: ${PRIVATE_STORAGE}"
-  echo ""
-  sha256sum "${WORK_DIR}/postgres.dump" "${WORK_DIR}/private_storage.tar.gz"
-} > "${WORK_DIR}/MANIFEST.sha256"
-
-# 4. Limpieza retención
-echo "[${TIMESTAMP}] Limpiando backups antiguos (>${RETENTION_DAYS} días)..."
-find "${BACKUP_DIR}" -maxdepth 1 -type d -name "consultora_dh_*" -mtime +"${RETENTION_DAYS}" -exec rm -rf {} \;
-
-echo "[${TIMESTAMP}] Backup completado: ${WORK_DIR}"
-echo "  - postgres.dump: $(du -h "${WORK_DIR}/postgres.dump" | cut -f1)"
-echo "  - private_storage.tar.gz: $(du -h "${WORK_DIR}/private_storage.tar.gz" | cut -f1)"
-echo "  - MANIFEST.sha256: $(cat "${WORK_DIR}/MANIFEST.sha256" | tail -2)"
-
-exit 0
+set -a; . ./.env; set +a
+docker compose exec -e BACKUP_DB_PASSWORD="$BACKUP_DB_PASSWORD" \
+  postgres bash /docker-entrypoint-initdb.d/02-create-backup-role.sh
 ```
 
-### Permisos
-```bash
-chmod +x scripts/backup.sh
-```
+Variables mínimas en `.env`:
 
-### Variables de Entorno para Backup
 ```env
-# En .env o docker-compose.override.yml
-BACKUP_DIR=/backups
-PG_HOST=postgres
-PG_PORT=5432
-PG_USER=consultora_dh_app
-PG_DB=consultora_dh
-PRIVATE_STORAGE=/var/www/html/storage/app/private
-RETENTION_DAYS=30
+BACKUP_DB_USER=consultora_dh_backup
+BACKUP_DB_PASSWORD=<secreto>
+BACKUP_REQUIRE_ENCRYPTION=true
+BACKUP_ENCRYPTION_PASSPHRASE=<secreto distinto>
+# o bien un fichero de clave montado en el contenedor:
+# BACKUP_ENCRYPTION_KEY_FILE=/run/secrets/backup_key
+BACKUP_HOST_DIR=/mnt/disco-externo/consultora-dh-backups
+BACKUP_RETENTION_DAYS=30
 ```
+
+No reutilice `DB_PASSWORD` ni `POSTGRES_PASSWORD` como passphrase de backup.
+Laravel nunca recibe las credenciales de backup.
 
 ---
 
-## 3. Runbook — Procedimiento de Backup
+## 2. Arranque y programación
 
-### Ejecución Manual
-```bash
-# Desde host o contenedor app
-docker compose exec app /var/www/html/scripts/backup.sh
-```
-
-### Verificación Post-Backup
-```bash
-# Verificar integridad
-BACKUP_LATEST=$(ls -1d /backups/consultora_dh_* | tail -1)
-cd "${BACKUP_LATEST}"
-sha256sum -c MANIFEST.sha256
-
-# Verificar que dump es válido
-pg_restore --list postgres.dump | head -20
-```
-
-### Alerting
-- Cron job debe reportar éxito/fallo (stdout/stderr a log centralizado)
-- Alerta si backup no aparece en `BACKUP_DIR` en 24h
-- Alerta si `pg_dump` o `tar` devuelven código != 0
-
----
-
-## 4. Restore — Procedimiento
-
-### ⚠️ REGLAS DE ORO
-1. **NUNCA** restores sobre desarrollo o producción directa
-2. **SIEMPRE** en BD/directorio **disposable** (temporal, aislado)
-3. **VERIFICAR** schema + datos + checksums antes de dar por bueno
-4. **BORRAR** targets disposable tras verificación
-
-### `scripts/restore_proof.sh`
+El servicio está detrás del perfil `ops` para que un `docker compose up` normal
+no lo arranque sin credenciales:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# ===========================================================================
-# Restore Proof — Verificación de backup en entorno disposable
-# ===========================================================================
-# Uso: ./scripts/restore_proof.sh /backups/consultora_dh_20261011_020000
-# ===========================================================================
-
-BACKUP_PATH="${1:-}"
-if [[ -z "${BACKUP_PATH}" || ! -d "${BACKUP_PATH}" ]]; then
-  echo "Uso: $0 <backup_directory>"
-  exit 1
-fi
-
-TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
-DISPOSABLE_DB="consultora_dh_restore_${TIMESTAMP}"
-DISPOSABLE_DIR="/tmp/restore_${TIMESTAMP}"
-
-echo "[${TIMESTAMP}] Iniciando restore proof desde: ${BACKUP_PATH}"
-
-# 1. Verificar manifest
-echo "[${TIMESTAMP}] Verificando checksums..."
-cd "${BACKUP_PATH}"
-sha256sum -c MANIFEST.sha256 || {
-  echo "[ERROR] Checksums no coinciden" >&2
-  exit 1
-}
-
-# 2. Crear BD disposable
-echo "[${TIMESTAMP}] Creando BD disposable: ${DISPOSABLE_DB}"
-createdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}"
-
-# 3. Restaurar PostgreSQL
-echo "[${TIMESTAMP}] Restaurando PostgreSQL..."
-pg_restore \
-  --host="${PG_HOST:-postgres}" \
-  --port="${PG_PORT:-5432}" \
-  --username="${PG_USER:-postgres}" \
-  --dbname="${DISPOSABLE_DB}" \
-  --jobs=4 \
-  --no-owner \
-  --no-privileges \
-  "${BACKUP_PATH}/postgres.dump"
-
-if [[ $? -ne 0 ]]; then
-  echo "[ERROR] pg_restore falló" >&2
-  dropdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}"
-  exit 1
-fi
-
-# 4. Verificar esquema esperado
-echo "[${TIMESTAMP}] Verificando esquema..."
-EXPECTED_TABLES=(
-  "users" "clients" "companies" "ai_conversations" "ai_messages"
-  "ai_action_proposals" "ai_artifacts" "mcp_tokens" "audit_events"
-)
-for table in "${EXPECTED_TABLES[@]}"; do
-  COUNT=$(psql -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" -d "${DISPOSABLE_DB}" -t -c "SELECT COUNT(*) FROM ${table};")
-  echo "  ${table}: ${COUNT} rows"
-done
-
-# 5. Verificar datos críticos
-echo "[${TIMESTAMP}] Verificando datos críticos..."
-psql -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" -d "${DISPOSABLE_DB}" -c "
-  SELECT 'users' as table, COUNT(*) as count FROM users
-  UNION ALL SELECT 'ai_conversations', COUNT(*) FROM ai_conversations
-  UNION ALL SELECT 'ai_artifacts', COUNT(*) FROM ai_artifacts
-  UNION ALL SELECT 'mcp_tokens', COUNT(*) FROM mcp_tokens;
-"
-
-# 6. Extraer y verificar almacenamiento privado
-echo "[${TIMESTAMP}] Verificando almacenamiento privado..."
-mkdir -p "${DISPOSABLE_DIR}"
-tar -xzf "${BACKUP_PATH}/private_storage.tar.gz" -C "${DISPOSABLE_DIR}"
-
-# Verificar archivos esperados
-EXPECTED_DIRS=("ai-artifacts" "clients" "imports")
-for dir in "${EXPECTED_DIRS[@]}"; do
-  if [[ -d "${DISPOSABLE_DIR}/${dir}" ]]; then
-    FILE_COUNT=$(find "${DISPOSABLE_DIR}/${dir}" -type f | wc -l)
-    echo "  ${dir}: ${FILE_COUNT} files"
-  else
-    echo "  ${dir}: NO ENCONTRADO (puede estar vacío)"
-  fi
-done
-
-# 7. Verificar checksums de archivos críticos (ej. ai_artifacts)
-echo "[${TIMESTAMP}] Verificando integridad archivos..."
-if [[ -d "${DISPOSABLE_DIR}/ai-artifacts" ]]; then
-  find "${DISPOSABLE_DIR}/ai-artifacts" -type f -name "*.pdf" -exec sha256sum {} \; | head -5
-fi
-
-# 8. Limpieza
-echo "[${TIMESTAMP}] Limpiando recursos disposable..."
-dropdb -h "${PG_HOST:-postgres}" -p "${PG_PORT:-5432}" -U "${PG_USER:-postgres}" "${DISPOSABLE_DB}"
-rm -rf "${DISPOSABLE_DIR}"
-
-echo "[${TIMESTAMP}] ✅ RESTORE PROOF EXITOSO"
-echo "  Backup verificado: ${BACKUP_PATH}"
-echo "  BD disposable eliminada: ${DISPOSABLE_DB}"
-echo "  Directorio disposable eliminado: ${DISPOSABLE_DIR}"
-exit 0
+docker compose --profile ops up -d backup
+docker compose --profile ops ps backup
+docker compose --profile ops logs -f backup
 ```
 
-### Ejecución
-```bash
-chmod +x scripts/restore_proof.sh
-
-# Ejecutar proof mensual (obligatorio)
-docker compose exec app /var/www/html/scripts/restore_proof.sh /backups/consultora_dh_20261011_020000
-```
-
----
-
-## 5. Restore Real (Disaster Recovery)
-
-### Solo si es absolutamente necesario
-```bash
-# 1. Poner app en maintenance
-php artisan down --message="Restoring from backup..."
-
-# 2. Backup estado actual (por si acaso)
-./scripts/backup.sh
-
-# 3. Restaurar PostgreSQL en BD producción
-pg_restore --clean --if-exists -h postgres -U consultora_dh_app -d consultora_dh /backups/consultora_dh_YYYYMMDD_HHMMSS/postgres.dump
-
-# 4. Restaurar almacenamiento privado
-rm -rf /var/www/html/storage/app/private/*
-tar -xzf /backups/consultora_dh_YYYYMMDD_HHMMSS/private_storage.tar.gz -C /var/www/html/storage/app/
-
-# 5. Limpiar cache
-php artisan config:clear && php artisan route:clear && php artisan view:clear
-
-# 6. Verificar
-php artisan migrate --force  # por si hay migraciones nuevas
-php artisan health:check
-
-# 7. Quitar maintenance
-php artisan up
-```
-
----
-
-## 6. Load Test (A07)
-
-### `scripts/load_test.sh`
+`docker/backup/run.sh` hace un backup inmediato al arrancar y después cada día a
+`BACKUP_HOUR_UTC` (02:00 por defecto). Si falla, reintenta cada
+`BACKUP_RETRY_SECONDS` (300 s). El healthcheck no comprueba que el proceso viva:
+comprueba que existe `/backups/.last-success` y que tiene menos de
+`BACKUP_MAX_AGE_HOURS` (36 h). Un contenedor `unhealthy` es la señal de alerta.
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# ===========================================================================
-# Load Test A07 — Fake AI Provider
-# ===========================================================================
-# Ejercita: API autenticada, mensaje AI, MCP read, endpoint business read-heavy
-# ===========================================================================
-
-BASE_URL="${BASE_URL:-http://localhost:8080}"
-CONCURRENCY="${CONCURRENCY:-10}"
-DURATION="${DURATION:-30}"  # segundos
-RESULTS_FILE="/tmp/load_test_$(date -u +%Y%m%d_%H%M%S).json"
-
-echo "Iniciando load test: ${CONCURRENCY} workers x ${DURATION}s"
-echo "Resultados en: ${RESULTS_FILE}"
-
-# Requiere: vegeta (https://github.com/tsenart/vegeta) o similar
-# O usar k6/wrk/hey
-
-# Ejemplo con hey (https://github.com/rakyll/hey):
-hey -z "${DURATION}s" -c "${CONCURRENCY}" \
-  -H "Authorization: Bearer <session_cookie>" \
-  -m GET "${BASE_URL}/api/health" \
-  -o json > "${RESULTS_FILE}"
-
-# Analizar resultados
-jq -r '.latencies | "p50=\(.p50/1000000)ms p95=\(.p95/1000000)ms p99=\(.p99/1000000)ms errors=\(.errors)"' "${RESULTS_FILE}"
+docker inspect --format '{{.State.Health.Status}}' consultora-dh-backup
 ```
 
-### Métricas Objetivo
-| Endpoint | p50 | p95 | Error Rate |
-|----------|-----|-----|------------|
-| `/api/health` | < 10ms | < 50ms | 0% |
-| `/api/ai/status` | < 50ms | < 200ms | 0% |
-| `/api/mcp/rpc` (tools/list) | < 100ms | < 300ms | 0% |
-| `/api/receivables` (read-heavy) | < 200ms | < 500ms | 0% |
-| AI message (fake provider) | < 500ms | < 2000ms | 0% |
+El backup manual es:
+
+```bash
+docker compose --profile ops exec backup /scripts/backup.sh
+```
 
 ---
 
-## 7. Verificación de Integridad Continua
+## 3. Qué produce un backup
 
-### Diario (automatizado)
-- [ ] Backup completado sin errores
-- [ ] Checksums MANIFEST.sha256 válidos
-- [ ] `pg_restore --list` lista tablas esperadas
+```
+/backups/consultora_dh_YYYYMMDD_HHMMSS/
+├── postgres.dump.gpg          # custom format, cifrado
+├── private_storage.tar.gz.gpg # contenido de storage/app/private
+├── COUNTS.tsv.gpg             # conteos de tablas en el instante del dump
+└── MANIFEST.sha256            # SHA-256 de los ficheros cifrados + metadatos
+```
 
-### Semanal
-- [ ] `restore_proof.sh` ejecutado y exitoso
-- [ ] Tamaño backup dentro de rangos esperados
+Sin cifrado (sólo si `BACKUP_REQUIRE_ENCRYPTION=false`) los nombres no llevan
+`.gpg` y el script emite un aviso. En producción no se acepta ese modo.
 
-### Mensual
-- [ ] Restore proof completo con verificación de datos
-- [ ] Revisión de retención y limpieza
-- [ ] Test de load test con fake AI provider
+El manifest incluye `StorageFiles` y `Encrypted`; el restore proof los usa para
+comparar el número de archivos y saber si debe descifrar.
 
----
-
-## 7. Contactos y Escalación
-
-| Evento | Acción | Contacto |
-|--------|--------|----------|
-| Backup falla 2 días seguidos | Alerta crítica, investigar | DevOps |
-| Restore proof falla | Alerta crítica, no desplegar | Dev Lead + DBA |
-| Load test > p95 threshold | Investigar rendimiento | Dev Lead |
-| Disaster recovery real | Activar plan DR, notificar | CTO + Dev Lead |
+Retención: se eliminan directorios `consultora_dh_*` con más de
+`RETENTION_DAYS` días, tanto en `BACKUP_DIR` como en `BACKUP_OFFSITE_DIR`.
 
 ---
 
-## 8. Checklist de Verificación
+## 4. Restore proof (obligatorio)
 
-- [ ] `scripts/backup.sh` existe y es ejecutable
-- [ ] `scripts/restore_proof.sh` existe y es ejecutable
-- [ ] `scripts/load_test.sh` existe
-- [ ] Cron job diario configurado y probado
-- [ ] `BACKUP_DIR` montado en volumen persistente
-- [ ] Retención 30 días verificada
-- [ ] Restore proof mensual documentado
-- [ ] Load test mensual ejecutado
-- [ ] Runbook impreso/disponible offline
+El proof **nunca** restaura sobre `PGDATABASE`. Crea
+`consultora_dh_restore_<UTC>`, restaura con `--single-transaction`, compara cada
+tabla de `COUNTS.tsv`, verifica el número de archivos privados y elimina la base
+y el directorio disposable en un `trap` incluso si falla.
+
+```bash
+docker compose --profile ops run --rm backup \
+  /scripts/restore_proof.sh /backups/consultora_dh_20261011_020000
+```
+
+Comprueba, en este orden:
+
+1. `sha256sum -c MANIFEST.sha256` sobre los bytes almacenados.
+2. Descifrado a un directorio temporal (si aplica).
+3. `createdb` con el rol de backup y `pg_restore --single-transaction`.
+4. `to_regclass` de cada tabla y comparación exacta con `COUNTS.tsv`.
+5. Extracción del storage y comparación con `StorageFiles`.
+6. Existencia de `ai-artifacts`, `clients` e `imports` (configurable con
+   `RESTORE_REQUIRED_DIRS`).
+
+Un resultado correcto termina con `RESTORE PROOF EXITOSO`. Cualquier diferencia
+de conteo o de archivos es un fallo, no un aviso.
+
+---
+
+## 5. Restauración real (sólo con autorización)
+
+> **Nunca** ejecute un restore sobre la base operativa sin una ventana de
+> mantenimiento aprobada y un backup del estado actual. El procedimiento de
+> abajo es el único autorizado; no use `docker compose down -v`, `dropdb` sobre
+> la base operativa ni `migrate:fresh`.
+
+```bash
+# 1. Detener escrituras de la aplicación
+docker compose stop queue queue-imports queue-ai queue-automations scheduler
+docker compose exec app php artisan down --message="Restauración en curso"
+
+# 2. Backup del estado actual antes de tocar nada
+docker compose --profile ops exec backup /scripts/backup.sh
+
+# 3. Descifrar el backup elegido a un directorio temporal dentro del sidecar
+#    (siga el mismo procedimiento del restore proof; no restaure el .gpg directo)
+
+# 4. Restaurar en la base operativa SOLO con autorización expresa:
+#    pg_restore --clean --if-exists --no-owner --no-privileges \
+#      --single-transaction -d consultora_dh /ruta/postgres.dump
+
+# 5. Restaurar storage/app/private con el tar extraído
+# 6. php artisan migrate --force (sólo si el backup es anterior a una migración)
+# 7. Verificar /api/health, login y un documento antes de abrir tráfico
+docker compose exec app php artisan up
+```
+
+La restauración real no está automatizada a propósito: un comando que borre la
+base operativa con un argumento equivocado es más peligroso que un runbook.
+
+---
+
+## 6. Evidencia mínima de DR
+
+| Evidencia | Cómo se obtiene |
+| --- | --- |
+| Backup real | `docker compose --profile ops exec backup /scripts/backup.sh` |
+| Checksums | `sha256sum -c MANIFEST.sha256` |
+| Conteos | Comparación de `COUNTS.tsv` contra la base restaurada |
+| Archivos | `StorageFiles` contra el tar extraído |
+| Cifrado | `Encrypted: yes` y descifrado correcto en el proof |
+| Aislamiento | La base disposable se crea y se elimina; `PGDATABASE` no se toca |
+| Retención | Directorios antiguos eliminados según `RETENTION_DAYS` |
+| Alerta | Healthcheck en `unhealthy` si no hay éxito reciente |
+
+La evidencia de una ejecución con datos sintéticos se guarda en el informe de
+entrega; no se usa la base de desarrollo ni datos de clientes para certificar.

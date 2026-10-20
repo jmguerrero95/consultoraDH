@@ -43,6 +43,12 @@ services:
       DB_USERNAME: ${DB_USERNAME:?DB_USERNAME must be set in .env}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
 
+      # --- Dedicated backup role, created by 02-create-backup-role.sh on a
+      # fresh volume. Empty by default: the init script skips it and the backup
+      # sidecar stays disabled until the operator supplies a password.
+      BACKUP_DB_USER: ${BACKUP_DB_USER:-consultora_dh_backup}
+      BACKUP_DB_PASSWORD: ${BACKUP_DB_PASSWORD:-}
+
       # Deterministic collation, independent of the host locale.
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
@@ -260,6 +266,61 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - consultora-dh
+
+  # Backup/restore sidecar. Kept behind the `ops` profile so a plain
+  # `docker compose up` does not start a second PostgreSQL client image, and
+  # so the operator must acknowledge the backup credentials/encryption setup.
+  #
+  #   docker compose --profile ops up -d backup
+  #
+  # The image is postgres:18.6, matching the server major version. The PHP
+  # image has pdo_pgsql but not pg_dump/pg_restore/createdb/dropdb.
+  backup:
+    profiles: ["ops"]
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    image: consultora-dh/backup:local
+    container_name: consultora-dh-backup
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${BACKUP_DB_USER:-consultora_dh_backup}
+      PGPASSWORD: ${BACKUP_DB_PASSWORD:-}
+      PGDATABASE: ${DB_DATABASE:-consultora_dh}
+      BACKUP_DIR: /backups
+      PRIVATE_STORAGE: /var/www/html/storage/app/private
+      RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_REQUIRE_ENCRYPTION: ${BACKUP_REQUIRE_ENCRYPTION:-true}
+      BACKUP_ENCRYPTION_PASSPHRASE: ${BACKUP_ENCRYPTION_PASSPHRASE:-}
+      BACKUP_ENCRYPTION_KEY_FILE: ${BACKUP_ENCRYPTION_KEY_FILE:-}
+      BACKUP_OFFSITE_DIR: ${BACKUP_OFFSITE_DIR:-}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-2}
+      BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-300}
+      BACKUP_MAX_AGE_HOURS: ${BACKUP_MAX_AGE_HOURS:-36}
+    volumes:
+      # Scripts come from the checkout so a fix is not trapped in an old image.
+      - ./scripts:/scripts:ro
+      # Read-only secret data. The backup process runs as root inside this
+      # isolated container because application files may be 0600 www-data.
+      - ./storage/app/private:/var/www/html/storage/app/private:ro
+      # Persistent, operator-controlled location. Point BACKUP_HOST_DIR at an
+      # external/off-host mount in production.
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
+      # For an off-host copy, add a second bind in a local override and set
+      # BACKUP_OFFSITE_DIR to its container path (for example /backups-offsite).
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "/usr/local/bin/backup-healthcheck"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
     networks:
       - consultora-dh
 

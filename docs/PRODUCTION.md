@@ -179,12 +179,14 @@ Este documento verifica que la aplicación está lista para producción. Cada it
 
 ## 10. Backup y Restore (ver `BACKUP-RESTORE.md`)
 
-- [ ] Script backup versionado en repo (`scripts/backup.sh`)
-- [ ] Runbook documentado
-- [ ] Backup PostgreSQL + almacenamiento privado
-- [ ] Timestampado, destino seguro, retención
+- [ ] Sidecar `backup` (perfil `ops`) con cliente PostgreSQL 18
+- [ ] Rol `BACKUP_DB_USER` con `CREATEDB` y `pg_read_all_data`; Laravel no lo usa
+- [ ] Destino persistente/externo (`BACKUP_HOST_DIR`) y retención
+- [ ] Cifrado AES-256 activo (`BACKUP_REQUIRE_ENCRYPTION=true` + passphrase/key)
+- [ ] Programación diaria y healthcheck de backup reciente
 - [ ] **Restore Proof** ejecutado y verificado en BD/directorio disposable
-- [ ] Nunca restore sobre desarrollo
+- [ ] Conteos y archivos comparados, no sólo “la tabla existe”
+- [ ] Nunca restore sobre desarrollo o producción sin ventana autorizada
 
 ---
 
