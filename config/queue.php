@@ -40,8 +40,11 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
-            'after_commit' => false,
+            // Must stay above the longest job timeout (IMPORT_TIMEOUT, 600 s)
+            // plus the worker's shutdown margin. Otherwise the queue releases
+            // a job for a second worker while the first one is still running.
+            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 900),
+            'after_commit' => (bool) env('QUEUE_AFTER_COMMIT', true),
         ],
 
         'beanstalkd' => [
@@ -68,9 +71,16 @@ return [
             'driver' => 'redis',
             'connection' => env('REDIS_QUEUE_CONNECTION', 'default'),
             'queue' => env('REDIS_QUEUE', 'default'),
-            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 90),
+            // 600 s import job + 300 s margin. A value below the import
+            // timeout makes Redis hand the same job to another worker while
+            // the first one is still parsing the workbook.
+            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 900),
             'block_for' => null,
-            'after_commit' => false,
+            // Never make a row/job visible to a worker before the surrounding
+            // database transaction commits. Without this a worker can pop an
+            // automation, import or report job and read state the request has
+            // not committed yet.
+            'after_commit' => (bool) env('QUEUE_AFTER_COMMIT', true),
         ],
 
         'deferred' => [
@@ -89,6 +99,30 @@ return [
             ],
         ],
 
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Queue Monitoring
+    |--------------------------------------------------------------------------
+    |
+    | `php artisan queue:health` reports pending, delayed and reserved jobs plus
+    | the age of the oldest pending job for every queue listed here. A monitor
+    | can run it on a schedule and alert on a non-zero exit code with --strict.
+    |
+    */
+
+    'monitoring' => [
+        'queues' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env(
+                'QUEUE_MONITORED_QUEUES',
+                'default,imports,support,notifications,automations,ai-tasks',
+            )),
+        ))),
+        'max_backlog' => (int) env('QUEUE_MAX_BACKLOG', 1000),
+        'max_age_seconds' => (int) env('QUEUE_MAX_AGE_SECONDS', 300),
+        'max_failed' => (int) env('QUEUE_MAX_FAILED', 0),
     ],
 
     /*

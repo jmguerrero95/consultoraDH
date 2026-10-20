@@ -37,7 +37,12 @@ class ExecuteAutomationRun implements ShouldQueue
 
     public function __construct(
         public int $automationRunId
-    ) {}
+    ) {
+        // G02: automation runs have their own worker. Leaving the job on
+        // `default` would put it back behind support traffic, and the split
+        // would exist only on paper.
+        $this->onQueue('automations');
+    }
 
     public function handle(): void
     {

@@ -666,10 +666,25 @@ ni pierda trabajos en cola.
 
 ## 9. Colas
 
-`queue` es un servicio propio que ejecuta `php artisan queue:work`. Existe
-porque A02 en adelante necesita trabajo asíncrono (importaciones, PDF,
-notificaciones) y la infraestructura debe estar probada antes de que exista el
-primer trabajo real.
+Hay cuatro servicios `queue:work`, separados por el trabajo que consumen:
+
+| Servicio | Colas | `--timeout` | Por qué |
+| --- | --- | ---: | --- |
+| `queue` | `default,support,notifications` | 180 s | Respuestas y avisos interactivos |
+| `queue-imports` | `imports` | 630 s | Una importación no bloquea soporte ni IA |
+| `queue-ai` | `ai-tasks` | 330 s | Extracción/generación con reintentos de proveedor |
+| `queue-automations` | `automations` | 180 s | Efectos externos sin retrasar a una persona |
+
+`REDIS_QUEUE_RETRY_AFTER` vale **900 s**, por encima del timeout máximo de
+importación (600 s) más el margen de apagado. Un valor menor haría que Redis
+entregara el mismo trabajo a otro worker mientras el primero sigue ejecutándose.
+La conexión tiene `after_commit=true`: un job no se publica hasta que la
+transacción que lo creó confirma.
+
+`php artisan queue:health --json --strict` informa pendientes, retrasados,
+reservados, edad del job más antiguo y `failed_jobs`. Es la señal que debe
+monitorizarse; `--strict` sale con código distinto de cero al superar
+`QUEUE_MAX_BACKLOG`, `QUEUE_MAX_AGE_SECONDS` o `QUEUE_MAX_FAILED`.
 
 En A01 se verificó el circuito completo: un trabajo colocado en Redis fue
 recogido y ejecutado por el worker, sin ninguna clase de trabajo en el

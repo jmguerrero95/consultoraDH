@@ -213,7 +213,9 @@ services:
     # shown to the person as "En cola", and never run at all - with no error anywhere. A named
     # queue that nothing listens to is the quietest possible failure, and the only thing that
     # finds it is a journey that waits for the work to finish.
-    command: ["php", "artisan", "queue:work", "--queue=default,imports,ai-tasks", "--sleep=1", "--tries=3", "--max-time=3600", "--verbose"]
+    # One worker is enough for the isolated E2E database, but it must listen on
+    # every queue the journeys dispatch to and allow the import budget (600 s).
+    command: ["php", "artisan", "queue:work", "--queue=default,imports,support,notifications,automations,ai-tasks", "--sleep=1", "--tries=3", "--timeout=630", "--max-time=3600", "--verbose"]
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor

@@ -120,33 +120,94 @@ services:
     networks:
       - consultora-dh
 
-  # Queue worker. Foundation only in A01, but wired up and verified so that
-  # long running work (imports, PDFs, notifications) has a home later.
+  # Workers are split by blast radius. A 10-minute import used to occupy the
+  # only worker, so support replies, notifications and AI jobs waited behind
+  # it; a retry_after below the import timeout could also hand the same job to
+  # a second worker while the first one was still running.
+  #
+  # Each service has an explicit --timeout. REDIS_QUEUE_RETRY_AFTER (900 s)
+  # must stay above the largest one (imports, 630 s) plus a shutdown margin;
+  # see config/queue.php.
   queue:
     <<: *app-image
     container_name: consultora-dh-queue
     restart: unless-stopped
     working_dir: /var/www/html
-    # `--queue=default,imports,support,notifications,automations` — A06 adds support, notifications, automations queues.
-    #
-    # A04's three jobs call `onQueue(config('imports.queue.queue'))`, which is `imports`, so that
-    # an import never competes with A03's generation backlog. But `queue:work` with no `--queue`
-    # listens on `default` only. So this worker drained the default queue and never once touched
-    # an import job: uploading a workbook in development returned 202 and left the batch in
-    # `queued` for ever, with no error anywhere.
-    #
-    # Nothing caught it because the whole test suite runs with `QUEUE_CONNECTION=sync`, where the
-    # queue name is irrelevant — the job runs inside the request. The bug only exists in the one
-    # environment a human uses, which is the environment nobody tests.
-    #
-    # Both names are listed rather than only `imports` so this worker stays the single worker for
-    # the application instead of needing a second container when another module starts queueing.
-    command: ["php", "artisan", "queue:work", "--queue=default,imports,support,notifications,automations,ai-tasks", "--sleep=3", "--tries=3", "--max-time=3600", "--verbose"]
+    # Interactive work that must not wait behind imports or AI generation.
+    command: ["php", "artisan", "queue:work", "--queue=default,support,notifications", "--sleep=3", "--tries=3", "--timeout=180", "--max-time=3600", "--verbose"]
+    stop_grace_period: 200s
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor
       # Conversion runs on the queue as well as in a request, so the worker
       # needs the same exchange directory the converter reads.
+      - document-work:/var/www/html/storage/app/document-work
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - consultora-dh
+
+  # A04's ParseLegacyImport, BuildLegacyImportPlan and ApplyLegacyImport run
+  # here with the 600 s budget from config/imports.php. Nothing else shares
+  # this queue, so a long workbook cannot delay support or AI work.
+  queue-imports:
+    <<: *app-image
+    container_name: consultora-dh-queue-imports
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: ["php", "artisan", "queue:work", "--queue=imports", "--sleep=3", "--tries=3", "--timeout=630", "--max-time=3600", "--verbose"]
+    # Give the worker time to finish the current import on a restart instead
+    # of killing it in the middle of the apply phase.
+    stop_grace_period: 660s
+    volumes:
+      - .:/var/www/html
+      - vendor:/var/www/html/vendor
+      - document-work:/var/www/html/storage/app/document-work
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - consultora-dh
+
+  # Assistant background work (document extraction, generation, research).
+  # It has its own worker because a provider retry can take minutes.
+  queue-ai:
+    <<: *app-image
+    container_name: consultora-dh-queue-ai
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: ["php", "artisan", "queue:work", "--queue=ai-tasks", "--sleep=1", "--tries=3", "--timeout=330", "--max-time=3600", "--verbose"]
+    stop_grace_period: 340s
+    volumes:
+      - .:/var/www/html
+      - vendor:/var/www/html/vendor
+      - document-work:/var/www/html/storage/app/document-work
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - consultora-dh
+
+  # Automation runs and their external deliveries. Kept away from interactive
+  # support so a slow provider or a retrying Telegram call does not delay a
+  # person's reply.
+  queue-automations:
+    <<: *app-image
+    container_name: consultora-dh-queue-automations
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: ["php", "artisan", "queue:work", "--queue=automations", "--sleep=3", "--tries=3", "--timeout=180", "--max-time=3600", "--verbose"]
+    stop_grace_period: 200s
+    volumes:
+      - .:/var/www/html
+      - vendor:/var/www/html/vendor
       - document-work:/var/www/html/storage/app/document-work
     depends_on:
       app:

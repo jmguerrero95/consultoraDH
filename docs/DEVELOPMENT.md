@@ -32,7 +32,10 @@ PHP y de Node y tarda bastante. Las siguientes veces es inmediato.
 | Servicio | Función | Puerto en el host |
 | --- | --- | --- |
 | `app` | PHP-FPM + Laravel | — |
-| `queue` | Consumidor de trabajos | — |
+| `queue` | Trabajos interactivos (`default,support,notifications`) | — |
+| `queue-imports` | Importaciones A04 (`imports`) | — |
+| `queue-ai` | Tareas del asistente (`ai-tasks`) | — |
+| `queue-automations` | Automatizaciones (`automations`) | — |
 | `nginx` | Servidor web | `8080` |
 | `node` | Vite (desarrollo) | `5173` |
 | `postgres` | PostgreSQL 18 | — (interno) |
@@ -437,12 +440,18 @@ Los cuatro deben pasar antes de dar por terminada una tarea.
 ## 10. Colas
 
 ```bash
-docker compose logs -f queue                                    # ver el worker
+docker compose logs -f queue queue-imports queue-ai queue-automations
 docker compose exec queue php artisan queue:work --stop-when-empty
+docker compose exec app php artisan queue:health --json
 docker compose exec app php artisan queue:failed
 docker compose exec app php artisan queue:retry <id>
 docker compose exec app php artisan queue:flush redis
 ```
+
+`queue:health --strict` sale con código 1 si el backlog, la edad del job más
+antiguo o `failed_jobs` superan los umbrales de `.env`
+(`QUEUE_MAX_BACKLOG`, `QUEUE_MAX_AGE_SECONDS`, `QUEUE_MAX_FAILED`). Es el
+comando que debe ejecutar la monitorización externa.
 
 Para despachar un trabajo desde código:
 
@@ -466,9 +475,10 @@ docker compose exec app php artisan tinker --execute="Queue::push(new App\Jobs\M
 | `ApplyLegacyImport` | El plan → maestros | 1 |
 
 Los tres van a la cola **`imports`**, no a `default`: `onQueue(config('imports.queue.queue'))`
-para que una importación no compita con la cola de generación de A03. Por eso el worker se
-arranca con `--queue=default,imports`; un worker sólo en `default` **nunca los ejecuta** y la
-importación se queda en `queued` para siempre sin ningún error.
+para que una importación no compita con la cola de generación de A03. Por eso el servicio
+`queue-imports` se arranca con `--queue=imports` y su propio `--timeout=630`; un worker sólo en
+`default` **nunca los ejecuta** y la importación se queda en `queued` para siempre sin ningún
+error.
 
 Es un fallo que ninguna prueba detectó, y conviene entender por qué: toda la suite corre con
 `QUEUE_CONNECTION=sync`, donde el nombre de la cola es irrelevante porque el trabajo se ejecuta
