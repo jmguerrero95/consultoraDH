@@ -198,6 +198,16 @@ return [
         'dynamic_pool' => (bool) env('AI_OPENROUTER_DYNAMIC_POOL', true),
         'max_dynamic_models' => (int) env('AI_OPENROUTER_MAX_DYNAMIC_MODELS', 5),
         'use_models_fallback' => (bool) env('AI_OPENROUTER_USE_MODELS_FALLBACK', false),
+
+        // OpenRouter routes a request to model providers whose own retention and
+        // training policies differ one from another. The account has separate
+        // "allow training" settings for paid and free models, but this server
+        // cannot read that setting or prove it is off. The safe default is
+        // therefore `training`: OpenRouter's free endpoints still answer general
+        // questions, and real client data only goes there when the operator has
+        // verified the account's free-model privacy setting and declares
+        // `AI_OPENROUTER_DATA_POLICY=standard`.
+        'data_policy' => env('AI_OPENROUTER_DATA_POLICY', 'training'),
     ],
 
     /*
@@ -225,6 +235,39 @@ return [
     | such a candidate only serves general questions unless
     | `AI_ALLOW_TRAINING_PROVIDERS` is set. The default is the safe one.
     |
+    | ## Verified classifications (2026-10-19)
+    |
+    | Groq and Cloudflare are `standard`, not `training`, because their current
+    | official terms forbid training on customer inputs and outputs. This is a
+    | provider-specific decision backed by evidence, not an assumption:
+    |
+    |   Groq — Services Agreement (Last Modified: 2026-06-22) §4.2:
+    |     "Groq is not permitted to use Inputs or Outputs for training or
+    |      fine-tuning any AI Model Services or other models, unless explicitly
+    |      granted permission or instructed by Customer."
+    |     https://console.groq.com/docs/legal/services-agreement
+    |   Groq — Your Data: inference is not retained by default; retention is
+    |     limited to reliability/abuse logs (up to 30 days) and can be removed
+    |     with the account's optional Zero Data Retention control. Retention for
+    |     reliability is not training, so it does not make the provider a
+    |     `training` provider under this gate.
+    |     https://console.groq.com/docs/your-data
+    |
+    |   Cloudflare — Workers AI Data usage (Last updated: 2026-10-16):
+    |     "Zero data retention" for standard inference and "No training":
+    |     "Cloudflare does not use Customer Content processed by Workers AI to
+    |      train AI models."
+    |     https://developers.cloudflare.com/workers-ai/platform/data-usage/
+    |
+    | Gemini keeps `training`: Google's free tier may use content to improve its
+    | products. Its classification is deliberately not inferred from the other
+    | two providers.
+    |
+    | The evidence is contractual for the endpoint as sold, including a fee-free
+    | tier (Groq §5.1; Cloudflare's Free allocation is the same Workers AI
+    | service). If a provider changes its terms, the value must be re-verified
+    | before it stays `standard`; the safe fallback remains `training`.
+    |
     | Cloudflare takes its account id in the URL, not the credential, so the
     | template carries `{account_id}` and the id comes from configuration.
     |
@@ -239,7 +282,9 @@ return [
             'models' => $csv(env('GROQ_MODELS')),
             'priority' => (int) env('GROQ_PRIORITY', 150),
             'capabilities' => ['chat', 'tools'],
-            'data_policy' => env('GROQ_DATA_POLICY', 'training'),
+            // Standard: Groq Services Agreement §4.2 forbids training on Inputs
+            // and Outputs. See the evidence block above.
+            'data_policy' => env('GROQ_DATA_POLICY') ?: 'standard',
             'enabled' => (bool) env('GROQ_ENABLED', true),
         ],
 
@@ -250,7 +295,9 @@ return [
             'models' => $csv(env('CLOUDFLARE_AI_MODELS')),
             'priority' => (int) env('CLOUDFLARE_AI_PRIORITY', 150),
             'capabilities' => ['chat', 'tools'],
-            'data_policy' => env('CLOUDFLARE_AI_DATA_POLICY', 'training'),
+            // Standard: Workers AI Data usage promises zero retention for
+            // standard inference and no training on Customer Content.
+            'data_policy' => env('CLOUDFLARE_AI_DATA_POLICY') ?: 'standard',
             'enabled' => (bool) env('CLOUDFLARE_AI_ENABLED', true),
         ],
 
@@ -260,7 +307,9 @@ return [
             'models' => $csv(env('GEMINI_MODELS')),
             'priority' => (int) env('GEMINI_PRIORITY', 150),
             'capabilities' => ['chat', 'tools'],
-            'data_policy' => env('GEMINI_DATA_POLICY', 'training'),
+            // Training: the Gemini free tier may use content to improve Google
+            // products. Not inferred from Groq/Cloudflare's classification.
+            'data_policy' => env('GEMINI_DATA_POLICY') ?: 'training',
             'enabled' => (bool) env('GEMINI_ENABLED', true),
         ],
 

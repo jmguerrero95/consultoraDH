@@ -126,30 +126,98 @@ function urlLibro(): string {
     return `/api/reports/download?${params.toString()}`;
 }
 
+/** A download in progress, by format or by workbook. */
+const descargandoFormato = ref<string | null>(null);
+
+/** A download that genuinely failed, shown beside the buttons. */
+const errorDescarga = ref<string | null>(null);
+
+/** The server's chosen filename, or a safe fallback. */
+function filenameFrom(response: Response, fallback: string): string {
+    const header = response.headers.get('content-disposition') ?? '';
+
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header);
+
+    if (encoded) {
+        try {
+            return decodeURIComponent(encoded[1]);
+        } catch {
+            // Fall through to the plain filename.
+        }
+    }
+
+    const plain = /filename="?([^";]+)"?/i.exec(header);
+
+    return plain?.[1] ?? fallback;
+}
+
 /**
- * Download through a real anchor rather than `window.open`.
+ * Download a report as a blob, so the screen can say "preparando…" and surface a
+ * real failure.
  *
- * `window.open` opens a tab the browser cannot style and may block; an anchor download is what
- * the browser treats as a download, so the `Content-Disposition` filename the server chose is the
- * one that lands on disk.
+ * The previous anchor-fired-and-forget could neither show progress nor tell the
+ * person that a 403 or a 500 had produced an HTML error page instead of a
+ * document: the browser simply navigated away. Fetching first means a failure is
+ * an error message on this screen, and a success is a file with the server's own
+ * name.
+ */
+async function descargarArchivo(url: string, key: string, fallbackName: string): Promise<boolean> {
+    errorDescarga.value = null;
+    descargandoFormato.value = key;
+
+    try {
+        const response = await fetch(url, {
+            credentials: 'same-origin',
+            headers: { Accept: '*/*' },
+        });
+
+        if (!response.ok) {
+            throw new Error(`La descarga respondió ${response.status}.`);
+        }
+
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+
+        try {
+            const enlace = document.createElement('a');
+
+            enlace.href = objectUrl;
+            enlace.download = filenameFrom(response, fallbackName);
+            document.body.appendChild(enlace);
+            enlace.click();
+            enlace.remove();
+        } finally {
+            // The browser keeps the blob alive until the download starts.
+            window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+        }
+
+        return true;
+    } catch {
+        errorDescarga.value = 'No se pudo descargar el archivo. Intente de nuevo.';
+
+        return false;
+    } finally {
+        descargandoFormato.value = null;
+    }
+}
+
+/**
+ * The operational workbook, with the same progress and error handling as the
+ * table exports.
  */
 function descargarLibro(): void {
     errorLibro.value = null;
     descargandoLibro.value = true;
 
-    try {
-        const enlace = document.createElement('a');
-
-        enlace.href = urlLibro();
-        enlace.rel = 'noopener';
-        document.body.appendChild(enlace);
-        enlace.click();
-        enlace.remove();
-    } catch {
-        errorLibro.value = 'No se pudo iniciar la descarga del libro operativo.';
-    } finally {
-        descargandoLibro.value = false;
-    }
+    void descargarArchivo(urlLibro(), 'libro', 'libro-operativo.xlsx')
+        .then((ok) => {
+            if (!ok) {
+                errorLibro.value = errorDescarga.value;
+            }
+        })
+        .finally(() => {
+            descargandoLibro.value = false;
+        });
 }
 
 const filtroLimpio = computed(() => {
@@ -172,7 +240,7 @@ function urlDescarga(format: string): string {
 
 /** §54: the download uses exactly the filters the table was loaded with. */
 function descargar(format: string): void {
-    window.open(urlDescarga(format), '_blank', 'noopener');
+    void descargarArchivo(urlDescarga(format), format, `reporte.${format}`);
 }
 
 async function cargar(): Promise<void> {
@@ -216,18 +284,35 @@ onMounted(async () => {
             <h1 class="h4 mb-0">Reportes</h1>
 
             <div v-if="puedeExportar" class="d-flex gap-2">
-                <AppButton variant="ghost" @click="descargar('xlsx')">
+                <AppButton
+                    variant="ghost"
+                    :busy="descargandoFormato === 'xlsx'"
+                    :disabled="descargandoFormato !== null"
+                    @click="descargar('xlsx')"
+                >
                     XLSX
                 </AppButton>
-                <AppButton variant="ghost" @click="descargar('csv')">
+                <AppButton
+                    variant="ghost"
+                    :busy="descargandoFormato === 'csv'"
+                    :disabled="descargandoFormato !== null"
+                    @click="descargar('csv')"
+                >
                     CSV
                 </AppButton>
-                <AppButton variant="primary" @click="descargar('pdf')">
+                <AppButton
+                    variant="primary"
+                    :busy="descargandoFormato === 'pdf'"
+                    :disabled="descargandoFormato !== null"
+                    @click="descargar('pdf')"
+                >
                     <i class="bi bi-file-earmark-pdf me-1" aria-hidden="true" />
                     Descargar PDF de morosos
                 </AppButton>
             </div>
         </div>
+
+        <AppAlert v-if="errorDescarga" variant="danger" :message="errorDescarga" class="mb-3" />
 
         <!--
             FIX-EXPORT-IMPORT-03 Block C.
@@ -301,6 +386,7 @@ onMounted(async () => {
 
                     <div class="col-12 col-md-2 d-grid">
                         <AppButton
+                            :busy="descargandoLibro"
                             :disabled="descargandoLibro || libro.hasta < libro.desde"
                             @click="descargarLibro"
                         >

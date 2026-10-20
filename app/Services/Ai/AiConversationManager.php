@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace App\Services\Ai;
 
 use App\Models\AiArtifact;
+use App\Models\AiAttachment;
 use App\Models\AiConversation;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 
 /**
  * Renaming, titling and deleting an assistant conversation.
@@ -38,6 +38,8 @@ final class AiConversationManager
 {
     /** The longest title the list stores and shows. */
     public const TITLE_LIMIT = 80;
+
+    public function __construct(private readonly AiArtifactCleaner $cleaner) {}
 
     /**
      * The placeholder title a freshly opened conversation carries.
@@ -140,31 +142,70 @@ final class AiConversationManager
     /**
      * Delete a conversation and the private material that belonged to it.
      *
-     * Runs in a transaction, but the file bytes are removed first: a database
-     * rollback cannot restore a file, and leaving the row gone but the bytes on
-     * disk is the worse of the two failures. The files are read from the
-     * conversation they were generated in, scoped to the owner, so a shared disk
-     * cannot be touched.
+     * ## The bytes are removed only after the transaction commits
+     *
+     * The transaction records the paths in the {@see AiArtifactCleaner} outbox,
+     * deletes the artifact rows and then the conversation. Only once that
+     * commits are the bytes removed — and only then, so a rollback cannot leave
+     * a file deleted for a row that still exists. If the process dies after the
+     * commit but before the bytes are gone, the outbox row survives and the
+     * scheduled `ai:cleanup-artifacts` command finishes the job. Deleting a
+     * conversation is therefore atomic in the database and durable for the disk:
+     * a committed delete always ends with no orphaned file.
+     *
+     * ## What it cannot touch
+     *
+     * The artifact and attachment queries are scoped to the conversation *and*
+     * its owner, so a shared disk or a forged id cannot reach another account's
+     * files. Messages, proposals, attachments and suggestions cascade with the
+     * conversation;
+     * operational tasks, clients, obligations and administrative documents do
+     * not reference it, so nothing administrative is deleted. Re-running the
+     * delete is safe: the row deletes affect zero rows and the outbox ignores the
+     * duplicate path.
      */
     public function delete(AiConversation $conversation): void
     {
         $artifacts = AiArtifact::query()
             ->where('conversation_id', $conversation->id)
             ->where('user_id', $conversation->user_id)
-            ->get();
+            ->get(['id', 'user_id', 'storage_path']);
 
-        foreach ($artifacts as $artifact) {
-            if (is_string($artifact->storage_path) && $artifact->storage_path !== '') {
-                Storage::disk('local')->delete($artifact->storage_path);
-            }
-        }
+        $attachments = AiAttachment::query()
+            ->where('ai_conversation_id', $conversation->id)
+            ->where('user_id', $conversation->user_id)
+            ->get(['id', 'user_id', 'storage_path']);
 
-        DB::transaction(function () use ($conversation, $artifacts): void {
+        DB::transaction(function () use ($conversation, $artifacts, $attachments): void {
+            $this->cleaner->queue([
+                ...$artifacts
+                    ->filter(fn (AiArtifact $artifact): bool => is_string($artifact->storage_path) && $artifact->storage_path !== '')
+                    ->map(fn (AiArtifact $artifact): array => [
+                        'user_id' => (int) $artifact->user_id,
+                        'storage_path' => (string) $artifact->storage_path,
+                    ])
+                    ->values()
+                    ->all(),
+                ...$attachments
+                    ->filter(fn (AiAttachment $attachment): bool => is_string($attachment->storage_path) && $attachment->storage_path !== '')
+                    ->map(fn (AiAttachment $attachment): array => [
+                        'user_id' => (int) $attachment->user_id,
+                        'storage_path' => (string) $attachment->storage_path,
+                    ])
+                    ->values()
+                    ->all(),
+            ]);
+
             AiArtifact::query()->whereIn('id', $artifacts->pluck('id')->all())->delete();
+
             // Messages, proposals, attachments and suggestions cascade with the
             // conversation; operational tasks, clients and obligations do not
             // reference it, so nothing administrative is touched.
             $conversation->delete();
         });
+
+        // After the commit only. A failure here is not fatal: the outbox row
+        // remains and the scheduler retries it.
+        $this->cleaner->process();
     }
 }

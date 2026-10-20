@@ -85,6 +85,16 @@ const selectedId = computed<number | null>(() => {
     return Number.isFinite(value) ? value : null
 })
 
+/**
+ * A selection resolved from the server when it is not in the current results.
+ *
+ * Editing an existing record preselects an id without a label, and the old
+ * fallback printed `Cliente #12` — an internal number, not a person. Asking the
+ * server for that one client gives the name and document the operator needs to
+ * confirm they are editing the right person.
+ */
+const resolvedSelection = ref<{ id: number; label: string } | null>(null)
+
 /** What to name the current selection, preferring the caller's own label when it has one. */
 const selectedName = computed(() => {
     if (props.selectedLabel) {
@@ -93,7 +103,15 @@ const selectedName = computed(() => {
 
     const chosen = options.value.find((option) => option.id === selectedId.value)
 
-    return chosen?.label ?? `Cliente #${selectedId.value ?? ''}`
+    if (chosen) {
+        return chosen.label
+    }
+
+    if (resolvedSelection.value?.id === selectedId.value) {
+        return resolvedSelection.value.label
+    }
+
+    return selectedId.value === null ? '' : 'Cliente seleccionado'
 })
 
 /** "Nombre — CC 12345678": both halves, because a name alone is rarely unique. */
@@ -189,6 +207,32 @@ watch(search, () => {
     scheduleSearch(300)
 })
 
+// Resolve a preselected id that is not among the search results, so the
+// confirmation line shows a name rather than an internal number.
+watch(selectedId, async (id) => {
+    resolvedSelection.value = null
+
+    if (id === null || props.selectedLabel) {
+        return
+    }
+
+    if (options.value.some((option) => option.id === id)) {
+        return
+    }
+
+    try {
+        const payload = await businessApi.clients.show(id)
+
+        // The selection may have changed while the request was in flight.
+        if (selectedId.value === id) {
+            resolvedSelection.value = { id, label: describe(payload.client) }
+        }
+    } catch {
+        // The selection stays usable; the line falls back to a neutral label
+        // rather than inventing a name.
+    }
+}, { immediate: true })
+
 // Loaded as soon as the picker appears, so the form is usable without typing first.
 onMounted(() => {
     void runSearch()
@@ -242,7 +286,7 @@ defineExpose({ reload: runSearch })
         </ul>
 
         <div v-if="selectedId !== null" class="form-text mt-1">
-            Cliente seleccionado: {{ selectedName }} (id {{ selectedId }}).
+            Cliente seleccionado: {{ selectedName }}.
             <button type="button" class="btn btn-link btn-sm p-0 align-baseline" @click="clear">
                 Cambiar
             </button>

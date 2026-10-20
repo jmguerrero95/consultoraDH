@@ -94,9 +94,11 @@ final class AiAssistantService
         private readonly TaskAssigneeGuard $assigneeGuard,
     ) {}
 
-    public function ask(AiConversation $conversation, string $question, User $user): array
+    public function ask(AiConversation $conversation, string $question, User $user, ?string $clientTurnId = null): array
     {
-        // Build message history from prior exchanges (bounded)
+        // Build message history from prior exchanges (bounded). Only completed
+        // turns are history, so a failed or in-flight one is never replayed to
+        // the model — see `conversationHistory`.
         $history = $this->conversationHistory($conversation);
         $recentQuestions = $this->recentUserQuestions($conversation);
 
@@ -105,6 +107,12 @@ final class AiAssistantService
             ...$history,
             AiMessage::user($question),
         ];
+
+        // §10: the turn becomes a durable row *before* the provider is asked, so
+        // a failure — or a process that dies mid-turn — still leaves the question
+        // the person can see and retry. `client_turn_id` makes a retry the same
+        // attempt, not a second one.
+        $userMessage = $this->beginUserTurn($conversation, $question, $clientTurnId);
 
         // One budget for the whole turn, created *before* anything spends time.
         // The A07-R4 defect was that document retrieval ran before the budget
@@ -124,7 +132,14 @@ final class AiAssistantService
         $this->deadline->set($budget->deadline);
 
         try {
-            return $this->runTurn($conversation, $question, $user, $messages, $history, $recentQuestions, $budget);
+            return $this->runTurn($conversation, $question, $user, $messages, $history, $recentQuestions, $budget, $userMessage);
+        } catch (\Throwable $e) {
+            // The turn did not complete: keep it as a failed row so the person
+            // still sees what they asked and can retry the same attempt. The
+            // failure text is safe — never the provider's raw words.
+            $this->failUserTurn($userMessage, $e);
+
+            throw $e;
         } finally {
             // Cleared so a later caller in the same worker does not inherit a
             // stale deadline and accidentally cap its own timeouts.
@@ -137,6 +152,169 @@ final class AiAssistantService
     }
 
     /**
+     * Make the question a durable turn before any provider is asked.
+     *
+     * Without a `client_turn_id` this is a plain insert: a caller that does not
+     * retry does not need idempotency. With one, the row for that attempt is
+     * reused, so a retry of a failed turn updates the same row instead of
+     * creating a second, duplicate question in the thread. A *completed* turn is
+     * short-circuited by the caller before this runs, so it is never re-run.
+     */
+    private function beginUserTurn(AiConversation $conversation, string $question, ?string $clientTurnId): AiMessageModel
+    {
+        $values = [
+            'role' => AiMessage::ROLE_USER,
+            'content' => $question,
+            'provider' => null,
+            'model' => null,
+            'status' => AiMessageModel::STATUS_PROCESSING,
+            'error' => null,
+        ];
+
+        if ($clientTurnId === null) {
+            return AiMessageModel::query()->create([
+                'ai_conversation_id' => $conversation->id,
+                ...$values,
+            ]);
+        }
+
+        return AiMessageModel::query()->updateOrCreate(
+            [
+                'ai_conversation_id' => $conversation->id,
+                'client_turn_id' => $clientTurnId,
+            ],
+            $values,
+        );
+    }
+
+    /**
+     * Mark a turn that did not complete, with a safe reason.
+     */
+    private function failUserTurn(AiMessageModel $message, \Throwable $error): void
+    {
+        $message->forceFill([
+            'status' => AiMessageModel::STATUS_FAILED,
+            'error' => $this->safeTurnError($error),
+        ])->save();
+    }
+
+    /**
+     * A short, safe description of a failed turn.
+     *
+     * The provider's own words are never surfaced here: a quota refusal often
+     * quotes a commercial pitch and a policy refusal can quote the content. The
+     * person already gets the classified sentence from the controller; this is
+     * the value stored on the row and shown in the transcript.
+     */
+    private function safeTurnError(\Throwable $error): string
+    {
+        return match (true) {
+            $error instanceof AiProviderException => $error->publicMessage(),
+            $error instanceof AiTurnFailed => 'El asistente no produjo una respuesta. Intenta reformular la pregunta.',
+            default => 'No fue posible completar la consulta esta vez.',
+        };
+    }
+
+    /**
+     * The stored result of a turn this conversation already completed.
+     *
+     * Used to replay a retried turn instead of executing it a second time. The
+     * lookup is scoped to the conversation (and therefore its owner), so a
+     * replayed id can never read another account's text. Returns null when the
+     * attempt is unknown, still running or failed — those are meant to be run.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function completedTurnResult(AiConversation $conversation, string $clientTurnId): ?array
+    {
+        $userMessage = AiMessageModel::query()
+            ->where('ai_conversation_id', $conversation->id)
+            ->where('client_turn_id', $clientTurnId)
+            ->where('status', AiMessageModel::STATUS_COMPLETED)
+            ->first();
+
+        if ($userMessage === null) {
+            return null;
+        }
+
+        // Bound the reply to *this* turn. A completed turn that produced only a
+        // proposal or an artifact has no assistant message; without the next
+        // user-message boundary, the query would pick a later turn's reply and
+        // replay it as the answer to this one.
+        $nextUserMessageId = AiMessageModel::query()
+            ->where('ai_conversation_id', $conversation->id)
+            ->where('role', AiMessage::ROLE_USER)
+            ->where('id', '>', $userMessage->id)
+            ->orderBy('id')
+            ->value('id');
+
+        $assistantQuery = AiMessageModel::query()
+            ->where('ai_conversation_id', $conversation->id)
+            ->where('role', AiMessage::ROLE_ASSISTANT)
+            ->where('id', '>', $userMessage->id);
+
+        if (is_int($nextUserMessageId) || is_numeric($nextUserMessageId)) {
+            $assistantQuery->where('id', '<', (int) $nextUserMessageId);
+        }
+
+        $assistantMessage = $assistantQuery->orderBy('id')->first();
+
+        return [
+            'conversation_id' => $conversation->id,
+            'reply' => (string) ($assistantMessage->content ?? ''),
+            'provider' => $assistantMessage->provider ?? $userMessage->provider,
+            'model' => $assistantMessage->model ?? $userMessage->model,
+            'proposals' => $this->pendingProposalsForMessage((int) $userMessage->id),
+            'artifacts' => $assistantMessage === null ? [] : $this->artifactsForMessage((int) $assistantMessage->id),
+            'tools' => [],
+            'replayed' => true,
+        ];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function pendingProposalsForMessage(int $messageId): array
+    {
+        return AiActionProposal::query()
+            ->where('message_id', $messageId)
+            ->where('status', AiActionProposal::PENDING)
+            ->where('expires_at', '>', now())
+            ->orderBy('id')
+            ->get()
+            ->map(fn (AiActionProposal $proposal): array => [
+                'id' => $proposal->id,
+                'tool' => $proposal->tool,
+                'arguments' => $proposal->arguments,
+                'expires_at' => $proposal->expires_at?->toDateTimeString(),
+                'pending' => true,
+                'message_id' => $proposal->message_id !== null ? (int) $proposal->message_id : null,
+            ])
+            ->all();
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function artifactsForMessage(int $messageId): array
+    {
+        return AiArtifact::query()
+            ->where('message_id', $messageId)
+            ->orderBy('id')
+            ->get()
+            ->map(fn (AiArtifact $artifact): array => [
+                'id' => $artifact->id,
+                'filename' => $artifact->display_filename,
+                'format' => $artifact->format,
+                'size_bytes' => (int) $artifact->size_bytes,
+                'download_url' => route('api.ai.artifacts.download', ['artifact' => $artifact->id]),
+                'expires_at' => $artifact->expires_at?->toDateTimeString(),
+                'message_id' => $artifact->message_id !== null ? (int) $artifact->message_id : null,
+            ])
+            ->all();
+    }
+
+    /**
      * The body of a turn, inside the budget and the tool deadline.
      *
      * @param  list<AiMessage>  $messages
@@ -144,8 +322,10 @@ final class AiAssistantService
      * @param  list<string>  $recentQuestions
      * @return array<string, mixed>
      */
-    private function runTurn(AiConversation $conversation, string $question, User $user, array $messages, array $history, array $recentQuestions, AiTurnBudget $budget): array
+    private function runTurn(AiConversation $conversation, string $question, User $user, array $messages, array $history, array $recentQuestions, AiTurnBudget $budget, AiMessageModel $userMessage): array
     {
+        // `$userMessage` is threaded through to `processResult`, which completes
+        // the durable turn row created in `ask()` (§10).
         // One id for the whole user turn, shared by every provider round and by
         // the turn summary in the diagnostics, and published to the tools so one
         // that must find this conversation's own material can do so without
@@ -230,6 +410,50 @@ final class AiAssistantService
         try {
             $result = $this->resolver->complete($messages, $toolDefinitions, null, $routing['task'], $budget->deadline, $requiresClientData, $budget, $turn, 1);
         } catch (AiProviderException $e) {
+            // Bounded empty-response recovery. A 200 with neither prose nor a
+            // tool call is treated as a provider fault by the adapter; failing
+            // the whole turn on it loses a question to a transient defect. The
+            // question is re-asked exactly once without tools, so this cannot
+            // propose or execute a write, and a second empty answer still fails
+            // the turn explicitly.
+            if ($e->kind === 'empty') {
+                $recovery = $this->synthesizeWithoutTools(
+                    [
+                        ...$messages,
+                        AiMessage::user('Tu respuesta anterior llegó vacía. Responde ahora a la última pregunta en texto, sin llamar herramientas.'),
+                    ],
+                    $requiresClientData,
+                    $budget,
+                    $turn,
+                    1,
+                );
+
+                if ($recovery !== null) {
+                    $recovered = self::stripToolCallLeak((string) $recovery['content']);
+
+                    if (trim($recovered) !== '') {
+                        return $this->processResult(
+                            new AiResponse(
+                                content: $recovered,
+                                provider: $recovery['provider'],
+                                model: $recovery['model'],
+                            ),
+                            $conversation,
+                            $user,
+                            $question,
+                            $messages,
+                            $toolDefinitions,
+                            $budget,
+                            $requiresClientData,
+                            $external,
+                            $turn,
+                            $researchIntent,
+                            $userMessage,
+                        );
+                    }
+                }
+            }
+
             $this->recordTurnSummary(
                 $turn, 0, max(1, (int) config('ai.tool_max_rounds', 4)), 0, [], 0,
                 $requiresClientData, $requiresClientData ? 'internal_request' : null,
@@ -239,7 +463,7 @@ final class AiAssistantService
             throw $e;
         }
 
-        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external, $turn, $researchIntent);
+        return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external, $turn, $researchIntent, $userMessage);
     }
 
     /**
@@ -638,6 +862,10 @@ final class AiAssistantService
         return AiMessageModel::query()
             ->where('ai_conversation_id', $conversation->id)
             ->where('role', AiMessage::ROLE_USER)
+            // Only a completed turn is context. A failed or in-flight question is
+            // not something the model answered, so replaying it would be inventing
+            // a prior exchange that never happened.
+            ->where('status', AiMessageModel::STATUS_COMPLETED)
             ->orderByDesc('id')
             ->limit($limit)
             ->pluck('content')
@@ -818,8 +1046,12 @@ final class AiAssistantService
      */
     private function conversationHistory(AiConversation $conversation): array
     {
+        // Only completed turns are history. A failed turn is kept so the person
+        // still sees the question, but it is not a prior exchange the model gave
+        // an answer to, so it must not be replayed as one.
         $allMessages = AiMessageModel::query()
             ->where('ai_conversation_id', $conversation->id)
+            ->where('status', AiMessageModel::STATUS_COMPLETED)
             ->orderBy('id')
             ->get();
 
@@ -878,7 +1110,7 @@ final class AiAssistantService
      * @param  string|null  $turn  the whole user turn's correlation id, shared by every provider
      *                             round and the turn summary in the diagnostics
      */
-    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = [], ?string $turn = null, bool $researchIntent = false): array
+    private function processResult(AiResponse $result, AiConversation $conversation, User $user, string $question, array $messages, array $toolDefinitions, AiTurnBudget $budget, bool $requiresClientData = false, array $prefetched = [], ?string $turn = null, bool $researchIntent = false, ?AiMessageModel $userMessage = null): array
     {
         $turn ??= substr(bin2hex(random_bytes(6)), 0, 12);
 
@@ -920,7 +1152,7 @@ final class AiAssistantService
         // usable and, after two in a row, steers the next call to a tool-free
         // synthesis instead of letting the model ask for another tool. See
         // AiTurnSupervisor for the rule and why it is not a second model.
-        $supervisor = new AiTurnSupervisor();
+        $supervisor = new AiTurnSupervisor;
 
         $currentResult = $result;
 
@@ -1618,6 +1850,39 @@ final class AiAssistantService
         // stores no assistant message.
         $hasReply = trim((string) $reply) !== '';
 
+        // Bounded empty-response recovery.
+        //
+        // A provider sometimes returns an empty body for a turn that was not
+        // refused. Failing immediately loses the question to a transient defect;
+        // asking forever would spend quota on a model that has nothing to say.
+        // So the turn is re-asked exactly once, without tools: no write can be
+        // proposed or executed by this call, so a retry here cannot duplicate an
+        // accepted action, and the turn's real proposals and artifacts — if any
+        // exist — already skip this branch entirely.
+        if (! $hasReply && $proposals === [] && $artifacts === []) {
+            $recovery = $this->synthesizeWithoutTools(
+                [
+                    ...$messages,
+                    AiMessage::user('Tu respuesta anterior llegó vacía. Responde ahora a la última pregunta en texto, sin llamar herramientas.'),
+                ],
+                $turnRequiresClientData,
+                $budget,
+                $turn,
+                $round + 1,
+            );
+
+            if ($recovery !== null) {
+                $recovered = self::stripToolCallLeak((string) $recovery['content']);
+
+                if (trim($recovered) !== '') {
+                    $reply = $recovered;
+                    $replyProvider = $recovery['provider'];
+                    $replyModel = $recovery['model'];
+                    $hasReply = true;
+                }
+            }
+        }
+
         if (! $hasReply && $proposals === [] && $artifacts === []) {
             $this->recordTurnSummary(
                 $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
@@ -1631,14 +1896,15 @@ final class AiAssistantService
         $provider = $replyProvider ?? $currentResult->provider ?? $result->provider;
         $model = $replyModel ?? $currentResult->model ?? $result->model;
 
-        // Persist user message and assistant reply
-        $userMessage = AiMessageModel::query()->create([
-            'ai_conversation_id' => $conversation->id,
-            'role' => AiMessage::ROLE_USER,
-            'content' => $question,
+        // The user message was already made durable before the turn started
+        // (§10); completing it records who answered and marks it as history. The
+        // assistant reply is created separately, below.
+        $userMessage->forceFill([
             'provider' => $provider,
             'model' => $model,
-        ]);
+            'status' => AiMessageModel::STATUS_COMPLETED,
+            'error' => null,
+        ])->save();
 
         // Link proposals created in this turn to the user message that asked for them.
         if ($createdProposalIds !== []) {

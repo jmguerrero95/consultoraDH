@@ -20,6 +20,18 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  */
 class AiMessage extends Model
 {
+    /**
+     * §10 turn states. A `completed` turn is history; a `failed` turn is kept so
+     * the person still sees their question but is never replayed to the model.
+     */
+    public const STATUS_PENDING = 'pending';
+
+    public const STATUS_PROCESSING = 'processing';
+
+    public const STATUS_FAILED = 'failed';
+
+    public const STATUS_COMPLETED = 'completed';
+
     protected $table = 'ai_messages';
 
     protected $fillable = [
@@ -28,10 +40,19 @@ class AiMessage extends Model
         'content',
         'provider',
         'model',
+        'client_turn_id',
+        'status',
+        'error',
     ];
 
     protected function conversation(): BelongsTo
     {
         return $this->belongsTo(AiConversation::class, 'ai_conversation_id');
+    }
+
+    /** Whether this turn belongs in the history sent to the model. */
+    public function isCompleted(): bool
+    {
+        return ($this->status ?? self::STATUS_COMPLETED) === self::STATUS_COMPLETED;
     }
 }

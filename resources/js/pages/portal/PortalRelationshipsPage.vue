@@ -66,7 +66,7 @@ onMounted(async () => {
                     <tbody>
                         <tr v-for="r in relaciones" :key="r.id">
                             <td>{{ r.company_name }}</td>
-                            <td>{{ r.company_tax_id }}</td>
+                            <td>{{ r.company_tax_id_label ?? r.company_tax_id ?? '—' }}</td>
                             <td>{{ r.job_title ?? '—' }}</td>
                             <td>{{ fecha(r.started_on) }}</td>
                             <td>{{ r.ended_on ? fecha(r.ended_on) : 'Vigente' }}</td>

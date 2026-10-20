@@ -429,10 +429,19 @@ final class AiAssistantRuntimeTest extends TestCase
             $this->assertTrue($e->retryable, 'Another candidate may still answer the same turn.');
         }
 
+        // §10: the question is now a durable, failed turn — the person still
+        // sees what they asked after a reload — but no assistant reply is stored,
+        // so a failed turn can never be mistaken for an answer.
         $this->assertSame(
             0,
-            $this->myMessages()->count(),
-            'Nothing is persisted when no model answered.'
+            $this->myMessages()->where('role', AiMessage::ROLE_ASSISTANT)->count(),
+            'A failed turn stores no assistant reply.'
+        );
+        $this->assertSame(1, $this->myMessages()->where('role', AiMessage::ROLE_USER)->count());
+        $this->assertSame(
+            AiMessageModel::STATUS_FAILED,
+            $this->myMessages()->where('role', AiMessage::ROLE_USER)->firstOrFail()->status,
+            'The failed question is kept so it can be retried by its turn id.'
         );
     }
 

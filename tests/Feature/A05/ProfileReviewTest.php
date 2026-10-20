@@ -118,10 +118,10 @@ it('U2: an update A02 refuses leaves the request pending and the client unchange
     $request = proposalFor($this);
 
     // A real refusal from the frozen action, not a fault injected into it. `phone` is
-    // `varchar(40)`, and PostgreSQL refuses a longer value — so `UpdateClient::execute()`
-    // genuinely throws while saving, which is exactly the situation the approval path has
-    // to survive.
-    $demasiadoLargo = str_repeat('9', 80);
+    // `varchar(180)` since FIX-LOCAL-01 widened it for masked workbook values, and
+    // PostgreSQL refuses a longer value — so `UpdateClient::execute()` genuinely throws
+    // while saving, which is exactly the situation the approval path has to survive.
+    $demasiadoLargo = str_repeat('9', 200);
 
     $request->forceFill(['proposed_changes' => ['phone' => $demasiadoLargo]])->save();
     $request->refresh();

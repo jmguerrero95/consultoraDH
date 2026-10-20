@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Tests\Feature\A07;
 
+use App\Models\User;
 use App\Services\Ai\AiAvailability;
 use App\Services\Ai\AiModelHealth;
 use App\Services\Ai\AiProviderResolver;
 use App\Services\Ai\ModelCandidate;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 
 /**
@@ -137,7 +139,9 @@ final class AiAvailabilityTest extends TestCase
 
         // A single independent provider is a single point of failure: usable, but
         // honest about having no failover, so reported as degraded, not available.
+        // `internal_data` needs tools, so it takes observed tool use to be proven.
         $this->health()->recordSuccess($this->candidate('groq-model'), 120);
+        $this->health()->markToolsDemonstrated($this->candidate('groq-model'));
 
         $row = $this->availability()->report()['internal_data'];
 
@@ -155,9 +159,11 @@ final class AiAvailabilityTest extends TestCase
             'gemini' => $this->provider(self::GEMINI, 'gemini-key', ['gemini-model'], 2),
         ]]);
 
-        // Only Groq has answered, but Gemini is a second independent provider
-        // that a failover can still try: two chances, so available.
+        // Only Groq has answered (and used a tool), but Gemini is a second
+        // independent provider that a failover can still try: two chances, so
+        // available.
         $this->health()->recordSuccess($this->candidate('groq-model'), 120);
+        $this->health()->markToolsDemonstrated($this->candidate('groq-model'));
 
         $row = $this->availability()->report()['internal_data'];
 
@@ -176,6 +182,8 @@ final class AiAvailabilityTest extends TestCase
 
         $this->health()->recordSuccess($this->candidate('groq-model'), 100);
         $this->health()->recordSuccess($this->candidate('gemini-model'), 200);
+        $this->health()->markToolsDemonstrated($this->candidate('groq-model'));
+        $this->health()->markToolsDemonstrated($this->candidate('gemini-model'));
 
         $row = $this->availability()->report()['internal_data'];
 
@@ -185,6 +193,49 @@ final class AiAvailabilityTest extends TestCase
         $this->assertNull($row['reason']);
         $this->assertSame(2, $this->availability()->independentPrivateProviders());
         $this->assertContains('internal_data', $this->availability()->readyOperations());
+    }
+
+    public function test_a_tool_operation_needs_observed_tool_use_not_only_a_chat_answer(): void
+    {
+        config(['ai.providers' => [
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1),
+            'gemini' => $this->provider(self::GEMINI, 'gemini-key', ['gemini-model'], 2),
+        ]]);
+
+        // Both models answer plain chat turns, which proves the conversation
+        // path — but neither has emitted a tool call. A tool-bearing operation
+        // must not be called available on the strength of a chat answer alone.
+        $this->health()->recordSuccess($this->candidate('groq-model'), 100);
+        $this->health()->recordSuccess($this->candidate('gemini-model'), 120);
+
+        $report = $this->availability()->report();
+
+        $this->assertSame('unverified', $report['internal_data']['state']);
+        $this->assertFalse($report['internal_data']['available']);
+        $this->assertStringContainsString('herramientas', (string) $report['internal_data']['reason']);
+
+        // The same pool answers a plain general question with confidence.
+        $this->assertSame('available', $report['general_chat']['state']);
+        $this->assertTrue($report['general_chat']['available']);
+    }
+
+    public function test_a_plain_operation_is_proven_by_a_recent_answer_without_tool_evidence(): void
+    {
+        config(['ai.providers' => [
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1),
+            'gemini' => $this->provider(self::GEMINI, 'gemini-key', ['gemini-model'], 2),
+        ]]);
+
+        // `private_chat` needs chat + client_data, but not tools: a recent
+        // answer is enough proof. Tool evidence must not be demanded of an
+        // operation that never declared the capability.
+        $this->health()->recordSuccess($this->candidate('groq-model', ['chat', 'client_data']), 100);
+
+        $row = $this->availability()->report()['private_chat'];
+
+        $this->assertSame('available', $row['state']);
+        $this->assertTrue($row['available']);
+        $this->assertSame('groq-model', $row['preferred_model']);
     }
 
     public function test_a_training_policy_provider_is_excluded_from_private_operations(): void
@@ -292,8 +343,8 @@ final class AiAvailabilityTest extends TestCase
 
     public function test_status_endpoint_exposes_capabilities_and_independent_count(): void
     {
-        $permission = \Spatie\Permission\Models\Permission::firstOrCreate(['name' => 'ai.use', 'guard_name' => 'web']);
-        $user = \App\Models\User::factory()->create();
+        $permission = Permission::firstOrCreate(['name' => 'ai.use', 'guard_name' => 'web']);
+        $user = User::factory()->create();
         $user->givePermissionTo($permission);
 
         config(['ai.providers' => [
@@ -303,6 +354,8 @@ final class AiAvailabilityTest extends TestCase
 
         $this->health()->recordSuccess($this->candidate('groq-model'), 100);
         $this->health()->recordSuccess($this->candidate('gemini-model'), 150);
+        $this->health()->markToolsDemonstrated($this->candidate('groq-model'));
+        $this->health()->markToolsDemonstrated($this->candidate('gemini-model'));
 
         $response = $this->actingAs($user)->getJson('/api/ai/status');
 

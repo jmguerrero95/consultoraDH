@@ -70,7 +70,10 @@ final readonly class ModelCandidate
      */
     public function supportsClientData(): bool
     {
-        if ($this->dataPolicy !== 'training') {
+        // Only an explicit `standard` classification permits real business
+        // data. An unknown or misspelled policy is treated like `training`:
+        // a configuration typo must fail closed, not silently unlock the gate.
+        if ($this->dataPolicy === 'standard') {
             return true;
         }
 

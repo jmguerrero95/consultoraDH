@@ -16,7 +16,7 @@ import { useAiTasks } from '@/composables/useTasks';
 import { useSuggestionContext } from '@/composables/useSuggestionContext';
 import { useVoice } from '@/composables/useVoice';
 import { useRoute } from 'vue-router';
-import { ai, groupArtifactsByMessage, groupProposalsByMessage } from '@/services/ai';
+import { ai, groupArtifactsByMessage, groupProposalsByMessage, newClientTurnId } from '@/services/ai';
 import { useAuthStore } from '@/stores/auth';
 import { readDraft, writeDraft } from '@/utils/drafts';
 
@@ -365,11 +365,12 @@ const availability = computed(() => {
 onMounted(async () => {
     await Promise.all([loadStatus(), loadConversations()]);
 
-    // A link from the widget names the conversation to open.
-    const fromQuery = conversationFromQuery();
+    // A link from the widget names the conversation to open; otherwise reopen
+    // the thread this person was last reading, so an F5 does not lose it.
+    const target = conversationFromQuery() ?? storedSelected();
 
-    if (fromQuery !== null && fromQuery !== selectedId.value) {
-        await selectConversation(fromQuery);
+    if (target !== null && target !== selectedId.value) {
+        await selectConversation(target);
     } else {
         // No thread named: restore whatever was typed for "new conversation".
         loadDraft();
@@ -443,6 +444,43 @@ async function loadConversations(): Promise<void> {
 /** This person's id, for scoping a draft to them. */
 function currentUserId(): number | null {
     return auth.user?.id ?? null;
+}
+
+/**
+ * The thread this person was reading, kept across a reload.
+ *
+ * Only the id is stored; the messages are always re-read from the server. The
+ * key carries the user id, so two accounts on one browser never reopen each
+ * other's thread. It is cleared when the thread is deleted or cannot be loaded.
+ */
+const STORAGE_CONVERSATION = 'cdh.asistente.conversation';
+
+function conversationStorageKey(): string {
+    return `${STORAGE_CONVERSATION}.${currentUserId() ?? 'anon'}`;
+}
+
+function persistSelected(): void {
+    try {
+        if (selectedId.value === null) {
+            window.localStorage.removeItem(conversationStorageKey());
+        } else {
+            window.localStorage.setItem(conversationStorageKey(), String(selectedId.value));
+        }
+    } catch {
+        // Storage can be unavailable (private mode, policy). The page still
+        // works for this session; it just will not reopen the thread.
+    }
+}
+
+function storedSelected(): number | null {
+    try {
+        const raw = window.localStorage.getItem(conversationStorageKey());
+        const value = raw === null ? Number.NaN : Number(raw);
+
+        return Number.isInteger(value) && value > 0 ? value : null;
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -554,6 +592,7 @@ async function selectConversation(id: number): Promise<void> {
     persistDraft();
 
     selectedId.value = id;
+    persistSelected();
     orphanProposals.value = [];
     sources.value = [];
     artifacts.value = [];
@@ -573,14 +612,20 @@ async function selectConversation(id: number): Promise<void> {
         const { byMessage, orphan } = groupArtifactsByMessage(payload.artifacts ?? []);
         const { byMessage: proposalsByMessage, orphan: orphanProposalsLoaded } = groupProposalsByMessage(payload.proposals ?? []);
 
-        messages.value = payload.messages.map((message) => ({
-            ...message,
-            // Files this reply produced, so they render under it rather than at
-            // the foot of the page.
-            artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
-            // Proposals this question asked for, inline with it.
-            proposals: typeof message.id === 'number' ? (proposalsByMessage.get(message.id) ?? []) : [],
-        }));
+        messages.value = payload.messages
+            // The transcript is the conversation between the person and the
+            // assistant; tool rows are internal machinery, not turns.
+            .filter((message) => message.role === 'user' || message.role === 'assistant')
+            .map((message) => ({
+                ...message,
+                // §10: an older server omits `status`; treat it as completed.
+                status: message.status ?? 'completed',
+                // Files this reply produced, so they render under it rather than
+                // at the foot of the page.
+                artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
+                // Proposals this question asked for, inline with it.
+                proposals: typeof message.id === 'number' ? (proposalsByMessage.get(message.id) ?? []) : [],
+            }));
 
         // Files with no reply to sit beside go to the collapsed section.
         artifacts.value = orphan;
@@ -593,6 +638,10 @@ async function selectConversation(id: number): Promise<void> {
         artifacts.value = [];
         orphanProposals.value = [];
         attachments.value = [];
+        // The thread is gone (deleted here or elsewhere) or unreadable. Forget
+        // the pointer instead of reopening a dead id on every reload.
+        selectedId.value = null;
+        persistSelected();
         error.value = readError(e, 'No fue posible cargar la conversación.');
     }
 
@@ -606,6 +655,9 @@ function startNewConversation(): void {
     persistDraft();
 
     selectedId.value = null;
+    // Forget the thread pointer too: reopening the page after "Nueva" must not
+    // jump back into the conversation the person just left.
+    persistSelected();
     messages.value = [];
     orphanProposals.value = [];
     sources.value = [];
@@ -622,34 +674,73 @@ function startNewConversation(): void {
 /**
  * Ask. The backend creates the conversation when none is selected, so the id
  * comes back on the first turn rather than from a separate create call.
+ *
+ * `retry` sends a question that already failed, reusing its `client_turn_id`.
+ * That is what makes the retry the same attempt rather than a second one: the
+ * server updates the failed row in place, and if the first attempt had in fact
+ * completed it replays the stored answer instead of running the turn again.
  */
-async function send(): Promise<void> {
-    const question = draft.value.trim();
+async function send(retry?: AiMessagePayload): Promise<void> {
+    const question = (retry?.content ?? draft.value).trim();
 
     if (question === '' || sending.value) {
         return;
     }
 
+    // Every attempt carries an id the server can recognise. A retry keeps the
+    // one it was first sent with; a new question gets a fresh one.
+    const clientTurnId = retry?.client_turn_id ?? newClientTurnId();
+
+    const isThisTurn = (message: AiMessagePayload): boolean =>
+        message.role === 'user' && message.client_turn_id === clientTurnId;
+
     sending.value = true;
     error.value = null;
     confirmation.value = null;
-    draft.value = '';
-    // The question is on its way, so the stored draft is no longer pending. The
-    // previous thread's key is cleared too: the id may change below.
-    persistDraft();
-    writeDraft(currentUserId(), selectedId.value, '');
 
-    // Rendered immediately so the question stays on screen while the model
-    // works; the reload below replaces it with the persisted copy.
-    // Include proposals array so they render inline with the question.
-    messages.value = [...messages.value, { role: 'user', content: question, provider: null, model: null, created_at: null, proposals: [] }];
+    if (retry === undefined) {
+        draft.value = '';
+        // The question is on its way, so the stored draft is no longer pending.
+        // The previous thread's key is cleared too: the id may change below.
+        persistDraft();
+        writeDraft(currentUserId(), selectedId.value, '');
+
+        // Rendered immediately so the question stays on screen while the model
+        // works. Its state is part of the bubble, so a failure survives a reload
+        // and can be retried from the transcript.
+        messages.value = [
+            ...messages.value,
+            {
+                role: 'user',
+                content: question,
+                provider: null,
+                model: null,
+                created_at: null,
+                proposals: [],
+                status: 'processing',
+                client_turn_id: clientTurnId,
+            },
+        ];
+    } else {
+        // A retry reuses the bubble that failed rather than adding a duplicate.
+        messages.value = messages.value.map((message) =>
+            message === retry ? { ...message, status: 'processing', client_turn_id: clientTurnId, error: null } : message,
+        );
+    }
+
     void scrollToLatest(true);
 
     try {
-        const turn = await ai.ask(question, selectedId.value);
+        const turn = await ai.ask(question, selectedId.value, clientTurnId);
 
         selectedId.value = turn.conversation_id;
+        persistSelected();
         collectSources(turn.tools);
+
+        // The attempt is now history: its state is what a reload will show.
+        messages.value = messages.value.map((message) =>
+            isThisTurn(message) ? { ...message, status: 'completed', error: null } : message,
+        );
 
         const turnArtifacts = turn.artifacts ?? [];
 
@@ -672,9 +763,7 @@ async function send(): Promise<void> {
         // whether or not the turn produced a textual reply.
         if (turn.proposals.length > 0) {
             messages.value = messages.value.map((message) =>
-                message.role === 'user' && message.content === question
-                    ? { ...message, proposals: turn.proposals }
-                    : message,
+                isThisTurn(message) ? { ...message, proposals: turn.proposals } : message,
             );
         } else if (turnArtifacts.length > 0) {
             // No prose to sit beside: the files go to the collapsed section.
@@ -684,13 +773,27 @@ async function send(): Promise<void> {
         await loadConversations();
         void scrollToLatest();
     } catch (e) {
-        // Keep the question in the draft: dropping it loses what was typed on a
-        // failure the user can retry, which is the moment it matters most.
-        draft.value = question;
-        // Stored under the thread it was asked in, which is the one that will
-        // still be selected after a reload so the retry lands where it belongs.
-        writeDraft(currentUserId(), selectedId.value, question);
-        error.value = readError(e, 'No fue posible completar la consulta.');
+        // The question stays on screen, marked failed, with its own id. That is
+        // the retry the person can act on: it survives a reload and does not
+        // cost them the text they typed.
+        const failure = readError(e, 'No fue posible completar la consulta.');
+
+        // A first question creates its conversation before the provider is
+        // asked. Adopting that id on failure is what lets an F5 show the failed
+        // turn and makes the retry land in the same thread, not a new one.
+        const failedId = conversationIdFromError(e);
+
+        if (failedId !== null && selectedId.value === null) {
+            selectedId.value = failedId;
+            persistSelected();
+            void loadConversations();
+        }
+
+        messages.value = messages.value.map((message) =>
+            isThisTurn(message) ? { ...message, status: 'failed', error: failure } : message,
+        );
+
+        error.value = failure;
     } finally {
         sending.value = false;
     }
@@ -774,8 +877,21 @@ async function rejectProposal(id: number): Promise<void> {
 async function refreshIfSelected(): Promise<void> {
     if (selectedId.value !== null) {
         const payload = await ai.history(selectedId.value);
-        messages.value = payload.messages;
-        artifacts.value = payload.artifacts ?? [];
+
+        const { byMessage, orphan } = groupArtifactsByMessage(payload.artifacts ?? []);
+        const { byMessage: proposalsByMessage, orphan: orphanProposalsLoaded } = groupProposalsByMessage(payload.proposals ?? []);
+
+        messages.value = payload.messages
+            .filter((message) => message.role === 'user' || message.role === 'assistant')
+            .map((message) => ({
+                ...message,
+                status: message.status ?? 'completed',
+                artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
+                proposals: typeof message.id === 'number' ? (proposalsByMessage.get(message.id) ?? []) : [],
+            }));
+
+        artifacts.value = orphan;
+        orphanProposals.value = orphanProposalsLoaded;
         attachments.value = payload.attachments ?? [];
     }
 }
@@ -818,6 +934,20 @@ function describeResult(tool: string, result: unknown): string {
 function readError(e: unknown, fallback: string): string {
     const message = (e as { message?: string } | null)?.message;
     return message !== undefined && message !== '' ? message : fallback;
+}
+
+/**
+ * The conversation a failed turn belongs to, when the server reported it.
+ *
+ * Only used when no thread is selected yet: the backend creates the conversation
+ * before asking the provider, so a failure on the first question would otherwise
+ * leave that failed row unreachable from the page.
+ */
+function conversationIdFromError(e: unknown): number | null {
+    const payload = (e as { payload?: { conversation_id?: unknown } } | null)?.payload;
+    const id = payload?.conversation_id;
+
+    return typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : null;
 }
 
 /**
@@ -1043,6 +1173,26 @@ function formatDate(value: string | null): string {
                         <SafeMarkdown v-if="message.role === 'assistant'" :content="message.content" />
                         <p v-else class="cdh-ai__message-body">{{ message.content }}</p>
 
+                        <!-- A failed question is kept in place and can be retried
+                             by its own attempt id; reloading the thread shows the
+                             same state rather than losing what was asked. -->
+                        <div
+                            v-if="message.role === 'user' && message.status === 'failed'"
+                            class="cdh-ai__message-failed"
+                            data-testid="failed-turn"
+                        >
+                            <p class="cdh-ai__message-error">{{ message.error || 'No se completó esta consulta.' }}</p>
+                            <AppButton
+                                type="button"
+                                size="sm"
+                                variant="secondary"
+                                :disabled="sending"
+                                @click="send(message)"
+                            >
+                                Reintentar
+                            </AppButton>
+                        </div>
+
                         <div class="cdh-ai__message-tools">
                             <SpeakButton
                                 v-if="message.role === 'assistant'"
@@ -1148,7 +1298,7 @@ function formatDate(value: string | null): string {
                     </ul>
                 </div>
 
-                <form class="cdh-ai__composer" @submit.prevent="send">
+                <form class="cdh-ai__composer" @submit.prevent="send()">
                     <label for="cdh-ai-input" class="visually-hidden">Mensaje para el asistente</label>
                     <textarea
                         id="cdh-ai-input"
@@ -1512,6 +1662,21 @@ function formatDate(value: string | null): string {
     z-index: 2;
     background: var(--cdh-surface);
     padding-bottom: calc(var(--cdh-space-2) + env(safe-area-inset-bottom, 0px));
+}
+
+.cdh-ai__message-failed {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: var(--cdh-space-2);
+    margin-top: var(--cdh-space-1);
+}
+
+.cdh-ai__message-error {
+    margin: 0;
+    font-size: 0.8125rem;
+    color: var(--cdh-danger, #b42318);
 }
 
 .cdh-ai__message-tools {

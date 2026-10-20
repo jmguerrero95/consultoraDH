@@ -70,7 +70,7 @@ final class AiAssistantController extends Controller
      * plainly rather than shown a 500. `recoverable` is what lets the interface
      * offer a retry instead of treating it as a permanent error.
      */
-    private function unavailable(\Throwable $e): JsonResponse
+    private function unavailable(\Throwable $e, ?AiConversation $conversation = null): JsonResponse
     {
         // The provider's own words are never surfaced. The exception message can
         // quote the refusal — which for a quota is often a commercial invitation
@@ -91,6 +91,11 @@ final class AiAssistantController extends Controller
             'error' => $message,
             'message' => $message,
             'recoverable' => true,
+            // The failed turn lives in this conversation. Returning its id even
+            // on a failure lets the browser adopt it, so an F5 shows the failed
+            // question and a retry targets the same turn instead of creating a
+            // second conversation with a second row.
+            ...($conversation !== null ? ['conversation_id' => $conversation->id] : []),
         ], 503);
     }
 
@@ -256,10 +261,33 @@ final class AiAssistantController extends Controller
             ]);
         }
 
+        $clientTurnId = $this->clientTurnId($request);
+
+        // §10: a retry of a turn this conversation already completed is replayed,
+        // never executed again — the accepted work is not done twice.
+        if ($clientTurnId !== null) {
+            $replay = $this->assistant->completedTurnResult($conversation, $clientTurnId);
+
+            if ($replay !== null) {
+                return response()->json([
+                    'conversation_id' => $conversation->id,
+                    'title' => $conversation->title,
+                    'reply' => $replay['reply'],
+                    'provider' => $replay['provider'],
+                    'model' => $replay['model'],
+                    'proposals' => $replay['proposals'],
+                    'tools' => [],
+                    'artifacts' => $replay['artifacts'] ?? [],
+                    'client_turn_id' => $clientTurnId,
+                    'replayed' => true,
+                ]);
+            }
+        }
+
         try {
-            $result = $this->assistant->ask($conversation, $data['question'], $request->user());
+            $result = $this->assistant->ask($conversation, $data['question'], $request->user(), $clientTurnId);
         } catch (AiProviderException|AiTurnFailed $e) {
-            return $this->unavailable($e);
+            return $this->unavailable($e, $conversation);
         }
 
         // The first real question names the thread. A title the person chose is
@@ -276,6 +304,7 @@ final class AiAssistantController extends Controller
             'proposals' => $result['proposals'],
             'tools' => $result['tools'],
             'artifacts' => $result['artifacts'] ?? [],
+            'client_turn_id' => $clientTurnId,
         ]);
     }
 
@@ -291,7 +320,7 @@ final class AiAssistantController extends Controller
         $messages = AiMessage::query()
             ->where('ai_conversation_id', $conversation->id)
             ->orderBy('id')
-            ->get(['id', 'role', 'content', 'provider', 'model', 'created_at'])
+            ->get(['id', 'role', 'content', 'provider', 'model', 'status', 'error', 'client_turn_id', 'created_at'])
             ->map(fn ($m): array => [
                 // The id is what an artifact points at, so the interface can put
                 // a generated file beside the reply it was generated in.
@@ -300,6 +329,11 @@ final class AiAssistantController extends Controller
                 'content' => $m->content,
                 'provider' => $m->provider,
                 'model' => $m->model,
+                // §10 turn state: a failed question survives a reload and can be
+                // retried by its `client_turn_id`; a completed one is history.
+                'status' => $m->status ?? AiMessage::STATUS_COMPLETED,
+                'error' => $m->error,
+                'client_turn_id' => $m->client_turn_id,
                 'created_at' => $m->created_at?->toDateTimeString(),
             ]);
 
@@ -406,11 +440,33 @@ final class AiAssistantController extends Controller
             return $this->fail('Se requiere un mensaje.', 400);
         }
 
+        $clientTurnId = $this->clientTurnId($request);
+
+        // §10: a retry of a turn this conversation already completed is replayed,
+        // never executed again.
+        if ($clientTurnId !== null) {
+            $replay = $this->assistant->completedTurnResult($conversation, $clientTurnId);
+
+            if ($replay !== null) {
+                return response()->json([
+                    'conversation_id' => $conversation->id,
+                    'title' => $conversation->title,
+                    'reply' => $replay['reply'],
+                    'provider' => $replay['provider'],
+                    'model' => $replay['model'],
+                    'proposals' => $replay['proposals'],
+                    'artifacts' => $replay['artifacts'] ?? [],
+                    'client_turn_id' => $clientTurnId,
+                    'replayed' => true,
+                ]);
+            }
+        }
+
         // Service handles all persistence: user message + assistant reply
         try {
-            $result = $this->assistant->ask($conversation, $data['message'], $request->user());
+            $result = $this->assistant->ask($conversation, $data['message'], $request->user(), $clientTurnId);
         } catch (AiProviderException|AiTurnFailed $e) {
-            return $this->unavailable($e);
+            return $this->unavailable($e, $conversation);
         }
 
         // A thread opened empty (to attach a file first) takes its title from
@@ -426,7 +482,33 @@ final class AiAssistantController extends Controller
             'model' => $result['model'],
             'proposals' => $result['proposals'],
             'artifacts' => $result['artifacts'] ?? [],
+            'client_turn_id' => $clientTurnId,
         ]);
+    }
+
+    /**
+     * The browser's id for this turn attempt, or null.
+     *
+     * Conservative on purpose: an id is only accepted if it is a short, opaque
+     * token of safe characters. Anything else is treated as "no id", so a
+     * malformed or hostile value cannot be used to probe another account's turns
+     * (the lookup is scoped by conversation anyway) and never reaches the row.
+     */
+    private function clientTurnId(Request $request): ?string
+    {
+        $raw = $request->input('client_turn_id');
+
+        if (! is_string($raw)) {
+            return null;
+        }
+
+        $clean = trim($raw);
+
+        if ($clean === '' || mb_strlen($clean) > 64) {
+            return null;
+        }
+
+        return preg_match('/^[A-Za-z0-9_.:-]{1,64}$/', $clean) === 1 ? $clean : null;
     }
 
     /**

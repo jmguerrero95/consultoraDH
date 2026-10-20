@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { api } from '@/services/api';
 
@@ -96,7 +96,7 @@ onMounted(() => {
 async function loadQueues() {
   try {
     const response = await api.support.queues();
-    queues.value = response.data;
+    queues.value = Array.isArray(response) ? response : (response.data ?? []);
   } catch (e) {
     console.error('Error loading queues:', e);
   }
@@ -155,6 +155,28 @@ function onFilterChange() {
   filters.value.page = 1;
   loadConversations();
 }
+
+// Vue 3 has no `@input.debounce` modifier (Vue 2 did); it silently attached no
+// listener, so typing in the client search filtered nothing. The debounce is
+// explicit here, on the model, so it cannot be lost to a template modifier.
+let clientSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(() => filters.value.client_search, () => {
+  if (clientSearchTimer !== null) {
+    clearTimeout(clientSearchTimer);
+  }
+
+  clientSearchTimer = setTimeout(() => {
+    clientSearchTimer = null;
+    onFilterChange();
+  }, 300);
+});
+
+onBeforeUnmount(() => {
+  if (clientSearchTimer !== null) {
+    clearTimeout(clientSearchTimer);
+  }
+});
 
 function openConversation(conversation: Conversation) {
   router.push(`/soporte/${conversation.id}`);
@@ -311,7 +333,7 @@ const formatRelativeTime = (dateString?: string | null) => {
 
           <div class="col-md-12">
             <div class="input-group">
-              <input type="text" class="form-control" placeholder="Buscar cliente..." v-model="filters.client_search" @input.debounce.300="onFilterChange">
+              <input type="text" class="form-control" placeholder="Buscar cliente..." v-model="filters.client_search">
               <button class="btn btn-outline-secondary" type="button" @click="filters.client_search = ''; onFilterChange()" v-if="filters.client_search">
                 <i class="bi bi-x-lg"></i>
               </button>

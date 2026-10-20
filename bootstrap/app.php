@@ -102,6 +102,15 @@ return Application::configure(dirname(__DIR__))
             ->everySixHours()
             ->withoutOverlapping()
             ->onOneServer();
+
+        // A07-R2: finish the file removals owed by a committed conversation
+        // delete. The delete already tries synchronously; this drains anything a
+        // crash or a transient disk error left outstanding, so a deleted
+        // conversation never leaves an orphaned file.
+        $schedule->command('ai:cleanup-artifacts')
+            ->everyFiveMinutes()
+            ->withoutOverlapping()
+            ->onOneServer();
     })
     ->withMiddleware(function (Middleware $middleware): void {
         // Baseline security headers on every dynamic response.

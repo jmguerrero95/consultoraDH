@@ -70,6 +70,9 @@ async function mountPage(): Promise<ReturnType<typeof mount>> {
 describe('asistente de IA', () => {
     beforeEach(() => {
         setActivePinia(createPinia());
+        // The page remembers the last thread by id; isolate tests from each
+        // other so one test's selection cannot decide the next one's.
+        window.localStorage.clear();
     });
 
     it('informa el modelo configurado sin exponer credenciales', async () => {
@@ -283,7 +286,7 @@ describe('asistente de IA', () => {
         expect(spy.mock.calls.some((call) => String(call[0]).includes('/api/ai/action-proposals/42/confirm'))).toBe(true);
     });
 
-    it('conserva la consulta escrita cuando el servidor falla', async () => {
+    it('deja la consulta fallida en el hilo y permite reintentarla sin duplicarla', async () => {
         stubFetch((url, init) => {
             if (url.includes('/api/ai/status')) {
                 return jsonResponse(ENABLED_STATUS);
@@ -306,9 +309,75 @@ describe('asistente de IA', () => {
         await flushPromises();
 
         expect(wrapper.text()).toContain('El proveedor no está disponible.');
-        // Losing the typed text on the one failure the user can retry is the
-        // worst possible moment to discard it.
-        expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('¿Y ahora?');
+        // §10: the failure is a durable turn in the transcript, with its own
+        // retry, rather than a copy of the question put back in the composer.
+        expect(wrapper.find('[data-testid="failed-turn"]').exists()).toBe(true);
+        expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('');
+    });
+
+    it('adopta la conversación de un primer turno fallido y reintenta en ella', async () => {
+        const spy = stubFetch((url, init) => {
+            if (url.includes('/api/ai/status')) {
+                return jsonResponse(ENABLED_STATUS);
+            }
+
+            if (url === '/api/ai/conversations' && init?.method === 'POST') {
+                const body = JSON.parse(String(init.body));
+
+                if (body.conversation_id === 9) {
+                    return jsonResponse({
+                        conversation_id: 9,
+                        title: 'Pregunta recuperada',
+                        reply: 'Respuesta después del fallo.',
+                        provider: 'groq',
+                        model: 'openai/gpt-oss-120b',
+                        proposals: [],
+                        tools: [],
+                        artifacts: [],
+                    });
+                }
+
+                // A first question creates its conversation before the provider
+                // is called. The id must survive the failure so the retry does
+                // not create a second conversation.
+                return jsonResponse({
+                    conversation_id: 9,
+                    error: 'El proveedor no está disponible.',
+                    message: 'El proveedor no está disponible.',
+                    recoverable: true,
+                }, 503);
+            }
+
+            if (url.includes('/api/ai/conversations')) {
+                return jsonResponse({ conversations: [] });
+            }
+
+            return jsonResponse({});
+        });
+
+        const wrapper = await mountPage();
+
+        await wrapper.find('textarea').setValue('Pregunta recuperable');
+        await wrapper.find('form').trigger('submit.prevent');
+        await flushPromises();
+
+        expect(wrapper.find('[data-testid="failed-turn"]').exists()).toBe(true);
+
+        const retry = wrapper.findAll('button').find((button) => button.text() === 'Reintentar');
+        expect(retry, 'the failed turn must offer a retry').toBeTruthy();
+        await retry?.trigger('click');
+        await flushPromises();
+
+        const retryCall = spy.mock.calls.find((call) => {
+            if (String(call[0]) !== '/api/ai/conversations' || call[1]?.method !== 'POST') {
+                return false;
+            }
+
+            return JSON.parse(String(call[1]?.body)).conversation_id === 9;
+        });
+        expect(retryCall, 'the retry must target the conversation created by the failed first turn').toBeTruthy();
+        expect(wrapper.text()).toContain('Respuesta después del fallo.');
+        expect(wrapper.find('[data-testid="failed-turn"]').exists()).toBe(false);
     });
 
     it('lista las conversaciones y abre la seleccionada', async () => {

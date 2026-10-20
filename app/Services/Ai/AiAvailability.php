@@ -24,6 +24,16 @@ namespace App\Services\Ai;
  * cooling down, rate-limited or missing a credential is counted as configured
  * but not ready, so "available" means "a model can be tried right now".
  *
+ * ## A chat answer does not prove a tool turn
+ *
+ * An operation that declares the `tools` capability is only "proven" by a model
+ * that has *actually emitted a structured tool call* recently
+ * (`markToolsDemonstrated`). A model that merely answered a plain chat turn
+ * proves the conversation path, not the tool path: it is honest to call a
+ * tool-bearing operation "unverified" until tool use has been observed, even
+ * when the same model is answering general questions. Operations without the
+ * `tools` capability keep using the ordinary recent-answer proof.
+ *
  * ## Nothing sensitive leaves here
  *
  * The report carries counts, states, model ids and provider names. It never
@@ -223,9 +233,15 @@ final class AiAvailability
             );
         }
 
+        // A tool-bearing operation is only proven by observed tool use; a plain
+        // operation is proven by a recent answer. See the class docblock.
+        $requiresTools = in_array('tools', $operation['capabilities'], true);
+
         $proven = array_values(array_filter(
             $ready,
-            fn (ModelCandidate $candidate): bool => $this->health->recentSuccess($candidate),
+            fn (ModelCandidate $candidate): bool => $requiresTools
+                ? $this->health->toolsDemonstrated($candidate)
+                : $this->health->recentSuccess($candidate),
         ));
 
         $lastSuccess = $this->lastResultFor($ready);
@@ -247,8 +263,10 @@ final class AiAvailability
             );
         }
 
-        // Configured and not blocked, but nothing recent proves it answers. It is
-        // honest to call this "unverified", never "available".
+        // Configured and not blocked, but nothing recent proves it. For a plain
+        // operation that means no recent answer; for a tool-bearing one it means
+        // no observed tool call, even if chat turns are being answered. Either
+        // way it is honest to call this "unverified", never "available".
         return $this->row(
             $operation['label'],
             'unverified',
@@ -257,7 +275,9 @@ final class AiAvailability
             $ready[0]->model,
             $lastSuccess,
             null,
-            'Hay proveedores configurados, pero ninguno ha respondido recientemente.',
+            $requiresTools
+                ? 'Hay proveedores configurados, pero ninguno ha demostrado usar herramientas recientemente.'
+                : 'Hay proveedores configurados, pero ninguno ha respondido recientemente.',
             $providers,
         );
     }

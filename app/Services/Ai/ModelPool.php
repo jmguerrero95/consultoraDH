@@ -71,6 +71,7 @@ class ModelPool
                     model: (string) config('ai.openrouter.free_router', 'openrouter/free'),
                     priority: (int) config('ai.openrouter.free_router_priority', 50),
                     source: 'free_router',
+                    dataPolicy: $this->dataPolicyFor($openRouter['base_url'], null),
                 ));
             }
 
@@ -83,6 +84,7 @@ class ModelPool
                     model: $model,
                     priority: $extraPriority++,
                     source: 'extra',
+                    dataPolicy: $this->dataPolicyFor($openRouter['base_url'], null),
                 ));
             }
 
@@ -102,6 +104,7 @@ class ModelPool
                         priority: $dynamicPriority++,
                         source: 'catalog',
                         contextLength: $this->catalog->contextLength($model),
+                        dataPolicy: $this->dataPolicyFor($openRouter['base_url'], null),
                     ));
 
                     $limit--;
@@ -221,6 +224,11 @@ class ModelPool
             capabilities: $capabilities,
             source: $candidate->source,
             contextLength: $candidate->contextLength ?? $this->catalog->contextLength($candidate->model),
+            providerName: $candidate->providerName,
+            // The privacy classification is not a capability the catalogue can
+            // refine. Rebuilding the candidate must carry it forward or an
+            // OpenRouter model would silently return to the permissive default.
+            dataPolicy: $candidate->dataPolicy,
         );
     }
 
@@ -242,7 +250,28 @@ class ModelPool
             model: $model,
             priority: $priority,
             source: 'slot',
+            dataPolicy: $this->dataPolicyFor($baseUrl, $config['data_policy'] ?? null),
         );
+    }
+
+    /**
+     * The privacy policy that governs one endpoint.
+     *
+     * A declared `standard` or `training` wins. Anything else is the safe
+     * default for that endpoint: OpenRouter is `training` unless the operator
+     * proves otherwise, and an operator's own independent endpoint is `standard`
+     * because its terms are the operator's decision. An unrecognised declaration
+     * is never allowed to become permissive by accident.
+     */
+    private function dataPolicyFor(string $baseUrl, mixed $declared): string
+    {
+        if ($declared !== null) {
+            return $declared === 'standard' ? 'standard' : 'training';
+        }
+
+        return str_contains($baseUrl, 'openrouter.ai')
+            ? (string) config('ai.openrouter.data_policy', 'training')
+            : 'standard';
     }
 
     /**
@@ -283,6 +312,7 @@ class ModelPool
                     : ['chat', 'tools'],
                 source: 'pool',
                 contextLength: is_int($entry['context'] ?? null) ? $entry['context'] : null,
+                dataPolicy: $this->dataPolicyFor($baseUrl, $entry['data_policy'] ?? null),
             );
         }
 

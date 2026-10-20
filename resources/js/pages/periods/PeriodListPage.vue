@@ -166,6 +166,9 @@ const generateBusy = ref(false);
 
 async function openPreview(period: PeriodSummary): Promise<void> {
     previewBusy.value = true;
+    // The button for the row actually being prepared says so; without this the
+    // per-row `:busy` binding could never be true.
+    busyPeriodId.value = period.id;
     previewError.value = null;
     preview.value = null;
     previewOpen.value = true;
@@ -179,6 +182,7 @@ async function openPreview(period: PeriodSummary): Promise<void> {
                 : 'No fue posible calcular la generación.';
     } finally {
         previewBusy.value = false;
+        busyPeriodId.value = null;
     }
 }
 
@@ -394,10 +398,15 @@ const generationSummary = computed(() => {
                 <article class="cdh-stat">
                     <p class="cdh-stat__label">
                         <i class="bi bi-cash-coin" aria-hidden="true" />
-                        <span>Recaudado</span>
+                        <!--
+                            §40: `total_paid_cop` is money applied to obligations,
+                            not money collected. Calling it "Recaudado" overstated
+                            the cash position.
+                        -->
+                        <span>Aplicado</span>
                     </p>
                     <p class="cdh-stat__value">{{ pesos(current ? current.total_paid_cop : 0) }}</p>
-                    <p class="cdh-stat__hint">Del periodo actual</p>
+                    <p class="cdh-stat__hint">Aplicado a obligaciones del periodo</p>
                 </article>
             </div>
 
@@ -411,7 +420,7 @@ const generationSummary = computed(() => {
                             <th scope="col" class="cdh-table__wide">Generación</th>
                             <th scope="col">Obligaciones</th>
                             <th scope="col">Facturado</th>
-                            <th scope="col">Recaudado</th>
+                            <th scope="col">Aplicado</th>
                             <th scope="col">Saldo</th>
                             <th scope="col"><span class="cdh-visually-hidden">Acciones</span></th>
                         </tr>

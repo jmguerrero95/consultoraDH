@@ -335,7 +335,7 @@ async function loadConversation() {
 async function loadMetadata() {
   try {
     const [queuesRes, staffRes] = await Promise.all([api.support.queues(), api.support.agents()]);
-    queues.value = queuesRes.data;
+    queues.value = Array.isArray(queuesRes) ? queuesRes : (queuesRes.data ?? []);
     staffUsers.value = (staffRes.data ?? []).map((u) => ({ id: u.id, name: u.name }));
   } catch (e) {
     // The conversation is readable without them; the dropdowns simply stay empty and say so.

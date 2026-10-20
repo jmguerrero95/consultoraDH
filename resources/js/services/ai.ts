@@ -35,10 +35,40 @@ export interface AiMessagePayload {
     model: string | null;
     created_at: string | null;
     /**
+     * §10 turn state. `failed` means the question was accepted but the turn did
+     * not complete: it survives a reload and can be retried by its id. Older
+     * servers omit it, so it is treated as `completed`.
+     */
+    status?: 'pending' | 'processing' | 'failed' | 'completed';
+    /** A short, safe reason for a failed turn. Never the provider's raw text. */
+    error?: string | null;
+    /** The client's id for this attempt, used to retry without duplicating it. */
+    client_turn_id?: string | null;
+    /**
      * Files this reply produced, filled in by the interface from the history
      * endpoint's flat artifact list. Not sent by the server on the message.
      */
     artifacts?: AiArtifact[];
+    /**
+     * Writes this reply proposed, filled in by the interface from the history
+     * endpoint's flat proposal list. Not sent by the server on the message.
+     */
+    proposals?: AiProposal[];
+}
+
+/**
+ * A fresh, opaque id for one turn attempt.
+ *
+ * A retry reuses the id it was first sent with, so the server can tell a retry
+ * from a new question: a failed turn is updated in place and an already
+ * completed turn is replayed rather than executed twice.
+ */
+export function newClientTurnId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+
+    return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /**
@@ -179,6 +209,10 @@ export interface AiTurnPayload {    conversation_id: number;
      * exactly the defect this carries the fix for.
      */
     artifacts?: AiArtifact[];
+    /** §10: the attempt this response belongs to, echoed by the server. */
+    client_turn_id?: string | null;
+    /** True when the server replayed a completed turn instead of running it. */
+    replayed?: boolean;
 }
 
 /**
@@ -388,11 +422,13 @@ export const ai = {
      *
      * Omitting `conversation_id` creates a new one and returns its id.
      */
-    ask(question: string, conversationId?: number | null): Promise<AiTurnPayload> {
+    ask(question: string, conversationId?: number | null, clientTurnId?: string | null): Promise<AiTurnPayload> {
         return request<AiTurnPayload>('POST', '/api/ai/conversations', {
             body: {
                 question,
                 ...(conversationId === undefined || conversationId === null ? {} : { conversation_id: conversationId }),
+                // §10: the attempt id makes a retry idempotent.
+                ...(clientTurnId === undefined || clientTurnId === null ? {} : { client_turn_id: clientTurnId }),
             },
         });
     },

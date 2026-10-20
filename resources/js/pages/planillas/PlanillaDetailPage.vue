@@ -221,12 +221,27 @@ async function devolverABorrador(): Promise<void> {
 
 async function cancelar(): Promise<void> {
     actionError.value = null;
+    actionMessage.value = null;
+
+    // The server requires a reason; asking here avoids a round trip that would
+    // only come back as a validation error.
+    const reason = motivoCancelacion.value.trim();
+
+    if (reason === '') {
+        actionError.value = 'Escriba el motivo de la cancelación.';
+
+        return;
+    }
+
     working.value = true;
 
     try {
-        await a05.planillas.cancel(id.value, motivoCancelacion.value);
+        await a05.planillas.cancel(id.value, reason);
         motivoCancelacion.value = '';
         await cargar();
+        // Cancelling is irreversible: say it happened rather than leaving the
+        // operator to infer it from the refreshed badge.
+        actionMessage.value = 'Planilla cancelada.';
     } catch (e) {
         actionError.value = e instanceof ApiError ? e.message : 'No se pudo cancelar.';
     } finally {

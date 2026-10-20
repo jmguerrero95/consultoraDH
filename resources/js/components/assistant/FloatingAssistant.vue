@@ -7,7 +7,7 @@ import SafeMarkdown from '@/components/ui/SafeMarkdown.vue';
 import ArtifactCard from '@/components/assistant/ArtifactCard.vue';
 import MicButton from '@/components/assistant/MicButton.vue';
 import { useVoice } from '@/composables/useVoice';
-import { ai, groupArtifactsByMessage, groupProposalsByMessage } from '@/services/ai';
+import { ai, groupArtifactsByMessage, groupProposalsByMessage, newClientTurnId } from '@/services/ai';
 import { useAuthStore } from '@/stores/auth';
 import { readDraft, writeDraft } from '@/utils/drafts';
 
@@ -72,6 +72,12 @@ interface ChatMessage {
     model: string | null;
     /** A question the server refused: kept on screen, with a retry. */
     failed?: boolean;
+    /** §10 turn state, so a failure survives a reload. */
+    status?: 'pending' | 'processing' | 'failed' | 'completed';
+    /** The attempt this bubble belongs to; a retry reuses it. */
+    clientTurnId?: string;
+    /** A short, safe reason for a failed turn. */
+    error?: string | null;
     /** Read tools that were consulted to produce this answer. */
     tools?: AiToolResult[];
     /**
@@ -81,6 +87,8 @@ interface ChatMessage {
      * beside the reply that generated it, not three questions further down.
      */
     artifacts?: AiArtifact[];
+    /** Writes this answer proposed, rendered inline beside it. */
+    proposals?: AiProposal[];
 }
 
 let messageSeq = 0;
@@ -379,6 +387,12 @@ async function restoreConversation(): Promise<void> {
                 role: message.role as 'user' | 'assistant',
                 content: message.content,
                 model: message.model,
+                // §10: a failed question comes back as a failed turn, with the
+                // attempt id its retry must reuse.
+                status: message.status ?? 'completed',
+                failed: message.status === 'failed',
+                error: message.error ?? null,
+                clientTurnId: message.client_turn_id ?? undefined,
                 // The files this reply produced travel with it, so a reload shows
                 // the report where it was asked for rather than at the bottom.
                 artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
@@ -417,8 +431,8 @@ async function restoreConversation(): Promise<void> {
     }
 }
 
-async function send(retryText?: string): Promise<void> {
-    const question = (retryText ?? draft.value).trim();
+async function send(retry?: ChatMessage): Promise<void> {
+    const question = (retry?.content ?? draft.value).trim();
 
     if (question === '' || sending.value) {
         return;
@@ -437,23 +451,47 @@ async function send(retryText?: string): Promise<void> {
     error.value = null;
     confirmation.value = null;
 
-    if (retryText === undefined) {
+    // §10: the attempt id makes a retry the same turn on the server. A retry
+    // keeps the id it failed with; a new question gets a fresh one.
+    const clientTurnId = retry?.clientTurnId ?? newClientTurnId();
+
+    if (retry === undefined) {
         draft.value = '';
-        messages.value = [...messages.value, { id: ++messageSeq, role: 'user', content: question, model: null, proposals: [] }];
+        messages.value = [
+            ...messages.value,
+            {
+                id: ++messageSeq,
+                role: 'user',
+                content: question,
+                model: null,
+                proposals: [],
+                status: 'processing',
+                clientTurnId,
+            },
+        ];
     } else {
         // A retry reuses the bubble that failed rather than adding a duplicate.
         messages.value = messages.value.map((message) =>
-            message.role === 'user' && message.failed && message.content === question ? { ...message, failed: false, proposals: message.proposals ?? [] } : message,
+            message === retry
+                ? { ...message, failed: false, status: 'processing', error: null, clientTurnId, proposals: message.proposals ?? [] }
+                : message,
         );
     }
 
     scrollToEnd();
 
     try {
-        const turn = await ai.ask(question, conversationId.value);
+        const turn = await ai.ask(question, conversationId.value, clientTurnId);
 
         conversationId.value = turn.conversation_id;
         persistConversation();
+
+        // The attempt is history now, so a reload shows it as completed.
+        messages.value = messages.value.map((message) =>
+            message.role === 'user' && message.clientTurnId === clientTurnId
+                ? { ...message, status: 'completed', failed: false, error: null }
+                : message,
+        );
 
         const turnArtifacts = turn.artifacts ?? [];
 
@@ -475,7 +513,7 @@ async function send(retryText?: string): Promise<void> {
                 },
             ];
         } else if (turn.proposals.length === 0 && turnArtifacts.length === 0) {
-            markLastUserFailed();
+            markLastUserFailed('El asistente no devolvió una respuesta. Intente reformular la pregunta.', clientTurnId);
             error.value = 'El asistente no devolvió una respuesta. Intente reformular la pregunta.';
         } else if (turn.proposals.length > 0) {
             // Proposal-only turn: attach proposals to the last user message so they
@@ -495,8 +533,20 @@ async function send(retryText?: string): Promise<void> {
     } catch (e) {
         // Keep the question on screen, flagged, so a retry does not cost the
         // person their typing.
-        markLastUserFailed();
-        error.value = readError(e, 'No fue posible completar la consulta.');
+        const failure = readError(e, 'No fue posible completar la consulta.');
+
+        // A first turn creates its conversation before the provider call; adopt
+        // that id so an F5 shows the failed bubble and the retry uses the same
+        // thread instead of creating another one.
+        const failedId = conversationIdFromError(e);
+
+        if (failedId !== null && conversationId.value === null) {
+            conversationId.value = failedId;
+            persistConversation();
+        }
+
+        markLastUserFailed(failure, clientTurnId);
+        error.value = failure;
     } finally {
         sending.value = false;
     }
@@ -536,12 +586,12 @@ function describeResult(tool: string, result: unknown): string {
     return `Acción aplicada: ${tool}.`;
 }
 
-function markLastUserFailed(): void {
+function markLastUserFailed(reason: string, clientTurnId: string): void {
     const next = [...messages.value];
 
     for (let index = next.length - 1; index >= 0; index -= 1) {
-        if (next[index].role === 'user') {
-            next[index] = { ...next[index], failed: true };
+        if (next[index].role === 'user' && next[index].clientTurnId === clientTurnId) {
+            next[index] = { ...next[index], failed: true, status: 'failed', error: reason };
 
             break;
         }
@@ -551,7 +601,7 @@ function markLastUserFailed(): void {
 }
 
 function retry(message: ChatMessage): void {
-    void send(message.content);
+    void send(message);
 }
 
 /** A conversation must exist before a file can belong to it. */
@@ -705,6 +755,20 @@ function readError(e: unknown, fallback: string): string {
     const message = (e as { message?: string } | null)?.message;
 
     return message !== undefined && message !== '' ? message : fallback;
+}
+
+/**
+ * The conversation a failed turn belongs to, when the server reported it.
+ *
+ * Only adopted when this widget has no thread yet: the first question creates
+ * the conversation server-side before the provider is asked, so without this the
+ * failed turn would be unreachable after a reload.
+ */
+function conversationIdFromError(e: unknown): number | null {
+    const payload = (e as { payload?: { conversation_id?: unknown } } | null)?.payload;
+    const id = payload?.conversation_id;
+
+    return typeof id === 'number' && Number.isInteger(id) && id > 0 ? id : null;
 }
 
 function scrollToEnd(): void {
@@ -930,6 +994,9 @@ watch(open, (value) => {
                     </div>
                     <span v-if="message.role === 'assistant' && message.model" class="cdh-assistant__meta">
                         {{ message.model }}
+                    </span>
+                    <span v-if="message.role === 'user' && message.failed && message.error" class="cdh-assistant__failed-reason">
+                        {{ message.error }}
                     </span>
                     <button
                         v-if="message.role === 'user' && message.failed"
@@ -1307,6 +1374,13 @@ watch(open, (value) => {
     font-size: 0.7rem;
     color: var(--cdh-text-muted, #6b7280);
     margin-top: 0.15rem;
+}
+
+.cdh-assistant__failed-reason {
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: #b42318;
+    text-align: right;
 }
 
 .cdh-assistant__retry {

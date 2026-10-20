@@ -37,6 +37,7 @@ final class PortalRelationshipController extends Controller
                 'id' => (int) $a->id,
                 'company_name' => $a->company?->legal_name,
                 'company_tax_id' => $a->company?->tax_id,
+                'company_tax_id_label' => $a->company?->taxIdLabel(),
                 'started_on' => $a->started_on?->format('Y-m-d'),
                 'ended_on' => $a->ended_on?->format('Y-m-d'),
                 'job_title' => $a->job_title,

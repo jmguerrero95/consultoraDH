@@ -1053,8 +1053,22 @@ export const api: ApiClient = {
     },
 
     support: {
-        queues(): Promise<{ data: { id: number; name: string }[] }> {
-            return request('GET', '/api/support/queues');
+        /**
+         * The active support queues.
+         *
+         * The controller answers with a bare array, while an older client
+         * expected `{ data }`. The union is deliberate: both shapes are accepted
+         * so a dropdown is never empty because of an envelope mismatch.
+         */
+        async queues(): Promise<{ data: { id: number; name: string }[] }> {
+            const response = await request<{ id: number; name: string }[] | { data: { id: number; name: string }[] }>(
+                'GET',
+                '/api/support/queues',
+            );
+
+            // The controller answers with a bare array. Normalise here so every
+            // caller gets one shape; the union keeps an older envelope working.
+            return Array.isArray(response) ? { data: response } : response;
         },
 
 

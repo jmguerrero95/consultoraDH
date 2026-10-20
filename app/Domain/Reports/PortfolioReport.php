@@ -26,6 +26,23 @@ use Carbon\CarbonImmutable;
 final class PortfolioReport implements ReportResult
 {
     /**
+     * The report's own ceiling.
+     *
+     * A morosos report is read as "this is the whole portfolio", so it must
+     * never silently stop at a page boundary. Pages are fetched until the
+     * service's own total is reached; this ceiling only exists so a pathological
+     * dataset cannot exhaust memory, and reaching it is *stated* in the output
+     * rather than hidden.
+     */
+    private const MAX_ROWS = 10_000;
+
+    /** How many clients exist for the filters, as the service counted them. */
+    private int $availableRows = 0;
+
+    /** Whether MAX_ROWS cut the report short. */
+    private bool $truncated = false;
+
+    /**
      * @param  array<string, mixed>  $filters
      */
     private function __construct(
@@ -58,12 +75,19 @@ final class PortfolioReport implements ReportResult
 
     public function meta(): array
     {
+        // `rows()` establishes the counts; calling it here keeps the metadata
+        // honest even when a caller asks for `meta()` before `rows()`.
+        $rows = $this->rows();
+
         return [
             'report_type' => $this->type->value,
             'title' => $this->type->label(),
             'as_of' => $this->asOf() ?? now()->toDateString(),
             'filters' => ReportFilter::describe($this->filters),
             'generated_at' => now()->format('Y-m-d H:i:s'),
+            'row_count' => count($rows),
+            'available_rows' => $this->availableRows,
+            'truncated' => $this->truncated,
             'disclaimer' => 'Documento interno de Consultora DH.',
         ];
     }
@@ -86,35 +110,54 @@ final class PortfolioReport implements ReportResult
     {
         // A03's own arithmetic and A03's own filters. The names below are A03's, not this
         // class's invention: `minimum_balance`, `overdue`, `aging_bucket`, `traffic_light`.
-        $result = $this->receivables->list(
-            array_filter([
-                'as_of' => $this->asOf(),
-                'company_id' => $this->filters['company_id'] ?? null,
-                'search' => $this->filters['search'] ?? null,
-                'aging_bucket' => $this->filters['aging_bucket'] ?? null,
-                'traffic_light' => $this->filters['traffic_light'] ?? null,
-                'minimum_balance' => $this->filters['minimum_balance'] ?? null,
-                'overdue' => ($this->filters['overdue_only'] ?? false) ? true : null,
-            ], static fn ($value): bool => $value !== null),
-            1,
-            500,
-        );
+        $filters = array_filter([
+            'as_of' => $this->asOf(),
+            'company_id' => $this->filters['company_id'] ?? null,
+            'search' => $this->filters['search'] ?? null,
+            'aging_bucket' => $this->filters['aging_bucket'] ?? null,
+            'traffic_light' => $this->filters['traffic_light'] ?? null,
+            'minimum_balance' => $this->filters['minimum_balance'] ?? null,
+            'overdue' => ($this->filters['overdue_only'] ?? false) ? true : null,
+        ], static fn ($value): bool => $value !== null);
 
         $rows = [];
+        $page = 1;
+        $perPage = 500;
+        $fetched = 0;
+        $this->availableRows = 0;
+        $this->truncated = false;
 
-        foreach ($result['items'] as $item) {
-            $rows[] = [
-                'full_name' => $item['full_name'],
-                'document_label' => $item['document_label'],
-                'company_names' => implode(', ', $item['company_names'] ?? []),
-                'balance_cop' => (int) $item['balance_cop'],
-                'overdue_balance_cop' => (int) $item['overdue_balance_cop'],
-                'overdue_periods_count' => (int) $item['overdue_periods_count'],
-                'aging_bucket' => AgingBucket::tryFrom((string) $item['aging_bucket'])?->label()
-                    ?? (string) $item['aging_bucket'],
-                'traffic_light' => $item['traffic_light_label'],
-            ];
-        }
+        // Fetch every page the service reports. A single 500-row page used to be
+        // the whole report, so a portfolio of 800 clients quietly totalled about
+        // 500 of them — the worst kind of wrong number, because nothing said so.
+        do {
+            $result = $this->receivables->list($filters, $page, $perPage);
+            $this->availableRows = (int) ($result['total'] ?? count($result['items']));
+
+            foreach ($result['items'] as $item) {
+                if ($fetched >= self::MAX_ROWS) {
+                    $this->truncated = true;
+
+                    break 2;
+                }
+
+                $rows[] = [
+                    'full_name' => $item['full_name'],
+                    'document_label' => $item['document_label'],
+                    'company_names' => implode(', ', $item['company_names'] ?? []),
+                    'balance_cop' => (int) $item['balance_cop'],
+                    'overdue_balance_cop' => (int) $item['overdue_balance_cop'],
+                    'overdue_periods_count' => (int) $item['overdue_periods_count'],
+                    'aging_bucket' => AgingBucket::tryFrom((string) $item['aging_bucket'])?->label()
+                        ?? (string) $item['aging_bucket'],
+                    'traffic_light' => $item['traffic_light_label'],
+                ];
+
+                $fetched++;
+            }
+
+            $page++;
+        } while ($result['items'] !== [] && $fetched < $this->availableRows && ! $this->truncated);
 
         return $rows;
     }
@@ -123,9 +166,13 @@ final class PortfolioReport implements ReportResult
     {
         $rows = $this->rows();
 
+        $label = $this->truncated
+            ? sprintf('%d de %d cliente(s) — reporte parcial', count($rows), $this->availableRows)
+            : (string) count($rows).' cliente(s)';
+
         return [[
             'full_name' => 'TOTAL',
-            'document_label' => (string) count($rows).' cliente(s)',
+            'document_label' => $label,
             'balance_cop' => array_sum(array_column($rows, 'balance_cop')),
             'overdue_balance_cop' => array_sum(array_column($rows, 'overdue_balance_cop')),
         ]];

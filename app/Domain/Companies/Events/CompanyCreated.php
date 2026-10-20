@@ -41,6 +41,9 @@ final readonly class CompanyCreated implements AuditableEvent, SubjectAware
         return [
             'legal_name' => $this->company->legal_name,
             'tax_id' => $this->company->tax_id,
+            // The display form, so a history reader sees `900.123.456-3`
+            // instead of a bare column value.
+            'tax_id_label' => $this->company->taxIdLabel(),
         ];
     }
 }

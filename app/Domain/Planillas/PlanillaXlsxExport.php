@@ -58,6 +58,32 @@ final class PlanillaXlsxExport
     ) {}
 
     /**
+     * The cell values of one planilla line, in COLUMNS order.
+     *
+     * One method for both writing and measuring, so a width can never describe a
+     * column the writer does not actually produce.
+     *
+     * @param  array<string, mixed>  $line
+     * @return list<mixed>
+     */
+    private function lineValues(array $line): array
+    {
+        return [
+            trim((string) $line['document_type'].' '.$line['document_number']),
+            $line['client_name'],
+            $line['job_title'],
+            $line['eps_name'],
+            $line['afp_name'],
+            $line['arl_name'],
+            $line['ccf_name'],
+            $line['arl_risk_class'],
+            $line['liquidated_amount_cop'],
+            $line['included'] ? 'Sí' : 'No',
+            $line['exclusion_reason'],
+        ];
+    }
+
+    /**
      * @return string The path to the generated file.
      */
     public function generate(ContributionSheet $sheet): string
@@ -78,13 +104,44 @@ final class PlanillaXlsxExport
         $sheet_writer = $writer->getCurrentSheet();
         $sheet_writer->setName(mb_substr('Planilla '.$summary['operator_label'], 0, 31));
 
-        // One width per column, from the widest thing it holds: a legal name and a
-        // three-letter risk class do not deserve the same 8.43 characters.
+        // One width per column, from the widest value it actually holds: a legal
+        // name and a three-letter risk class do not deserve the same 8.43
+        // characters. The previous values were fixed guesses in COLUMNS, not a
+        // measurement, so a long name or a formatted amount was clipped.
+        $widths = array_map(
+            static fn (array $column): int => mb_strlen((string) $column[0]) + 2,
+            self::COLUMNS,
+        );
+
+        foreach ($summary['lines'] as $line) {
+            foreach ($this->lineValues($line) as $index => $value) {
+                // Money is written as a number but displayed with separators, so
+                // the width has to be measured on the displayed form.
+                $display = is_int($value) || is_float($value)
+                    ? number_format((float) $value, 0, ',', '.')
+                    : (string) $value;
+
+                $widths[$index] = max($widths[$index], mb_strlen($display) + 2);
+            }
+        }
+
+        foreach ([
+            'Total liquidado (COP)',
+            number_format((float) $summary['total_liquidated_cop'], 0, ',', '.'),
+            'Líneas incluidas',
+            (string) $summary['included_line_count'],
+        ] as $index => $value) {
+            $widths[$index] = max($widths[$index], mb_strlen($value) + 2);
+        }
+
         foreach (self::COLUMNS as $index => $column) {
             // OpenSpout's width API is 1-based (`min`/`max` go straight into the XML), while
             // this list is 0-based: passing `$index` wrote `min="0"` for the first column and
             // shifted every other one, which strict readers reject outright.
-            $sheet_writer->setColumnWidth(min(self::MAX_WIDTH, max(self::MIN_WIDTH, $column[1])), $index + 1);
+            $sheet_writer->setColumnWidth(
+                min(self::MAX_WIDTH, max(self::MIN_WIDTH, (float) $widths[$index])),
+                $index + 1,
+            );
         }
 
         $writer->addRow(Row::fromValuesWithStyle(
@@ -138,19 +195,7 @@ final class PlanillaXlsxExport
         );
 
         foreach ($summary['lines'] as $line) {
-            $writer->addRow(Row::fromValuesWithStyles([
-                trim($line['document_type'].' '.$line['document_number']),
-                $line['client_name'],
-                $line['job_title'],
-                $line['eps_name'],
-                $line['afp_name'],
-                $line['arl_name'],
-                $line['ccf_name'],
-                $line['arl_risk_class'],
-                $line['liquidated_amount_cop'],
-                $line['included'] ? 'Sí' : 'No',
-                $line['exclusion_reason'],
-            ], $bodyStyles));
+            $writer->addRow(Row::fromValuesWithStyles($this->lineValues($line), $bodyStyles));
         }
 
         $writer->addRow(Row::fromValues([]));

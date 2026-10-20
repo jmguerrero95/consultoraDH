@@ -367,6 +367,16 @@ class AiModelHealth
             return (int) config('ai.health.model_missing_cooldown_seconds', 21600);
         }
 
+        // An empty body is not evidence that the endpoint is down: the same
+        // model often answers on an immediate re-ask, and the assistant service
+        // already bounds that recovery to one extra call. Cooling the model here
+        // made that recovery impossible — it was skipped as "in cooldown" — and
+        // turned a transient blank into a 45-second outage. The failure is still
+        // recorded and still fails over to another candidate within this turn.
+        if ($error->kind === 'empty') {
+            return 0;
+        }
+
         $base = max(5, (int) config('ai.health.base_cooldown_seconds', 45));
         $max = max($base, (int) config('ai.health.max_cooldown_seconds', 1800));
 

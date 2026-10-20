@@ -164,7 +164,11 @@ function describeEntry(entry: HistoryEntry): string {
 
     if (metadata.legal_name) facts.push(String(metadata.legal_name));
 
-    if (metadata.tax_id) facts.push(`NIT ${metadata.tax_id}`);
+    // Prefer the server's formatted label (`900.123.456-3`); older audit rows
+    // predate it and still carry the bare number.
+    if (metadata.tax_id_label || metadata.tax_id) {
+        facts.push(`NIT ${String(metadata.tax_id_label ?? metadata.tax_id)}`);
+    }
 
     // Effective date first: "when this took effect" is the question a reader has of a dated
     // record, and `started_on`/`effective_month` are where the audit states it.

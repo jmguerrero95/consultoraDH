@@ -54,10 +54,11 @@ function json(body: unknown, status = 200): Response {
 }
 
 /**
- * Mount the page and record every download it asks the browser for.
+ * Mount the page and record every download it asks the server for.
  *
- * The page builds the workbook URL and hands it to an anchor, so the URL is observed rather than
- * the response: what matters is that the right months reach the right endpoint.
+ * Downloads now go through `fetch` so the screen can show progress and surface a
+ * real error. The URL is observed at the request, not at the anchor: the anchor
+ * only receives a blob URL, while the filters live on the request.
  */
 async function mounted(permissions = ['reports.view', 'reports.export']) {
     const downloads: string[] = [];
@@ -79,21 +80,47 @@ async function mounted(permissions = ['reports.view', 'reports.export']) {
                 });
             }
 
+            if (url.includes('/api/reports/download')) {
+                downloads.push(url);
+
+                return new Response(new Blob(['xlsx']), {
+                    status: 200,
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                        'Content-Disposition': 'attachment; filename="reporte.xlsx"',
+                    },
+                });
+            }
+
             return json({ data: [], meta: {}, groups: [] });
         }),
     );
 
-    const original = HTMLAnchorElement.prototype.click;
+    const originalClick = HTMLAnchorElement.prototype.click;
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
 
     HTMLAnchorElement.prototype.click = function click(this: HTMLAnchorElement) {
-        downloads.push(this.getAttribute('href') ?? '');
+        // The blob URL is not the request URL; the fetch stub records the real
+        // one, so the click only has to be harmless in jsdom.
+        void this;
     };
+    URL.createObjectURL = vi.fn(() => 'blob:reporte');
+    URL.revokeObjectURL = vi.fn();
 
     const wrapper = mount(ReportesPage, { global: { stubs: { RouterLink: true } } });
 
     await flushPromises();
 
-    return { wrapper, downloads, restore: () => (HTMLAnchorElement.prototype.click = original) };
+    return {
+        wrapper,
+        downloads,
+        restore: () => {
+            HTMLAnchorElement.prototype.click = originalClick;
+            URL.createObjectURL = originalCreate;
+            URL.revokeObjectURL = originalRevoke;
+        },
+    };
 }
 
 describe('ReportesPage — el libro operativo', () => {
@@ -122,6 +149,7 @@ describe('ReportesPage — el libro operativo', () => {
         const { wrapper, downloads, restore } = await mounted();
 
         await wrapper.findAll('button').find((b) => b.text().trim() === 'Descargar XLSX')?.trigger('click');
+        await flushPromises();
         restore();
 
         expect(downloads).toHaveLength(1);
@@ -139,6 +167,7 @@ describe('ReportesPage — el libro operativo', () => {
         await flushPromises();
 
         await wrapper.findAll('button').find((b) => b.text().trim() === 'Descargar XLSX')?.trigger('click');
+        await flushPromises();
         restore();
 
         expect(downloads[0]).toContain('months=3');

@@ -1685,6 +1685,8 @@ export interface PortalRelationship {
     id: number;
     company_name: string | null;
     company_tax_id: string | null;
+    /** The NIT as printed (`900.123.456-3`); absent on older servers. */
+    company_tax_id_label?: string | null;
     started_on: string | null;
     ended_on: string | null;
     job_title: string | null;
