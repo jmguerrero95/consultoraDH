@@ -1009,3 +1009,325 @@ QA_DATA_CLEANED=YES
 MAIN_UNCHANGED=YES
 FINAL_RESULT=FAIL
 ```
+
+---
+
+## 20. Cierre A07-XLSX-04 — cartera determinista desde el adjunto
+
+### 20.1 Estrategia y causa
+
+LIVE-03 confirmó que el problema no era el lector del adjunto: el archivo se
+procesó, `analyze_table` devolvió sus datos y el fallo ocurrió cuando el modelo
+tuvo que serializar el libro XLSX v2. Cloudflare
+`@cf/openai/gpt-oss-120b` emitió `create_artifact` con argumentos vacíos, ignoró
+la reparación forzada y cerró el turno con texto. Pedir un JSON más corto, más
+rondas o más tokens habría seguido dependiendo de que un modelo gratuito
+respetara un contrato grande.
+
+A07-XLSX-04 cambia la responsabilidad: para una solicitud de cartera
+inequívoca, el servidor reconoce el plan, lee el adjunto autorizado, calcula las
+filas y construye el libro XLSX v2 en PHP. El modelo no serializa ninguna fila,
+fórmula, indicador ni JSON de workbook. Si la solicitud no es inequívoca, el
+planner no actúa y el flujo normal del asistente sigue disponible.
+
+### 20.2 Implementación
+
+| Pieza | Cambio |
+|---|---|
+| `TabularAttachmentReader` | Extrae el lector de CSV/Excel y la resolución del adjunto por propietario y conversación; `AnalyzeTableTool` lo reutiliza. No hay un segundo lector ni una dependencia nueva. |
+| `StructuredTable` | Añade el mapeo de cliente y un `receivablesMapping()` estricto: exige una sola columna de cliente, obligación y pagado; las alternativas ambiguas se rechazan. |
+| `TabularReportPlanner` | Reconoce solo peticiones explícitas: adjunto de esta conversación, intención de cartera, generación de libro y descuento indicado (o ausente, que significa 0). No inventa un porcentaje y no combina adjuntos. |
+| `TabularReportService` | Valida filas e importes, calcula `Saldo pendiente`, `Descuento` y `Saldo ajustado`, y construye las hojas `Cartera` y `Resumen` con rangos dinámicos, siete indicadores y formatos COP/entero/porcentaje. |
+| `AiAssistantService::runTurn` | Antes de cualquier llamada al proveedor, completa un plan determinista con el turno normal, mensaje assistant, vínculo de artefacto, privacidad, auditoría y estado `completed`. |
+| `AnalyzeTableTool` | Acepta la operación compacta `report_type="receivables"`, `discount_percent` e `include_summary`; el modelo solo aporta esos escalares, no el libro. |
+| `CreateArtifactTool` / `XlsxWorkbookBuilder` | Sin cambios de contrato: siguen validando fórmulas, referencias, inyección, formatos y estructura antes de persistir. |
+
+No se modificaron proveedores, credenciales, prioridades, cuotas, timeouts,
+límites de rondas, RBAC, confirmación de escrituras ni módulos administrativos.
+No se crearon obligaciones, clientes ni escrituras de negocio.
+
+### 20.3 Pruebas herméticas
+
+| Caso obligatorio | Resultado |
+|---|---|
+| A. 3 clientes, contrato QA-R3-02 | **PASS**: dos hojas, siete indicadores, fórmulas y valores exactos |
+| B. 10 clientes | **PASS**: `SUM(B2:B11)`, último registro y totales dinámicos |
+| C. 100 clientes | **PASS**: `SUM(B2:B101)`, resumen en la fila 102 |
+| D. Descuentos 5/10/15 % | **PASS**: fórmulas `0.05`, `0.1`, `0.15` y totales correctos |
+| E. Sin descuento solicitado | **PASS**: descuento 0, sin inventar un porcentaje |
+| F. Columnas desordenadas | **PASS**: mapeo por encabezado, no por posición |
+| G. Encabezados ambiguos | **PASS**: HTTP 503 `tabular_report_rejected`, sin artefacto |
+| H. Datos inválidos | **PASS**: importe no numérico rechazado, sin convertirlo en cero |
+| I. Inyección de fórmulas | **PASS**: nombre de cliente conservado como texto, no como fórmula |
+| J. Aislamiento de adjuntos | **PASS**: solo el adjunto de la conversación y usuario; el ajeno se rechaza |
+| K. Idempotencia | **PASS**: mismo `client_turn_id` devuelve replay y un solo artefacto |
+| L. Regresión anterior | **PASS**: XLSX v2, CSV, fórmulas, inyección y export plano siguen pasando |
+
+```text
+A07_TESTS=580 passed, 2180 assertions
+A07_DURATION_SECONDS=248.36
+TARGETED_FINAL=21 passed, 188 assertions
+PINT=PASS
+HERMETIC_PROVIDER_CALLS=0
+NEW_DEPENDENCIES=NO
+NEW_EXCEL_READER=NO
+LOCAL_MODELS=NO
+LEGACY_REGRESSION=PASS
+```
+
+La prueba de integración usa la ruta normal del asistente
+(`POST /api/ai/conversations/{id}/messages`), un usuario QA con `ai.use` y
+`artifacts.create`, un adjunto almacenado y descargado por la ruta autenticada.
+No usa un endpoint alternativo ni una llamada directa a `create_artifact`.
+
+### 20.4 Certificación LIVE única
+
+Se ejecutó una sola solicitud LIVE después de las pruebas herméticas. Se usó un
+usuario QA sintético desechable, una conversación propia, un adjunto CSV de tres
+registros y el mismo endpoint autenticado del widget. No hubo mocks ni acceso
+directo a servicios internos.
+
+```text
+LIVE_RUNS=1
+LIVE_HTTP=200
+TOTAL_DURATION_SECONDS=0.759428
+CONVERSATION_ID=73
+ATTACHMENT_ID=116
+SOURCE_ATTACHMENT=cdh-cartera-qa.csv
+ATTACHMENT_STATUS=processed
+USER_MESSAGE_ID=181
+ASSISTANT_MESSAGE_ID=182
+TURN_ID=f8fea9fcf437
+CLIENT_TURN_ID=live-04-1792517793
+ARTIFACT_ID=26
+ARTIFACT_DISPLAY_FILENAME=Cartera_Resumen_QA_A07_XLSX_04.xlsx
+ARTIFACT_SIZE_BYTES=8250
+RESPONSE_PROVIDER=server
+RESPONSE_MODEL=tabular_report_v1
+TURN_STATUS=completed
+PRIVACY_REASON=attachment
+ENDED_BY=deterministic_report
+PROVIDER_ROWS_IN_DIAGNOSTICS=0
+LIVE_PROVIDER_CALLS=0
+MODEL_TOOL_CALLS=0
+MODEL_CREATE_ARTIFACT_CALLED=NO
+SERVER_WORKBOOK_BUILD=YES
+```
+
+La petición LIVE fue:
+
+```text
+Analiza el Excel adjunto y genera un libro llamado
+"Cartera_Resumen_QA_A07_XLSX_04.xlsx" con Cartera y Resumen, descuento del 10 %,
+fórmulas reales y los siete indicadores.
+```
+
+El diagnóstico del turno no contiene ninguna fila de proveedor: `rounds=0`,
+`tool_calls=1`, `tools=["analyze_table"]`, `result=ok`,
+`ended_by=deterministic_report`. El único “tool” registrado es la capacidad
+interna reutilizada por el servidor; el modelo no fue invocado.
+
+### 20.5 Validación del libro descargado
+
+La descarga se hizo por la ruta autenticada real:
+
+```text
+DOWNLOAD_HTTP=200
+DOWNLOAD_TIME=0.202099
+DOWNLOAD_SIZE_BYTES=8250
+CONTENT_TYPE=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+CONTENT_DISPOSITION=attachment; filename=Cartera_Resumen_QA_A07_XLSX_04.xlsx
+UNAUTHENTICATED_DOWNLOAD_HTTP=401
+```
+
+El archivo se reabrió con PhpSpreadsheet y se recalculó después de cambiar
+`Cartera!B2` de `300000` a `400000`.
+
+| Comprobación | Resultado |
+|---|---|
+| Hojas | `Cartera`, `Resumen`; exactamente 2 |
+| Filas de datos | 3; `Cartera` termina en la fila 5 (encabezado + datos + totales) |
+| Encabezados | `Cliente`, `Obligación`, `Pagado`, `Saldo pendiente`, `Descuento`, `Saldo ajustado` |
+| Fórmulas de fila | `D2=B2-C2`, `E2=D2*0.1`, `F2=D2-E2` |
+| Fórmulas de totales | `B5=SUM(B2:B4)` … `F5=SUM(F2:F4)` |
+| Indicadores | 7 fórmulas en `Resumen!B2:B8` |
+| Deudores | `=COUNTIF(Cartera!D2:D4,">0")` |
+| Recuperación | `=IFERROR(Cartera!C5/Cartera!B5,0)`, sin multiplicar por 100 |
+| Formato monetario | `"$" #,##0;[Red]-"$" #,##0` |
+| Formato entero | `0` |
+| Formato porcentual | `0.00%`; muestra `33.33%` |
+| Importes como texto | No; `B2` es numérico (`n`) |
+
+Valores iniciales:
+
+```text
+OBLIGATIONS=1050000
+PAID=350000
+BALANCE=700000
+DISCOUNT=70000
+ADJUSTED=630000
+DEBTORS=2
+RECOVERY_PERCENT=33.333333
+```
+
+Después de `Cartera!B2=400000`:
+
+```text
+OBLIGATIONS=1150000
+PAID=350000
+BALANCE=800000
+DISCOUNT=80000
+ADJUSTED=720000
+DEBTORS=2
+RECOVERY_PERCENT=30.434783
+```
+
+La recalculación afectó a las fórmulas de fila, a los totales y a los siete
+indicadores del resumen. El archivo no contiene valores fijos en esas celdas.
+
+### 20.6 Idempotencia, vínculo y limpieza
+
+- El usuario QA terminó con **un solo artefacto** (`ARTIFACT_COUNT=1`), un
+  mensaje de usuario completado y un mensaje assistant (`MESSAGE_COUNT=2`).
+- El artefacto quedó vinculado al mensaje assistant 182 y a la conversación 73.
+- La conversación quedó marcada `contains_client_data=true` y el artefacto se
+  almacenó en la ruta privada `ai-artifacts/77/...`.
+- La descarga sin sesión devolvió `401`, no el archivo.
+- La prueba hermética de idempotencia confirma que el mismo `client_turn_id`
+  devuelve `replayed=true` sin un segundo artefacto.
+- Se eliminaron usuario 77, conversación 73, tarea 19, adjunto 116, artefacto
+  26, sus mensajes, chunks, archivos de storage, cookies y temporales. La
+  limpieza terminó con `user_exists=false`, `conversation_exists=false`,
+  `attachment_exists=false`, `artifact_exists=false` y `task_exists=false`.
+- No se borraron datos de otras conversaciones ni de otras sesiones.
+
+### 20.7 Residuales honestos
+
+- **La aceptación del producto sigue pendiente del propietario.** El código y la
+  certificación LIVE están completos, pero `main` no se ha fusionado ni
+  publicado.
+- **La LIVE certifica la ruta determinista, no una llamada al proveedor.** El
+  turno se completó sin LLM (`LIVE_PROVIDER_CALLS=0`), que es precisamente el
+  objetivo de A07-XLSX-04. La disponibilidad de proveedores para turnos que sí
+  requieren modelo sigue amparada por la evidencia de failover anterior, no por
+  esta ejecución.
+- **El artefacto LIVE se eliminó después de validarlo**, conforme a la limpieza
+  de datos sintéticos; no queda un enlace de descarga permanente. La evidencia
+  conserva fórmulas, valores, formatos, estados y hashes, no el archivo.
+- **El reconocimiento es deliberadamente estrecho.** Una petición sin mención
+  del adjunto, sin intención de cartera o con un descuento ambiguo no se ejecuta
+  en silencio: vuelve al flujo normal para que el asistente pregunte. Es una
+  decisión de seguridad, no un fallo.
+- No se modificaron los informes no relacionados que ya estaban sin seguimiento
+  en el árbol de trabajo.
+
+## 21. Contrato A07-XLSX-04
+
+```text
+CONSULTORA_DH_A07_XLSX_04
+
+BASE_SHA=d20195eb601392e802cb8908ebe466262368b32c
+WORK_BRANCH=fix/a07-xlsx-01-formulas
+CODE_SHA=5c7b9c42f7606d159de7009cb784e6fcdfcc1039
+FINAL_CODE_SHA=5c7b9c42f7606d159de7009cb784e6fcdfcc1039
+REPORT_SHA=PENDING_REPORT_COMMIT
+MAIN_UNCHANGED=YES
+
+STRATEGY=SERVER_SIDE_DETERMINISTIC_TABULAR_REPORT
+MODEL_SERIALIZES_WORKBOOK_JSON=NO
+MODEL_SENDS_ROWS=NO
+MODEL_SENDS_FORMULAS=NO
+MODEL_SENDS_INDICATORS=NO
+COMPACT_OPERATION=analyze_table(report_type=receivables)
+ATTACHMENT_SOURCE=CURRENT_USER_CURRENT_CONVERSATION_ONLY
+DISCOUNT_SOURCE=EXPLICIT_USER_STATEMENT_OR_ZERO
+DISCOUNT_INFERRED_FROM_FILE=NO
+AMBIGUOUS_TEMPLATE_APPLIED=NO
+MULTIPLE_ATTACHMENTS_COMBINED=NO
+
+SHEETS=Cartera,Resumen
+TOTAL_ROWS_DYNAMIC=YES
+REAL_FORMULAS=YES
+SEVEN_INDICATORS=YES
+FORMULA_INJECTION_SAFE=YES
+COP_FORMAT=YES
+INTEGER_FORMAT=YES
+PERCENTAGE_FORMAT=YES
+PERCENTAGE_MULTIPLIED_BY_100=NO
+CREATE_ARTIFACT_VALIDATION=PRESERVED
+LEGACY_XLSX_V2=PASS
+
+TEST_A_3_CLIENTS=PASS
+TEST_B_10_CLIENTS=PASS
+TEST_C_100_CLIENTS=PASS
+TEST_D_5_10_15_PERCENT=PASS
+TEST_E_NO_DISCOUNT=PASS
+TEST_F_REORDERED_COLUMNS=PASS
+TEST_G_AMBIGUOUS_HEADERS=REJECTED
+TEST_H_INVALID_DATA=REJECTED
+TEST_I_FORMULA_INJECTION=TEXT
+TEST_J_ATTACHMENT_ISOLATION=PASS
+TEST_K_IDEMPOTENCY=PASS
+TEST_L_LEGACY_REGRESSION=PASS
+
+A07_TESTS=580 passed, 2180 assertions
+A07_DURATION_SECONDS=248.36
+TARGETED_FINAL=21 passed, 188 assertions
+PINT=PASS
+HERMETIC_PROVIDER_CALLS=0
+NEW_DEPENDENCIES=NO
+NEW_EXCEL_READER=NO
+LOCAL_MODELS=NO
+PROVIDER_CONFIG_CHANGED=NO
+RBAC_CHANGED=NO
+ADMIN_WRITES=NO
+
+LIVE_RUNS=1
+LIVE_HTTP=200
+LIVE_PROVIDER_CALLS=0
+TOTAL_DURATION_SECONDS=0.759428
+LIVE_ATTACHMENT_ID=116
+LIVE_ARTIFACT_ID=26
+LIVE_FILENAME=Cartera_Resumen_QA_A07_XLSX_04.xlsx
+LIVE_ARTIFACT_SIZE_BYTES=8250
+LIVE_DOWNLOAD_HTTP=200
+LIVE_DOWNLOAD_AUTHENTICATED=YES
+LIVE_UNAUTHENTICATED_DOWNLOAD_HTTP=401
+TWO_SHEETS=YES
+SEVEN_INDICATORS=YES
+REAL_FORMULAS=YES
+CORRECT_FORMATS=YES
+RECALCULATION=YES
+INITIAL_OBLIGATIONS=1050000
+INITIAL_PAID=350000
+INITIAL_BALANCE=700000
+INITIAL_DISCOUNT=70000
+INITIAL_ADJUSTED=630000
+INITIAL_DEBTORS=2
+INITIAL_RECOVERY_PERCENT=33.333333
+RECALCULATED_OBLIGATIONS=1150000
+RECALCULATED_BALANCE=800000
+RECALCULATED_DISCOUNT=80000
+RECALCULATED_ADJUSTED=720000
+RECALCULATED_DEBTORS=2
+RECALCULATED_RECOVERY_PERCENT=30.434783
+ARTIFACT_COUNT=1
+MESSAGE_COUNT=2
+TURN_STATUS=completed
+ARTIFACT_LINKED_TO_MESSAGE=YES
+PRIVATE_STORAGE=YES
+SYNTHETIC_DATA_CLEANED=YES
+QA_DATA_CLEANED=YES
+MAIN_UNCHANGED=YES
+FINAL_RESULT=PASS
+CODE_RESULT=PASS
+PRODUCT_ACCEPTANCE=PENDING_USER
+BLOCKER=NONE
+NEXT=OWNER_REVIEW_AND_FAST_FORWARD_AUTHORIZATION
+```
+
+`CODE_SHA` identifica el commit funcional que se ejecutó en la LIVE. El commit
+posterior de este informe no cambia código. `REPORT_SHA` identifica el commit
+que contiene esta evidencia; el tip de la rama solo actualiza esa referencia.
+`main` y `origin/main` permanecen en
+`d20195eb601392e802cb8908ebe466262368b32c` hasta la aceptación del propietario.
