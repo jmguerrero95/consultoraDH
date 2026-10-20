@@ -332,6 +332,23 @@ final class XlsxWorkbookTest extends TestCase
         $this->assertRejected(json_encode([['Cliente' => 'Prueba Alfa']]), 'no una lista');
     }
 
+    public function test_malformed_json_is_also_rejected_for_csv(): void
+    {
+        try {
+            $this->create([
+                'format' => 'csv',
+                'filename' => 'csv-invalido',
+                'content' => '{"version":2,"sheets":[',
+            ]);
+
+            $this->fail('Malformed JSON must not become a CSV file.');
+        } catch (AiToolRejected $exception) {
+            $this->assertStringContainsString('mal formado', $exception->getMessage());
+        }
+
+        $this->assertSame(0, AiArtifact::query()->count());
+    }
+
     public function test_invalid_or_duplicate_sheet_names_are_rejected(): void
     {
         $this->assertRejected(json_encode([
