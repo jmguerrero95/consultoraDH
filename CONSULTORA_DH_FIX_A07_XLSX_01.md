@@ -881,3 +881,131 @@ FINAL_RESULT=FAIL
 BLOCKER=LIVE_RUN_CAP_REACHED
 NEXT=AUTHORIZE_THIRD_LIVE_RUN
 ```
+
+## 18. QA-R3-02 LIVE-03 — ejecución autorizada
+
+El propietario autorizó una única ejecución LIVE adicional. No se modificó
+código antes de probar. La rama siguió en `fix/a07-xlsx-01-formulas`, con el
+commit funcional `9941499e1c7afe5b1551aaf339537df7c0de16ce` y el informe en
+`b20d953c8ae792c1ecddd19823632f4eef274e2f`. El contenedor de aplicación tenía
+cargado `b20d953` (incluye el commit funcional) y el worker de cola compartía el
+mismo bind mount y los mismos marcadores de código.
+
+### 18.1 Comprobaciones previas, sin llamadas LLM
+
+| Comprobación | Resultado |
+|---|---|
+| `tools` como lista con una sola herramienta | **PASS**: `array_values` + `array_map` producen `[{"type":"function",...}]`; `array_is_list=true` |
+| `tool_choice` forzado solo en recuperación/reparación | **PASS**: solo las dos rutas de `create_artifact` pasan `forceTool`; la llamada inicial no lo hace |
+| Manejo de un 400 por modalidad forzada | **PASS**: el resolver lo clasifica como `malformed`/`capability`, lo marca como tools no soportado y hace failover |
+| Permisos del usuario QA | **PASS**: `ai.use=yes`, `artifacts.create=yes` |
+| Adjunto sintético procesado | **PASS**: `attachment_id=115`, `status=processed`, 1 chunk |
+| Presupuesto | **PASS**: 150 s, 4 intentos, 4 rondas; sin cooldowns ni cuotas bloqueantes |
+| Caché de configuración | **PASS**: sin `bootstrap/cache/config.php` |
+| Código cargado en app y worker | **PASS**: ambos ven `$nextTools = [$offered['create_artifact']]` y `array_values($tools)` |
+
+El pool elegible tenía 10 candidatos. El primero era Cloudflare
+`@cf/openai/gpt-oss-120b` (prioridad 3, herramientas demostradas, sin cooldown),
+con `max_tokens=2048`. La comprobación de que el proveedor *acepta* la modalidad
+forzada no puede hacerse sin una llamada real; el resolver está preparado para
+failover si la rechaza.
+
+### 18.2 Ejecución LIVE
+
+Se usó un usuario QA sintético desechable, conversación 72, tarea 18 y adjunto
+115, con el archivo de tres registros (`Prueba Alfa 300000/100000`,
+`Prueba Beta 250000/250000`, `Prueba Gamma 500000/0`). La petición se envió por
+la ruta autenticada real, sin mocks ni llamada directa a `create_artifact`.
+
+```text
+LIVE_HTTP=503
+TIME=93.717395 s
+CODE=artifact_validation_failed
+ARTIFACTS=[]
+```
+
+Traza del mismo turno `b6147494261d`:
+
+| Ronda | Proveedor / modelo | Herramientas | Latencia | Resultado |
+|---|---|---|---|---|
+| 0 | Cloudflare `@cf/openai/gpt-oss-120b` | `analyze_table` | 4.432 s | OK |
+| 1 | Cloudflare `@cf/openai/gpt-oss-120b` | `create_artifact` | 36.149 s | Llamada con **argumentos vacíos** |
+| 2 | Cloudflare `@cf/openai/gpt-oss-120b` | ninguna | 52.297 s | Texto de 63 caracteres; no llamó a la herramienta |
+
+El validador rechazó la única llamada a `create_artifact`:
+
+```text
+El argumento 'format' es obligatorio.
+```
+
+Después de ese rechazo, la ronda de reparación se envió con
+`tool_choice={"type":"function","function":{"name":"create_artifact"}}` y una
+sola herramienta. El proveedor respondió con texto y `tool_calls=[]`, por lo que
+el turno terminó como `artifact_validation_failed`. No hubo failover: las tres
+respuestas HTTP fueron exitosas; el fallo fue de contenido/validación, no una
+excepción de proveedor.
+
+- `CREATE_ARTIFACT_CALLED=YES` (una vez, con argumentos vacíos).
+- `VALIDATOR_RESULT=REJECTED`.
+- `ARTIFACT_ID=NONE`; no hubo descarga que validar.
+- `TWO_SHEETS=NO`, `SEVEN_INDICATORS=NO`, `REAL_FORMULAS=NO`,
+  `CORRECT_FORMATS=NO`, `RECALCULATION=NO`.
+- La evidencia no conserva `finish_reason`; no se afirma que fuera `length`.
+  Lo observable es que el modelo emitió la llamada sin argumentos y luego
+  ignoró la restricción de herramienta.
+
+No se ejecutó una cuarta solicitud. No se implementó otra corrección.
+
+### 18.3 Recomendación basada en la nueva evidencia
+
+1. **No reparar con el mismo modelo que produjo argumentos vacíos.** La
+   reparación debe considerar la llamada vacía como una incapacidad de la
+   combinación modelo/herramienta y pasar al siguiente candidato con
+   herramientas, en lugar de aceptar una respuesta de texto del mismo modelo.
+2. **Elegir para `create_artifact` un modelo que respete `tool_choice` y tenga
+   presupuesto de salida suficiente.** Cloudflare `@cf/openai/gpt-oss-120b`
+   tiene `max_tokens=2048`; el esquema v2 y el libro completo son grandes. La
+   evidencia no prueba truncamiento, pero hace que ese límite sea un riesgo
+   concreto.
+3. **Valorar el constructor determinista del libro a partir del adjunto y una
+   especificación compacta.** Es la vía más segura para que las cifras salgan
+   del archivo y las fórmulas no dependan de que un modelo gratuito genere un
+   JSON v2 extenso.
+4. Mientras no se aplique una de esas medidas, el resultado operativo sigue
+   siendo `FAIL`; no hay archivo real que validar.
+
+### 18.4 Limpieza
+
+Se eliminó el usuario QA 76, la conversación 72, la tarea 18, el adjunto 115,
+los archivos sintéticos, las cookies temporales y la traza `ai-runtime.log`. Se
+retiró `AI_TRACE_RUNTIME` de `.env` y se limpió la caché de configuración. No se
+borraron datos de la conversación 69 ni de otras sesiones.
+
+## 19. Contrato QA-R3-02 LIVE-03
+
+```text
+QA_R3_02_LIVE_03
+
+CODE_SHA=9941499e1c7afe5b1551aaf339537df7c0de16ce
+RUNTIME_CODE_VERIFIED=YES
+PROVIDER=cloudflare
+MODEL=@cf/openai/gpt-oss-120b
+HTTP_STATUS=503
+ERROR_CODE=artifact_validation_failed
+TOOL_CALLS=analyze_table; create_artifact (argumentos vacíos); reparación sin herramienta
+CREATE_ARTIFACT_CALLED=YES
+VALIDATOR_RESULT=REJECTED: El argumento 'format' es obligatorio.
+ARTIFACT_ID=NONE
+ARTIFACT_DOWNLOAD=NO
+TWO_SHEETS=NO
+SEVEN_INDICATORS=NO
+REAL_FORMULAS=NO
+CORRECT_FORMATS=NO
+RECALCULATION=NO
+
+LIVE_PROVIDER_CALLS=3
+TOTAL_DURATION_SECONDS=93.717
+QA_DATA_CLEANED=YES
+MAIN_UNCHANGED=YES
+FINAL_RESULT=FAIL
+```
