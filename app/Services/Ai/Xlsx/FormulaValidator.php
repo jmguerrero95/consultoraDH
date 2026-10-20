@@ -114,6 +114,74 @@ final class FormulaValidator
     }
 
     /**
+     * Detect the common "percentage multiplied by 100" mistake.
+     *
+     * A percentage cell stores a fraction (1/3), and Excel's percentage format
+     * supplies the multiplication by 100 when displaying it. A formula that
+     * already multiplies by 100 would display 3333.33% and is therefore rejected
+     * structurally. `*100%` is not rejected: the percent operator makes it a
+     * factor of one, not a scale by one hundred.
+     */
+    public function isScaledByHundred(string $expression): bool
+    {
+        $expression = trim($expression);
+
+        if (str_starts_with($expression, '=')) {
+            $expression = ltrim(substr($expression, 1));
+        }
+
+        $tokens = $this->tokenize($expression);
+        $count = count($tokens);
+
+        for ($index = 0; $index < $count; $index++) {
+            $token = $tokens[$index];
+
+            if ($token['type'] === 'operator' && $token['value'] === '*') {
+                $next = $tokens[$index + 1] ?? null;
+                $after = $tokens[$index + 2] ?? null;
+
+                if ($next !== null && $next['type'] === 'number' && (float) $next['value'] === 100.0) {
+                    if ($after === null || $after['type'] !== 'operator' || $after['value'] !== '%') {
+                        return true;
+                    }
+                }
+
+                if (
+                    $next !== null && $next['type'] === 'number' && (float) $next['value'] === 10.0
+                    && $after !== null && $after['type'] === 'operator' && $after['value'] === '^'
+                    && isset($tokens[$index + 3])
+                    && $tokens[$index + 3]['type'] === 'number'
+                    && (float) $tokens[$index + 3]['value'] === 2.0
+                ) {
+                    return true;
+                }
+            }
+
+            if ($token['type'] === 'operator' && $token['value'] === '/') {
+                $next = $tokens[$index + 1] ?? null;
+
+                if (
+                    $next !== null && $next['type'] === 'number'
+                    && abs((float) $next['value'] - 0.01) < 1e-12
+                ) {
+                    return true;
+                }
+            }
+
+            if (
+                $token['type'] === 'number' && (float) $token['value'] === 100.0
+                && isset($tokens[$index + 1])
+                && $tokens[$index + 1]['type'] === 'operator'
+                && $tokens[$index + 1]['value'] === '*'
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * @return list<array{type: string, value: string}>
      */
     private function tokenize(string $formula): array

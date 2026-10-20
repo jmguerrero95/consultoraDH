@@ -317,6 +317,12 @@ final class XlsxWorkbookBuilder
         }
 
         $this->validateFormulas($book);
+        $this->applyIndicators(
+            $book,
+            $decoded['indicators'] ?? null,
+            $decoded['required_indicators'] ?? null,
+        );
+        $this->validatePercentageFormats($book);
 
         return $book;
     }
@@ -746,6 +752,278 @@ final class XlsxWorkbookBuilder
     }
 
     /**
+     * Validate the stable summary indicators declared by the model and apply
+     * their explicit formats to the destination cells.
+     *
+     * `required_indicators` is the machine-readable list of indicators the user
+     * asked for. `indicators` defines each one by stable id, sheet, cell, kind
+     * and format. Every required id must have a definition whose destination
+     * exists; otherwise the workbook is rejected. This is how an omitted
+     * "descuento total" or "saldo ajustado" stops being silently accepted.
+     */
+    private function applyIndicators(array &$book, mixed $rawIndicators, mixed $rawRequired): void
+    {
+        if ($rawIndicators === null && $rawRequired === null) {
+            return;
+        }
+
+        if ($rawIndicators === null || $rawRequired === null) {
+            throw new AiToolRejected(
+                'El libro XLSX debe enviar «required_indicators» e «indicators» juntos.'
+            );
+        }
+
+        if (! is_array($rawIndicators) || ! array_is_list($rawIndicators)) {
+            throw new AiToolRejected('El campo «indicators» debe ser una lista de indicadores.');
+        }
+
+        if (! is_array($rawRequired) || ! array_is_list($rawRequired)) {
+            throw new AiToolRejected('El campo «required_indicators» debe ser una lista de identificadores.');
+        }
+
+        if ($rawIndicators === [] && $rawRequired === []) {
+            return;
+        }
+
+        $required = [];
+
+        foreach ($rawRequired as $rawId) {
+            $id = $this->normaliseIndicatorId($rawId, 'required_indicators');
+
+            if (isset($required[$id])) {
+                throw new AiToolRejected("El identificador de indicador «{$id}» está duplicado en required_indicators.");
+            }
+
+            $required[$id] = true;
+        }
+
+        if ($required === []) {
+            throw new AiToolRejected('Si defines indicadores, «required_indicators» no puede estar vacío.');
+        }
+
+        $sheetIndexes = [];
+
+        foreach ($book['sheets'] as $index => $sheet) {
+            $sheetIndexes[mb_strtolower($sheet['name'])] = $index;
+        }
+
+        $defined = [];
+
+        foreach ($rawIndicators as $raw) {
+            if (! is_array($raw) || array_is_list($raw)) {
+                throw new AiToolRejected('Cada elemento de «indicators» debe ser un objeto.');
+            }
+
+            $id = $this->normaliseIndicatorId($raw['id'] ?? null, 'indicators');
+
+            if (isset($defined[$id])) {
+                throw new AiToolRejected("El indicador «{$id}» está definido más de una vez.");
+            }
+
+            $sheetName = $raw['sheet'] ?? null;
+
+            if (! is_string($sheetName) || trim($sheetName) === '') {
+                throw new AiToolRejected("El indicador «{$id}» debe indicar una hoja.");
+            }
+
+            $sheetKey = mb_strtolower(trim($sheetName));
+
+            if (! isset($sheetIndexes[$sheetKey])) {
+                throw new AiToolRejected("El indicador «{$id}» apunta a una hoja inexistente: «{$sheetName}».");
+            }
+
+            $sheet = &$book['sheets'][$sheetIndexes[$sheetKey]];
+            $coordinate = strtoupper(str_replace('$', '', trim((string) ($raw['cell'] ?? ''))));
+
+            if (preg_match('/^([A-Z]{1,3})([1-9][0-9]*)$/', $coordinate, $match) !== 1) {
+                throw new AiToolRejected("El indicador «{$id}» debe indicar una celda válida como B2.");
+            }
+
+            $columnIndex = Coordinate::columnIndexFromString($match[1]);
+            $rowIndex = (int) $match[2];
+            $maxColumns = 0;
+
+            foreach ($sheet['rows'] as $row) {
+                $maxColumns = max($maxColumns, count($row));
+            }
+
+            if ($rowIndex > count($sheet['rows']) || $columnIndex > $maxColumns) {
+                throw new AiToolRejected(
+                    "El indicador «{$id}» apunta a {$coordinate}, fuera de los datos de la hoja «{$sheet['name']}»."
+                );
+            }
+
+            if (! isset($sheet['rows'][$rowIndex - 1][$columnIndex - 1])) {
+                throw new AiToolRejected("El indicador «{$id}» apunta a una celda vacía en «{$sheet['name']}».");
+            }
+
+            $cell = &$sheet['rows'][$rowIndex - 1][$columnIndex - 1];
+
+            if ($cell['kind'] === 'blank') {
+                throw new AiToolRejected("El indicador «{$id}» apunta a una celda vacía en «{$sheet['name']}».");
+            }
+
+            $kind = $raw['kind'] ?? null;
+
+            if (! is_string($kind) || ! in_array(mb_strtolower(trim($kind)), ['formula', 'value'], true)) {
+                throw new AiToolRejected(
+                    "El indicador «{$id}» debe declarar kind como «formula» o «value»."
+                );
+            }
+
+            $kind = mb_strtolower(trim($kind));
+
+            if ($kind === 'formula' && $cell['kind'] !== 'formula') {
+                throw new AiToolRejected("El indicador «{$id}» se declaró como fórmula, pero {$coordinate} no lo es.");
+            }
+
+            if ($kind === 'value' && $cell['kind'] === 'formula') {
+                throw new AiToolRejected("El indicador «{$id}» se declaró como valor, pero {$coordinate} es una fórmula.");
+            }
+
+            if (! array_key_exists('format', $raw) || ! is_string($raw['format']) || trim($raw['format']) === '') {
+                throw new AiToolRejected("El indicador «{$id}» debe declarar un format explícito.");
+            }
+
+            $format = $this->normaliseFormatName($raw['format']);
+
+            // The indicator declaration is the most specific specification:
+            // it overrides a column default and a cell-level default.
+            $cell['format'] = $format;
+
+            $this->assertNumericIndicator($cell, $format, $id, $sheet['name'], $coordinate);
+
+            $defined[$id] = true;
+
+            unset($cell, $sheet);
+        }
+
+        $missing = array_values(array_diff(array_keys($required), array_keys($defined)));
+
+        if ($missing !== []) {
+            throw new AiToolRejected(
+                'Faltan indicadores requeridos en el libro XLSX: '.implode(', ', $missing).'.'
+            );
+        }
+    }
+
+    private function normaliseIndicatorId(mixed $id, string $field): string
+    {
+        if (! is_string($id)) {
+            throw new AiToolRejected("Cada identificador de «{$field}» debe ser una cadena.");
+        }
+
+        $id = trim($id);
+
+        if (preg_match('/^[a-z][a-z0-9_.-]{0,63}$/', $id) !== 1) {
+            throw new AiToolRejected(
+                "El identificador de indicador «{$id}» no es válido. Usa minúsculas, números, punto, guion o guion bajo."
+            );
+        }
+
+        return $id;
+    }
+
+    /**
+     * Money, integer and percentage indicators must be numeric or formulas. A
+     * text cell such as "33,33 %" is not a real percentage value.
+     */
+    private function assertNumericIndicator(
+        array $cell,
+        string $format,
+        string $id,
+        string $sheet,
+        string $coordinate
+    ): void {
+        $numericFormats = [
+            self::FORMAT_CODES['currency_cop'],
+            self::FORMAT_CODES['integer'],
+            self::FORMAT_CODES['percentage'],
+        ];
+
+        if (! in_array($format, $numericFormats, true)) {
+            return;
+        }
+
+        if ($cell['kind'] === 'formula') {
+            return;
+        }
+
+        $value = null;
+
+        if ($cell['kind'] === 'number') {
+            $value = $cell['value'];
+        } elseif ($cell['kind'] === 'value' && is_numeric($cell['value'] ?? null)) {
+            $value = $cell['value'] + 0;
+        }
+
+        if ($value === null) {
+            throw new AiToolRejected(
+                "El indicador «{$id}» de la hoja «{$sheet}», celda {$coordinate}, "
+                .'debe ser numérico o una fórmula para su formato.'
+            );
+        }
+
+        if ($format === self::FORMAT_CODES['integer'] && (float) $value !== floor((float) $value)) {
+            throw new AiToolRejected(
+                "El indicador «{$id}» de la hoja «{$sheet}», celda {$coordinate}, debe ser un entero."
+            );
+        }
+    }
+
+    /**
+     * A percentage cell stores a fraction; the number format displays it as a
+     * percentage. Reject the two obvious ways to break that contract: a formula
+     * that already multiplies by 100 (or divides by 0.01), and text pretending
+     * to be a percentage.
+     */
+    private function validatePercentageFormats(array $book): void
+    {
+        foreach ($book['sheets'] as $sheet) {
+            foreach ($sheet['rows'] as $rowIndex => $row) {
+                foreach ($row as $columnIndex => $cell) {
+                    $coordinate = $this->coordinate($rowIndex + 1, $columnIndex + 1);
+                    $format = $cell['format'] ?? $sheet['cell_formats'][$coordinate] ?? null;
+
+                    if ($format === null && $rowIndex > 0) {
+                        $column = Coordinate::stringFromColumnIndex($columnIndex + 1);
+                        $format = $sheet['column_formats'][$column] ?? null;
+                    }
+
+                    if ($format !== self::FORMAT_CODES['percentage'] || $cell['kind'] === 'blank') {
+                        continue;
+                    }
+
+                    if ($cell['kind'] === 'formula') {
+                        if ($this->formulaValidator->isScaledByHundred($cell['expression'])) {
+                            throw new AiToolRejected(
+                                "La celda {$coordinate} de la hoja «{$sheet['name']}» tiene formato percentage, "
+                                .'pero su fórmula multiplica por 100. Guarda la fracción (0,3333) y deja que '
+                                .'el formato la muestre como 33,33 %.'
+                            );
+                        }
+
+                        continue;
+                    }
+
+                    if ($cell['kind'] === 'number') {
+                        continue;
+                    }
+
+                    if ($cell['kind'] === 'value' && is_numeric($cell['value'] ?? null)) {
+                        continue;
+                    }
+
+                    throw new AiToolRejected(
+                        "La celda {$coordinate} de la hoja «{$sheet['name']}» tiene formato percentage, "
+                        .'pero no contiene un número o una fórmula.'
+                    );
+                }
+            }
+        }
+    }
+
+    /**
      * @param  array{name: string, rows: list<list<array{kind: string, value?: mixed, expression?: string, format?: string}>>, column_formats: array<string, string>, cell_formats: array<string, string>, freeze_pane: string|null}  $sheet
      * @return array<string, string> coordinate => expression
      */
@@ -945,6 +1223,17 @@ final class XlsxWorkbookBuilder
                         "La fórmula de la celda {$coordinate} de la hoja «{$sheetName}» produce {$value}. "
                         .'Corrige la fórmula o protégela con IFERROR.'
                     );
+                }
+
+                $format = $worksheet->getCell($coordinate)->getStyle()->getNumberFormat()->getFormatCode();
+
+                if ($format === self::FORMAT_CODES['integer']) {
+                    if (! is_numeric($value) || (float) $value !== floor((float) $value)) {
+                        throw new AiToolRejected(
+                            "La celda {$coordinate} de la hoja «{$sheetName}» tiene formato integer, "
+                            .'pero su fórmula no produce un entero.'
+                        );
+                    }
                 }
             }
         }

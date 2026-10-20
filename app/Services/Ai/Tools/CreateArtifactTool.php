@@ -63,7 +63,11 @@ final class CreateArtifactTool extends AbstractAiTool
             .'como Cartera!B5 o SUM(B2:B4). Fórmulas permitidas: + - * / ^, comparaciones, SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, '
             .'COUNTIF, SUMIF, IF, IFERROR, ROUND, ABS, AND, OR, NOT. Para varias hojas, fórmulas o referencias entre hojas usa '
             .'este formato v2; para una tabla plana puedes usar analyze_table. No envíes fórmulas como texto: '
-            .'márcalas con {"type":"formula","expression":"=..."}.';
+            .'márcalas con {"type":"formula","expression":"=..."}. '
+            .'Si el libro incluye un resumen, envía «required_indicators» con todos los ids solicitados y «indicators» con '
+            .'[{"id":"total_obligations","sheet":"Resumen","cell":"B2","kind":"formula","format":"currency_cop"}]. '
+            .'Cada id requerido debe tener su definición o el libro se rechaza. Usa integer para conteos, percentage para '
+            .'tasas (guarda la fracción 0.3333, sin multiplicar por 100) y currency_cop para importes.';
     }
 
     public function parameters(): array
@@ -86,7 +90,8 @@ final class CreateArtifactTool extends AbstractAiTool
                         .'Para CSV es un arreglo JSON de filas, la primera con los encabezados. Para XLSX es ese mismo '
                         .'arreglo (hoja Datos) o un objeto v2 con «version»:2, «sheets», «column_formats», «cell_formats» '
                         .'y «freeze_pane». En v2 una celda con fórmula se escribe '
-                        .'{"type":"formula","expression":"=SUM(B2:B4)"}; el resto de celdas son valores normales.',
+                        .'{"type":"formula","expression":"=SUM(B2:B4)"}; el resto de celdas son valores normales. '
+                        .'Para un resumen, agrega «required_indicators» y «indicators» con id, sheet, cell, kind y format.',
                 ],
                 'title' => [
                     'type' => 'string',

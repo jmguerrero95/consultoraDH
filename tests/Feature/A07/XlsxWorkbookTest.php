@@ -75,6 +75,66 @@ final class XlsxWorkbookTest extends TestCase
 
         return [
             'version' => 2,
+            'required_indicators' => [
+                'total_obligations',
+                'total_paid',
+                'total_balance',
+                'total_discount',
+                'total_adjusted',
+                'debtors',
+                'recovery',
+            ],
+            'indicators' => [
+                [
+                    'id' => 'total_obligations',
+                    'sheet' => 'Resumen',
+                    'cell' => 'B2',
+                    'kind' => 'formula',
+                    'format' => 'currency_cop',
+                ],
+                [
+                    'id' => 'total_paid',
+                    'sheet' => 'Resumen',
+                    'cell' => 'B3',
+                    'kind' => 'formula',
+                    'format' => 'currency_cop',
+                ],
+                [
+                    'id' => 'total_balance',
+                    'sheet' => 'Resumen',
+                    'cell' => 'B4',
+                    'kind' => 'formula',
+                    'format' => 'currency_cop',
+                ],
+                [
+                    'id' => 'total_discount',
+                    'sheet' => 'Resumen',
+                    'cell' => 'B5',
+                    'kind' => 'formula',
+                    'format' => 'currency_cop',
+                ],
+                [
+                    'id' => 'total_adjusted',
+                    'sheet' => 'Resumen',
+                    'cell' => 'B6',
+                    'kind' => 'formula',
+                    'format' => 'currency_cop',
+                ],
+                [
+                    'id' => 'debtors',
+                    'sheet' => 'Resumen',
+                    'cell' => 'B7',
+                    'kind' => 'formula',
+                    'format' => 'integer',
+                ],
+                [
+                    'id' => 'recovery',
+                    'sheet' => 'Resumen',
+                    'cell' => 'B8',
+                    'kind' => 'formula',
+                    'format' => 'percentage',
+                ],
+            ],
             'sheets' => [
                 [
                     'name' => 'Cartera',
@@ -113,14 +173,10 @@ final class XlsxWorkbookTest extends TestCase
                         ['Clientes con deuda', $formula('=COUNTIF(Cartera!D2:D4,">0")')],
                         ['Recuperación', $formula('=IF(Cartera!B5=0,0,Cartera!C5/Cartera!B5)')],
                     ],
-                    'cell_formats' => [
-                        'B2' => 'currency_cop',
-                        'B3' => 'currency_cop',
-                        'B4' => 'currency_cop',
-                        'B5' => 'currency_cop',
-                        'B6' => 'currency_cop',
-                        'B7' => 'number',
-                        'B8' => 'percentage',
+                    // Deliberately currency for the whole column: the integer
+                    // and percentage indicators must override it cell by cell.
+                    'column_formats' => [
+                        'B' => 'currency_cop',
                     ],
                     'freeze_pane' => 'A2',
                 ],
@@ -170,7 +226,15 @@ final class XlsxWorkbookTest extends TestCase
         $this->assertSame('=D2-E2', $cartera->getCell('F2')->getValue());
         $this->assertSame('=SUM(B2:B4)', $cartera->getCell('B5')->getValue());
         $this->assertSame('=Cartera!B5', $resumen->getCell('B2')->getValue());
+        $this->assertSame('=Cartera!F5', $resumen->getCell('B6')->getValue());
         $this->assertSame('=COUNTIF(Cartera!D2:D4,">0")', $resumen->getCell('B7')->getValue());
+        $this->assertSame(
+            '=IF(Cartera!B5=0,0,Cartera!C5/Cartera!B5)',
+            $resumen->getCell('B8')->getValue()
+        );
+        $this->assertSame('Descuento total', $resumen->getCell('A5')->getValue());
+        $this->assertSame('Saldo ajustado', $resumen->getCell('A6')->getValue());
+        $this->assertSame(8, $resumen->getHighestDataRow());
 
         $this->assertEqualsWithDelta(200000, $cartera->getCell('D2')->getCalculatedValue(), 0.001);
         $this->assertEqualsWithDelta(20000, $cartera->getCell('E2')->getCalculatedValue(), 0.001);
@@ -194,7 +258,13 @@ final class XlsxWorkbookTest extends TestCase
         $this->assertIsNumeric($cartera->getCell('B2')->getValue());
         $this->assertStringContainsString('$', $cartera->getCell('B2')->getStyle()->getNumberFormat()->getFormatCode());
         $this->assertStringContainsString('#,##0', $cartera->getCell('B2')->getStyle()->getNumberFormat()->getFormatCode());
+        $this->assertStringContainsString('$', $resumen->getCell('B6')->getStyle()->getNumberFormat()->getFormatCode());
+        $this->assertSame('0', $resumen->getCell('B7')->getStyle()->getNumberFormat()->getFormatCode());
+        $this->assertStringNotContainsString('$', $resumen->getCell('B7')->getFormattedValue());
+        $this->assertSame('2', $resumen->getCell('B7')->getFormattedValue());
         $this->assertSame('0.00%', $resumen->getCell('B8')->getStyle()->getNumberFormat()->getFormatCode());
+        $this->assertStringContainsString('33.33%', $resumen->getCell('B8')->getFormattedValue());
+        $this->assertStringNotContainsString('$', $resumen->getCell('B8')->getFormattedValue());
 
         $this->assertSame('A2', $cartera->getFreezePane());
         $this->assertSame('A2', $resumen->getFreezePane());
@@ -253,6 +323,48 @@ final class XlsxWorkbookTest extends TestCase
             350000 / 1150000,
             $reopened->getSheetByName('Resumen')->getCell('B8')->getCalculatedValue(),
             0.000001
+        );
+    }
+
+    public function test_a_required_summary_indicator_without_definition_is_rejected(): void
+    {
+        $book = $this->carteraBook();
+        $book['indicators'] = array_values(array_filter(
+            $book['indicators'],
+            static fn (array $indicator): bool => $indicator['id'] !== 'total_adjusted'
+        ));
+
+        $this->assertRejected(
+            json_encode($book, JSON_UNESCAPED_UNICODE),
+            'Faltan indicadores requeridos en el libro XLSX: total_adjusted'
+        );
+    }
+
+    public function test_a_percentage_indicator_scaled_by_100_is_rejected(): void
+    {
+        $book = $this->carteraBook();
+        $book['sheets'][1]['rows'][7][1] = [
+            'type' => 'formula',
+            'expression' => '=Cartera!C5/Cartera!B5*100',
+        ];
+
+        $this->assertRejected(
+            json_encode($book, JSON_UNESCAPED_UNICODE),
+            'multiplica por 100'
+        );
+    }
+
+    public function test_an_integer_indicator_whose_formula_returns_a_fraction_is_rejected(): void
+    {
+        $book = $this->carteraBook();
+        $book['sheets'][1]['rows'][6][1] = [
+            'type' => 'formula',
+            'expression' => '=0.5',
+        ];
+
+        $this->assertRejected(
+            json_encode($book, JSON_UNESCAPED_UNICODE),
+            'no produce un entero'
         );
     }
 

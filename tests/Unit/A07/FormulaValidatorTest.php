@@ -91,4 +91,16 @@ final class FormulaValidatorTest extends TestCase
             ['Cartera', 'Resumen'],
         );
     }
+
+    public function test_percentage_scale_detection_rejects_the_hundred_multiplier(): void
+    {
+        $validator = new FormulaValidator;
+
+        $this->assertTrue($validator->isScaledByHundred('=A1/B1*100'));
+        $this->assertTrue($validator->isScaledByHundred('=100*A1/B1'));
+        $this->assertTrue($validator->isScaledByHundred('=A1/B1/0.01'));
+        $this->assertTrue($validator->isScaledByHundred('=A1/B1*10^2'));
+        $this->assertFalse($validator->isScaledByHundred('=A1/B1*100%'));
+        $this->assertFalse($validator->isScaledByHundred('=A1/B1'));
+    }
 }
