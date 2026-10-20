@@ -46,5 +46,5 @@ interface CloudAiProvider
      *
      * @throws AiProviderException on any failure, retryable or not
      */
-    public function complete(array $messages, array $tools = [], ?int $timeoutSeconds = null): AiResponse;
+    public function complete(array $messages, array $tools = [], ?int $timeoutSeconds = null, ?string $forceTool = null): AiResponse;
 }

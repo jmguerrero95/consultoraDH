@@ -220,6 +220,16 @@ final class ArtifactValidationRecoveryTest extends TestCase
 
         $repairRequest = $providerCalls[1][0];
         $this->assertOnlyTools($repairRequest, ['create_artifact']);
+        $this->assertSame(
+            [0],
+            array_keys($repairRequest->data()['tools'] ?? []),
+            'The tools payload must be a JSON list, not a name-keyed object.',
+        );
+        $this->assertSame(
+            ['type' => 'function', 'function' => ['name' => 'create_artifact']],
+            $repairRequest->data()['tool_choice'] ?? null,
+            'The repair round must force create_artifact instead of leaving it to auto.',
+        );
 
         $messages = $repairRequest->data()['messages'] ?? [];
         $directive = null;

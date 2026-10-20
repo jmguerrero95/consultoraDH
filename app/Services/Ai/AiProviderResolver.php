@@ -106,6 +106,7 @@ class AiProviderResolver
         ?string $turn = null,
         ?int $round = null,
         ?string $avoidModel = null,
+        ?string $forceTool = null,
     ): AiResponse {
         // The classification is mandatory. A07-R4-R1 fixed today's callers, but
         // the contract still defaulted the argument to "public", so the next
@@ -246,7 +247,7 @@ class AiProviderResolver
             $attemptTimeout = max(3, min($configuredTimeout, $remaining));
 
             try {
-                $response = $this->providerFor($candidate)->complete($messages, $tools, $attemptTimeout);
+                $response = $this->providerFor($candidate)->complete($messages, $tools, $attemptTimeout, $forceTool);
             } catch (AiProviderException $e) {
                 $latency = $this->latenciesFrom($startedAt);
 

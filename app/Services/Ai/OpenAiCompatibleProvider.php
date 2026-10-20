@@ -10,6 +10,7 @@ use App\Domain\Ai\AiToolCall;
 use App\Domain\Ai\AiToolDefinition;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 /**
  * A provider speaking the OpenAI-compatible chat-completions shape.
@@ -77,7 +78,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         return new AiToolDefinition($name, $description, $parameters);
     }
 
-    public function complete(array $messages, array $tools = [], ?int $timeoutSeconds = null): AiResponse
+    public function complete(array $messages, array $tools = [], ?int $timeoutSeconds = null, ?string $forceTool = null): AiResponse
     {
         if (! $this->isConfigured()) {
             throw AiProviderException::notConfigured();
@@ -89,7 +90,6 @@ class OpenAiCompatibleProvider implements CloudAiProvider
             'model' => $this->slot()['model'],
             'messages' => $this->wireMessages($messages),
         ];
-
         $maxTokens = $this->slot()['max_tokens'] ?? null;
 
         if (is_int($maxTokens) && $maxTokens > 0) {
@@ -97,8 +97,25 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         }
 
         if ($tools !== []) {
+            // The wire contract is a JSON *list* of tool definitions. A caller
+            // that passes a name-keyed map would otherwise serialise as a JSON
+            // object and every OpenAI-compatible provider rejects the request.
+            $tools = array_values($tools);
+
             $payload['tools'] = array_map(fn (AiToolDefinition $tool): array => $tool->toWire(), $tools);
-            $payload['tool_choice'] = 'auto';
+
+            // A recovery that must produce the requested file does not leave the
+            // choice to a model that just answered in prose twice. Forcing the
+            // named function is part of the OpenAI-compatible contract and is
+            // only asked for when the tool is actually offered.
+            $forced = $forceTool !== null && in_array($forceTool, array_map(
+                static fn (AiToolDefinition $tool): string => $tool->name,
+                $tools,
+            ), true);
+
+            $payload['tool_choice'] = $forced
+                ? ['type' => 'function', 'function' => ['name' => $forceTool]]
+                : 'auto';
         }
 
         // OpenRouter's own ordering of alternative models for one call. It is
@@ -122,6 +139,42 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         }
 
         if ($response->failed()) {
+            if (config('ai.trace_runtime', false)) {
+                Log::build([
+                    'driver' => 'single',
+                    'path' => storage_path('logs/ai-runtime.log'),
+                    'level' => 'debug',
+                ])->warning('provider_failed', [
+                    'provider' => $this->name,
+                    'model' => $this->slot()['model'] ?? null,
+                    'status' => $response->status(),
+                    'payload_hash' => hash('sha256', (string) json_encode($payload)),
+                    'payload_bytes' => strlen((string) json_encode($payload)),
+                    'messages' => count($payload['messages']),
+                    'tools' => count($payload['tools'] ?? []),
+                    'tool_choice' => $payload['tool_choice'] ?? null,
+                    'wire_audit' => array_map(static function (array $message): array {
+                        $calls = [];
+                        foreach ($message['tool_calls'] ?? [] as $call) {
+                            $calls[] = [
+                                'name' => $call['function']['name'] ?? null,
+                                'arguments_type' => gettype($call['function']['arguments'] ?? null),
+                                'arguments_valid' => is_string($call['function']['arguments'] ?? null)
+                                    && is_array(json_decode($call['function']['arguments'], true)),
+                            ];
+                        }
+
+                        return [
+                            'role' => $message['role'] ?? null,
+                            'content_type' => gettype($message['content'] ?? null),
+                            'tool_call_id' => $message['tool_call_id'] ?? null,
+                            'tool_calls' => $calls,
+                        ];
+                    }, $payload['messages']),
+                    'detail' => mb_substr((string) $this->providerMessage($response->json()), 0, 2000),
+                ]);
+            }
+
             throw $this->classify($response->status(), $response->json(), $response->headers());
         }
 

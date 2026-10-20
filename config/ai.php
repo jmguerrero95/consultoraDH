@@ -61,6 +61,18 @@ return [
     'timeout_seconds' => (int) env('AI_TIMEOUT_SECONDS', 30),
 
     /*
+     * Temporary, opt-in runtime trace for a tool/artifact incident.
+     *
+     * Writes only safe classifiers, tool names, payload hashes and the
+     * validator's own rejection text to storage/logs/ai-runtime.log. It never
+     * writes a prompt, a client record or a provider credential, and it is off
+     * by default.
+     *
+     * AI_TRACE_RUNTIME
+     */
+    'trace_runtime' => (bool) env('AI_TRACE_RUNTIME', false),
+
+    /*
      * How long a proposed write waits for a person before it can no longer be
      * confirmed. Short, because the proposal is a live intent rather than a
      * record of one.

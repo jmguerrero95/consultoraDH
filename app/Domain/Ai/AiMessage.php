@@ -128,16 +128,20 @@ final readonly class AiMessage
                 // `"[]"` and was rejected by the provider — with the same 400 for
                 // every candidate, because the payload, not the model, was wrong.
                 // Casting the top level to an object makes `[]` become `{}` while
-                // nested arrays stay arrays.
+                // nested arrays stay arrays. Invalid UTF-8 is substituted rather
+                // than making json_encode return `false`, which every provider
+                // reports as "failed to parse tool call arguments".
+                $arguments = json_encode(
+                    (object) ($call['arguments'] ?? []),
+                    JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE,
+                );
+
                 $wireCall = [
                     'id' => $call['id'] ?? '',
                     'type' => 'function',
                     'function' => [
                         'name' => $call['name'],
-                        'arguments' => json_encode(
-                            (object) ($call['arguments'] ?? []),
-                            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
-                        ),
+                        'arguments' => $arguments === false ? '{}' : $arguments,
                     ],
                 ];
 
@@ -158,7 +162,8 @@ final readonly class AiMessage
         if ($this->role === self::ROLE_TOOL) {
             $wire['tool_call_id'] = $this->toolCallId;
             // Named so the model can tell which catalogue entry produced this,
-            // without the name ever being a place to put an instruction.
+            // without the name ever being a place to put an instruction. The
+            // call id remains the field providers match on.
             $wire['name'] = $this->toolName;
         }
 

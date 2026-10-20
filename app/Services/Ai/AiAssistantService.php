@@ -15,6 +15,7 @@ use App\Models\AiArtifact;
 use App\Models\AiConversation;
 use App\Models\AiMessage as AiMessageModel;
 use App\Models\User;
+use Illuminate\Support\Facades\Log;
 
 /**
  * One turn of a conversation, from a question to an answer or a proposal.
@@ -1237,6 +1238,18 @@ final class AiAssistantService
             $content = $currentResult->content;
             $toolCalls = $currentResult->toolCalls;
 
+            $this->traceRuntime('round', [
+                'turn' => $turn,
+                'round' => $round,
+                'provider' => $currentResult->provider,
+                'model' => $currentResult->model,
+                'tool_calls' => array_map(
+                    static fn ($call): ?string => is_object($call) ? ($call->name ?? null) : (is_array($call) ? ($call['name'] ?? null) : null),
+                    $toolCalls,
+                ),
+                'content_length' => mb_strlen($content),
+            ]);
+
             // A model that printed its tool call as text instead of returning it
             // as a structured call is recognised here, never shown raw. A textual
             // envelope that *is* the whole message — and nothing else — becomes a
@@ -1278,6 +1291,7 @@ final class AiAssistantService
                     $turnRequiresClientData, $privacyReason, $requiresClientData,
                     false, false, 'artifact_validation_failed', 'failed',
                     array_keys($toolErrorCodes),
+                    array_keys($offered),
                 );
 
                 throw AiTurnFailed::artifactValidationFailed(
@@ -1316,6 +1330,8 @@ final class AiAssistantService
                                 $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                                 $turnRequiresClientData, $privacyReason, $requiresClientData,
                                 false, false, 'provider_error', 'failed',
+                                array_keys($toolErrorCodes),
+                                array_keys($offered),
                             );
 
                             throw $e;
@@ -1373,6 +1389,8 @@ final class AiAssistantService
                             $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                             $turnRequiresClientData, $privacyReason, $requiresClientData,
                             false, false, 'provider_error', 'failed',
+                            array_keys($toolErrorCodes),
+                            array_keys($offered),
                         );
 
                         throw $e;
@@ -1410,6 +1428,8 @@ final class AiAssistantService
                             $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                             $turnRequiresClientData, $privacyReason, $requiresClientData,
                             false, false, 'provider_error', 'failed',
+                            array_keys($toolErrorCodes),
+                            array_keys($offered),
                         );
 
                         throw $e;
@@ -1475,6 +1495,8 @@ final class AiAssistantService
                                     $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                                     $turnRequiresClientData, $privacyReason, $requiresClientData,
                                     false, false, 'provider_error', 'failed',
+                                    array_keys($toolErrorCodes),
+                                    array_keys($offered),
                                 );
 
                                 throw $e;
@@ -1499,6 +1521,8 @@ final class AiAssistantService
                                 $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                                 $turnRequiresClientData, $privacyReason, $requiresClientData,
                                 false, false, 'provider_error', 'failed',
+                                array_keys($toolErrorCodes),
+                                array_keys($offered),
                             );
 
                             throw $e;
@@ -1548,12 +1572,14 @@ final class AiAssistantService
                             );
 
                             try {
-                                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1, $currentResult->model);
+                                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1, $currentResult->model, 'create_artifact');
                             } catch (AiProviderException $e) {
                                 $this->recordTurnSummary(
                                     $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                                     $turnRequiresClientData, $privacyReason, $requiresClientData,
                                     false, false, 'provider_error', 'failed',
+                                    array_keys($toolErrorCodes),
+                                    array_keys($offered),
                                 );
 
                                 throw $e;
@@ -1567,6 +1593,7 @@ final class AiAssistantService
                             $turnRequiresClientData, $privacyReason, $requiresClientData,
                             false, false, 'missing_artifact', 'failed',
                             array_keys($toolErrorCodes),
+                            array_keys($offered),
                         );
 
                         throw AiTurnFailed::missingArtifact();
@@ -1852,6 +1879,16 @@ final class AiAssistantService
                         $toolErrorCode = $this->toolErrorCode($toolName, $e->getMessage());
                         $toolErrorCodes[$toolErrorCode] = true;
 
+                        $this->traceRuntime('tool_error', [
+                            'turn' => $turn,
+                            'round' => $round,
+                            'tool' => $toolName,
+                            'code' => $toolErrorCode,
+                            'argument_keys' => is_array($args) ? array_keys($args) : [],
+                            'argument_hash' => hash('sha256', (string) json_encode($args)),
+                            'message' => mb_substr($e->getMessage(), 0, 1500),
+                        ]);
+
                         if ($toolName === 'create_artifact') {
                             $artifactFailures++;
                             $artifactErrorCode = $this->artifactErrorCode($e->getMessage());
@@ -1870,6 +1907,7 @@ final class AiAssistantService
                         $turnRequiresClientData, $privacyReason, $requiresClientData,
                         false, false, 'artifact_validation_failed', 'failed',
                         array_keys($toolErrorCodes),
+                        array_keys($offered),
                     );
 
                     throw AiTurnFailed::artifactValidationFailed(
@@ -1923,7 +1961,7 @@ final class AiAssistantService
                     $messages[] = AiMessage::user(
                         'La llamada anterior a «create_artifact» fue rechazada por la validación del libro.'.$detail
                         .' Corrige exactamente ese error y vuelve a llamar únicamente a «create_artifact» con el '
-                        .'libro completo. No vuelvas a llamar a «analyze_table»: ya tienes los datos del adjunto en '
+                        .'libro completo, incluyendo «format», «filename» y «content». No vuelvas a llamar a «analyze_table»: ya tienes los datos del adjunto en '
                         .'el contexto. No respondas solo con texto, no inventes un enlace y no omitas ningún '
                         .'indicador requerido.'
                     );
@@ -1932,7 +1970,12 @@ final class AiAssistantService
                     // deliverable. analyze_table already ran; offering it again
                     // lets the model reset its progress and reach the round limit
                     // with no file, which is what happened in QA-R3-02.
-                    $nextTools = ['create_artifact' => $offered['create_artifact']];
+                    //
+                    // A list, not an associative array: PHP's array_map keeps
+                    // string keys, so `['create_artifact' => …]` reached the wire
+                    // as a JSON object (`"tools": {"create_artifact": …}`) and
+                    // every provider rejected the request with 400.
+                    $nextTools = [$offered['create_artifact']];
                 } else {
                     $nextTools = $supervisor->shouldForceSynthesis() ? [] : array_values($offered);
 
@@ -1949,12 +1992,14 @@ final class AiAssistantService
                 // failure before it does, so the final result is never inferred
                 // from a provider row that said "ok" earlier.
                 try {
-                    $currentResult = $this->resolver->complete($messages, $nextTools, null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1);
+                    $currentResult = $this->resolver->complete($messages, $nextTools, null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1, null, $repairArtifactNow ? 'create_artifact' : null);
                 } catch (AiProviderException $e) {
                     $this->recordTurnSummary(
                         $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                         $turnRequiresClientData, $privacyReason, $requiresClientData,
                         false, false, 'provider_error', 'failed',
+                        array_keys($toolErrorCodes),
+                        array_keys($offered),
                     );
 
                     throw $e;
@@ -2002,6 +2047,7 @@ final class AiAssistantService
                 $turnRequiresClientData, $privacyReason, $requiresClientData,
                 false, $pending, $endedBy === 'answer' ? 'round_limit' : $endedBy, 'failed',
                 array_keys($toolErrorCodes),
+                array_keys($offered),
             );
 
             throw AiTurnFailed::toolRoundsExhausted($maxRounds);
@@ -2082,6 +2128,7 @@ final class AiAssistantService
                     $turnRequiresClientData, $privacyReason, $requiresClientData,
                     false, false, 'missing_artifact', 'failed',
                     array_keys($toolErrorCodes),
+                    array_keys($offered),
                 );
 
                 throw AiTurnFailed::missingArtifact();
@@ -2094,6 +2141,7 @@ final class AiAssistantService
                 $turnRequiresClientData, $privacyReason, $requiresClientData,
                 false, $pending, 'empty', 'failed',
                 array_keys($toolErrorCodes),
+                array_keys($offered),
             );
 
             throw AiTurnFailed::emptyAnswer();
@@ -2157,6 +2205,7 @@ final class AiAssistantService
             $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
             $turnRequiresClientData, $privacyReason, $requiresClientData,
             true, $pending, $endedBy, 'ok', array_keys($toolErrorCodes),
+            array_keys($offered),
         );
 
         return [
@@ -2197,6 +2246,7 @@ final class AiAssistantService
         string $endedBy,
         string $result,
         array $toolErrors = [],
+        array $offeredTools = [],
     ): void {
         $this->resolver->recordTurn([
             'turn' => $turn,
@@ -2213,6 +2263,7 @@ final class AiAssistantService
             'ended_by' => $endedBy,
             'result' => $result,
             'tool_errors' => array_values(array_unique($toolErrors)),
+            'offered_tools' => array_values(array_unique($offeredTools)),
         ]);
     }
 
@@ -2312,6 +2363,28 @@ final class AiAssistantService
         }
 
         return $tool === 'analyze_table' ? 'analyze_table_error' : 'tool_error';
+    }
+
+    /**
+     * Opt-in, safe runtime trace for a tool/artifact incident.
+     *
+     * Off unless `AI_TRACE_RUNTIME=true`. It records counts, tool names, a
+     * payload hash and the validator's own rejection, never a prompt or a
+     * client record.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    private function traceRuntime(string $event, array $context): void
+    {
+        if (! config('ai.trace_runtime', false)) {
+            return;
+        }
+
+        Log::build([
+            'driver' => 'single',
+            'path' => storage_path('logs/ai-runtime.log'),
+            'level' => 'debug',
+        ])->warning($event, $context);
     }
 
     /**

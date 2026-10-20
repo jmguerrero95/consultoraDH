@@ -131,6 +131,16 @@ final class MissingArtifactRecoveryTest extends TestCase
 
         // The recovery asked for the tool call; it did not re-ask the person.
         $this->assertCount(3, Http::recorded());
+
+        // The recovery does not leave the choice to a model that just answered
+        // in prose: the provider is told to call create_artifact. This is the
+        // QA-R3-02 / conversation-69 defect, where two models ignored the tool
+        // and the turn ended as missing_artifact.
+        $recovery = Http::recorded()[1][0];
+        $this->assertSame(
+            ['type' => 'function', 'function' => ['name' => 'create_artifact']],
+            $recovery->data()['tool_choice'] ?? null,
+        );
     }
 
     public function test_a_second_answer_without_a_file_fails_instead_of_claiming_one(): void
@@ -156,6 +166,14 @@ final class MissingArtifactRecoveryTest extends TestCase
                 ->where('role', 'assistant')
                 ->count(),
             'A failed turn must not be stored as something the assistant said.',
+        );
+
+        // Even a model that ignores the forced tool cannot turn the failure into
+        // a successful text answer: the second call was already constrained.
+        $recovery = Http::recorded()[1][0];
+        $this->assertSame(
+            ['type' => 'function', 'function' => ['name' => 'create_artifact']],
+            $recovery->data()['tool_choice'] ?? null,
         );
     }
 
