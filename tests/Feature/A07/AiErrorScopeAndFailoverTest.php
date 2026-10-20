@@ -761,7 +761,8 @@ final class AiErrorScopeAndFailoverTest extends TestCase
             'question' => 'Explica en una frase qué es una EPS en Colombia.',
         ]);
 
-        $response->assertStatus(503);
+        $response->assertStatus(503)
+            ->assertJsonPath('code', 'quota_limited');
 
         $payload = json_encode($response->json(), JSON_UNESCAPED_UNICODE);
 

@@ -82,6 +82,15 @@ final class AiAssistantController extends Controller
             default => 'No hay un proveedor de inteligencia artificial disponible en este momento.',
         };
 
+        // A stable code lets the interface distinguish "the model exhausted its
+        // tool rounds" from "the provider is in a quota wall" without receiving
+        // an exception message, a trace or the provider's own text.
+        $code = match (true) {
+            $e instanceof AiTurnFailed => $e->code(),
+            $e instanceof AiProviderException => $e->publicCode(),
+            default => 'provider_unavailable',
+        };
+
         // The turn just changed what the pool knows about its providers. Drop the
         // cached status so the next read of `/api/ai/status` — which runs no
         // inference — reports the new state instead of a stale "operativo".
@@ -90,6 +99,7 @@ final class AiAssistantController extends Controller
         return response()->json([
             'error' => $message,
             'message' => $message,
+            'code' => $code,
             'recoverable' => true,
             // The failed turn lives in this conversation. Returning its id even
             // on a failure lets the browser adopt it, so an F5 shows the failed

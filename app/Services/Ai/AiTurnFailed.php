@@ -24,11 +24,31 @@ use RuntimeException;
  */
 class AiTurnFailed extends RuntimeException
 {
+    /**
+     * A stable, safe code the interface may show or use to choose a message.
+     * It is deliberately not the exception message: that can quote internal
+     * details and is only for secure logs.
+     */
+    public function __construct(string $message, private readonly string $failureCode = 'turn_failed')
+    {
+        parent::__construct($message);
+    }
+
+    /**
+     * The safe classification for the interface, for example
+     * `tool_rounds_exhausted` or `artifact_validation_failed`.
+     */
+    public function code(): string
+    {
+        return $this->failureCode;
+    }
+
     public static function toolRoundsExhausted(int $rounds): self
     {
         return new self(
             'The model kept requesting tools without producing an answer after '
-            .$rounds.' rounds. The turn produced no response.'
+            .$rounds.' rounds. The turn produced no response.',
+            'tool_rounds_exhausted',
         );
     }
 
@@ -42,7 +62,10 @@ class AiTurnFailed extends RuntimeException
      */
     public static function emptyAnswer(): self
     {
-        return new self('The model returned an empty answer. The turn produced no response.');
+        return new self(
+            'The model returned an empty answer. The turn produced no response.',
+            'empty_answer',
+        );
     }
 
     /**
@@ -56,6 +79,23 @@ class AiTurnFailed extends RuntimeException
      */
     public static function missingArtifact(): self
     {
-        return new self('The model claimed a file it did not generate. The turn produced no artifact.');
+        return new self(
+            'The model claimed a file it did not generate. The turn produced no artifact.',
+            'missing_artifact',
+        );
+    }
+
+    /**
+     * The artifact tool rejected the file and the one bounded repair also
+     * failed. The code is the safe classifier (`artifact_missing_indicators`,
+     * `artifact_percentage_scaled`, …) and carries no model text.
+     */
+    public static function artifactValidationFailed(string $code = 'artifact_validation_failed'): self
+    {
+        return new self(
+            'The artifact tool rejected the requested file after one repair. '
+            .'The turn produced no artifact.',
+            $code,
+        );
     }
 }

@@ -51,12 +51,19 @@ final class XlsxWorkbookBuilder
     private const FORMAT_CODES = [
         'general' => 'General',
         'number' => '#,##0',
+        'numero' => '#,##0',
+        'decimal' => '#,##0.00',
         'integer' => '0',
+        'entero' => '0',
         'currency_cop' => '"$" #,##0;[Red]-"$" #,##0',
         'currency' => '"$" #,##0;[Red]-"$" #,##0',
+        'cop' => '"$" #,##0;[Red]-"$" #,##0',
+        'moneda' => '"$" #,##0;[Red]-"$" #,##0',
         'percentage' => '0.00%',
         'percent' => '0.00%',
+        'porcentaje' => '0.00%',
         'text' => '@',
+        'texto' => '@',
     ];
 
     public function __construct(private readonly FormulaValidator $formulaValidator) {}
@@ -696,7 +703,8 @@ final class XlsxWorkbookBuilder
 
         if (! isset(self::FORMAT_CODES[$key])) {
             throw new AiToolRejected(
-                "El formato «{$format}» no está admitido. Usa currency_cop, percentage, number, integer, text o general."
+                "El formato «{$format}» no está admitido. Usa currency_cop/COP, percentage/porcentaje, "
+                .'number, decimal, integer/entero, text o general.'
             );
         }
 

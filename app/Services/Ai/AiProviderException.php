@@ -263,6 +263,25 @@ class AiProviderException extends RuntimeException
     }
 
     /**
+     * A stable, safe classification for the interface. The provider's own
+     * message, HTTP body and commercial text never appear here.
+     */
+    public function publicCode(): string
+    {
+        return match (true) {
+            $this->scope === self::SCOPE_PRIVACY => 'provider_unavailable_private',
+            $this->kind === 'rate_limited',
+            $this->scope === self::SCOPE_QUOTA_ACCOUNT,
+            $this->scope === self::SCOPE_QUOTA_MODEL => 'quota_limited',
+            $this->kind === 'empty' => 'provider_empty',
+            $this->kind === 'not_configured' => 'provider_not_configured',
+            $this->scope === self::SCOPE_POLICY => 'provider_policy_refusal',
+            $this->scope === self::SCOPE_INTERNAL => 'provider_internal_error',
+            default => 'provider_unavailable',
+        };
+    }
+
+    /**
      * The message a person may be shown, in Spanish, carrying no provider text.
      *
      * The exception's own `getMessage()` is written for a log: it can quote the

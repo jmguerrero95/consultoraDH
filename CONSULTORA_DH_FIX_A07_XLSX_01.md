@@ -509,3 +509,186 @@ BUSINESS_ACCEPTANCE=PENDING_USER
 posterior de este informe no cambia el código. `main` y `origin/main` permanecen
 en `d20195eb601392e802cb8908ebe466262368b32c` hasta que el propietario acepte el
 QA manual y se autorice el fast-forward.
+
+---
+
+## 14. Incidente QA-R3-02_RUNTIME_FAILURE — 2026-10-20
+
+La segunda ejecución manual de QA-R3-02 no llegó a producir el archivo: el
+widget recibió **HTTP 503** con el mensaje genérico del asistente. Esta sección
+documenta el turno real, la causa y la corrección acotada. No se reenvió la
+petición fallida ni se hizo ninguna llamada nueva al LLM durante el diagnóstico
+(`LLM_CALLS=0`).
+
+### 14.1 Evidencia del turno fallido
+
+| Campo | Valor |
+|---|---|
+| Mensaje | `ai_messages.id=175`, conversación `68` |
+| `client_turn_id` | `64af03a8-1a46-47f0-9d15-94f4e8786561` |
+| Turno de diagnóstico | `998945114b95` |
+| Creado | `2026-10-20 07:49:44` (America/Bogota, -05) |
+| Falló | `2026-10-20 07:50:48` (64 s) |
+| Adjunto | `ai_attachments.id=111`, `QA_R3_02_Entrada_Cartera.xlsx`, XLSX válido, 1 chunk |
+| Vista previa del adjunto | contenía `Prueba Alfa` y `300000` |
+| Artefacto generado | **ninguno** para la conversación 68 |
+| Proveedor del turno | `gemini-3.1-flash-lite` |
+| Intentos del proveedor | todos `outcome=ok` |
+
+Diagnóstico guardado por el resolver:
+
+```text
+rounds=4
+round_limit=4
+tool_calls=4
+tools=analyze_table, create_artifact
+processed=false
+pending=true
+ended_by=round_limit
+result=failed
+```
+
+`/api/ai/status` informaba 4 proveedores independientes, 10 candidatos listos,
+`state=unchecked` y ningún cooldown. Por tanto el 503 **no** era una caída de
+proveedores ni una cuota agotada: el turno se agotó en el servidor.
+
+### 14.2 Causa confirmada
+
+El adjunto se procesó bien y el modelo llamó a `create_artifact`. El validador
+rechazó el libro; el modelo volvió a `analyze_table`, volvió a intentar el libro,
+fue rechazado otra vez y consumió las cuatro rondas de herramientas. La
+síntesis final sin herramientas quedó vacía y el turno terminó por
+`round_limit`. El defecto no estaba en el motor XLSX ni en la cuota: estaba en
+que un rechazo del validador no tenía una reparación acotada y el modelo podía
+gastar todas las rondas alternando `analyze_table` con el mismo libro inválido.
+
+No fue posible recuperar la frase exacta del rechazo porque el turno original no
+se reejecutó. El bucle y el agotamiento están probados por las trazas; la frase
+concreta se infiere de las rutas del validador.
+
+### 14.3 Corrección aplicada
+
+1. **Una sola reparación acotada.** Tras el primer rechazo de
+   `create_artifact`, el siguiente turno recibe el error exacto del validador y
+   se le ofrece **únicamente** `create_artifact`. `analyze_table` deja de estar
+   disponible en esa ronda, porque ya tenía los datos del adjunto.
+2. **Segundo rechazo = fin seguro.** Si la reparación también es rechazada, el
+   turno termina de inmediato con un código seguro; no se gasta otra ronda ni se
+   convierte el fallo en una respuesta de texto.
+3. **Ningún archivo falso.** Una respuesta final de texto no satisface una
+   petición de archivo cuando la generación falló. La única excepción es una
+   negativa explícita del modelo, que se conserva como negativa honesta.
+4. **Códigos seguros para la interfaz.** El 503 incluye `code` sin mensajes del
+   proveedor, trazas ni detalle interno:
+
+   ```text
+   tool_rounds_exhausted
+   artifact_validation_failed
+   artifact_indicators_pair_missing
+   artifact_required_indicator_missing
+   artifact_percentage_scaled
+   artifact_percentage_invalid
+   artifact_integer_invalid
+   artifact_format_not_supported
+   artifact_formula_calculation
+   artifact_formula_error
+   artifact_storage_failed
+   artifact_limit_exceeded
+   artifact_schema_invalid
+   missing_artifact
+   quota_limited
+   provider_unavailable
+   provider_unavailable_private
+   provider_empty
+   provider_not_configured
+   provider_policy_refusal
+   provider_internal_error
+   ```
+
+   Un `AiTurnFailed` conserva el mensaje honesto «El asistente no pudo completar
+   la respuesta esta vez», no «no hay proveedor disponible»: un turno agotado no
+   se presenta como una caída externa cuando hay candidatos elegibles.
+5. **Alias de formato.** El generador normaliza alias en español y de negocio
+   (`COP`, `moneda`, `porcentaje`, `entero`, `decimal`, `numero`, `texto`) a los
+   formatos reales de Excel. No se relajó ninguna validación: un porcentaje
+   sigue siendo una fracción y un entero sigue siendo un entero.
+6. **Deduplicación y confirmación intactas.** La reparación reutiliza el mismo
+   turno y las mismas reglas de deduplicación; no crea un segundo artefacto ni
+   ejecuta escrituras sin confirmación.
+
+Archivos modificados: `AiAssistantService`, `AiTurnFailed`,
+`AiProviderException`, `AiAssistantController`, `CreateArtifactTool`,
+`XlsxWorkbookBuilder` y las pruebas del área. No se tocaron proveedores
+certificados, política de entrenamiento, RBAC, migraciones, portal, cartera
+administrativa, soporte, planillas ni frontend.
+
+### 14.4 Pruebas de la corrección
+
+| Prueba | Resultado |
+|---|---|
+| `ArtifactValidationRecoveryTest` (nueva) | **3 passed, 23 assertions** |
+| Dirigidas: recuperación + artefacto faltante + XLSX + errores + fórmulas | **72 passed, 269 assertions** |
+| Suite A07 completa (`tests/Feature/A07`, vía Pest) | **437 passed, 1685 assertions** (196,54 s) |
+| `vendor/bin/pint` sobre los 9 archivos | **PASS** (1 ajuste de estilo) |
+| `git diff --check` | sin errores |
+
+La prueba nueva reproduce herméticamente el bucle: un artefacto rechazado recibe
+una reparación dirigida y se entrega; un segundo rechazo termina con el código
+seguro específico; y el endpoint devuelve ese código sin detalle interno. La
+suite completa se ejecutó con Pest, que carga `tests/Pest.php`; ejecutarla con
+`phpunit` directo omite ese archivo y produce 129 errores falsos por
+`seedPortfolioRoles()` no definido, no relacionados con este cambio.
+
+### 14.5 Residuales honestos
+
+- El turno original no se reejecutó: no hay una petición LIVE nueva que confirme
+  la entrega del archivo. La reparación está probada de forma hermética, pero la
+  aceptación operativa sigue requiriendo que el propietario repita QA-R3-02.
+- La frase exacta del validador que provocó el primer rechazo no es recuperable
+  sin reejecutar el turno; se conoce el bucle y su desenlace, no el texto literal.
+- No hay LibreOffice para una apertura visual independiente; el XLSX se valida
+  con el motor de cálculo de PhpSpreadsheet.
+- La rama sigue sin fusionar ni publicar. `main` permanece en
+  `d20195eb601392e802cb8908ebe466262368b32c`.
+
+## 15. Contrato del incidente de runtime
+
+```text
+CONSULTORA_DH_A07_RUNTIME_FAILURE
+
+BRANCH=fix/a07-xlsx-01-formulas
+MAIN_UNCHANGED=YES
+
+FAILED_TURN=ai_messages.id=175 / conversation 68
+FAILED_TURN_ENDED_BY=round_limit
+FAILED_TURN_TOOL_CALLS=4
+FAILED_TURN_ARTIFACT_CREATED=NO
+ATTACHMENT_PROCESSED=YES
+PROVIDER_ATTEMPTS_OK=YES
+PROVIDER_OUTAGE=NO
+QUOTA_FAILURE=NO
+
+ROOT_CAUSE=tool_round_exhaustion_after_rejected_artifact
+BOUNDED_REPAIR=IMPLEMENTED
+REPAIR_TOOLS=create_artifact_only
+SECOND_REJECTION=SAFE_FAILURE
+TEXT_ONLY_AFTER_FAILED_FILE=REFUSED
+SAFE_ERROR_CODES=YES
+PROVIDER_TEXT_EXPOSED=NO
+
+ARTIFACT_RECOVERY_TESTS=3 passed, 23 assertions
+TARGETED_TESTS=72 passed, 269 assertions
+BACKEND_A07_TESTS=437 passed, 1685 assertions
+PINT=PASS
+DIFF_CHECK=PASS
+
+LLM_CALLS=0
+LIVE_REPLAY=NO
+MANUAL_QA_R3_02=PENDING_USER
+BUSINESS_ACCEPTANCE=PENDING_USER
+```
+
+El siguiente paso es del propietario: repetir QA-R3-02 desde el widget y
+verificar las dos hojas, los siete indicadores, los formatos y el recálculo al
+cambiar `Cartera!B2`. Si el turno vuelve a fallar, el nuevo `code` del 503
+identificará la causa sin exponer detalles internos.

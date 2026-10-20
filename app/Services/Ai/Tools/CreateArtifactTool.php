@@ -67,7 +67,9 @@ final class CreateArtifactTool extends AbstractAiTool
             .'Si el libro incluye un resumen, envía «required_indicators» con todos los ids solicitados y «indicators» con '
             .'[{"id":"total_obligations","sheet":"Resumen","cell":"B2","kind":"formula","format":"currency_cop"}]. '
             .'Cada id requerido debe tener su definición o el libro se rechaza. Usa integer para conteos, percentage para '
-            .'tasas (guarda la fracción 0.3333, sin multiplicar por 100) y currency_cop para importes.';
+            .'tasas (guarda la fracción 0.3333, sin multiplicar por 100) y currency_cop para importes. También se aceptan '
+            .'los alias COP/moneda, porcentaje, entero y decimal, que se normalizan al formato real. Si la validación '
+            .'rechaza el libro, corrige exactamente el error y vuelve a llamar a create_artifact; no respondas solo con texto.';
     }
 
     public function parameters(): array

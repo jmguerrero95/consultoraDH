@@ -1193,6 +1193,20 @@ final class AiAssistantService
         // has already been tried. Once per turn.
         $recoveredFromMissingArtifact = false;
 
+        // A create_artifact call that was rejected by its own validator is
+        // different from a missing tool call: the model did call the tool, but
+        // the file was invalid. The failed QA-R3-02 turn spent four batches
+        // alternating analyze_table with a rejected artifact and then reached
+        // the round limit. One targeted repair (artifact tool only, explicit
+        // error) is allowed; a second rejection ends the turn with a safe code
+        // instead of spending another round.
+        $artifactFailures = 0;
+        $artifactErrorCode = null;
+        $lastArtifactFailure = '';
+        $artifactRepairTried = false;
+        /** @var array<string, true> $toolErrorCodes */
+        $toolErrorCodes = [];
+
         // Whether this turn both offered and *authorised* the tool a recovery
         // would use. The tool is in the offered set for every non-conversational
         // turn, so being offered is not enough: the person must actually hold
@@ -1245,6 +1259,30 @@ final class AiAssistantService
                     $invalidToolCall = true;
                     $content = $leak['prose'];
                 }
+            }
+
+            // Once an artifact has been rejected and the one repair was asked
+            // for, a text answer or a different tool is not a repair. Answering
+            // now would either fabricate a file or spend the remaining rounds on
+            // another analyze_table, which is exactly how the failed QA-R3-02
+            // turn reached the round limit without a deliverable. Stop here with
+            // the classifier's safe code.
+            if ($artifactRepairTried
+                && $artifactFailures > 0
+                && $artifacts === []
+                && $linkedArtifactIds === []
+                && ($round >= $maxRounds || ! $this->callsTool($toolCalls, 'create_artifact'))
+            ) {
+                $this->recordTurnSummary(
+                    $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                    $turnRequiresClientData, $privacyReason, $requiresClientData,
+                    false, false, 'artifact_validation_failed', 'failed',
+                    array_keys($toolErrorCodes),
+                );
+
+                throw AiTurnFailed::artifactValidationFailed(
+                    $artifactErrorCode ?? 'artifact_validation_failed'
+                );
             }
 
             // A response with no tool call is the answer. It is consumed *before*
@@ -1528,6 +1566,7 @@ final class AiAssistantService
                             $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                             $turnRequiresClientData, $privacyReason, $requiresClientData,
                             false, false, 'missing_artifact', 'failed',
+                            array_keys($toolErrorCodes),
                         );
 
                         throw AiTurnFailed::missingArtifact();
@@ -1809,7 +1848,33 @@ final class AiAssistantService
                             'output' => 'Error: '.$e->getMessage(),
                         ];
                         $messages[] = AiMessage::toolResult($toolName, ['error' => $e->getMessage()], $toolCallId);
+
+                        $toolErrorCode = $this->toolErrorCode($toolName, $e->getMessage());
+                        $toolErrorCodes[$toolErrorCode] = true;
+
+                        if ($toolName === 'create_artifact') {
+                            $artifactFailures++;
+                            $artifactErrorCode = $this->artifactErrorCode($e->getMessage());
+                            $lastArtifactFailure = $e->getMessage();
+                        }
                     }
+                }
+
+                // The one repair was used and the artifact was rejected again.
+                // Another provider round would only repeat the same invalid
+                // payload or spend the remaining rounds on analyze_table, so the
+                // turn ends now with the safe classifier code.
+                if ($artifactRepairTried && $artifactFailures > 1 && $artifacts === [] && $linkedArtifactIds === []) {
+                    $this->recordTurnSummary(
+                        $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                        $turnRequiresClientData, $privacyReason, $requiresClientData,
+                        false, false, 'artifact_validation_failed', 'failed',
+                        array_keys($toolErrorCodes),
+                    );
+
+                    throw AiTurnFailed::artifactValidationFailed(
+                        $artifactErrorCode ?? 'artifact_validation_failed'
+                    );
                 }
 
                 $toolResults = array_merge($toolResults, $toolResultsThisRound);
@@ -1843,10 +1908,37 @@ final class AiAssistantService
                 // evidence it already holds instead of asking for one more tool.
                 // Everything else — the messages, the retrieved passages, the
                 // tool results — is unchanged, so nothing recovered is lost.
-                $nextTools = $supervisor->shouldForceSynthesis() ? [] : array_values($offered);
+                $repairArtifactNow = $artifactFailures > 0
+                    && $artifacts === []
+                    && $linkedArtifactIds === []
+                    && ! $artifactRepairTried
+                    && $artifactCapabilityOffered;
 
-                if ($nextTools === [] && $supervisor->shouldForceSynthesis()) {
-                    $endedBy = 'synthesis';
+                if ($repairArtifactNow) {
+                    $artifactRepairTried = true;
+
+                    $detail = trim($lastArtifactFailure);
+                    $detail = $detail === '' ? '' : ' Detalle de la validación: '.mb_substr($detail, 0, 1200);
+
+                    $messages[] = AiMessage::user(
+                        'La llamada anterior a «create_artifact» fue rechazada por la validación del libro.'.$detail
+                        .' Corrige exactamente ese error y vuelve a llamar únicamente a «create_artifact» con el '
+                        .'libro completo. No vuelvas a llamar a «analyze_table»: ya tienes los datos del adjunto en '
+                        .'el contexto. No respondas solo con texto, no inventes un enlace y no omitas ningún '
+                        .'indicador requerido.'
+                    );
+
+                    // The repair round offers only the tool that can produce the
+                    // deliverable. analyze_table already ran; offering it again
+                    // lets the model reset its progress and reach the round limit
+                    // with no file, which is what happened in QA-R3-02.
+                    $nextTools = ['create_artifact' => $offered['create_artifact']];
+                } else {
+                    $nextTools = $supervisor->shouldForceSynthesis() ? [] : array_values($offered);
+
+                    if ($nextTools === [] && $supervisor->shouldForceSynthesis()) {
+                        $endedBy = 'synthesis';
+                    }
                 }
 
                 // A provider failure here is an explicit failure of the turn, not
@@ -1909,6 +2001,7 @@ final class AiAssistantService
                 $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                 $turnRequiresClientData, $privacyReason, $requiresClientData,
                 false, $pending, $endedBy === 'answer' ? 'round_limit' : $endedBy, 'failed',
+                array_keys($toolErrorCodes),
             );
 
             throw AiTurnFailed::toolRoundsExhausted($maxRounds);
@@ -1965,11 +2058,42 @@ final class AiAssistantService
             }
         }
 
+        // The final answer, whether it came from the loop, a tool-free synthesis
+        // or the empty-response recovery, is not allowed to turn a requested
+        // file into a successful text answer. A stated refusal is the honest
+        // exception; ordinary prose after a failed generation is not a
+        // deliverable. This closes the case where a synthesis returned text
+        // after every create_artifact call had been rejected.
+        if ($hasReply
+            && $fileGenerationRequested
+            && $artifactCapabilityOffered
+            && $artifacts === []
+            && $linkedArtifactIds === []
+        ) {
+            $finalRefusal = RefusalClassifier::classify(
+                (string) $reply,
+                $artifactCapabilityOffered,
+                $deliverableRequested,
+            );
+
+            if ($finalRefusal === RefusalClassifier::NONE) {
+                $this->recordTurnSummary(
+                    $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                    $turnRequiresClientData, $privacyReason, $requiresClientData,
+                    false, false, 'missing_artifact', 'failed',
+                    array_keys($toolErrorCodes),
+                );
+
+                throw AiTurnFailed::missingArtifact();
+            }
+        }
+
         if (! $hasReply && $proposals === [] && $artifacts === []) {
             $this->recordTurnSummary(
                 $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
                 $turnRequiresClientData, $privacyReason, $requiresClientData,
                 false, $pending, 'empty', 'failed',
+                array_keys($toolErrorCodes),
             );
 
             throw AiTurnFailed::emptyAnswer();
@@ -2032,7 +2156,7 @@ final class AiAssistantService
         $this->recordTurnSummary(
             $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
             $turnRequiresClientData, $privacyReason, $requiresClientData,
-            true, $pending, $endedBy, 'ok',
+            true, $pending, $endedBy, 'ok', array_keys($toolErrorCodes),
         );
 
         return [
@@ -2055,6 +2179,8 @@ final class AiAssistantService
      * error" into a readable cause.
      *
      * @param  array<string, true>  $toolNames
+     * @param  list<string>  $toolErrors  safe classifier codes only; never a tool
+     *                                    message, which can contain model text
      */
     private function recordTurnSummary(
         string $turn,
@@ -2070,6 +2196,7 @@ final class AiAssistantService
         bool $pending,
         string $endedBy,
         string $result,
+        array $toolErrors = [],
     ): void {
         $this->resolver->recordTurn([
             'turn' => $turn,
@@ -2085,6 +2212,7 @@ final class AiAssistantService
             'pending' => $pending,
             'ended_by' => $endedBy,
             'result' => $result,
+            'tool_errors' => array_values(array_unique($toolErrors)),
         ]);
     }
 
@@ -2149,6 +2277,75 @@ final class AiAssistantService
         }
 
         return $tool.'|'.mb_strtolower(trim($decisive));
+    }
+
+    /**
+     * Whether this provider response calls a particular tool.
+     *
+     * @param  list<AiToolCall>  $toolCalls
+     */
+    private function callsTool(array $toolCalls, string $name): bool
+    {
+        foreach ($toolCalls as $call) {
+            $called = is_object($call)
+                ? ($call->name ?? null)
+                : (is_array($call) ? ($call['name'] ?? null) : null);
+
+            if ($called === $name) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * A safe classifier for a failed tool call. The raw message stays in the
+     * provider payload and the secure application log; the diagnostics get only
+     * this code, so they cannot echo model-authored sheet names, formulas or
+     * record values.
+     */
+    private function toolErrorCode(string $tool, string $message): string
+    {
+        if ($tool === 'create_artifact') {
+            return $this->artifactErrorCode($message);
+        }
+
+        return $tool === 'analyze_table' ? 'analyze_table_error' : 'tool_error';
+    }
+
+    /**
+     * Classify the XLSX validator's rejection without storing its message.
+     *
+     * The classification is deliberately based on our own stable phrases, not
+     * on model text. It is what makes a failed artifact actionable in
+     * `/api/ai/status`: "missing required indicators" and "percentage scaled by
+     * 100" are different repairs.
+     */
+    private function artifactErrorCode(string $message): string
+    {
+        $text = mb_strtolower($message);
+
+        return match (true) {
+            str_contains($text, 'required_indicators') && str_contains($text, 'juntos') => 'artifact_indicators_pair_missing',
+            str_contains($text, 'faltan indicadores') => 'artifact_required_indicator_missing',
+            str_contains($text, 'multiplica por 100'),
+            str_contains($text, 'divide por 0.01') => 'artifact_percentage_scaled',
+            str_contains($text, 'formato percentage'),
+            str_contains($text, 'formato porcentaje') => 'artifact_percentage_invalid',
+            str_contains($text, 'formato integer'),
+            str_contains($text, 'debe ser un entero'),
+            str_contains($text, 'no produce un entero') => 'artifact_integer_invalid',
+            str_contains($text, 'no está admitido') => 'artifact_format_not_supported',
+            str_contains($text, 'no se pudo calcular') => 'artifact_formula_calculation',
+            str_contains($text, 'produce #') => 'artifact_formula_error',
+            str_contains($text, 'no fue posible guardar') => 'artifact_storage_failed',
+            str_contains($text, 'supera el máximo') => 'artifact_limit_exceeded',
+            str_contains($text, 'json'),
+            str_contains($text, 'libro xlsx'),
+            str_contains($text, 'formato avanzado v2') => 'artifact_schema_invalid',
+            default => 'artifact_validation_failed',
+        };
     }
 
     /**
@@ -2667,6 +2864,9 @@ final class AiAssistantService
             '  define cada uno en «indicators» con id estable, hoja, celda, kind y format. No omitas ninguno. Usa',
             '  integer para conteos, percentage para tasas (guarda la fracción 0.3333, nunca multipliques por 100) y',
             '  currency_cop para importes. El generador rechaza un id requerido sin definición.',
+            '- Si create_artifact rechaza el libro, lee el error de validación, corrígelo y vuelve a llamar',
+            '  create_artifact. No vuelvas a analyze_table: ya tienes los datos y esa segunda llamada no corrige',
+            '  el libro. No respondas solo con texto si el archivo pedido no existe.',
             '- Escribe contenido real y bien estructurado (títulos, listas, tablas cuando aporten). En PDF y DOCX,',
             '  las tablas se escriben en Markdown de tuberías (| columna | columna |); el sistema las convierte en',
             '  tablas reales. No pegues filas separadas por tabulaciones.',

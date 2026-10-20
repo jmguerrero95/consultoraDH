@@ -368,6 +368,55 @@ final class XlsxWorkbookTest extends TestCase
         );
     }
 
+    public function test_spanish_format_aliases_are_normalised_to_the_canonical_excel_formats(): void
+    {
+        $book = $this->carteraBook();
+
+        $aliases = [
+            'total_obligations' => 'COP',
+            'total_paid' => 'moneda',
+            'total_balance' => 'COP',
+            'total_discount' => 'moneda',
+            'total_adjusted' => 'COP',
+            'debtors' => 'entero',
+            'recovery' => 'porcentaje',
+        ];
+
+        foreach ($book['indicators'] as &$indicator) {
+            $indicator['format'] = $aliases[$indicator['id']];
+        }
+        unset($indicator);
+
+        // `decimal` is a cell-level alias too; it must not silently become COP.
+        $book['sheets'][0]['cell_formats'] = ['C2' => 'decimal'];
+
+        $spreadsheet = $this->load($this->create([
+            'format' => 'xlsx',
+            'filename' => 'cartera_alias',
+            'content' => json_encode($book, JSON_UNESCAPED_UNICODE),
+        ]));
+
+        $cartera = $spreadsheet->getSheetByName('Cartera');
+        $resumen = $spreadsheet->getSheetByName('Resumen');
+
+        $this->assertNotNull($cartera);
+        $this->assertNotNull($resumen);
+        $this->assertSame(
+            '"$" #,##0;[Red]-"$" #,##0',
+            $cartera->getStyle('B2')->getNumberFormat()->getFormatCode()
+        );
+        $this->assertSame(
+            '#,##0.00',
+            $cartera->getStyle('C2')->getNumberFormat()->getFormatCode()
+        );
+        $this->assertSame(
+            '"$" #,##0;[Red]-"$" #,##0',
+            $resumen->getStyle('B2')->getNumberFormat()->getFormatCode()
+        );
+        $this->assertSame('0', $resumen->getStyle('B7')->getNumberFormat()->getFormatCode());
+        $this->assertSame('0.00%', $resumen->getStyle('B8')->getNumberFormat()->getFormatCode());
+    }
+
     public function test_the_legacy_row_array_still_produces_one_datos_sheet(): void
     {
         $result = $this->create([
