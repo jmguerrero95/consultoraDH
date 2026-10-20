@@ -692,3 +692,192 @@ El siguiente paso es del propietario: repetir QA-R3-02 desde el widget y
 verificar las dos hojas, los siete indicadores, los formatos y el recálculo al
 cambiar `Cartera!B2`. Si el turno vuelve a fallar, el nuevo `code` del 503
 identificará la causa sin exponer detalles internos.
+
+## 16. Reincidencia QA-R3-02_RUNTIME_FAILURE — conversación 69
+
+Esta sección documenta la reincidencia posterior al cierre 02/03. No reemplaza
+la evidencia anterior: añade la traza de la conversación 69 y los dos intentos
+LIVE de confirmación.
+
+### 16.1 Traza no-LLM de la conversación 69
+
+| Dato | Valor observado |
+|---|---|
+| Usuario | 70 (cuenta QA existente) |
+| Conversación | 69, creada `2026-10-20 09:30:27` |
+| Adjunto | `id=112`, `QA_R3_02_Entrada_Cartera.xlsx` |
+| Estado del adjunto | `processed`, 1 chunk, 174 caracteres, vista previa con `Prueba Alfa` y `300000` |
+| Artefactos de la conversación | 0 filas; el máximo `ai_artifacts.id=25` pertenece a la conversación 67 |
+| Mensajes fallidos | 176 y 177; no hay mensaje assistant persistido |
+
+| Turno | `client_turn_id` | Inicio | Fin | Rondas | Herramientas | Resultado |
+|---|---|---|---|---|---|---|
+| 176 | `9818b1e0-9963-4109-8032-51c8f3c4f0ec` | 09:30:47 | 09:31:47 | 2 / 4 | `analyze_table`, `create_artifact` | `provider_error` |
+| 177 | `14fd2efd-b3a4-4a97-b02b-5da16dfe092e` | 09:32:04 | 09:32:12 | 1 / 4 | ninguna | `missing_artifact` |
+
+- **Turno 176.** `analyze_table` leyó el adjunto y `create_artifact` fue
+  ejecutada, pero no creó ninguna fila de artefacto: la validación la rechazó.
+  La ronda de reparación terminó con todos los proveedores en HTTP 400
+  (Gemini, Cloudflare y OpenRouter) y Groq en 401. El texto literal del
+  validador no se conservó porque esa ruta de error no persistía
+  `tool_errors`; no se inventa aquí.
+- **Turno 177.** El primer modelo (`google/gemma-4-31b-it:free`) falló con 429
+  `quota_model`; `nvidia/nemotron-3.5-lightning:free` y `openrouter/free`
+  respondieron texto, pero **no llamaron a ninguna herramienta**. La
+  recuperación por artefacto faltante se ejecutó una vez y el segundo modelo
+  volvió a responder sin archivo. El turno terminó como `missing_artifact`; es
+  el 503 más reciente que vio el usuario.
+
+### 16.2 Causa raíz confirmada
+
+1. **La lista de herramientas se serializaba como objeto JSON después de un
+   rechazo de artefacto.** La reparación construía
+   `$nextTools = ['create_artifact' => $offered['create_artifact']]`.
+   `array_map` conserva las claves string cuando recibe un solo array, así que
+   el payload enviaba `"tools": {"create_artifact": …}` en lugar de
+   `"tools": [ … ]`. Todos los proveedores OpenAI-compatible rechazaron la
+   petición con 400 «tools must be an array». Es exactamente la secuencia del
+   turno 176: dos herramientas ejecutadas, rechazo de `create_artifact` y la
+   ronda siguiente rechazada por todos los candidatos.
+2. **Un modelo conversacional ignoró la herramienta en la recuperación.** En el
+   turno 177 la recuperación se pidió con `tool_choice=auto`; dos modelos
+   respondieron texto y el turno terminó sin archivo. La recuperación debe
+   forzar la función, no confiar en que el modelo la elija.
+3. **Un cambio especulativo intermedio agravó el primer intento LIVE.** Se
+   probó a enviar `content: null` en el mensaje assistant con `tool_calls`; el
+   primer proveedor lo rechazó con un error de tipo. Se revirtió a `content: ''`
+   antes del segundo intento. La corrección final conserva string.
+4. **La instrumentación no registraba los errores de herramienta en todas las
+   rutas de error de proveedor.** Por eso el turno 176 mostraba
+   `tool_errors=[]` aunque `create_artifact` había fallado.
+
+### 16.3 Corrección aplicada
+
+| Archivo | Cambio |
+|---|---|
+| `AiAssistantService` | La reparación usa `[$offered['create_artifact']]` (lista). La recuperación por artefacto faltante y la reparación pasan `forceTool='create_artifact'`. La instrucción de reparación exige `format`, `filename` y `content`. |
+| `AiProviderResolver` / `CloudAiProvider` | Nuevo parámetro opcional `forceTool`, propagado al proveedor. |
+| `OpenAiCompatibleProvider` | Normaliza `tools` con `array_values`, envía `tool_choice` forzado solo si la herramienta está ofrecida y registra una traza segura opt-in. |
+| `AiMessage` | `arguments` se codifica con `JSON_INVALID_UTF8_SUBSTITUTE` y nunca se envía `false`; el contenido del assistant sigue siendo string. |
+| Diagnósticos | `offered_tools`, `tool_errors` en las rutas de error de proveedor y traza `ai-runtime.log` con nombres, hash, tipos y mensaje del validador; sin prompts, archivos ni credenciales. |
+| Pruebas | Nueva `AiMessageWireTest`; aserciones de lista JSON y de `tool_choice` forzado en las pruebas de recuperación. |
+
+No se tocaron proveedores, credenciales, prioridades, política de
+entrenamiento, RBAC, módulos administrativos, deduplicación ni confirmación de
+escrituras.
+
+### 16.4 Pruebas de la corrección
+
+| Prueba | Resultado |
+|---|---|
+| `tests/Unit/A07/AiMessageWireTest.php` | **4 passed** |
+| `ArtifactValidationRecoveryTest` | **3 passed**, con aserción de `tools` como lista JSON |
+| `MissingArtifactRecoveryTest` | **3 passed**, con aserción de `tool_choice=create_artifact` |
+| Dirigidas (wire, runtime, failover, recuperación) | **46 passed, 178 assertions** |
+| Suite A07 completa (Pest) | **437 passed, 1689 assertions** (223,55 s) |
+| `vendor/bin/pint` sobre 9 archivos | **PASS** |
+| `git diff --check` | **PASS** |
+
+La prueba nueva reproduce el patrón exacto: respuesta assistant con
+`tool_calls` y sin prosa, argumentos que deben ser un objeto JSON, recuperación
+forzada y payload `tools` como lista. No es un mock que siempre acierta: la
+prueba de reparación sigue simulando un primer `create_artifact` rechazado.
+
+### 16.5 Intentos LIVE y bloqueo
+
+Se usaron dos ejecuciones LIVE completas con un usuario QA sintético desechable,
+archivo sintético de tres registros (`Prueba Alfa 300000/100000`,
+`Prueba Beta 250000/250000`, `Prueba Gamma 500000/0`), ruta real de upload,
+ingesta, recuperación, proveedor real, herramientas, almacenamiento y descarga
+autenticada. No se usó `Http::fake()` ni se llamó a `create_artifact` desde el
+test.
+
+| Intento | Conversación | Duración | HTTP | Código | Artefacto | Observación |
+|---|---|---|---|---|---|---|
+| LIVE 1 | 70 | 150,019 s | 503 | `provider_unavailable` | NO | `analyze_table` ejecutada; la ronda siguiente fue rechazada por los proveedores (Cloudflare 400, Groq 400, Gemini 400, OpenRouter 503). Incluía el cambio especulativo `content:null`, ya revertido. |
+| LIVE 2 | 71 | 31,197 s | 503 | `provider_unavailable` | NO | `analyze_table` + `create_artifact` con argumentos vacíos («El argumento `format` es obligatorio»); la reparación forzada envió `tools` como objeto JSON y Gemini respondió 400 «tools must be an array». |
+
+El segundo intento reveló la causa definitiva y la corrección ya está aplicada.
+No se ejecutó un tercer intento porque el protocolo de control fija un máximo de
+dos ejecuciones LIVE completas y ordena detenerse y reportar el bloqueo. El
+bloqueo es de protocolo, no del proveedor: no hay evidencia de una caída externa
+general.
+
+- `LIVE_RUNS=2/2`
+- `LIVE_ARTIFACT=NO`
+- `LIVE_END_TO_END=FAIL`
+- `SHEETS_VALIDATED=NO`
+- `FORMULAS_VALIDATED=NO`
+- `RECALC_VALIDATED=NO`
+- `FINAL_RESULT=FAIL`
+
+Limpieza realizada: usuario QA id 75, conversaciones 70/71, tareas 16/17,
+adjuntos 113/114, archivos sintéticos, cookies y traza `ai-runtime.log`
+eliminados; `AI_TRACE_RUNTIME` retirado de `.env` y caché de configuración
+limpiada. No se borraron datos de la conversación 69 ni de otras sesiones.
+
+### 16.6 Residuales honestos
+
+- **No hay PASS LIVE.** La corrección está probada de forma hermética, pero no
+  se ha observado un archivo real descargado con las hojas `Cartera` y
+  `Resumen`, los siete indicadores, las fórmulas y el recálculo. Se requiere
+  autorización para una tercera ejecución LIVE de confirmación.
+- El texto literal del validador del turno 176 no es recuperable; la causa del
+  400 posterior sí está confirmada por el intento LIVE 2.
+- Algunos modelos pueden no soportar `tool_choice` forzado; el failover sigue
+  operando y, si ningún candidato lo soporta, el turno falla de forma segura.
+- Un modelo puede volver a llamar a `create_artifact` con argumentos vacíos; la
+  reparación lo corrige una vez y un segundo rechazo termina con código seguro.
+- La rama no se fusionó ni se publicó. `main` permanece en
+  `d20195eb601392e802cb8908ebe466262368b32c`.
+
+## 17. Contrato de la reincidencia
+
+```text
+CONSULTORA_DH_A07_RUNTIME_FAILURE_REINCIDENCE
+
+BRANCH=fix/a07-xlsx-01-formulas
+FUNCTIONAL_CODE_SHA=9941499e1c7afe5b1551aaf339537df7c0de16ce
+MAIN_UNCHANGED=YES
+
+CONVERSATION=69
+FAILED_MESSAGES=176,177
+LATEST_CODE=missing_artifact
+ATTACHMENT=112
+ATTACHMENT_PROCESSED=YES
+ARTIFACT_ROWS=0
+CREATE_ARTIFACT_CALLED=TURN_176_YES_TURN_177_NO
+CREATE_ARTIFACT_SUCCEEDED=NO
+VALIDATOR_ERROR_176=NOT_CAPTURED
+VALIDATOR_ERROR_LIVE2="El argumento 'format' es obligatorio."
+
+ROOT_CAUSE=TOOLS_SERIALIZED_AS_OBJECT_AFTER_ARTIFACT_REJECTION_PLUS_TEXT_ONLY_RECOVERY
+FIX=LIST_TOOLS_PLUS_FORCED_TOOL_CHOICE_PLUS_ROBUST_ARGUMENT_JSON
+SECOND_REJECTION=SAFE_FAILURE
+TEXT_ONLY_AFTER_FAILED_FILE=REFUSED
+SAFE_ERROR_CODES=YES
+PROVIDER_TEXT_EXPOSED=NO
+RBAC_UNCHANGED=YES
+WRITE_CONFIRMATION_UNCHANGED=YES
+
+WIRE_TEST=4 passed
+ARTIFACT_RECOVERY_TESTS=3 passed
+MISSING_ARTIFACT_TESTS=3 passed
+TARGETED_TESTS=46 passed, 178 assertions
+BACKEND_A07_TESTS=437 passed, 1689 assertions
+PINT=PASS
+DIFF_CHECK=PASS
+
+LIVE_RUNS=2/2
+LIVE_RUN_1=503 provider_unavailable (150.019 s)
+LIVE_RUN_2=503 provider_unavailable (31.197 s)
+LIVE_ARTIFACT=NO
+LIVE_END_TO_END=FAIL
+SHEETS_VALIDATED=NO
+FORMULAS_VALIDATED=NO
+RECALC_VALIDATED=NO
+SYNTHETIC_DATA_CLEANED=YES
+FINAL_RESULT=FAIL
+BLOCKER=LIVE_RUN_CAP_REACHED
+NEXT=AUTHORIZE_THIRD_LIVE_RUN
+```
