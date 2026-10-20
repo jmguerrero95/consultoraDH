@@ -9,14 +9,15 @@ use App\Services\Ai\ModelPool;
 use Tests\TestCase;
 
 /**
- * A07-R2: the privacy classification of the independent providers is evidence,
- * not analogy.
+ * A07-R2/R3: the privacy classification of the independent providers is
+ * evidence, not analogy.
  *
  * Groq and Cloudflare are `standard` because their official terms forbid
- * training on customer content; Gemini stays `training` because its free tier
- * may use content to improve its products. This test pins the configuration and
- * the gate that consumes it, so a silent edit cannot make private client data
- * eligible for a provider whose terms do not allow it.
+ * training on customer content; Gemini and OpenRouter are `training` because
+ * their free tiers may use content. A07-R3 authorises the use of training
+ * providers explicitly through `AI_ALLOW_TRAINING_PROVIDERS`, so both modes are
+ * pinned here: the safe default still excludes them, and the operator opt-in
+ * opens them without rewriting their classification.
  */
 final class ProviderPrivacyClassificationTest extends TestCase
 {
@@ -125,11 +126,52 @@ final class ProviderPrivacyClassificationTest extends TestCase
 
     public function test_the_shipped_default_is_not_to_authorise_training_providers(): void
     {
-        $default = require config_path('ai.php');
+        // The deployment may authorise training providers explicitly (A07-R3),
+        // but the value shipped in `config/ai.php` must stay fail-closed when
+        // the environment does not decide. Evaluate it with the variable unset
+        // rather than with whatever this deployment's `.env` happens to say.
+        $key = 'AI_ALLOW_TRAINING_PROVIDERS';
+        $env = $_ENV[$key] ?? null;
+        $server = $_SERVER[$key] ?? null;
+
+        unset($_ENV[$key], $_SERVER[$key]);
+        putenv($key);
+
+        try {
+            $default = require config_path('ai.php');
+        } finally {
+            if ($env !== null) {
+                $_ENV[$key] = $env;
+            }
+            if ($server !== null) {
+                $_SERVER[$key] = $server;
+            }
+        }
 
         $this->assertFalse(
             $default['privacy']['allow_training_providers'],
-            'AI_ALLOW_TRAINING_PROVIDERS must stay off in the shipped configuration.',
+            'AI_ALLOW_TRAINING_PROVIDERS must stay fail-closed when it is not set.',
         );
+    }
+
+    public function test_an_authorised_training_provider_keeps_its_classification_and_serves_private_data(): void
+    {
+        config(['ai.privacy.allow_training_providers' => true]);
+
+        $gemini = $this->candidate('gemini');
+
+        $this->assertSame('training', $gemini->dataPolicy);
+        $this->assertTrue($gemini->supportsClientData());
+
+        $openrouter = new ModelCandidate(
+            baseUrl: 'https://openrouter.ai/api/v1',
+            apiKey: 'test-key',
+            model: 'vendor/model:free',
+            providerName: 'openrouter',
+            dataPolicy: 'training',
+        );
+
+        $this->assertSame('training', $openrouter->dataPolicy);
+        $this->assertTrue($openrouter->supportsClientData());
     }
 }

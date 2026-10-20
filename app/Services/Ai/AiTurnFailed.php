@@ -44,4 +44,18 @@ class AiTurnFailed extends RuntimeException
     {
         return new self('The model returned an empty answer. The turn produced no response.');
     }
+
+    /**
+     * A file was requested and generation was authorised, but no file was
+     * produced after the bounded recovery.
+     *
+     * Raised rather than delivering the model's claim of a file that does not
+     * exist: a reply that names a link the person cannot download is a
+     * fabricated result, and storing it would make the next turn treat it as
+     * something the assistant really delivered.
+     */
+    public static function missingArtifact(): self
+    {
+        return new self('The model claimed a file it did not generate. The turn produced no artifact.');
+    }
 }

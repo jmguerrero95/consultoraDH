@@ -99,4 +99,24 @@ final class RefusalClassificationTest extends TestCase
             '¿Cuántos clientes tenemos y cómo está la cartera?'
         ));
     }
+
+    public function test_only_an_explicit_generation_request_counts_as_a_missing_file_contract(): void
+    {
+        $this->assertTrue(RefusalClassifier::requestsFileGeneration(
+            'Genera un archivo XLSX descargable con el detalle de las obligaciones.'
+        ));
+
+        $this->assertTrue(RefusalClassifier::requestsFileGeneration(
+            'Exporta la cartera a Excel.'
+        ));
+
+        // Mentioning a document is not asking to create one.
+        $this->assertFalse(RefusalClassifier::requestsFileGeneration(
+            'Resume este documento y dime cuántas páginas tiene.'
+        ));
+
+        $this->assertFalse(RefusalClassifier::requestsFileGeneration(
+            '¿Cuántos clientes tenemos y cómo está la cartera?'
+        ));
+    }
 }

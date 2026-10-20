@@ -87,8 +87,14 @@ class OpenAiCompatibleProvider implements CloudAiProvider
 
         $payload = [
             'model' => $this->slot()['model'],
-            'messages' => array_map(fn (AiMessage $message): array => $message->toWire(), $messages),
+            'messages' => $this->wireMessages($messages),
         ];
+
+        $maxTokens = $this->slot()['max_tokens'] ?? null;
+
+        if (is_int($maxTokens) && $maxTokens > 0) {
+            $payload['max_tokens'] = $maxTokens;
+        }
 
         if ($tools !== []) {
             $payload['tools'] = array_map(fn (AiToolDefinition $tool): array => $tool->toWire(), $tools);
@@ -120,6 +126,49 @@ class OpenAiCompatibleProvider implements CloudAiProvider
         }
 
         return $this->parse($response->json());
+    }
+
+    /**
+     * Serialise the conversation for this endpoint.
+     *
+     * `extra_content` is opaque provider state that must be echoed back only to
+     * the provider that issued it. Gemini 3 requires the thought signature of a
+     * function call on the continuation; other OpenAI-compatible endpoints do
+     * not know the field, so it is removed rather than sent to every host. A
+     * failover that lands on a different vendor therefore sends a clean payload.
+     *
+     * @param  list<AiMessage>  $messages
+     * @return list<array<string, mixed>>
+     */
+    private function wireMessages(array $messages): array
+    {
+        $keepProviderState = $this->isGeminiEndpoint();
+
+        $wire = array_map(fn (AiMessage $message): array => $message->toWire(), $messages);
+
+        if ($keepProviderState) {
+            return $wire;
+        }
+
+        foreach ($wire as &$message) {
+            if (! isset($message['tool_calls']) || ! is_array($message['tool_calls'])) {
+                continue;
+            }
+
+            $message['tool_calls'] = array_map(static function (array $call): array {
+                unset($call['extra_content']);
+
+                return $call;
+            }, $message['tool_calls']);
+        }
+        unset($message);
+
+        return $wire;
+    }
+
+    private function isGeminiEndpoint(): bool
+    {
+        return str_contains((string) $this->slot()['base_url'], 'generativelanguage.googleapis.com');
     }
 
     /**
@@ -511,6 +560,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
                 $function['name'],
                 $this->decodeArguments($function['arguments'] ?? null),
                 $this->normaliseToolCallId($call['id'] ?? null),
+                is_array($call['extra_content'] ?? null) ? $call['extra_content'] : [],
             );
         }
 
@@ -596,7 +646,7 @@ class OpenAiCompatibleProvider implements CloudAiProvider
     }
 
     /**
-     * @return array{base_url: ?string, api_key: ?string, model: ?string}
+     * @return array{base_url: ?string, api_key: ?string, model: ?string, max_tokens?: ?int}
      */
     private function slot(): array
     {

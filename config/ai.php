@@ -299,6 +299,11 @@ return [
             // standard inference and no training on Customer Content.
             'data_policy' => env('CLOUDFLARE_AI_DATA_POLICY') ?: 'standard',
             'enabled' => (bool) env('CLOUDFLARE_AI_ENABLED', true),
+            // Workers AI defaults the completion budget to 256 tokens. A
+            // reasoning model spends that on its reasoning and returns an
+            // empty message with `finish_reason=length`, so the tool call never
+            // arrives. A larger, explicit ceiling is required for tool work.
+            'max_tokens' => (int) env('CLOUDFLARE_AI_MAX_TOKENS', 2048),
         ],
 
         'gemini' => [

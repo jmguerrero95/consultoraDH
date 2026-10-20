@@ -1184,6 +1184,15 @@ final class AiAssistantService
         // pushing a request for a verbal summary into making a file.
         $deliverableRequested = RefusalClassifier::requestsFileDeliverable($question);
 
+        // Whether the question explicitly asked for a file to be *produced*.
+        // Broader "documento" talk is not enough: recovery for a missing file
+        // must not turn a question about a document into a request to make one.
+        $fileGenerationRequested = RefusalClassifier::requestsFileGeneration($question);
+
+        // Whether the one bounded correction for a claimed-but-missing artifact
+        // has already been tried. Once per turn.
+        $recoveredFromMissingArtifact = false;
+
         // Whether this turn both offered and *authorised* the tool a recovery
         // would use. The tool is in the offered set for every non-conversational
         // turn, so being offered is not enough: the person must actually hold
@@ -1461,6 +1470,70 @@ final class AiAssistantService
                     }
                 }
 
+                // A request to generate a file that produced no file is not an
+                // answer. The model may claim it created one, or simply answer
+                // in prose; either way the person asked for a download that
+                // does not exist. One bounded correction asks the model to call
+                // the tool it already holds, preferring a different provider so
+                // a model with a demonstrated tool record gets the chance. If
+                // the file still does not exist, the turn fails explicitly
+                // instead of delivering a fabricated artifact or link.
+                if ($fileGenerationRequested
+                    && $artifactCapabilityOffered
+                    && $artifacts === []
+                    && $linkedArtifactIds === []
+                ) {
+                    $artifactRefusal = RefusalClassifier::classify(
+                        $content,
+                        $artifactCapabilityOffered,
+                        $deliverableRequested,
+                    );
+
+                    // A refusal is not a missing file. Policy refusals are
+                    // delivered, and capability/generic refusals already have
+                    // their own one-shot recovery above; treating either as a
+                    // missing artifact would add a second recovery and loop.
+                    if ($artifactRefusal === RefusalClassifier::NONE) {
+                        if (! $recoveredFromMissingArtifact
+                            && $round < $maxRounds
+                            && ! $budget->outOfTime()
+                        ) {
+                            $recoveredFromMissingArtifact = true;
+                            $round++;
+
+                            $messages[] = AiMessage::assistant($content);
+                            $messages[] = AiMessage::user(
+                                'El archivo solicitado todavía no existe: no se ha generado. Llama ahora a la '
+                                .'herramienta «create_artifact» con el formato, el nombre y el contenido correctos. '
+                                .'No afirmes que el archivo existe, no inventes enlaces de descarga y no respondas '
+                                .'solo con texto.'
+                            );
+
+                            try {
+                                $currentResult = $this->resolver->complete($messages, array_values($offered), null, null, $budget->deadline, $turnRequiresClientData, $budget, $turn, $round + 1, $currentResult->model);
+                            } catch (AiProviderException $e) {
+                                $this->recordTurnSummary(
+                                    $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                                    $turnRequiresClientData, $privacyReason, $requiresClientData,
+                                    false, false, 'provider_error', 'failed',
+                                );
+
+                                throw $e;
+                            }
+
+                            continue;
+                        }
+
+                        $this->recordTurnSummary(
+                            $turn, $round, $maxRounds, $toolCallCount, $toolNames, $dedupedCount,
+                            $turnRequiresClientData, $privacyReason, $requiresClientData,
+                            false, false, 'missing_artifact', 'failed',
+                        );
+
+                        throw AiTurnFailed::missingArtifact();
+                    }
+                }
+
                 $reply = $content;
                 $replyProvider = $currentResult->provider ?? $result->provider;
                 $replyModel = $currentResult->model ?? $result->model;
@@ -1486,11 +1559,20 @@ final class AiAssistantService
             // If there are tool calls, add the assistant message with tool_calls to the message history
             if (! empty($toolCalls)) {
                 $toolCallsForWire = array_map(function ($call): array {
-                    return [
+                    $wire = [
                         'id' => $call->id,
                         'name' => $call->name,
                         'arguments' => $call->arguments,
                     ];
+
+                    // Opaque continuation state (Gemini thought signature). Kept
+                    // on the call so the next round can echo it; the provider
+                    // strips it for endpoints that do not understand it.
+                    if ($call->providerState !== []) {
+                        $wire['extra_content'] = $call->providerState;
+                    }
+
+                    return $wire;
                 }, $toolCalls);
 
                 $messages[] = AiMessage::assistant($content, $toolCallsForWire);

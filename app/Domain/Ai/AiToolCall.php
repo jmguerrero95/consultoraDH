@@ -15,10 +15,14 @@ final readonly class AiToolCall
 {
     /**
      * @param  array<string, mixed>  $arguments
+     * @param  array<string, mixed>  $providerState  opaque continuation fields the provider
+     *                                               requires when the call is replayed (Gemini's
+     *                                               `extra_content.google.thought_signature`)
      */
     public function __construct(
         public string $name,
         public array $arguments = [],
         public ?string $id = null,
+        public array $providerState = [],
     ) {}
 }

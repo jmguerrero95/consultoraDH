@@ -375,6 +375,10 @@ final class AiErrorScopeAndFailoverTest extends TestCase
 
     public function test_private_data_is_not_sent_to_a_training_policy_provider(): void
     {
+        // Explicit, so the test does not inherit the operator's .env choice:
+        // what is asserted here is the fail-closed policy, not this deployment.
+        config(['ai.privacy.allow_training_providers' => false]);
+
         $this->useProviders([
             'training' => $this->provider(self::GROQ, 'groq-key', ['training-model'], 1, ['chat', 'tools'], 'training'),
             'standard' => $this->provider(self::GEMINI, 'gemini-key', ['standard-model'], 2, ['chat', 'tools'], 'standard'),

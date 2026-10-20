@@ -129,7 +129,7 @@ final readonly class AiMessage
                 // every candidate, because the payload, not the model, was wrong.
                 // Casting the top level to an object makes `[]` become `{}` while
                 // nested arrays stay arrays.
-                return [
+                $wireCall = [
                     'id' => $call['id'] ?? '',
                     'type' => 'function',
                     'function' => [
@@ -140,6 +140,18 @@ final readonly class AiMessage
                         ),
                     ],
                 ];
+
+                // Some providers require opaque state to be echoed back with the
+                // call. Gemini 3 returns `extra_content.google.thought_signature`
+                // and rejects the continuation without it. The provider decides
+                // whether this endpoint may receive the field (see
+                // OpenAiCompatibleProvider::wireMessages()), so a failover to a
+                // different vendor never has to understand it.
+                if (is_array($call['extra_content'] ?? null) && $call['extra_content'] !== []) {
+                    $wireCall['extra_content'] = $call['extra_content'];
+                }
+
+                return $wireCall;
             }, $this->toolCalls);
         }
 

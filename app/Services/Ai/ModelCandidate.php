@@ -53,6 +53,13 @@ final readonly class ModelCandidate
         public ?int $contextLength = null,
         public string $providerName = '',
         public string $dataPolicy = 'standard',
+        /**
+         * Output-token ceiling for providers whose own default is too low to
+         * finish a tool-call round (Cloudflare Workers AI defaults to 256, which
+         * a reasoning model spends before it emits the call). Null leaves the
+         * provider's default untouched.
+         */
+        public ?int $maxTokens = null,
     ) {}
 
     public function supportsTools(): bool
@@ -146,6 +153,7 @@ final readonly class ModelCandidate
             'base_url' => $this->baseUrl,
             'api_key' => $this->apiKey,
             'model' => $this->model,
+            'max_tokens' => $this->maxTokens,
         ];
     }
 }

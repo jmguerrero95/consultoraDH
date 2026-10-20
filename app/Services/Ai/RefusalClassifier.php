@@ -70,6 +70,18 @@ final class RefusalClassifier
     ];
 
     /**
+     * Verbs that ask for a file to be produced, paired with a deliverable mark
+     * above so ["documento"] alone does not force generation.
+     *
+     * @var list<string>
+     */
+    private const GENERATION_MARKERS = [
+        'genera', 'generar', 'generame', 'generalo', 'generala', 'crea', 'crear', 'creame',
+        'exporta', 'exportar', 'exportame', 'convierte', 'convertir', 'conviertelo',
+        'descargable', 'para descargar',
+    ];
+
+    /**
      * Words that say a refusal is about content policy rather than capability.
      *
      * Kept deliberately about *safety* language. A generic "no puedo cumplir con
@@ -215,9 +227,37 @@ final class RefusalClassifier
      */
     public static function requestsFileDeliverable(string $question): bool
     {
+        return self::containsMarker(self::normalise($question), self::DELIVERABLE_MARKERS);
+    }
+
+    /**
+     * The request asked to *produce* a file, not merely mentioned one.
+     *
+     * `requestsFileDeliverable` is deliberately broad so a refusal can be
+     * recognised as declining a capability the turn has ("resume este
+     * documento" names a document). Recovery for a file that was not produced
+     * has to be narrower: it is only a contract failure when the person asked
+     * for the file to be generated, exported or made downloadable. Both a
+     * deliverable marker and a generation verb (or the explicit "descargable"
+     * wording) are required, so a question *about* a document is never pushed
+     * into generating one.
+     */
+    public static function requestsFileGeneration(string $question): bool
+    {
         $text = self::normalise($question);
 
-        foreach (self::DELIVERABLE_MARKERS as $marker) {
+        return self::containsMarker($text, self::DELIVERABLE_MARKERS)
+            && self::containsMarker($text, self::GENERATION_MARKERS);
+    }
+
+    /**
+     * Whether one of the markers appears as a whole word.
+     *
+     * @param  list<string>  $markers
+     */
+    private static function containsMarker(string $text, array $markers): bool
+    {
+        foreach ($markers as $marker) {
             if (preg_match('/(?<![\p{L}\p{N}])'.preg_quote($marker, '/').'(?![\p{L}\p{N}])/u', $text) === 1) {
                 return true;
             }

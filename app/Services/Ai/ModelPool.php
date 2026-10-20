@@ -229,6 +229,7 @@ class ModelPool
             // refine. Rebuilding the candidate must carry it forward or an
             // OpenRouter model would silently return to the permissive default.
             dataPolicy: $candidate->dataPolicy,
+            maxTokens: $candidate->maxTokens,
         );
     }
 
@@ -251,6 +252,7 @@ class ModelPool
             priority: $priority,
             source: 'slot',
             dataPolicy: $this->dataPolicyFor($baseUrl, $config['data_policy'] ?? null),
+            maxTokens: isset($config['max_tokens']) ? (int) $config['max_tokens'] : null,
         );
     }
 
@@ -313,6 +315,7 @@ class ModelPool
                 source: 'pool',
                 contextLength: is_int($entry['context'] ?? null) ? $entry['context'] : null,
                 dataPolicy: $this->dataPolicyFor($baseUrl, $entry['data_policy'] ?? null),
+                maxTokens: isset($entry['max_tokens']) ? (int) $entry['max_tokens'] : null,
             );
         }
 
@@ -391,6 +394,7 @@ class ModelPool
                     source: 'provider',
                     providerName: (string) $name,
                     dataPolicy: $dataPolicy,
+                    maxTokens: isset($provider['max_tokens']) ? (int) $provider['max_tokens'] : null,
                 );
             }
         }

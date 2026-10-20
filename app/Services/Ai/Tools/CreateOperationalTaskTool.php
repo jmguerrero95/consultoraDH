@@ -46,15 +46,19 @@ final class CreateOperationalTaskTool extends AbstractAiTool
             'type' => 'object',
             'properties' => [
                 'title' => ['type' => 'string', 'description' => 'Titulo de la tarea.'],
-                'description' => ['type' => 'string', 'description' => 'Descripcion de la tarea.'],
+                // Optional fields are explicitly nullable because some
+                // OpenAI-compatible providers (Groq) validate every value the
+                // model emits against the schema even when the property is not
+                // required. The validator already treats null as "absent".
+                'description' => ['type' => ['string', 'null'], 'description' => 'Descripcion de la tarea.'],
                 'assigned_to' => ['type' => 'integer', 'description' => 'Identificador del colega responsable.'],
                 'priority' => [
                     'type' => 'string',
                     'description' => 'Prioridad de la tarea.',
                     'enum' => array_column(TaskPriority::options(), 'value'),
                 ],
-                'due_on' => ['type' => 'string', 'description' => 'Fecha de vencimiento YYYY-MM-DD.'],
-                'client_id' => ['type' => 'integer', 'description' => 'Cliente al que se refiere.'],
+                'due_on' => ['type' => ['string', 'null'], 'description' => 'Fecha de vencimiento YYYY-MM-DD.'],
+                'client_id' => ['type' => ['integer', 'null'], 'description' => 'Cliente al que se refiere.'],
             ],
             'required' => ['title', 'assigned_to'],
         ];
