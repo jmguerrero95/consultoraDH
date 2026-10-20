@@ -73,6 +73,11 @@ final class AnalyzeTableToolTest extends TestCase
 
     private const CARTERA = "Categoria,Obligacion,Pagado\nA,300000,100000\nB,250000,250000\nC,500000,0\n";
 
+    private const CARTERA_CON_CLIENTE = "Cliente,Obligacion,Pagado\n"
+        ."Prueba Alfa,300000,100000\n"
+        ."Prueba Beta,250000,250000\n"
+        ."Prueba Gamma,500000,0\n";
+
     /**
      * Run the tool the way the registry does: validate, then execute.
      *
@@ -199,6 +204,35 @@ final class AnalyzeTableToolTest extends TestCase
         // Nothing to fall back to in this conversation, and the id points at a
         // file that is not here.
         $this->runTool(['attachment_id' => $attachment->id]);
+    }
+
+    public function test_a_compact_receivables_request_builds_the_two_sheet_workbook(): void
+    {
+        $this->attachCsv(self::CARTERA_CON_CLIENTE);
+
+        app(AiTurnContext::class)->set($this->conversation->id, 'turn-report');
+
+        $result = $this->runTool([
+            'report_type' => 'receivables',
+            'discount_percent' => 10,
+            'include_summary' => true,
+            'filename' => 'cartera-compacta',
+        ]);
+
+        $this->assertSame('receivables', $result['report_type']);
+        $this->assertSame(3, $result['row_count']);
+        $this->assertTrue($result['artifact']['created']);
+
+        $artifact = AiArtifact::query()->findOrFail($result['artifact']['artifact_id']);
+        $spreadsheet = SpreadsheetFactory::load(Storage::disk('local')->path($artifact->storage_path));
+
+        $this->assertSame(['Cartera', 'Resumen'], $spreadsheet->getSheetNames());
+        $this->assertSame('=D2*0.1', $spreadsheet->getSheetByName('Cartera')->getCell('E2')->getValue());
+        $this->assertEqualsWithDelta(
+            630000,
+            $spreadsheet->getSheetByName('Resumen')->getCell('B6')->getCalculatedValue(),
+            0.001,
+        );
     }
 
     public function test_the_tool_is_registered_and_read_only(): void

@@ -191,10 +191,10 @@ final class AiCapabilityCatalog
             'keywords' => ['pdf', 'word', 'docx', 'excel', 'xlsx', 'csv', 'documento', 'informe', 'archivo', 'descargar', 'exportar'],
         ],
         'analyze_table' => [
-            'purpose' => 'Leer una tabla adjunta (CSV/Excel) y devolver sus datos verificados: filas, saldo pendiente calculado y totales, pudiendo exportarla.',
-            'when' => 'Cuando pidan analizar, resumir o convertir a Excel/CSV una tabla que adjuntaron a la conversación.',
+            'purpose' => 'Leer una tabla adjunta (CSV/Excel) y devolver sus datos verificados: filas, saldo pendiente calculado y totales. Con report_type=receivables construye en el servidor las hojas Cartera y Resumen, fórmulas e indicadores.',
+            'when' => 'Cuando pidan analizar, resumir o convertir a Excel/CSV una tabla que adjuntaron a la conversación, o un reporte de cartera con fórmulas.',
             'private' => true, 'internet' => false,
-            'keywords' => ['tabla', 'adjunto', 'csv', 'excel', 'analizar', 'saldo pendiente', 'totales', 'cartera', 'obligaciones', 'pagos', 'exportar'],
+            'keywords' => ['tabla', 'adjunto', 'csv', 'excel', 'analizar', 'saldo pendiente', 'totales', 'cartera', 'obligaciones', 'pagos', 'exportar', 'reporte'],
         ],
     ];
 

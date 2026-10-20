@@ -6,11 +6,10 @@ namespace App\Services\Ai\Tools;
 
 use App\Domain\Ai\AiToolRejected;
 use App\Domain\Documents\StructuredTable;
-use App\Models\AiAttachment;
 use App\Models\User;
 use App\Services\Ai\AiTurnContext;
-use Illuminate\Support\Facades\Storage;
-use PhpOffice\PhpSpreadsheet\IOFactory as SpreadsheetFactory;
+use App\Services\Ai\TabularAttachmentReader;
+use App\Services\Ai\TabularReportService;
 
 /**
  * Reads a table attached to this conversation and hands back *verified* data.
@@ -40,12 +39,11 @@ use PhpOffice\PhpSpreadsheet\IOFactory as SpreadsheetFactory;
  */
 final class AnalyzeTableTool extends AbstractAiTool
 {
-    /** Extensions the parser understands. */
-    private const TABULAR_EXTENSIONS = ['csv', 'tsv', 'txt', 'xlsx', 'xls'];
-
     public function __construct(
         private readonly AiTurnContext $turnContext,
         private readonly CreateArtifactTool $artifacts,
+        private readonly TabularAttachmentReader $reader,
+        private readonly TabularReportService $reports,
     ) {}
 
     public function name(): string
@@ -59,7 +57,10 @@ final class AnalyzeTableTool extends AbstractAiTool
             .'filas, y —cuando la tabla tiene una columna de obligación/deuda y otra de pagos— el saldo pendiente '
             .'calculado y los totales. Úsala siempre que el usuario pida analizar, resumir o convertir a Excel/CSV '
             .'una tabla que adjuntó. Los números que devuelve están calculados por el servidor: úsalos tal cual, no '
-            .'los recalcules ni los reescribas de memoria. Con "export" genera además el archivo (xlsx o csv).';
+            .'los recalcules ni los reescribas de memoria. Con "export" genera además el archivo (xlsx o csv). '
+            .'Para un reporte de cartera con hojas Cartera/Resumen, fórmulas reales y descuento, usa '
+            .'report_type="receivables"; el servidor construye el libro con los datos del adjunto y no necesitas '
+            .'enviar filas, fórmulas ni JSON XLSX.';
     }
 
     public function parameters(): array
@@ -96,6 +97,26 @@ final class AnalyzeTableTool extends AbstractAiTool
                     'description' => 'Agregar una fila de totales.',
                     'default' => true,
                 ],
+                'report_type' => [
+                    'type' => 'string',
+                    'enum' => ['none', 'receivables'],
+                    'description' => 'Tipo de reporte determinista. Usa "receivables" para cartera: construye '
+                        .'las hojas Cartera y Resumen, las fórmulas y los siete indicadores desde el adjunto.',
+                    'default' => 'none',
+                ],
+                'discount_percent' => [
+                    'type' => 'number',
+                    'minimum' => 0,
+                    'maximum' => 100,
+                    'description' => 'Descuento solicitado por el usuario, como porcentaje (10 significa 10 %). '
+                        .'No lo deduzcas del archivo.',
+                    'default' => 0,
+                ],
+                'include_summary' => [
+                    'type' => 'boolean',
+                    'description' => 'Incluir la hoja Resumen con los siete indicadores.',
+                    'default' => true,
+                ],
             ],
             'required' => [],
         ];
@@ -120,6 +141,24 @@ final class AnalyzeTableTool extends AbstractAiTool
             throw new AiToolRejected('attachment_id debe ser un número.');
         }
 
+        $reportType = strtolower(trim((string) ($arguments['report_type'] ?? 'none')));
+
+        if (! in_array($reportType, ['none', 'receivables'], true)) {
+            throw new AiToolRejected("Tipo de reporte no soportado: {$reportType}.");
+        }
+
+        $discount = $arguments['discount_percent'] ?? 0;
+
+        if (! is_numeric($discount)) {
+            throw new AiToolRejected('discount_percent debe ser un número.');
+        }
+
+        $discount = (float) $discount;
+
+        if ($discount < 0 || $discount > 100) {
+            throw new AiToolRejected('discount_percent debe estar entre 0 y 100.');
+        }
+
         return [
             'attachment_id' => $id !== null ? (int) $id : null,
             'export' => $export,
@@ -127,6 +166,9 @@ final class AnalyzeTableTool extends AbstractAiTool
             'title' => isset($arguments['title']) ? trim((string) $arguments['title']) : null,
             'add_balance' => (bool) ($arguments['add_balance'] ?? true),
             'include_totals' => (bool) ($arguments['include_totals'] ?? true),
+            'report_type' => $reportType,
+            'discount_percent' => $discount,
+            'include_summary' => (bool) ($arguments['include_summary'] ?? true),
         ];
     }
 
@@ -149,9 +191,42 @@ final class AnalyzeTableTool extends AbstractAiTool
             throw new AiToolRejected('Esta herramienta solo funciona dentro de una conversación con un archivo adjunto.');
         }
 
-        $attachment = $this->resolveAttachment($arguments['attachment_id'], $user, $conversationId);
+        $attachment = $this->reader->resolve($arguments['attachment_id'], $user, $conversationId);
 
-        $rawRows = $this->readRows($attachment);
+        if ($arguments['report_type'] === 'receivables') {
+            $filename = ($arguments['filename'] ?? '') !== '' ? $arguments['filename'] : 'Cartera_Resumen';
+            $title = ($arguments['title'] ?? '') !== '' ? $arguments['title'] : $filename;
+
+            $report = $this->reports->generateForAttachment(
+                $attachment,
+                $user,
+                $arguments['discount_percent'],
+                $arguments['include_summary'],
+                $filename,
+                $title,
+            );
+
+            return [
+                'attachment_id' => (int) $attachment->id,
+                'original_name' => $attachment->original_name,
+                'report_type' => 'receivables',
+                'row_count' => $report['row_count'] ?? null,
+                'artifact' => [
+                    'created' => $report['created'] ?? null,
+                    'deduplicated' => $report['deduplicated'] ?? null,
+                    'artifact_id' => $report['artifact_id'],
+                    'filename' => $report['filename'],
+                    'format' => $report['format'],
+                    'size_bytes' => $report['size_bytes'],
+                    'download_url' => $report['download_url'] ?? null,
+                ],
+                'download_url' => $report['download_url'] ?? null,
+                'note' => 'El libro Cartera/Resumen, sus fórmulas y sus totales fueron construidos por el servidor '
+                    .'a partir del adjunto. No reescribas las cifras ni construyas otro JSON XLSX.',
+            ];
+        }
+
+        $rawRows = $this->reader->rows($attachment);
         $table = StructuredTable::fromRawRows($rawRows);
 
         if ($table->headers === []) {
@@ -197,129 +272,5 @@ final class AnalyzeTableTool extends AbstractAiTool
         }
 
         return $result;
-    }
-
-    private function resolveAttachment(?int $id, User $user, int $conversationId): AiAttachment
-    {
-        // The scope is this person and this conversation, always. `attachment_id`
-        // is only a *hint* the model can add, never an authorization: whatever it
-        // sends, the query cannot leave the conversation, so a guessed or stale
-        // id can fail to match but can never reach somebody else's file.
-        $scoped = AiAttachment::query()
-            ->where('user_id', $user->id)
-            ->where('ai_conversation_id', $conversationId)
-            ->whereIn('extension', self::TABULAR_EXTENSIONS);
-
-        $attachment = $id !== null
-            ? (clone $scoped)->whereKey($id)->first()
-            : null;
-
-        // When the hint does not resolve inside the conversation, fall back to
-        // the newest table rather than refusing. A model that invented an id
-        // should still get the analysis it asked for — the result names the file
-        // it actually read, so nothing is hidden — and failing here is what a
-        // real turn did: the tool was called with an id that did not exist and
-        // the person got "no hay ninguna tabla adjunta" about a table they had
-        // just attached.
-        $attachment ??= (clone $scoped)->orderByDesc('id')->first();
-
-        if ($attachment === null) {
-            throw new AiToolRejected('No hay ninguna tabla (CSV o Excel) adjunta a esta conversación para analizar.');
-        }
-
-        if (! $attachment->isAccessibleBy($user, $conversationId)) {
-            throw new AiToolRejected('No tiene acceso a ese adjunto.');
-        }
-
-        return $attachment;
-    }
-
-    /**
-     * @return list<array<int, mixed>>
-     */
-    private function readRows(AiAttachment $attachment): array
-    {
-        $disk = Storage::disk('local');
-        $path = (string) $attachment->storage_path;
-
-        if ($path === '' || ! $disk->exists($path)) {
-            throw new AiToolRejected('El archivo adjunto ya no está disponible.');
-        }
-
-        $extension = strtolower((string) $attachment->extension);
-
-        return in_array($extension, ['xlsx', 'xls'], true)
-            ? $this->readSpreadsheet($disk->path($path))
-            : $this->readDelimited((string) $disk->get($path));
-    }
-
-    /**
-     * @return list<array<int, mixed>>
-     */
-    private function readDelimited(string $content): array
-    {
-        $content = str_replace(["\r\n", "\r"], "\n", $content);
-        $content = preg_replace('/^\xEF\xBB\xBF/', '', $content) ?? $content;
-
-        $lines = array_values(array_filter(
-            explode("\n", $content),
-            static fn (string $line): bool => trim($line) !== '',
-        ));
-
-        if ($lines === []) {
-            return [];
-        }
-
-        $delimiter = $this->sniffDelimiter(implode("\n", array_slice($lines, 0, 5)));
-
-        $rows = [];
-
-        foreach ($lines as $line) {
-            $rows[] = str_getcsv($line, $delimiter);
-        }
-
-        return $rows;
-    }
-
-    private function sniffDelimiter(string $sample): string
-    {
-        $candidates = [',' => 0, ';' => 0, "\t" => 0, '|' => 0];
-
-        foreach (array_keys($candidates) as $delimiter) {
-            $candidates[$delimiter] = substr_count($sample, $delimiter);
-        }
-
-        arsort($candidates);
-        $best = (string) array_key_first($candidates);
-
-        return $candidates[$best] > 0 ? $best : ',';
-    }
-
-    /**
-     * @return list<array<int, mixed>>
-     */
-    private function readSpreadsheet(string $path): array
-    {
-        $reader = SpreadsheetFactory::createReaderForFile($path);
-        $reader->setReadDataOnly(true);
-        $spreadsheet = $reader->load($path);
-
-        $rows = [];
-
-        foreach ($spreadsheet->getActiveSheet()->getRowIterator() as $row) {
-            $cells = [];
-            $iterator = $row->getCellIterator();
-            $iterator->setIterateOnlyExistingCells(false);
-
-            foreach ($iterator as $cell) {
-                $cells[] = $cell->getValue();
-            }
-
-            $rows[] = $cells;
-        }
-
-        $spreadsheet->disconnectWorksheets();
-
-        return $rows;
     }
 }

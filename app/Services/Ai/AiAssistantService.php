@@ -8,6 +8,7 @@ use App\Domain\Ai\AiMessage;
 use App\Domain\Ai\AiResponse;
 use App\Domain\Ai\AiToolCall;
 use App\Domain\Ai\AiToolDefinition;
+use App\Domain\Ai\AiToolRejected;
 use App\Domain\Assistant\Research\ResearchQuality;
 use App\Domain\Documents\DocumentRetriever;
 use App\Models\AiActionProposal;
@@ -93,6 +94,8 @@ final class AiAssistantService
         private readonly AiOutboundContext $outbound,
         private readonly AiTurnContext $turnContext,
         private readonly TaskAssigneeGuard $assigneeGuard,
+        private readonly TabularReportPlanner $tabularPlanner,
+        private readonly TabularReportService $tabularReports,
     ) {}
 
     public function ask(AiConversation $conversation, string $question, User $user, ?string $clientTurnId = null): array
@@ -334,6 +337,17 @@ final class AiAssistantService
         $turn = substr(bin2hex(random_bytes(6)), 0, 12);
         $this->turnContext->set($conversation->id, $turn);
 
+        // A clearly recognised attached-table report is completed on the server.
+        // The model is not asked to repeat the rows, totals, formulas or XLSX
+        // JSON; it is not asked anything at all. This is the path the LIVE-03
+        // failure required: a provider that emits an empty `create_artifact`
+        // call can no longer stand between the attachment and its workbook.
+        $reportPlan = $this->tabularPlanner->plan($conversation, $user, $question);
+
+        if ($reportPlan !== null) {
+            return $this->completeTabularReport($reportPlan, $conversation, $user, $userMessage, $turn);
+        }
+
         // What the person has attached to *this* conversation, retrieved before
         // the model is asked. This is the step that makes "upload a spreadsheet,
         // then ask about it" work: without it the model has no idea the file
@@ -465,6 +479,143 @@ final class AiAssistantService
         }
 
         return $this->processResult($result, $conversation, $user, $question, $messages, $toolDefinitions, $budget, $requiresClientData, $external, $turn, $researchIntent, $userMessage);
+    }
+
+    /**
+     * Complete a recognised attached-table report without a provider call.
+     *
+     * The file, its figures and its formulas come from the attachment. This
+     * branch still uses the normal turn row, assistant message, artifact
+     * linkage, conversation privacy flag and diagnostics, so the widget sees
+     * the same shape it sees for any other completed turn.
+     *
+     * @return array<string, mixed>
+     */
+    private function completeTabularReport(
+        TabularReportPlan $plan,
+        AiConversation $conversation,
+        User $user,
+        AiMessageModel $userMessage,
+        string $turn,
+    ): array {
+        $this->markConversationPrivate($conversation);
+
+        try {
+            $report = $this->tabularReports->generateForAttachment(
+                $plan->attachment,
+                $user,
+                $plan->discountPercent,
+                $plan->includeSummary,
+                $plan->filename,
+            );
+
+            $artifact = $this->linkArtifact((int) $report['artifact_id'], $conversation);
+
+            if ($artifact === null) {
+                throw new AiTurnFailed('The generated report could not be linked to this conversation.', 'artifact_link_failed');
+            }
+        } catch (AiToolRejected $exception) {
+            $this->recordTurnSummary(
+                $turn,
+                0,
+                max(1, (int) config('ai.tool_max_rounds', 4)),
+                0,
+                [],
+                0,
+                true,
+                'attachment',
+                true,
+                false,
+                false,
+                'deterministic_report',
+                'failed',
+                ['tabular_report_rejected'],
+                ['analyze_table'],
+            );
+
+            throw new AiTurnFailed(
+                'The attached table could not be turned into a receivables workbook: '.$exception->getMessage(),
+                'tabular_report_rejected',
+            );
+        }
+
+        $provider = 'server';
+        $model = 'tabular_report_v1';
+        $rowCount = (int) ($report['row_count'] ?? 0);
+
+        $reply = $plan->includeSummary
+            ? sprintf(
+                'Generé «%s» a partir de «%s» con %d registro%s. Incluye las hojas Cartera y Resumen, '
+                .'con fórmulas reales y los siete indicadores; las cifras y los totales se calcularon en el servidor. '
+                .'El archivo está listo para descargar.',
+                $artifact['filename'],
+                $plan->sourceName,
+                $rowCount,
+                $rowCount === 1 ? '' : 's',
+            )
+            : sprintf(
+                'Generé «%s» a partir de «%s» con %d registro%s. Incluye la hoja Cartera con fórmulas reales; '
+                .'las cifras y los totales se calcularon en el servidor. El archivo está listo para descargar.',
+                $artifact['filename'],
+                $plan->sourceName,
+                $rowCount,
+                $rowCount === 1 ? '' : 's',
+            );
+
+        $userMessage->forceFill([
+            'provider' => $provider,
+            'model' => $model,
+            'status' => AiMessageModel::STATUS_COMPLETED,
+            'error' => null,
+        ])->save();
+
+        $assistantMessage = AiMessageModel::query()->create([
+            'ai_conversation_id' => $conversation->id,
+            'role' => AiMessage::ROLE_ASSISTANT,
+            'content' => $reply,
+            'provider' => $provider,
+            'model' => $model,
+        ]);
+
+        AiArtifact::query()
+            ->whereKey((int) $report['artifact_id'])
+            ->whereNull('message_id')
+            ->update(['message_id' => $assistantMessage->id]);
+
+        $this->recordTurnSummary(
+            $turn,
+            0,
+            max(1, (int) config('ai.tool_max_rounds', 4)),
+            1,
+            ['analyze_table' => true],
+            0,
+            true,
+            'attachment',
+            true,
+            true,
+            false,
+            'deterministic_report',
+            'ok',
+            [],
+            ['analyze_table'],
+        );
+
+        return [
+            'reply' => $reply,
+            'provider' => $provider,
+            'model' => $model,
+            'proposals' => [],
+            'tools' => [[
+                'tool' => 'analyze_table',
+                'output' => [
+                    'deterministic' => true,
+                    'attachment_id' => (int) $plan->attachment->id,
+                    'row_count' => $rowCount,
+                    'artifact_id' => (int) $report['artifact_id'],
+                ],
+            ]],
+            'artifacts' => [$artifact],
+        ];
     }
 
     /**
@@ -2929,10 +3080,11 @@ final class AiAssistantService
             '  descarga. No termines describiendo el documento: prodúcelo.',
             '- Si el archivo debe contener los datos de una tabla que el usuario adjuntó, genera ese archivo con',
             '  analyze_table (sobre el adjunto) en lugar de create_artifact, para que las cifras salgan del archivo.',
-            '- EXCEPCIÓN: si piden varias hojas, fórmulas Excel reales, referencias entre hojas o un libro actualizable,',
-            '  usa create_artifact con el formato XLSX v2 que describe la herramienta. Puedes usar analyze_table solo para',
-            '  leer o verificar las cifras del adjunto, no como entrega final: exporta una tabla plana y no conserva',
-            '  fórmulas. Mantén las cifras del adjunto como fuente y no las inventes.',
+            '- Si piden un reporte de cartera con varias hojas, fórmulas reales, referencias entre hojas o un libro',
+            '  actualizable, usa analyze_table con report_type="receivables" y los argumentos compactos',
+            '  discount_percent e include_summary. El servidor construye Cartera/Resumen, las filas, las fórmulas y los',
+            '  siete indicadores desde el adjunto. No envíes tú el JSON XLSX v2 ni reescribas las filas o los totales.',
+            '  Usa create_artifact v2 solo para libros que no provengan de una tabla adjunta de cartera.',
             '- Si el libro v2 incluye un resumen, enumera TODOS los indicadores pedidos en «required_indicators» y',
             '  define cada uno en «indicators» con id estable, hoja, celda, kind y format. No omitas ninguno. Usa',
             '  integer para conteos, percentage para tasas (guarda la fracción 0.3333, nunca multipliques por 100) y',

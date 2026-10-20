@@ -54,6 +54,12 @@ final class StructuredTable
         'saldo pendiente', 'saldo', 'pendiente', 'por pagar', 'adeudado', 'restante', 'debe', 'saldo por pagar',
     ];
 
+    /** Headers that name the person or account the row belongs to. */
+    private const CLIENT_HEADERS = [
+        'cliente', 'nombre', 'razon social', 'deudor', 'tercero', 'beneficiario',
+        'nombre cliente', 'nombre del cliente', 'entidad',
+    ];
+
     /**
      * @param  list<string>  $headers
      * @param  list<list<string>>  $rows
@@ -64,6 +70,7 @@ final class StructuredTable
         public readonly ?int $obligationColumn,
         public readonly ?int $paidColumn,
         public readonly ?int $balanceColumn,
+        public readonly ?int $clientColumn,
     ) {}
 
     /**
@@ -88,7 +95,7 @@ final class StructuredTable
         }
 
         if ($clean === []) {
-            return new self([], [], null, null, null);
+            return new self([], [], null, null, null, null);
         }
 
         /** @var list<string> $headers */
@@ -113,8 +120,60 @@ final class StructuredTable
         $paid = self::findColumn($headers, self::PAID_HEADERS, $rows);
         $balance = self::findColumn($headers, self::BALANCE_HEADERS, $rows, array_values(array_filter([$paid])));
         $obligation = self::findColumn($headers, self::OBLIGATION_HEADERS, $rows, array_values(array_filter([$paid, $balance])));
+        $client = self::findHeaderColumn(
+            $headers,
+            self::CLIENT_HEADERS,
+            $rows,
+            array_values(array_filter([$paid, $balance, $obligation])),
+        );
 
-        return new self($headers, $rows, $obligation, $paid, $balance);
+        return new self($headers, $rows, $obligation, $paid, $balance, $client);
+    }
+
+    /**
+     * The columns a deterministic receivables report needs, and any ambiguity.
+     *
+     * `findColumn()` deliberately picks the first plausible column so the
+     * existing analysis tool keeps working with its historical tolerance. A
+     * report that will be handed to a person as a workbook cannot be tolerant in
+     * the same way: two columns named "Cliente", or an "Obligación" next to a
+     * "Total" that also looks like debt, would make the output depend on column
+     * order. This method reports those candidates so the caller can refuse and
+     * ask which one is meant instead of silently choosing.
+     *
+     * @return array{client: ?int, obligation: ?int, paid: ?int, ambiguous: list<string>}
+     */
+    public function receivablesMapping(): array
+    {
+        $paid = self::findColumns($this->headers, self::PAID_HEADERS, $this->rows);
+        $obligation = self::findColumns($this->headers, self::OBLIGATION_HEADERS, $this->rows, $paid);
+        $client = self::findHeaderColumns(
+            $this->headers,
+            self::CLIENT_HEADERS,
+            $this->rows,
+            array_merge($paid, $obligation),
+        );
+
+        $ambiguous = [];
+
+        if (count($client) > 1) {
+            $ambiguous[] = 'cliente';
+        }
+
+        if (count($obligation) > 1) {
+            $ambiguous[] = 'obligación';
+        }
+
+        if (count($paid) > 1) {
+            $ambiguous[] = 'pagado';
+        }
+
+        return [
+            'client' => count($client) === 1 ? $client[0] : null,
+            'obligation' => count($obligation) === 1 ? $obligation[0] : null,
+            'paid' => count($paid) === 1 ? $paid[0] : null,
+            'ambiguous' => $ambiguous,
+        ];
     }
 
     /**
@@ -127,33 +186,114 @@ final class StructuredTable
      */
     private static function findColumn(array $headers, array $needles, array $rows, array $exclude = []): ?int
     {
+        $matches = self::findColumns($headers, $needles, $rows, $exclude);
+
+        return $matches[0] ?? null;
+    }
+
+    /**
+     * Every header that matches, and whose data contains at least one number.
+     *
+     * @param  list<string>  $headers
+     * @param  list<string>  $needles
+     * @param  list<list<string>>  $rows
+     * @param  list<int>  $exclude
+     * @return list<int>
+     */
+    private static function findColumns(array $headers, array $needles, array $rows, array $exclude = []): array
+    {
+        $matches = [];
+
         foreach ($headers as $index => $header) {
             if (in_array($index, $exclude, true)) {
                 continue;
             }
 
-            $normalised = self::normaliseHeader($header);
-
-            if ($normalised === '') {
+            if (! self::headerMatches($header, $needles)) {
                 continue;
             }
 
-            foreach ($needles as $needle) {
-                if ($normalised === $needle || str_contains($normalised, $needle)) {
-                    foreach ($rows as $row) {
-                        if (self::parseNumber($row[$index] ?? '') !== null) {
-                            return $index;
-                        }
-                    }
+            foreach ($rows as $row) {
+                if (self::parseNumber($row[$index] ?? '') !== null) {
+                    $matches[] = $index;
 
-                    // Header matched but the column holds no numbers; try the
-                    // next header rather than claiming a text column.
                     break;
                 }
             }
         }
 
-        return null;
+        return $matches;
+    }
+
+    /**
+     * The first header that names a person/account and has a value.
+     *
+     * A client column is normally text, so unlike an amount column it is not
+     * required to contain numbers. It is still required to contain something:
+     * an empty column with a promising header is not a mapping.
+     *
+     * @param  list<string>  $headers
+     * @param  list<string>  $needles
+     * @param  list<list<string>>  $rows
+     * @param  list<int>  $exclude
+     */
+    private static function findHeaderColumn(array $headers, array $needles, array $rows, array $exclude = []): ?int
+    {
+        $matches = self::findHeaderColumns($headers, $needles, $rows, $exclude);
+
+        return $matches[0] ?? null;
+    }
+
+    /**
+     * @param  list<string>  $headers
+     * @param  list<string>  $needles
+     * @param  list<list<string>>  $rows
+     * @param  list<int>  $exclude
+     * @return list<int>
+     */
+    private static function findHeaderColumns(array $headers, array $needles, array $rows, array $exclude = []): array
+    {
+        $matches = [];
+
+        foreach ($headers as $index => $header) {
+            if (in_array($index, $exclude, true)) {
+                continue;
+            }
+
+            if (! self::headerMatches($header, $needles)) {
+                continue;
+            }
+
+            foreach ($rows as $row) {
+                if (trim((string) ($row[$index] ?? '')) !== '') {
+                    $matches[] = $index;
+
+                    break;
+                }
+            }
+        }
+
+        return $matches;
+    }
+
+    /**
+     * @param  list<string>  $needles
+     */
+    private static function headerMatches(string $header, array $needles): bool
+    {
+        $normalised = self::normaliseHeader($header);
+
+        if ($normalised === '') {
+            return false;
+        }
+
+        foreach ($needles as $needle) {
+            if ($normalised === $needle || str_contains($normalised, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
