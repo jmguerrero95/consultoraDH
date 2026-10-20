@@ -101,6 +101,8 @@ final class ReportGenerator
         // The file is written first and the row second, so a database failure can be
         // cleaned up by hand; the reverse order would leave a row claiming a file that
         // does not exist (§66).
+        $row = null;
+
         try {
             $row = GeneratedReport::query()->create([
                 'report_type' => $type->value,
@@ -113,27 +115,35 @@ final class ReportGenerator
                 'status' => 'ready',
                 'occurrence_key' => $occurrence,
             ]);
+
+            $this->audit->record(AuditAction::GeneratedReportRequested, $actor, [
+                'report_type' => $type->value,
+                'format' => $format->value,
+                'generated_report_id' => (int) $row->id,
+                // FIX-EXPORT-IMPORT-03: what the workbook covered. The audit needs the scope and the
+                // shape, not the rows — a download of every month of every company is a materially
+                // different event from one company, and an audit that recorded only "xlsx" would not
+                // tell them apart.
+                ...($type === ReportType::LibroOperativo ? [
+                    'sheets' => $workbook->sheetCount(),
+                    'company_blocks' => $workbook->blockCount(),
+                    'rows' => $workbook->rowCount(),
+                    'selection' => $filters,
+                ] : []),
+            ], null, $row);
         } catch (\Throwable $e) {
+            // T09: the file is not left behind when the row or its audit entry
+            // cannot be written. The previous order deleted the file only on a
+            // row failure; a later failure could strand a physical artifact
+            // that no `generated_reports` row points at.
             $this->disk()->delete($relative);
+
+            if ($row !== null && $row->exists) {
+                $row->delete();
+            }
 
             throw $e;
         }
-
-        $this->audit->record(AuditAction::GeneratedReportRequested, $actor, [
-            'report_type' => $type->value,
-            'format' => $format->value,
-            'generated_report_id' => (int) $row->id,
-            // FIX-EXPORT-IMPORT-03: what the workbook covered. The audit needs the scope and the
-            // shape, not the rows — a download of every month of every company is a materially
-            // different event from one company, and an audit that recorded only "xlsx" would not
-            // tell them apart.
-            ...($type === ReportType::LibroOperativo ? [
-                'sheets' => $workbook->sheetCount(),
-                'company_blocks' => $workbook->blockCount(),
-                'rows' => $workbook->rowCount(),
-                'selection' => $filters,
-            ] : []),
-        ], null, $row);
 
         return $row;
     }
