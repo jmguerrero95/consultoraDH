@@ -11,10 +11,12 @@ use App\Domain\Support\Actions\ChangeConversationPriority;
 use App\Domain\Support\Actions\ChangeConversationQueue;
 use App\Domain\Support\Actions\CloseConversation;
 use App\Domain\Support\Actions\CreateSupportConversation;
+use App\Domain\Support\Actions\LinkSupportAttachments;
 use App\Domain\Support\Actions\MarkConversationRead;
 use App\Domain\Support\Actions\ReopenConversation;
 use App\Domain\Support\Actions\ResolveConversation;
 use App\Domain\Support\Actions\StoreSupportAttachment;
+use App\Domain\Support\SupportAttachmentRejected;
 use App\Domain\Support\SupportConversationPriority;
 use App\Domain\Support\SupportMessageChannel;
 use App\Domain\Support\SupportMessageSenderKind;
@@ -27,6 +29,7 @@ use App\Models\SupportQueueMember;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -64,17 +67,30 @@ class SupportConversationController extends Controller
         ]);
 
         try {
-            $conversation = app(CreateSupportConversation::class)->execute([
-                'client_id' => $validated['client_id'],
-                'queue_id' => $validated['queue_id'] ?? null,
-                'subject' => $validated['subject'],
-                'priority' => isset($validated['priority'])
-                    ? SupportConversationPriority::from($validated['priority'])
-                    : SupportConversationPriority::Normal,
-                'origin_channel' => SupportMessageChannel::Staff,
-                'first_message' => $validated['body_text'],
-                'sender_kind' => SupportMessageSenderKind::Staff,
-            ], $request->user());
+            $conversation = DB::transaction(function () use ($validated, $request) {
+                $conversation = app(CreateSupportConversation::class)->execute([
+                    'client_id' => $validated['client_id'],
+                    'queue_id' => $validated['queue_id'] ?? null,
+                    'subject' => $validated['subject'],
+                    'priority' => isset($validated['priority'])
+                        ? SupportConversationPriority::from($validated['priority'])
+                        : SupportConversationPriority::Normal,
+                    'origin_channel' => SupportMessageChannel::Staff,
+                    'first_message' => $validated['body_text'],
+                    'sender_kind' => SupportMessageSenderKind::Staff,
+                ], $request->user());
+
+                if (! empty($validated['attachment_ids'])) {
+                    app(LinkSupportAttachments::class)->execute(
+                        $conversation,
+                        (int) $conversation->last_message_id,
+                        $validated['attachment_ids'],
+                        $request->user(),
+                    );
+                }
+
+                return $conversation;
+            });
         } catch (\InvalidArgumentException $e) {
             // No default queue configured: a configuration state, not a bug, and the
             // operator is told which one is missing rather than shown a 500.
@@ -82,12 +98,11 @@ class SupportConversationController extends Controller
                 'message' => 'No hay una cola por defecto configurada. Elija una cola.',
                 'code' => 'no_default_queue',
             ], 409);
-        }
-
-        if (! empty($validated['attachment_ids'])) {
-            SupportMessageAttachment::whereIn('id', $validated['attachment_ids'])
-                ->whereNull('support_message_id')
-                ->update(['support_message_id' => $conversation->last_message_id]);
+        } catch (SupportAttachmentRejected $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 422);
         }
 
         return response()->json($conversation->load('client', 'queue', 'messages.attachments'), 201);
@@ -141,12 +156,19 @@ class SupportConversationController extends Controller
             'attachment_ids.*' => 'integer|exists:support_message_attachments,id',
         ]);
 
-        $message = app(AppendStaffReply::class)->execute(
-            $conversation,
-            $validated['body_text'],
-            $request->user(),
-            $validated['attachment_ids'] ?? []
-        );
+        try {
+            $message = app(AppendStaffReply::class)->execute(
+                $conversation,
+                $validated['body_text'],
+                $request->user(),
+                $validated['attachment_ids'] ?? []
+            );
+        } catch (SupportAttachmentRejected $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 422);
+        }
 
         return response()->json($message->load('attachments'), 201);
     }
@@ -161,12 +183,19 @@ class SupportConversationController extends Controller
             'attachment_ids.*' => 'integer|exists:support_message_attachments,id',
         ]);
 
-        $message = app(AddInternalNote::class)->execute(
-            $conversation,
-            $validated['body_text'],
-            $request->user(),
-            $validated['attachment_ids'] ?? []
-        );
+        try {
+            $message = app(AddInternalNote::class)->execute(
+                $conversation,
+                $validated['body_text'],
+                $request->user(),
+                $validated['attachment_ids'] ?? []
+            );
+        } catch (SupportAttachmentRejected $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 422);
+        }
 
         return response()->json($message->load('attachments'), 201);
     }

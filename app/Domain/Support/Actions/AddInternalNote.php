@@ -10,13 +10,16 @@ use App\Domain\Support\SupportMessageKind;
 use App\Domain\Support\SupportMessageSenderKind;
 use App\Models\SupportConversation;
 use App\Models\SupportMessage;
-use App\Models\SupportMessageAttachment;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Dispatch;
 
 class AddInternalNote
 {
+    public function __construct(
+        private readonly LinkSupportAttachments $attachments,
+    ) {}
+
     public function execute(SupportConversation $conversation, string $bodyText, User $author, array $attachmentIds = []): SupportMessage
     {
         return DB::transaction(function () use ($conversation, $bodyText, $author, $attachmentIds) {
@@ -41,9 +44,7 @@ class AddInternalNote
             ]);
 
             if (! empty($attachmentIds)) {
-                SupportMessageAttachment::whereIn('id', $attachmentIds)
-                    ->whereNull('support_message_id')
-                    ->update(['support_message_id' => $message->id]);
+                $this->attachments->execute($conversation, (int) $message->id, $attachmentIds, $author);
             }
 
             $conversation->last_message_id = $message->id;

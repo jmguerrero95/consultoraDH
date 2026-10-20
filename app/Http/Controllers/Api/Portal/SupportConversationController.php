@@ -6,8 +6,10 @@ namespace App\Http\Controllers\Api\Portal;
 
 use App\Domain\Support\Actions\AppendClientMessage;
 use App\Domain\Support\Actions\CreateSupportConversation;
+use App\Domain\Support\Actions\LinkSupportAttachments;
 use App\Domain\Support\Actions\MarkConversationRead;
 use App\Domain\Support\Actions\StoreSupportAttachment;
+use App\Domain\Support\SupportAttachmentRejected;
 use App\Domain\Support\SupportConversationPriority;
 use App\Domain\Support\SupportMessageChannel;
 use App\Domain\Support\SupportMessageSenderKind;
@@ -17,6 +19,7 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -63,27 +66,41 @@ class SupportConversationController extends Controller
             'attachment_ids.*' => 'integer|exists:support_message_attachments,id',
         ]);
 
-        $conversation = app(CreateSupportConversation::class)->execute([
-            'client_id' => $user->client_id,
-            // Read with a default, not by key. The rule is `nullable`, so a
-            // request that simply does not choose a queue leaves the key out of
-            // the validated array entirely, and reading it directly raised
-            // "Undefined array key" — a 500 on every conversation opened from
-            // the portal without naming a queue, which is what the portal's own
-            // form does. `CreateSupportConversation` resolves the default queue
-            // when this is null.
-            'queue_id' => $validated['queue_id'] ?? null,
-            'subject' => $validated['subject'],
-            'priority' => SupportConversationPriority::Normal,
-            'origin_channel' => SupportMessageChannel::Portal,
-            'first_message' => $validated['body_text'],
-            'sender_kind' => SupportMessageSenderKind::Client,
-        ], $user);
+        try {
+            $conversation = DB::transaction(function () use ($validated, $user) {
+                $conversation = app(CreateSupportConversation::class)->execute([
+                    'client_id' => $user->client_id,
+                    // Read with a default, not by key. The rule is `nullable`, so a
+                    // request that simply does not choose a queue leaves the key out of
+                    // the validated array entirely, and reading it directly raised
+                    // "Undefined array key" — a 500 on every conversation opened from
+                    // the portal without naming a queue, which is what the portal's own
+                    // form does. `CreateSupportConversation` resolves the default queue
+                    // when this is null.
+                    'queue_id' => $validated['queue_id'] ?? null,
+                    'subject' => $validated['subject'],
+                    'priority' => SupportConversationPriority::Normal,
+                    'origin_channel' => SupportMessageChannel::Portal,
+                    'first_message' => $validated['body_text'],
+                    'sender_kind' => SupportMessageSenderKind::Client,
+                ], $user);
 
-        if (! empty($validated['attachment_ids'])) {
-            SupportMessageAttachment::whereIn('id', $validated['attachment_ids'])
-                ->whereNull('support_message_id')
-                ->update(['support_message_id' => $conversation->last_message_id]);
+                if (! empty($validated['attachment_ids'])) {
+                    app(LinkSupportAttachments::class)->execute(
+                        $conversation,
+                        (int) $conversation->last_message_id,
+                        $validated['attachment_ids'],
+                        $user,
+                    );
+                }
+
+                return $conversation;
+            });
+        } catch (SupportAttachmentRejected $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 422);
         }
 
         return response()->json($conversation->load('queue', 'messages.attachments'), 201);
@@ -152,7 +169,14 @@ class SupportConversationController extends Controller
             'attachment_ids.*' => 'integer|exists:support_message_attachments,id',
         ]);
 
-        $message = app(AppendClientMessage::class)->execute($conversation, $validated['body_text'], $user, $validated['attachment_ids'] ?? []);
+        try {
+            $message = app(AppendClientMessage::class)->execute($conversation, $validated['body_text'], $user, $validated['attachment_ids'] ?? []);
+        } catch (SupportAttachmentRejected $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'code' => $e->reason,
+            ], 422);
+        }
 
         return response()->json($message->load('attachments'), 201);
     }

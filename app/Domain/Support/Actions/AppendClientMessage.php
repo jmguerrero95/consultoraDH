@@ -7,12 +7,12 @@ namespace App\Domain\Support\Actions;
 use App\Domain\Support\Events\SupportConversationCreated;
 use App\Domain\Support\Events\SupportMessageCreated;
 use App\Domain\Support\Events\SupportReadStateUpdated;
+use App\Domain\Support\SupportAttachmentRejected;
 use App\Domain\Support\SupportMessageChannel;
 use App\Domain\Support\SupportMessageKind;
 use App\Domain\Support\SupportMessageSenderKind;
 use App\Models\SupportConversation;
 use App\Models\SupportMessage;
-use App\Models\SupportMessageAttachment;
 use App\Models\SupportReadState;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -20,6 +20,10 @@ use Illuminate\Support\Facades\Dispatch;
 
 class AppendClientMessage
 {
+    public function __construct(
+        private readonly LinkSupportAttachments $attachments,
+    ) {}
+
     public function execute(SupportConversation $conversation, string $bodyText, ?User $author = null, array $attachmentIds = []): SupportMessage
     {
         if (! $conversation->canReceiveClientMessage()) {
@@ -48,9 +52,13 @@ class AppendClientMessage
             ]);
 
             if (! empty($attachmentIds)) {
-                SupportMessageAttachment::whereIn('id', $attachmentIds)
-                    ->whereNull('support_message_id')
-                    ->update(['support_message_id' => $message->id]);
+                // Every attachment must belong to this conversation and have been
+                // uploaded by this sender; otherwise the whole message is rejected.
+                if ($author === null) {
+                    throw new SupportAttachmentRejected;
+                }
+
+                $this->attachments->execute($conversation, (int) $message->id, $attachmentIds, $author);
             }
 
             $wasWaitingStaff = $conversation->isWaitingStaff();
