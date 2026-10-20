@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
+use App\Domain\Automations\AutomationRunStatus;
+use App\Models\AutomationActionRun;
 use App\Models\SupportDelivery;
 use App\Models\TelegramEndpoint;
 use Illuminate\Bus\Queueable;
@@ -28,7 +30,8 @@ class SendTelegramMessage implements ShouldQueue
     public function __construct(
         public int $endpointId,
         public string $message,
-        public ?string $dedupeKey = null
+        public ?string $dedupeKey = null,
+        public ?int $automationActionRunId = null,
     ) {}
 
     public function handle(): void
@@ -37,6 +40,7 @@ class SendTelegramMessage implements ShouldQueue
 
         if (! $endpoint || ! $endpoint->enabled) {
             Log::info('Telegram endpoint not found or disabled', ['endpoint_id' => $this->endpointId]);
+            $this->recordOutcome('failed', 'telegram_endpoint_unavailable');
 
             return;
         }
@@ -53,6 +57,11 @@ class SendTelegramMessage implements ShouldQueue
         if ($delivery === null) {
             Log::info('Telegram message already delivered or in flight', ['dedupe_key' => $dedupeKey]);
 
+            // Already sent: idempotently a success. Still in flight: not ours to
+            // declare, so the action stays queued until that worker reports.
+            $existing = SupportDelivery::query()->where('dedupe_key', $dedupeKey)->value('status');
+            $this->recordOutcome($existing === 'sent' ? 'succeeded' : 'queued', $existing === 'sent' ? null : 'delivery_in_flight');
+
             return;
         }
 
@@ -60,6 +69,7 @@ class SendTelegramMessage implements ShouldQueue
 
         if (! $token) {
             Log::error('Telegram bot token not configured');
+            $this->recordOutcome('failed', 'telegram_token_missing');
 
             return;
         }
@@ -79,6 +89,7 @@ class SendTelegramMessage implements ShouldQueue
                 // failure would be reported as a broken send.
                 $delivery->update(['status' => 'sent', 'sent_at' => now()]);
                 Log::info('Telegram message sent', ['endpoint_id' => $endpoint->id]);
+                $this->recordOutcome('succeeded');
             } else {
                 throw new \Exception('Telegram API error: '.$response->body());
             }
@@ -92,9 +103,30 @@ class SendTelegramMessage implements ShouldQueue
                 'status' => 'failed',
                 'last_error_code' => $e->getCode() ?: 'unknown',
             ]);
+            $this->recordOutcome('failed', (string) ($e->getCode() ?: 'telegram_failed'));
 
             throw $e;
         }
+    }
+
+    /**
+     * Report the real result to the automation action that asked for the send.
+     */
+    private function recordOutcome(string $status, ?string $errorCode = null): void
+    {
+        if ($this->automationActionRunId === null) {
+            return;
+        }
+
+        AutomationActionRun::query()
+            ->whereKey($this->automationActionRunId)
+            ->update([
+                'status' => $status,
+                'error_code' => $errorCode,
+                'finished_at' => $status === 'queued' ? null : now(),
+            ]);
+
+        AutomationRunStatus::recomputeForActionRun($this->automationActionRunId);
     }
 
     /**

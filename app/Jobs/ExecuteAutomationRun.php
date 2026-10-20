@@ -8,7 +8,6 @@ use App\Domain\Support\Actions\AssignConversation;
 use App\Domain\Support\Actions\ChangeConversationPriority;
 use App\Domain\Support\Actions\ChangeConversationQueue;
 use App\Domain\Support\SupportConversationPriority;
-use App\Mail\AutomationEmail;
 use App\Models\AutomationAction;
 use App\Models\AutomationActionRun;
 use App\Models\AutomationRun;
@@ -25,7 +24,6 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Mail;
 
 class ExecuteAutomationRun implements ShouldQueue
 {
@@ -51,7 +49,22 @@ class ExecuteAutomationRun implements ShouldQueue
             return;
         }
 
-        if (! in_array($run->status, ['pending', 'partial', 'failed'], true)) {
+        /*
+         * Claim the run with a single conditional UPDATE.
+         *
+         * Two workers can receive the same run id — a retry after a timeout, a
+         * queue that was scaled, a duplicated dispatch. Reading the status and
+         * then writing `running` is check-then-act: both read `pending` and both
+         * execute every action. The WHERE clause makes the database decide the
+         * single winner; the loser sees zero affected rows and does nothing.
+         *
+         * A run left `running` by a worker that died becomes reclaimable only
+         * after the job timeout plus a margin, never while it may still be
+         * executing.
+         */
+        if (! $this->claimRun($run)) {
+            Log::info('Automation run already claimed or finished', ['run_id' => $run->id]);
+
             return;
         }
 
@@ -62,10 +75,6 @@ class ExecuteAutomationRun implements ShouldQueue
 
             return;
         }
-
-        $run->update(['status' => 'running']);
-
-        $allSucceeded = true;
 
         foreach ($run->rule->actions as $action) {
             $actionRun = AutomationActionRun::firstOrCreate(
@@ -78,40 +87,163 @@ class ExecuteAutomationRun implements ShouldQueue
                 continue;
             }
 
+            /*
+             * Claim the action too. This is the narrower race: the same run id
+             * reaching two workers, or a retry arriving while the previous
+             * attempt is still inside an external call. `firstOrCreate` gives
+             * both callers the same row, so the row itself must decide who runs.
+             */
+            if (! $this->claimAction($actionRun)) {
+                continue;
+            }
+
             // Check action-specific permissions before execution
             if (! $this->checkActionPermissions($run, $action)) {
-                $actionRun->update([
+                $this->recordActionStatus($actionRun, [
                     'status' => 'blocked',
                     'finished_at' => now(),
                     'error_code' => 'action_permission_lost',
                 ]);
-                $allSucceeded = false;
 
                 continue;
             }
 
             try {
-                $this->executeAction($action, $run, $actionRun);
-                $actionRun->update(['status' => 'succeeded', 'finished_at' => now()]);
+                $outcome = $this->executeAction($action, $run, $actionRun);
+
+                $this->recordActionStatus($actionRun, [
+                    'status' => $outcome,
+                    // An asynchronous delivery has not happened yet; its job
+                    // closes the row when the mailer or Telegram answers.
+                    'finished_at' => $outcome === 'queued' ? null : now(),
+                ]);
             } catch (\Throwable $e) {
                 Log::error('Automation action failed', [
                     'run_id' => $run->id,
                     'action_id' => $action->id,
                     'error' => $e->getMessage(),
                 ]);
-                $actionRun->update([
+                $this->recordActionStatus($actionRun, [
                     'status' => 'failed',
                     'finished_at' => now(),
-                    'error_code' => $e->getCode() ?? 'unknown',
+                    'error_code' => $e->getCode() ?: 'unknown',
                 ]);
-                $allSucceeded = false;
             }
         }
 
-        $run->update([
-            'status' => $allSucceeded ? 'succeeded' : 'partial',
+        $this->finish($run);
+    }
+
+    /**
+     * Take the run, or report that another worker has it or it is complete.
+     */
+    private function claimRun(AutomationRun $run): bool
+    {
+        $claimed = AutomationRun::query()
+            ->whereKey($run->id)
+            ->whereIn('status', ['pending', 'partial', 'failed'])
+            ->update([
+                'status' => 'running',
+                'started_at' => now(),
+                'finished_at' => null,
+                'error_code' => null,
+            ]);
+
+        if ($claimed === 1) {
+            return true;
+        }
+
+        $staleBefore = now()->subSeconds($this->timeout + 30);
+
+        return AutomationRun::query()
+            ->whereKey($run->id)
+            ->where('status', 'running')
+            ->where('started_at', '<', $staleBefore)
+            ->update(['started_at' => now()]) === 1;
+    }
+
+    /**
+     * Take one action, or report that it is done or in somebody else's hands.
+     */
+    private function claimAction(AutomationActionRun $actionRun): bool
+    {
+        $staleBefore = now()->subSeconds($this->timeout + 30);
+
+        $claimed = AutomationActionRun::query()
+            ->whereKey($actionRun->id)
+            ->where(function ($query) use ($staleBefore): void {
+                $query->whereIn('status', ['pending', 'failed'])
+                    ->orWhere(function ($stale) use ($staleBefore): void {
+                        $stale->where('status', 'running')
+                            ->where('started_at', '<', $staleBefore);
+                    });
+            })
+            ->update([
+                'status' => 'running',
+                'started_at' => now(),
+                'finished_at' => null,
+                'error_code' => null,
+            ]);
+
+        return $claimed === 1;
+    }
+
+    /**
+     * Write an action's outcome through the query builder.
+     *
+     * The in-memory model was loaded before {@see claimAction()} changed the row
+     * outside it. Calling `$model->update()` compares against those stale
+     * attributes and, when the new value looks identical, performs no UPDATE at
+     * all — a retry that failed the same way as the first attempt would be left
+     * looking `running`. The builder writes unconditionally.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function recordActionStatus(AutomationActionRun $actionRun, array $attributes): void
+    {
+        AutomationActionRun::query()
+            ->whereKey($actionRun->id)
+            ->update($attributes);
+
+        $actionRun->refresh();
+    }
+
+    /**
+     * The run's own state, derived from what actually happened to its actions.
+     */
+    private function finish(AutomationRun $run): void
+    {
+        $statuses = $run->actionRuns()->pluck('status')->all();
+
+        if (array_intersect($statuses, ['pending', 'running', 'queued']) !== []) {
+            // At least one effect is still with a delivery worker. Calling the
+            // run succeeded here would be exactly the overstatement this
+            // change removes.
+            $this->recordRunStatus($run, ['status' => 'queued', 'finished_at' => null]);
+
+            return;
+        }
+
+        $failed = array_intersect($statuses, ['failed', 'blocked']) !== [];
+
+        $this->recordRunStatus($run, [
+            'status' => $failed ? 'partial' : 'succeeded',
             'finished_at' => now(),
         ]);
+    }
+
+    /**
+     * Same stale-attribute trap as {@see recordActionStatus()}, one level up.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function recordRunStatus(AutomationRun $run, array $attributes): void
+    {
+        AutomationRun::query()
+            ->whereKey($run->id)
+            ->update($attributes);
+
+        $run->refresh();
     }
 
     private function checkOwnerPermissions(AutomationRun $run): bool
@@ -159,8 +291,10 @@ class ExecuteAutomationRun implements ShouldQueue
         };
     }
 
-    private function executeAction(AutomationAction $action, AutomationRun $run, AutomationActionRun $actionRun): void
+    private function executeAction(AutomationAction $action, AutomationRun $run, AutomationActionRun $actionRun): string
     {
+        $outcome = 'succeeded';
+
         switch ($action->action_type) {
             case 'internal_notification':
                 $this->executeInternalNotification($action, $run);
@@ -169,10 +303,12 @@ class ExecuteAutomationRun implements ShouldQueue
                 $this->executeCreateTask($action, $run);
                 break;
             case 'send_email':
-                $this->executeSendEmail($action, $run);
+                $this->executeSendEmail($action, $run, $actionRun);
+                $outcome = 'queued';
                 break;
             case 'send_telegram':
-                $this->executeSendTelegram($action, $run);
+                $this->executeSendTelegram($action, $run, $actionRun);
+                $outcome = 'queued';
                 break;
             case 'assign_support_queue':
                 $this->executeAssignSupportQueue($action, $run);
@@ -187,6 +323,8 @@ class ExecuteAutomationRun implements ShouldQueue
                 // Unknown action type: reject/block (never permissive default)
                 throw new \InvalidArgumentException("Unknown action type: {$action->action_type}");
         }
+
+        return $outcome;
     }
 
     private function executeInternalNotification(AutomationAction $action, AutomationRun $run): void
@@ -228,7 +366,7 @@ class ExecuteAutomationRun implements ShouldQueue
         ]);
     }
 
-    private function executeSendEmail(AutomationAction $action, AutomationRun $run): void
+    private function executeSendEmail(AutomationAction $action, AutomationRun $run, AutomationActionRun $actionRun): void
     {
         $config = $action->config;
         $recipientType = $config['recipient_type'] ?? 'specific_user';
@@ -285,11 +423,13 @@ class ExecuteAutomationRun implements ShouldQueue
         }
 
         foreach ($recipients as $email) {
-            Mail::to($email)->queue(new AutomationEmail($subject, $body));
+            // Queued, not sent. The action row stays `queued` until the delivery
+            // job has actually handed the message to the mailer.
+            SendAutomationEmail::dispatch($actionRun->id, $email, $subject, $body);
         }
     }
 
-    private function executeSendTelegram(AutomationAction $action, AutomationRun $run): void
+    private function executeSendTelegram(AutomationAction $action, AutomationRun $run, AutomationActionRun $actionRun): void
     {
         $config = $action->config;
         $endpointId = $config['endpoint_id'];
@@ -300,7 +440,7 @@ class ExecuteAutomationRun implements ShouldQueue
             throw new \InvalidArgumentException('Telegram endpoint not found or disabled');
         }
 
-        SendTelegramMessage::dispatch($endpointId, $message);
+        SendTelegramMessage::dispatch($endpointId, $message, null, $actionRun->id);
     }
 
     /**
