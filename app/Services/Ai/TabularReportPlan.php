@@ -11,8 +11,8 @@ use App\Models\AiAttachment;
  *
  * The model is not asked to carry the rows, the totals, the formulas or the XLSX
  * v2 JSON. This object carries only the decisions a person expressed in the
- * question: which attached table, which discount, whether the summary is wanted
- * and what the file should be called.
+ * question: which attached table, which sheet of that table, which discount,
+ * whether the summary is wanted and what the file should be called.
  */
 final readonly class TabularReportPlan
 {
@@ -22,6 +22,7 @@ final readonly class TabularReportPlan
         public bool $includeSummary,
         public string $filename,
         public string $sourceName,
+        public ?string $sheetName = null,
     ) {}
 
     /** The decimal rate a spreadsheet formula can multiply by. */

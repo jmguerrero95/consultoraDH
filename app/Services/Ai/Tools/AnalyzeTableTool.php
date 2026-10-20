@@ -117,6 +117,11 @@ final class AnalyzeTableTool extends AbstractAiTool
                     'description' => 'Incluir la hoja Resumen con los siete indicadores.',
                     'default' => true,
                 ],
+                'sheet_name' => [
+                    'type' => 'string',
+                    'description' => 'Hoja del libro a leer. Obligatorio cuando el Excel adjunto tiene más de una hoja; '
+                        .'sin él, el servidor no elige una hoja en silencio y rechaza la lectura.',
+                ],
             ],
             'required' => [],
         ];
@@ -159,6 +164,14 @@ final class AnalyzeTableTool extends AbstractAiTool
             throw new AiToolRejected('discount_percent debe estar entre 0 y 100.');
         }
 
+        $sheetName = $arguments['sheet_name'] ?? null;
+
+        if ($sheetName !== null && ! is_string($sheetName)) {
+            throw new AiToolRejected('sheet_name debe ser el nombre de una hoja.');
+        }
+
+        $sheetName = $sheetName !== null && trim($sheetName) !== '' ? trim($sheetName) : null;
+
         return [
             'attachment_id' => $id !== null ? (int) $id : null,
             'export' => $export,
@@ -169,6 +182,7 @@ final class AnalyzeTableTool extends AbstractAiTool
             'report_type' => $reportType,
             'discount_percent' => $discount,
             'include_summary' => (bool) ($arguments['include_summary'] ?? true),
+            'sheet_name' => $sheetName,
         ];
     }
 
@@ -204,6 +218,7 @@ final class AnalyzeTableTool extends AbstractAiTool
                 $arguments['include_summary'],
                 $filename,
                 $title,
+                $arguments['sheet_name'],
             );
 
             return [
@@ -226,7 +241,7 @@ final class AnalyzeTableTool extends AbstractAiTool
             ];
         }
 
-        $rawRows = $this->reader->rows($attachment);
+        $rawRows = $this->reader->rows($attachment, $arguments['sheet_name']);
         $table = StructuredTable::fromRawRows($rawRows);
 
         if ($table->headers === []) {

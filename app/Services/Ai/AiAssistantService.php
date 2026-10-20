@@ -507,6 +507,7 @@ final class AiAssistantService
                 $plan->discountPercent,
                 $plan->includeSummary,
                 $plan->filename,
+                sheetName: $plan->sheetName,
             );
 
             $artifact = $this->linkArtifact((int) $report['artifact_id'], $conversation);

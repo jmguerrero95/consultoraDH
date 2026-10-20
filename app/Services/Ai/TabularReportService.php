@@ -37,6 +37,7 @@ final class TabularReportService
         bool $includeSummary,
         string $filename,
         ?string $title = null,
+        ?string $sheetName = null,
     ): array {
         if ($user->cannot('ai.use') || $user->cannot('artifacts.create')) {
             throw new AiToolRejected('Su rol no tiene permiso para generar este reporte.');
@@ -48,7 +49,7 @@ final class TabularReportService
             throw new AiToolRejected('No tiene acceso a ese adjunto.');
         }
 
-        $rawRows = $this->reader->rows($attachment);
+        $rawRows = $this->reader->rows($attachment, $sheetName);
         $spec = $this->buildSpec($rawRows, $discountPercent, $includeSummary);
 
         $filename = trim($filename) !== '' ? trim($filename) : 'Cartera_Resumen';
