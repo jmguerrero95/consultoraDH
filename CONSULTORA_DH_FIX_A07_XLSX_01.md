@@ -628,7 +628,7 @@ administrativa, soporte, planillas ni frontend.
 |---|---|
 | `ArtifactValidationRecoveryTest` (nueva) | **3 passed, 23 assertions** |
 | Dirigidas: recuperación + artefacto faltante + XLSX + errores + fórmulas | **72 passed, 269 assertions** |
-| Suite A07 completa (`tests/Feature/A07`, vía Pest) | **437 passed, 1685 assertions** (196,54 s) |
+| Suite A07 completa (`tests/Feature/A07`, vía Pest) | **437 passed, 1685 assertions** (209,61 s) |
 | `vendor/bin/pint` sobre los 9 archivos | **PASS** (1 ajuste de estilo) |
 | `git diff --check` | sin errores |
 
