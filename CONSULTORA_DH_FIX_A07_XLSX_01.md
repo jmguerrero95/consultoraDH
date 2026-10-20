@@ -289,3 +289,223 @@ PRODUCT_ACCEPTANCE=PENDING_USER
 la prueba de rechazo de CSV mal formado y la actualización de este informe; el tip
 de la rama contiene todo lo anterior. `main` permanece en
 `d20195eb601392e802cb8908ebe466262368b32c` hasta la aceptación del propietario.
+
+---
+
+## 12. Cierre BUG-A07-XLSX-02/03 — QA-R3-02, segunda ejecución
+
+Esta sección actualiza el estado de XLSX-01 con la corrección de los defectos
+observados por el propietario. La sección 7 conserva la evidencia histórica de la
+primera corrección; las cifras finales son las de esta sección.
+
+`FINAL_CODE_SHA=5f4f1a8e2de8be0b128e65ac69cc9eb5bdf0707a`
+
+### 12.1 Causa confirmada
+
+El motor de XLSX-01 ya generaba hojas, fórmulas y referencias cruzadas. Los
+defectos restantes estaban en el contrato de tipos y en la ausencia de una
+declaración verificable de los indicadores:
+
+1. El generador aceptaba cualquier formato explícito para una celda porcentual.
+   El modelo podía escribir `=Cartera!C5/Cartera!B5*100` y asignarle
+   `currency_cop`; Excel mostraba un importe (`$33`) en lugar de `33,33 %`.
+2. No existía una lista de indicadores requeridos. Si el modelo omitía
+   «Descuento total» y «Saldo ajustado» de la hoja `Resumen`, el generador no
+   tenía un contrato determinista para detectarlo.
+3. Un conteo como `Clientes con deuda` podía heredar el formato monetario de la
+   columna y mostrarse como `$2`, aunque su valor numérico fuera el entero `2`.
+
+### 12.2 Corrección aplicada
+
+Se mantuvo el motor existente y se agregó una extensión mínima al contrato v2:
+
+```json
+{
+  "version": 2,
+  "required_indicators": [
+    "total_obligations", "total_paid", "total_balance",
+    "total_discount", "total_adjusted", "debtors", "recovery"
+  ],
+  "indicators": [
+    {
+      "id": "total_obligations",
+      "sheet": "Resumen",
+      "cell": "B2",
+      "kind": "formula",
+      "format": "currency_cop"
+    },
+    {
+      "id": "debtors",
+      "sheet": "Resumen",
+      "cell": "B7",
+      "kind": "formula",
+      "format": "integer"
+    },
+    {
+      "id": "recovery",
+      "sheet": "Resumen",
+      "cell": "B8",
+      "kind": "formula",
+      "format": "percentage"
+    }
+  ],
+  "sheets": []
+}
+```
+
+Reglas deterministas agregadas:
+
+- `required_indicators` e `indicators` se envían juntos. Cada id requerido debe
+  tener una definición; si falta, el libro se rechaza indicando los ids ausentes.
+- Cada indicador declara `id` estable, hoja, celda, `kind` (`formula` o `value`)
+  y `format` explícito. No se valida por el texto en español de la etiqueta. El
+  origen de los datos queda expresado en la fórmula del indicador (por ejemplo
+  `Cartera!B5`) y en la hoja/celda destino; no se duplica un campo redundante.
+- El formato del indicador se aplica a la celda destino y prevalece sobre el
+  formato de columna o de celda. Así el conteo usa `integer` y la recuperación
+  usa `percentage` aunque la columna `B` sea `currency_cop`.
+- Un indicador monetario, entero o porcentual debe ser numérico o una fórmula.
+  Un texto como `"33,33 %"` no se acepta como porcentaje.
+- Una fórmula con formato `percentage` que multiplica por `100`, divide por
+  `0,01` o usa `10^2` para escalar se rechaza con un error explícito. La fracción
+  correcta es `1/3`, no `33.3333`.
+- Una fórmula con formato `integer` debe producir un entero. `COUNTIF` devuelve
+  `2` y se muestra como `2`, sin símbolo monetario.
+- La descripción de `create_artifact` y la instrucción del asistente exigen
+  enumerar todos los indicadores solicitados y usar los formatos correctos.
+  No se añadió otra llamada al LLM ni se modificó el supervisor.
+
+La corrección es general: no contiene valores de Prueba Alfa, Beta o Gamma, ni
+una excepción para el archivo de QA. Los ids son estables y sirven para reportes
+de cartera, planillas, comisiones, saldos, descuentos, estadísticas o cualquier
+otro resumen.
+
+### 12.3 Evidencia de los siete indicadores
+
+Libro inicial (`Cartera!B2=300000`):
+
+| Indicador | Fórmula | Valor | Formato |
+|---|---|---:|---|
+| Obligaciones totales | `=Cartera!B5` | 1.050.000 | `currency_cop` |
+| Pagado total | `=Cartera!C5` | 350.000 | `currency_cop` |
+| Saldo pendiente | `=Cartera!D5` | 700.000 | `currency_cop` |
+| Descuento total | `=Cartera!E5` | 70.000 | `currency_cop` |
+| Saldo ajustado | `=Cartera!F5` | 630.000 | `currency_cop` |
+| Clientes con deuda | `=COUNTIF(Cartera!D2:D4,">0")` | 2 | `integer` (`0`) |
+| Recuperación | `=IF(Cartera!B5=0,0,Cartera!C5/Cartera!B5)` | 0,3333333333 | `percentage` (`0.00%`) |
+
+La celda `Resumen!B8` conserva el valor fraccionario `1/3` y se muestra como
+`33.33%`; no se almacena `33.3333` ni texto con `%`. La celda `Resumen!B7`
+conserva el entero `2` y su valor formateado no contiene `$`.
+
+Tras cambiar `Cartera!B2` a `400000` y recalcular:
+
+| Indicador | Valor |
+|---|---:|
+| Obligaciones totales | 1.150.000 |
+| Pagado total | 350.000 |
+| Saldo pendiente | 800.000 |
+| Descuento total | 80.000 |
+| Saldo ajustado | 720.000 |
+| Clientes con deuda | 2 |
+| Recuperación | 30,4348 % |
+
+Las fórmulas se conservan después de guardar y volver a abrir el archivo. El
+recálculo se comprobó con el motor real de PhpSpreadsheet, no con cadenas que
+empiezan por `=`.
+
+### 12.4 Pruebas del cierre
+
+| Prueba | Resultado |
+|---|---|
+| `XlsxWorkbookTest` | **16 passed, 114 assertions** |
+| `FormulaValidatorTest` | **25 passed, 30 assertions** |
+| Pruebas dirigidas combinadas | **41 passed, 144 assertions** |
+| Suite A07 completa (`tests/Feature/A07 tests/Unit/A07`) | **558 passed, 1975 assertions** (212,42 s) |
+| `vendor/bin/pint` sobre los 6 archivos modificados | **PASS** |
+| `git diff --check` | sin errores |
+
+Casos nuevos o reforzados: siete indicadores presentes; descuento y saldo
+ajustado presentes; `COUNTIF` entero y con formato `integer`; porcentaje
+fraccionario con formato `percentage`; formato individual sobre la columna;
+importes COP; fórmulas entre hojas; recálculo al cambiar `B2`; persistencia tras
+guardar y reabrir; rechazo de un id requerido sin definición; rechazo de
+`*100` en porcentaje; rechazo de una fórmula `integer` que devuelve fracción;
+compatibilidad legacy, CSV, texto con `=` tratado como texto, dedupe, ausencia
+de archivo ante error y protección contra fórmulas peligrosas.
+
+### 12.5 Residuales honestos
+
+- La validación estructural garantiza que los ids **declarados** como requeridos
+  tengan definición y formato, pero no puede adivinar un indicador que el modelo
+  omita tanto de `required_indicators` como de `indicators`. La instrucción exige
+  enumerar todos; la comparación final con la solicitud sigue siendo parte del QA
+  manual del propietario.
+- No hay LibreOffice instalado para una apertura visual independiente. La
+  validación automatizada abrió el XLSX real con PhpSpreadsheet y comprobó
+  fórmulas, valores calculados, tipos y códigos de formato.
+- La rama no se publicó ni se fusionó en `main`. La aceptación del producto sigue
+  pendiente del QA manual.
+- No se modificaron proveedores, failover, política de entrenamiento, RBAC,
+  migraciones, portal, cartera administrativa, soporte ni planillas.
+
+## 13. Contrato de salida del cierre 02/03
+
+```text
+CONSULTORA_DH_FIX_A07_XLSX_02_03
+
+BASE_SHA=d20195eb601392e802cb8908ebe466262368b32c
+WORK_BRANCH=fix/a07-xlsx-01-formulas
+FINAL_CODE_SHA=5f4f1a8e2de8be0b128e65ac69cc9eb5bdf0707a
+MAIN_UNCHANGED=YES
+
+ROOT_CAUSE_CONFIRMED=YES
+SEVEN_SUMMARY_METRICS=PASS
+DISCOUNT_TOTAL_PRESENT=YES
+ADJUSTED_BALANCE_PRESENT=YES
+
+CURRENCY_FORMAT=PASS
+INTEGER_FORMAT=PASS
+PERCENTAGE_FORMAT=PASS
+
+PERCENTAGE_RAW_VALUE=0.3333333333
+PERCENTAGE_DISPLAY=33.33%
+
+CROSS_SHEET_FORMULAS=PASS
+FORMULA_RECALCULATION=PASS
+LEGACY_COMPATIBILITY=PASS
+FORMULA_INJECTION_PROTECTION=PASS
+
+EXPECTED_TOTAL_OBLIGATIONS=1050000
+EXPECTED_TOTAL_PAID=350000
+EXPECTED_TOTAL_BALANCE=700000
+EXPECTED_TOTAL_DISCOUNT=70000
+EXPECTED_TOTAL_ADJUSTED=630000
+EXPECTED_DEBTORS=2
+
+RECALCULATED_OBLIGATIONS=1150000
+RECALCULATED_BALANCE=800000
+RECALCULATED_DISCOUNT=80000
+RECALCULATED_ADJUSTED=720000
+RECALCULATED_DEBTORS=2
+RECALCULATED_RECOVERY_PERCENT=30.4348
+
+TARGETED_TESTS=41 passed, 144 assertions
+BACKEND_A07_TESTS=558 passed, 1975 assertions
+PINT=PASS
+
+LLM_CALLS=0
+AI_PROVIDER_CONFIG_CHANGED=NO
+OTHER_MODULES_MODIFIED=NO
+
+LOCAL_RUNTIME_READY=YES
+MANUAL_QA_R3_02=PENDING_USER
+
+CODE_RESULT=PASS
+BUSINESS_ACCEPTANCE=PENDING_USER
+```
+
+`FINAL_CODE_SHA` identifica el commit funcional de esta corrección. El commit
+posterior de este informe no cambia el código. `main` y `origin/main` permanecen
+en `d20195eb601392e802cb8908ebe466262368b32c` hasta que el propietario acepte el
+QA manual y se autorice el fast-forward.
