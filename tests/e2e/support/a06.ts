@@ -29,20 +29,6 @@ export const STAFF_PASSWORD = process.env.E2E_PASSWORD ?? 'Password1234';
 /** The password given to every portal client these journeys provision. */
 export const CLIENT_PASSWORD = process.env.E2E_CLIENT_PASSWORD ?? 'Password1234';
 
-function cookieValue(name: string): string | null {
-    const prefix = `${name}=`;
-
-    for (const part of document.cookie.split(';')) {
-        const entry = part.trim();
-
-        if (entry.startsWith(prefix)) {
-            return decodeURIComponent(entry.slice(prefix.length));
-        }
-    }
-
-    return null;
-}
-
 /**
  * Sign in through the product's own endpoint and land on `expectedPath`.
  *

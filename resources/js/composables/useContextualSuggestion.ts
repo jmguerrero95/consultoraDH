@@ -4,7 +4,6 @@ import { useRouter } from 'vue-router';
 import { useSuggestion } from '@/composables/useSuggestion';
 import { contextForRoute } from '@/composables/useSuggestionContext';
 
-import type { SuggestionContext } from '@/composables/useSuggestionContext';
 import type { AiSuggestionPayload } from '@/services/ai';
 
 /**
@@ -42,11 +41,14 @@ export function useContextualSuggestion(
     routeName: string | null,
     relevantKey?: () => string | number | null,
     clientId?: () => number | null,
-): { context: ReturnType<typeof contextForRoute> } & ReturnType<typeof useSuggestion> & {
-    load: () => Promise<void>;
-    accept: (id: number) => Promise<boolean>;
-    dismiss: (id: number) => Promise<boolean>;
-} {
+): { context: ReturnType<typeof contextForRoute> } & Pick<
+        ReturnType<typeof useSuggestion>,
+        'suggestion' | 'hasSuggestion' | 'busy' | 'error'
+    > & {
+        load: () => Promise<void>;
+        accept: (id: number) => Promise<boolean>;
+        dismiss: (id: number) => Promise<boolean>;
+    } {
     const router = useRouter();
     const hint = useSuggestion();
 

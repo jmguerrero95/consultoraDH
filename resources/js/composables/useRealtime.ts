@@ -1,7 +1,32 @@
 import { useRealtimeStore } from '@/stores/realtime'
+import type { ChannelCallbacks, PresenceMember } from '@/stores/realtime'
+
+/**
+ * The payload of an event that carries a message.
+ */
+export interface RealtimeMessageEvent<TMessage> {
+  message: TMessage
+}
+
+/**
+ * The payload of an event that carries a conversation.
+ *
+ * The server sends more than the conversation on some events — who answered,
+ * which queue it moved to — so the envelope keeps the rest reachable without
+ * pretending to know it.
+ */
+export interface RealtimeConversationEvent<TConversation> {
+  conversation?: TConversation
+  [key: string]: unknown
+}
 
 /**
  * Composable for using the realtime store with type-safe channel subscriptions.
+ *
+ * The message and the conversation are typed by the caller, because the pages
+ * already declare what they expect: a page that renders a conversation has its
+ * own `Conversation` and its own `Message`, and the channel only says "a
+ * message arrived".
  */
 export function useRealtime() {
   const realtime = useRealtimeStore()
@@ -21,7 +46,7 @@ export function useRealtime() {
    * arrives is recorded by the store and shrugged off. Callers get an
    * unsubscribe function either way.
    */
-  function join(channel: string, handlers: Record<string, Function>): () => void {
+  function join(channel: string, handlers: ChannelCallbacks): () => void {
     if (!realtime.isConnected) {
       void realtime
         .initialize()
@@ -41,46 +66,49 @@ export function useRealtime() {
   /**
    * Subscribe to a support conversation channel
    */
-  function subscribeToConversation(conversationId: number, callbacks: {
-    onMessage?: (message: any) => void
-    onNote?: (message: any) => void
-    onReadUpdate?: (data: any) => void
-    onConversationUpdate?: (data: any) => void
-    onAssignment?: (data: any) => void
-    onQueueChange?: (data: any) => void
-    onResolution?: (data: any) => void
-    onReopen?: (data: any) => void
-  }) {
+  function subscribeToConversation<TMessage extends { message_kind?: string }, TConversation>(
+    conversationId: number,
+    callbacks: {
+      onMessage?: (message: TMessage) => void
+      onNote?: (message: TMessage) => void
+      onReadUpdate?: (data: RealtimeConversationEvent<TConversation>) => void
+      onConversationUpdate?: (data: RealtimeConversationEvent<TConversation>) => void
+      onAssignment?: (data: RealtimeConversationEvent<TConversation>) => void
+      onQueueChange?: (data: RealtimeConversationEvent<TConversation>) => void
+      onResolution?: (data: RealtimeConversationEvent<TConversation>) => void
+      onReopen?: (data: RealtimeConversationEvent<TConversation>) => void
+    },
+  ) {
     return join(`support.conversation.${conversationId}`, {
-      'message.created': (data: any) => {
+      'message.created': (data: RealtimeMessageEvent<TMessage>) => {
         if (data.message?.message_kind === 'note') {
           callbacks.onNote?.(data.message)
         } else {
           callbacks.onMessage?.(data.message)
         }
       },
-      'note.created': (data: any) => {
+      'note.created': (data: RealtimeMessageEvent<TMessage>) => {
         callbacks.onNote?.(data.message)
       },
-      'read.updated': (data: any) => {
+      'read.updated': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onReadUpdate?.(data)
       },
-      'conversation.updated': (data: any) => {
+      'conversation.updated': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onConversationUpdate?.(data)
       },
-      'conversation.assigned': (data: any) => {
+      'conversation.assigned': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onAssignment?.(data)
       },
-      'conversation.queue_changed': (data: any) => {
+      'conversation.queue_changed': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onQueueChange?.(data)
       },
-      'conversation.resolved': (data: any) => {
+      'conversation.resolved': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onResolution?.(data)
       },
-      'conversation.reopened': (data: any) => {
+      'conversation.reopened': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onReopen?.(data)
       },
-      'conversation.created': (data: any) => {
+      'conversation.created': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onConversationUpdate?.(data)
       },
     })
@@ -89,11 +117,14 @@ export function useRealtime() {
   /**
    * Subscribe to staff-only conversation channel (for internal notes)
    */
-  function subscribeToStaffConversation(conversationId: number, callbacks: {
-    onNote?: (message: any) => void
-  }) {
+  function subscribeToStaffConversation<TMessage>(
+    conversationId: number,
+    callbacks: {
+      onNote?: (message: TMessage) => void
+    },
+  ) {
     return join(`support.staff.conversation.${conversationId}`, {
-      'note.created': (data: any) => {
+      'note.created': (data: RealtimeMessageEvent<TMessage>) => {
         callbacks.onNote?.(data.message)
       },
     })
@@ -102,15 +133,20 @@ export function useRealtime() {
   /**
    * Subscribe to queue channel for queue-level notifications
    */
-  function subscribeToQueue(queueId: number, callbacks: {
-    onNewConversation?: (conversation: any) => void
-    onConversationUpdate?: (data: any) => void
-  }) {
+  function subscribeToQueue<TConversation>(
+    queueId: number,
+    callbacks: {
+      onNewConversation?: (conversation: TConversation) => void
+      onConversationUpdate?: (data: RealtimeConversationEvent<TConversation>) => void
+    },
+  ) {
     return join(`support.queue.${queueId}`, {
-      'conversation.created': (data: any) => {
-        callbacks.onNewConversation?.(data.conversation)
+      'conversation.created': (data: RealtimeConversationEvent<TConversation>) => {
+        if (data.conversation !== undefined) {
+          callbacks.onNewConversation?.(data.conversation)
+        }
       },
-      'conversation.updated': (data: any) => {
+      'conversation.updated': (data: RealtimeConversationEvent<TConversation>) => {
         callbacks.onConversationUpdate?.(data)
       },
     })
@@ -119,29 +155,34 @@ export function useRealtime() {
   /**
    * Subscribe to user presence channel
    */
-  function subscribeToPresence(userId: number, callbacks: {
-    onHere?: (members: any[]) => void
-    onJoining?: (member: any) => void
-    onLeaving?: (member: any) => void
-  }) {
+  function subscribeToPresence(
+    userId: number,
+    callbacks: {
+      onHere?: (members: PresenceMember[]) => void
+      onJoining?: (member: PresenceMember) => void
+      onLeaving?: (member: PresenceMember) => void
+    },
+  ) {
     const channel = `support.user.${userId}`
+
+    const handlers: ChannelCallbacks = {
+      'presence:here': (members: PresenceMember[]) => {
+        callbacks.onHere?.(members)
+      },
+      'presence:joining': (member: PresenceMember) => {
+        callbacks.onJoining?.(member)
+      },
+      'presence:leaving': (member: PresenceMember) => {
+        callbacks.onLeaving?.(member)
+      },
+    }
 
     if (!realtime.isConnected) {
       void realtime
         .initialize()
         .catch(() => undefined)
         .finally(() => {
-          realtime.joinPresenceChannel(channel, {
-            'presence:here': (members: any) => {
-              callbacks.onHere?.(members)
-            },
-            'presence:joining': (member: any) => {
-              callbacks.onJoining?.(member)
-            },
-            'presence:leaving': (member: any) => {
-              callbacks.onLeaving?.(member)
-            },
-          })
+          realtime.joinPresenceChannel(channel, handlers)
         })
 
       return () => {
@@ -149,17 +190,7 @@ export function useRealtime() {
       }
     }
 
-    realtime.joinPresenceChannel(channel, {
-      'presence:here': (members: any) => {
-        callbacks.onHere?.(members)
-      },
-      'presence:joining': (member: any) => {
-        callbacks.onJoining?.(member)
-      },
-      'presence:leaving': (member: any) => {
-        callbacks.onLeaving?.(member)
-      },
-    })
+    realtime.joinPresenceChannel(channel, handlers)
 
     return () => {
       realtime.leaveChannel(channel)

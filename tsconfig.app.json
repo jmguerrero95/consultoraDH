@@ -32,11 +32,16 @@
 
         "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo"
     },
+    /*
+     * The frontend suite is checked by its own project (`tsconfig.test.json`),
+     * because it runs on Node and needs Node's types. The application is a
+     * browser bundle: giving it `node` types would let a page reach for
+     * `process` or `node:fs` and still compile.
+     */
     "include": [
         "resources/js/**/*.ts",
         "resources/js/**/*.vue",
-        "resources/js/**/*.d.ts",
-        "tests/frontend/**/*.ts"
+        "resources/js/**/*.d.ts"
     ],
     "exclude": ["node_modules", "public", "vendor"]
 }

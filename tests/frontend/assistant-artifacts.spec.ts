@@ -165,7 +165,17 @@ describe('archivos generados junto a su respuesta', () => {
         // 20 messages, 8 of them assistant answers that each produced a file.
         // The defect was that every file drifted to the foot of the page; at this
         // size that is the difference between a transcript and a pile.
-        const messages = [
+        // The shape is declared: without it TypeScript reads the first
+        // element and decides `created_at` is `null` for the whole array, and
+        // every later message with a real timestamp is a type error.
+        const messages: {
+            id: number;
+            role: string;
+            content: string;
+            provider: string | null;
+            model: string | null;
+            created_at: string | null;
+        }[] = [
             { id: 1, role: 'user', content: 'Hola', provider: null, model: null, created_at: null },
         ];
         const artifacts: Record<string, unknown>[] = [];

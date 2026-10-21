@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { expect, test } from '@playwright/test';
-import type { Page } from '@playwright/test';
 
 import { apiRequest, signInAsStaff } from './support/a06';
 

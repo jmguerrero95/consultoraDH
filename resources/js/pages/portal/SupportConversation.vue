@@ -521,9 +521,9 @@ onMounted(() => {
     return;
   }
 
-  cleanupRealtime = realtime.subscribeToConversation(id, {
-    onMessage: (data) => appendIncoming(data?.message ?? data),
-    onNote: (data) => appendIncoming(data?.message ?? data),
+  cleanupRealtime = realtime.subscribeToConversation<Message, Conversation>(id, {
+    onMessage: (message) => appendIncoming(message),
+    onNote: (message) => appendIncoming(message),
     onConversationUpdate: (data) => {
       if (conversation.value && data?.conversation) {
         conversation.value = { ...conversation.value, ...data.conversation };

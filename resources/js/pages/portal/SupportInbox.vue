@@ -69,7 +69,7 @@ async function loadConversations() {
   error.value = null;
 
   try {
-    const params: Record<string, any> = {
+    const params: Record<string, string | number | boolean | null | undefined> = {
       page: filters.value.page,
       per_page: filters.value.per_page,
     };
@@ -79,7 +79,7 @@ async function loadConversations() {
     // The portal's own endpoint, not the staff inbox: the staff route is guarded
     // by permissions a client does not hold, so asking it answered 403 and the
     // list rendered as empty.
-    const response = await api.portal.inbox(params);
+    const response = await api.portal.inbox<Conversation>(params);
     conversations.value = response.data;
     pagination.value = {
       current_page: response.current_page,

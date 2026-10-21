@@ -1,0 +1,23 @@
+{
+    "extends": "./tsconfig.app.json",
+    "compilerOptions": {
+        /*
+         * The frontend suite runs on Node, not in a browser: it reads the
+         * shipped `manifest.json` and `sw.js` from disk to assert the PWA's
+         * technical contract, and it needs `process.cwd()` to find them.
+         *
+         * Those are the types of the environment the tests run in, so they
+         * belong to the test project and not to the application: the app is a
+         * browser bundle and must not be able to reach for `process` or
+         * `node:fs` by accident.
+         */
+        "types": ["node", "vite/client"],
+        "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo"
+    },
+    "include": [
+        "tests/frontend/**/*.ts",
+        "resources/js/**/*.ts",
+        "resources/js/**/*.vue",
+        "resources/js/**/*.d.ts"
+    ]
+}

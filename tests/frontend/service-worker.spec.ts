@@ -29,7 +29,6 @@ function loadSafeDestination(): (candidate: unknown) => string {
     const end = source.indexOf('\n}', start);
     const declaration = source.slice(start, end + 2);
 
-    // eslint-disable-next-line no-new-func
     return new Function(`${declaration}; return safeDestination;`)() as (candidate: unknown) => string;
 }
 

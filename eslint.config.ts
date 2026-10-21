@@ -81,7 +81,17 @@ export default tseslint.config(
     },
 
     {
-        files: ['vite.config.ts', 'vitest.config.ts', 'playwright.config.ts', 'eslint.config.ts'],
+        files: [
+            'vite.config.ts',
+            'vitest.config.ts',
+            'playwright.config.ts',
+            'eslint.config.ts',
+            // The end to end suite and the deterministic provider stub run in
+            // Node, not in a browser: they start a server, read files and
+            // print what they are doing.
+            'tests/e2e/**/*.ts',
+            'tests/e2e/**/*.mjs',
+        ],
         languageOptions: {
             // Build and test tooling legitimately runs in Node.
             globals: {

@@ -123,7 +123,9 @@ onMounted(async () => {
         // §E.2: propose the signed-in operator as the initial responsible party. Only a
         // default — the assignment rules are unchanged and anybody may be chosen.
         if (nuevaTarea.value.assigned_to === '' && vocabTareas.current_user_id) {
-            nuevaTarea.value.assigned_to = vocabTareas.current_user_id;
+            // The select holds strings: an option's value is a string in the
+            // DOM whatever the number behind it was.
+            nuevaTarea.value.assigned_to = String(vocabTareas.current_user_id);
         }
     } catch {
         errorMessage.value = 'No se pudo cargar el vocabulario.';

@@ -732,7 +732,7 @@ onMounted(() => {
     return;
   }
 
-  const unsubscribe = realtime.subscribeToConversation(id, {
+  const unsubscribe = realtime.subscribeToConversation<Message, Conversation>(id, {
     onMessage: (message) => appendIncoming(message),
     onConversationUpdate: (data) => {
       if (conversation.value && data.conversation) {
@@ -741,7 +741,7 @@ onMounted(() => {
     },
   });
 
-  const unsubscribeStaff = realtime.subscribeToStaffConversation(id, {
+  const unsubscribeStaff = realtime.subscribeToStaffConversation<Message>(id, {
     onNote: (message) => appendIncoming(message),
   });
 

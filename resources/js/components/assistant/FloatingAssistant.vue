@@ -1124,7 +1124,6 @@ watch(open, (value) => {
                             </AppButton>
                         </div>
                     </div>
-
                 </details>
 
                 <div v-if="sending" class="cdh-assistant__message cdh-assistant__message--assistant">

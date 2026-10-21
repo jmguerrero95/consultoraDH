@@ -11,11 +11,57 @@ declare global {
 }
 window.Pusher = Pusher
 
+/**
+ * A handler for a realtime event.
+ *
+ * The payload is typed by the caller, so the store does not have to know what
+ * travels over a channel; `never` is what makes every concrete handler
+ * assignable to it.
+ */
+export type ChannelCallback = (data: never) => void
+
+/** The handlers of one channel, by event name. */
+export type ChannelCallbacks = Record<string, ChannelCallback>
+
+/** The channels this deployment talks to. Reverb speaks the Pusher protocol. */
+type ReverbEcho = Echo<'reverb'>
+
+type PrivateChannel = ReturnType<ReverbEcho['private']>
+type PresenceChannel = ReturnType<ReverbEcho['join']>
+
+/** What is remembered of a channel so it can be joined again after a reconnect. */
+interface RealtimeChannelState {
+  channel: PrivateChannel | PresenceChannel | null
+  callbacks: ChannelCallbacks
+}
+
+/** A member of a presence channel. */
+export interface PresenceMember {
+  id: number
+  name: string
+}
+
+/**
+ * Call a handler with a payload.
+ *
+ * The handlers are typed by whoever registered them, and the store only knows
+ * that *some* handler is there. This is the one place where the two meet.
+ */
+function emit(callbacks: ChannelCallbacks, event: string, payload: unknown): void {
+  const handler = callbacks[event]
+
+  if (!handler) {
+    return
+  }
+
+  ;(handler as (data: unknown) => void)(payload)
+}
+
 interface RealtimeState {
   connected: boolean
   connecting: boolean
   error: string | null
-  channels: Map<string, any>
+  channels: Map<string, RealtimeChannelState>
 }
 
 export const useRealtimeStore = defineStore('realtime', () => {
@@ -26,7 +72,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
     channels: new Map(),
   })
 
-  let echo: Echo<any> | null = null
+  let echo: ReverbEcho | null = null
 
   const isConnected = computed(() => state.value.connected)
   const isConnecting = computed(() => state.value.connecting)
@@ -84,7 +130,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
               state.value.connecting = false
             })
 
-            echo.connector.pusher.connection.bind('error', (error: any) => {
+            echo.connector.pusher.connection.bind('error', (error: { message?: string }) => {
               state.value.connecting = false
               state.value.error = error.message || 'Connection error'
               reject(new Error(error.message || 'Connection error'))
@@ -132,7 +178,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
   /**
    * Join a private channel
    */
-  function joinPrivateChannel(channelName: string, callbacks: Record<string, Function> = {}): any {
+  function joinPrivateChannel(channelName: string, callbacks: ChannelCallbacks = {}): PrivateChannel | null {
     if (!echo) {
       // Not an error, and deliberately not thrown.
       //
@@ -166,7 +212,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
   /**
    * Join a presence channel
    */
-  function joinPresenceChannel(channelName: string, callbacks: Record<string, Function> = {}): any {
+  function joinPresenceChannel(channelName: string, callbacks: ChannelCallbacks = {}): PresenceChannel | null {
     if (!echo) {
       // Same reasoning as `joinPrivateChannel`: realtime not being available is
       // a recorded state, not an exception that takes a screen down with it.
@@ -189,16 +235,16 @@ export const useRealtimeStore = defineStore('realtime', () => {
     })
 
     // Handle presence events
-    channel.here((members: any[]) => {
-      callbacks['presence:here']?.(members)
+    channel.here((members: PresenceMember[]) => {
+      emit(callbacks, 'presence:here', members)
     })
 
-    channel.joining((member: any) => {
-      callbacks['presence:joining']?.(member)
+    channel.joining((member: PresenceMember) => {
+      emit(callbacks, 'presence:joining', member)
     })
 
-    channel.leaving((member: any) => {
-      callbacks['presence:leaving']?.(member)
+    channel.leaving((member: PresenceMember) => {
+      emit(callbacks, 'presence:leaving', member)
     })
 
     return channel
@@ -227,7 +273,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
   /**
    * Listen for an event on a channel
    */
-  function listen(channelName: string, event: string, callback: Function): void {
+  function listen(channelName: string, event: string, callback: ChannelCallback): void {
     if (!echo) {
       throw new Error('Echo not initialized')
     }
@@ -235,7 +281,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
     const privateName = `private-${channelName}`
     const channelData = state.value.channels.get(privateName)
 
-    if (channelData) {
+    if (channelData?.channel) {
       channelData.channel.listen(event, callback)
       channelData.callbacks[event] = callback
     } else {
@@ -259,7 +305,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
     const privateName = `private-${channelName}`
     const channelData = state.value.channels.get(privateName)
 
-    if (channelData) {
+    if (channelData?.channel) {
       channelData.channel.stopListening(event)
       delete channelData.callbacks[event]
     }

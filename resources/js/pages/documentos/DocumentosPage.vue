@@ -200,8 +200,11 @@ async function subirDocumento(): Promise<void> {
         });
 
         archivos.value = [];
-        documentoCliente.value = '';
-        documentoTipo.value = '';
+        // `null`, not `''`: the selects are bound to numeric ids, and an
+        // empty string matched no option — so the form looked empty while the
+        // model still held a value that the server would reject.
+        documentoCliente.value = null;
+        documentoTipo.value = null;
         actionMessage.value = 'Documento guardado.';
         await recargar();
     } catch (e) {

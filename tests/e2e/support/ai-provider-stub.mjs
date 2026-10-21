@@ -114,7 +114,7 @@ const server = createServer((request, response) => {
 
     readBody(request)
         .then((raw) => {
-            let payload = {};
+            let payload;
 
             try {
                 payload = JSON.parse(raw);

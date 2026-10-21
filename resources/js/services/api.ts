@@ -81,8 +81,8 @@ import type {
 interface ApiClient {
     health(): Promise<HealthPayload>;
 
-    get<T>(url: string, options?: { query?: Record<string, any>; headers?: Record<string, string> }): Promise<{ data: T }>;
-    post<T>(url: string, options?: { body?: any; headers?: Record<string, string> }): Promise<{ data: T }>;
+    get<T>(url: string, options?: { query?: Record<string, string | number | boolean | null | undefined>; headers?: Record<string, string> }): Promise<{ data: T }>;
+    post<T>(url: string, options?: { body?: unknown; headers?: Record<string, string> }): Promise<{ data: T }>;
 
     auth: {
         me(): Promise<UserPayload>;
@@ -274,18 +274,18 @@ interface ApiClient {
      * conversation in it and no error either.
      */
     portal: {
-        inbox(params: Record<string, any>): Promise<{
-            data: any[];
+        inbox<T = unknown>(params: Record<string, string | number | boolean | null | undefined>): Promise<{
+            data: T[];
             current_page: number;
             last_page: number;
             total: number;
             per_page: number;
         }>;
-        conversation(id: number, params: Record<string, any>): Promise<any>;
-        createConversation(payload: { subject: string; body_text: string; queue_id?: number | null }): Promise<any>;
-        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<any>;
-        uploadAttachment(conversationId: number, file: File): Promise<any>;
-        markRead(conversationId: number, upToMessageId: number): Promise<any>;
+        conversation(id: number, params: Record<string, string | number | boolean | null | undefined>): Promise<unknown>;
+        createConversation(payload: { subject: string; body_text: string; queue_id?: number | null }): Promise<unknown>;
+        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<unknown>;
+        uploadAttachment(conversationId: number, file: File): Promise<unknown>;
+        markRead(conversationId: number, upToMessageId: number): Promise<unknown>;
     },
 
     support: {
@@ -299,22 +299,22 @@ interface ApiClient {
          * literal in the client and cascaded onto every other `support` call.
          */
         agents(): Promise<{ data: { id: number; name: string; email: string }[] }>;
-        inbox(params: Record<string, any>): Promise<{ data: any[]; current_page: number; last_page: number; total: number; per_page: number }>;
-        conversation(id: number, params: Record<string, any>): Promise<any>;
-        createConversation(payload: Record<string, any>): Promise<{ data: any }>;
-        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<any>;
-        sendNote(conversationId: number, payload: { body_text: string }): Promise<any>;
-        uploadAttachment(conversationId: number, file: File): Promise<any>;
-        sendMessageWithAttachment(conversationId: number, payload: { body_text: string; attachment_ids: number[] }): Promise<any>;
-        changePriority(conversationId: number, priority: string): Promise<{ data: any }>;
-        changeQueue(conversationId: number, payload: { queue_id: number; assignee_user_id?: number | null }): Promise<{ data: any }>;
-        resolveConversation(conversationId: number): Promise<{ data: any }>;
-        closeConversation(conversationId: number): Promise<{ data: any }>;
-        reopenConversation(conversationId: number): Promise<{ data: any }>;
-        assignConversation(conversationId: number, userId: number | null): Promise<{ data: any }>;
+        inbox<T = unknown>(params: Record<string, string | number | boolean | null | undefined>): Promise<{ data: T[]; current_page: number; last_page: number; total: number; per_page: number }>;
+        conversation(id: number, params: Record<string, string | number | boolean | null | undefined>): Promise<unknown>;
+        createConversation(payload: Record<string, string | number | boolean | null | undefined>): Promise<{ data: unknown }>;
+        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<unknown>;
+        sendNote(conversationId: number, payload: { body_text: string }): Promise<unknown>;
+        uploadAttachment(conversationId: number, file: File): Promise<unknown>;
+        sendMessageWithAttachment(conversationId: number, payload: { body_text: string; attachment_ids: number[] }): Promise<unknown>;
+        changePriority(conversationId: number, priority: string): Promise<{ data: unknown }>;
+        changeQueue(conversationId: number, payload: { queue_id: number; assignee_user_id?: number | null }): Promise<{ data: unknown }>;
+        resolveConversation(conversationId: number): Promise<{ data: unknown }>;
+        closeConversation(conversationId: number): Promise<{ data: unknown }>;
+        reopenConversation(conversationId: number): Promise<{ data: unknown }>;
+        assignConversation(conversationId: number, userId: number | null): Promise<{ data: unknown }>;
         /** Records how far this user has read, so the unread badge clears. */
-        markRead(conversationId: number, upToMessageId: number): Promise<any>;
-        loadMoreMessages(conversationId: number, beforeId: number, perPage: number): Promise<any>;
+        markRead(conversationId: number, upToMessageId: number): Promise<unknown>;
+        loadMoreMessages(conversationId: number, beforeId: number, perPage: number): Promise<unknown>;
     };
 
     /**
@@ -336,11 +336,11 @@ export const api: ApiClient = {
         return request<HealthPayload>('GET', '/api/health');
     },
 
-    get<T>(url: string, options?: { query?: Record<string, any>; headers?: Record<string, string> }): Promise<{ data: T }> {
+    get<T>(url: string, options?: { query?: Record<string, string | number | boolean | null | undefined>; headers?: Record<string, string> }): Promise<{ data: T }> {
         return request<{ data: T }>('GET', url, options);
     },
 
-    post<T>(url: string, options?: { body?: any; headers?: Record<string, string> }): Promise<{ data: T }> {
+    post<T>(url: string, options?: { body?: unknown; headers?: Record<string, string> }): Promise<{ data: T }> {
         return request<{ data: T }>('POST', url, options);
     },
 
@@ -1006,8 +1006,8 @@ export const api: ApiClient = {
      * to use these rather than the staff client.
      */
     portal: {
-        inbox(params: Record<string, any> = {}): Promise<{
-            data: any[];
+        inbox<T = unknown>(params: Record<string, string | number | boolean | null | undefined> = {}): Promise<{
+            data: T[];
             current_page: number;
             last_page: number;
             total: number;
@@ -1016,7 +1016,7 @@ export const api: ApiClient = {
             return request('GET', '/api/portal/support/conversations', { query: params });
         },
 
-        conversation(id: number, params: Record<string, any> = {}): Promise<{ data: any }> {
+        conversation(id: number, params: Record<string, string | number | boolean | null | undefined> = {}): Promise<{ data: unknown }> {
             return request('GET', `/api/portal/support/conversations/${id}`, { query: params });
         },
 
@@ -1024,19 +1024,19 @@ export const api: ApiClient = {
             subject: string;
             body_text: string;
             queue_id?: number | null;
-        }): Promise<{ data: any }> {
+        }): Promise<{ data: unknown }> {
             return request('POST', '/api/portal/support/conversations', { body: payload });
         },
 
         sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<{
-            data: any;
+            data: unknown;
         }> {
             return request('POST', `/api/portal/support/conversations/${conversationId}/messages`, {
                 body: payload,
             });
         },
 
-        uploadAttachment(conversationId: number, file: File): Promise<{ data: any }> {
+        uploadAttachment(conversationId: number, file: File): Promise<{ data: unknown }> {
             const form = new FormData();
             form.append('file', file);
 
@@ -1045,7 +1045,7 @@ export const api: ApiClient = {
             });
         },
 
-        markRead(conversationId: number, upToMessageId: number): Promise<{ data: any }> {
+        markRead(conversationId: number, upToMessageId: number): Promise<{ data: unknown }> {
             return request('POST', `/api/portal/support/conversations/${conversationId}/read`, {
                 body: { up_to_message_id: upToMessageId },
             });
@@ -1072,23 +1072,23 @@ export const api: ApiClient = {
         },
 
 
-        inbox(params: Record<string, any> = {}): Promise<{ data: any[]; current_page: number; last_page: number; total: number; per_page: number }> {
+        inbox<T = unknown>(params: Record<string, string | number | boolean | null | undefined> = {}): Promise<{ data: T[]; current_page: number; last_page: number; total: number; per_page: number }> {
             return request('GET', '/api/support/inbox', { query: params });
         },
 
-        conversation(id: number, params: Record<string, any> = {}): Promise<{ data: any }> {
+        conversation(id: number, params: Record<string, string | number | boolean | null | undefined> = {}): Promise<{ data: unknown }> {
             return request('GET', `/api/support/conversations/${id}`, { query: params });
         },
 
-        createConversation(payload: Record<string, any>): Promise<{ data: any }> {
+        createConversation(payload: Record<string, string | number | boolean | null | undefined>): Promise<{ data: unknown }> {
             return request('POST', '/api/support/conversations', { body: payload });
         },
 
-        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<{ data: any }> {
+        sendMessage(conversationId: number, payload: { body_text: string; attachment_ids?: number[] }): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/messages`, { body: payload });
         },
 
-        sendNote(conversationId: number, payload: { body_text: string }): Promise<{ data: any }> {
+        sendNote(conversationId: number, payload: { body_text: string }): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/notes`, { body: payload });
         },
 
@@ -1099,7 +1099,7 @@ export const api: ApiClient = {
          * transcript could never clear its unread marker. The endpoint has always existed
          * (`POST /api/support/conversations/{id}/read`); this is the declaration of it.
          */
-        markRead(conversationId: number, upToMessageId: number): Promise<{ data: any }> {
+        markRead(conversationId: number, upToMessageId: number): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/read`, {
                 body: { up_to_message_id: upToMessageId },
             });
@@ -1117,41 +1117,41 @@ export const api: ApiClient = {
             return request('GET', '/api/support/agents');
         },
 
-        uploadAttachment(conversationId: number, file: File): Promise<{ data: any }> {
+        uploadAttachment(conversationId: number, file: File): Promise<{ data: unknown }> {
             const formData = new FormData();
             formData.append('file', file);
             return request('POST', `/api/support/conversations/${conversationId}/attachments`, { body: formData });
         },
 
-        sendMessageWithAttachment(conversationId: number, payload: { body_text: string; attachment_ids: number[] }): Promise<{ data: any }> {
+        sendMessageWithAttachment(conversationId: number, payload: { body_text: string; attachment_ids: number[] }): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/messages`, { body: payload });
         },
 
-        changePriority(conversationId: number, priority: string): Promise<{ data: any }> {
+        changePriority(conversationId: number, priority: string): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/priority`, { body: { priority } });
         },
 
-        changeQueue(conversationId: number, payload: { queue_id: number; assignee_user_id?: number | null }): Promise<{ data: any }> {
+        changeQueue(conversationId: number, payload: { queue_id: number; assignee_user_id?: number | null }): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/queue`, { body: payload });
         },
 
-        resolveConversation(conversationId: number): Promise<{ data: any }> {
+        resolveConversation(conversationId: number): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/resolve`);
         },
 
-        closeConversation(conversationId: number): Promise<{ data: any }> {
+        closeConversation(conversationId: number): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/close`);
         },
 
-        reopenConversation(conversationId: number): Promise<{ data: any }> {
+        reopenConversation(conversationId: number): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/reopen`);
         },
 
-        assignConversation(conversationId: number, userId: number | null): Promise<{ data: any }> {
+        assignConversation(conversationId: number, userId: number | null): Promise<{ data: unknown }> {
             return request('POST', `/api/support/conversations/${conversationId}/assign`, { body: { user_id: userId } });
         },
 
-        loadMoreMessages(conversationId: number, beforeId: number, perPage: number = 50): Promise<{ data: { messages: any[] } }> {
+        loadMoreMessages<T = unknown>(conversationId: number, beforeId: number, perPage: number = 50): Promise<{ data: { messages: T[] } }> {
             return request('GET', `/api/support/conversations/${conversationId}`, { query: { before_id: beforeId, per_page: perPage } });
         },
     },

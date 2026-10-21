@@ -23,7 +23,9 @@
  */
 import { ref } from 'vue';
 
-const props = defineProps<{
+// The template reads `busy` and `disabled` directly, so the declaration is
+// not bound to a variable.
+defineProps<{
     busy?: boolean;
     disabled?: boolean;
 }>();
@@ -31,8 +33,6 @@ const props = defineProps<{
 const emit = defineEmits<{
     (e: 'choose', file: File): void;
 }>();
-
-const input = ref<HTMLInputElement | null>(null);
 
 /** The formats the ingestor accepts. Kept in step with the server's list. */
 const ACCEPT = '.pdf,.docx,.xlsx,.csv,.txt,.md';
@@ -67,7 +67,6 @@ function onChange(event: Event): void {
             <span class="visually-hidden">Adjuntar un documento</span>
 
             <input
-                ref="input"
                 type="file"
                 class="cdh-attach__input"
                 data-testid="attachment-input"

@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
 import {
     apiRequest,
     provisionPortalClient,
-    signIn,
     signInAsPortalClient,
     signInAsStaff,
     stamp,
@@ -69,7 +69,7 @@ interface ClientIdentity {
 }
 
 /** A queue both portal clients open their conversation on. */
-async function ensureDefaultQueue(page: import('@playwright/test').Page): Promise<void> {
+async function ensureDefaultQueue(page: Page): Promise<void> {
     // A bare list, not a page: this endpoint predates the paginated ones and the
     // suite reads it exactly as the conversation form does.
     const existing = await apiRequest<{ id: number; name: string }[]>(page, 'GET', '/api/support/queues');
@@ -105,7 +105,7 @@ async function ensureDefaultQueue(page: import('@playwright/test').Page): Promis
  * call it. Everything asserted after that point is the interface.
  */
 async function openConversationAsClient(
-    page: import('@playwright/test').Page,
+    page: Page,
     subject: string,
     body: string,
 ): Promise<number> {

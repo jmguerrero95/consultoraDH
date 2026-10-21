@@ -105,7 +105,7 @@ async function loadQueues() {
 async function loadAssignees() {
   try {
     const response = await api.support.agents();
-    assignees.value = (response as any).data.map((u: any) => ({ id: u.id, name: u.name }));
+    assignees.value = response.data.map((u) => ({ id: u.id, name: u.name }));
   } catch (e) {
     console.error('Error loading assignees:', e);
   }
@@ -116,7 +116,7 @@ async function loadConversations() {
   error.value = null;
 
   try {
-    const params: Record<string, any> = {
+    const params: Record<string, string | number | boolean | null | undefined> = {
       page: filters.value.page,
       per_page: filters.value.per_page,
     };
@@ -130,7 +130,7 @@ async function loadConversations() {
     if (filters.value.unread) params.unread = true;
     if (filters.value.client_search) params.client_search = filters.value.client_search;
 
-    const response = await api.support.inbox(params);
+    const response = await api.support.inbox<Conversation>(params);
     conversations.value = response.data;
     pagination.value = {
       current_page: response.current_page,

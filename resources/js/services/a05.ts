@@ -154,7 +154,15 @@ export const a05 = {
             return request('GET', '/api/tasks', { query: filters });
         },
 
-        vocabulary(): Promise<{ priorities: VocabularyOption[]; statuses: VocabularyOption[] }> {
+        vocabulary(): Promise<{
+            priorities: VocabularyOption[];
+            statuses: VocabularyOption[];
+            // Who may be made responsible for a task, and who is signed in.
+            // The endpoint answers for both so the form does not need a
+            // second lookup.
+            assignees: { id: number; name: string }[];
+            current_user_id: number | null;
+        }> {
             return request('GET', '/api/tasks/vocabulary');
         },
 
@@ -202,7 +210,9 @@ export const a05 = {
 
         storeType(input: {
             name: string;
-            slug: string;
+            // `null` is the server's "derive it from the name": the endpoint
+            // replaces an empty slug with `Str::slug($name)`.
+            slug: string | null;
             description?: string | null;
             retention_days?: number | null;
             client_visible_default?: boolean;

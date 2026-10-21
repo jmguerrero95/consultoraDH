@@ -50,7 +50,17 @@ function suggestion(overrides: Partial<AiSuggestionPayload> = {}): AiSuggestionP
 
 const current = ref<string | null>('clients.account');
 
-function withComposable(relevantKey?: () => string | number | null, clientId?: () => number | null) {
+/**
+ * The composable, mounted inside a component, plus the wrapper.
+ *
+ * The tuple is declared: without it TypeScript infers an *array*, and the
+ * destructured `hint` is then a union of the composable and the wrapper, so
+ * every property of the composable is "possibly missing".
+ */
+function withComposable(
+    relevantKey?: () => string | number | null,
+    clientId?: () => number | null,
+): [ReturnType<typeof useContextualSuggestion>, ReturnType<typeof mount>] {
     let result!: ReturnType<typeof useContextualSuggestion>;
 
     const wrapper = mount(
@@ -155,12 +165,15 @@ describe('useContextualSuggestion', () => {
 
         // The first request is answered slowly, the way a real one can be, and
         // the person navigates while it is still in flight.
-        let releaseFirst: (() => void) | null = null;
+        // The gate is an object, not a local variable: TypeScript narrows a
+        // local to `null` at this point and the call would be "not callable",
+        // while the narrowing of a property is reset by the awaits in between.
+        const gate: { release: (() => void) | null } = { release: null };
 
         vi.mocked(ai.suggestion).mockImplementationOnce(
             () =>
                 new Promise((resolve) => {
-                    releaseFirst = () => resolve({ suggestion: suggestion({ id: 7, evidence: { client_id: 7 } }) });
+                    gate.release = () => resolve({ suggestion: suggestion({ id: 7, evidence: { client_id: 7 } }) });
                 }),
         );
 
@@ -175,7 +188,7 @@ describe('useContextualSuggestion', () => {
         expect(hint.suggestion.value?.evidence.client_id).toBe(9);
 
         // Now the slow answer for the client we left arrives.
-        releaseFirst?.();
+        gate.release?.();
         await flushPromises();
 
         // It must not overwrite what is on screen now: that is one client's debt

@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
 import { apiRequest, signInAsStaff } from './support/a06';
 
@@ -68,7 +69,7 @@ interface IngestTask {
     result: { chunks?: number; characters?: number; attachment_id?: number } | null;
 }
 
-async function taskForFixture(page: import('@playwright/test').Page): Promise<IngestTask | null> {
+async function taskForFixture(page: Page): Promise<IngestTask | null> {
     const listed = await apiRequest<{ tasks: IngestTask[] }>(page, 'GET', '/api/ai/tasks');
     const mine = listed.data.tasks.filter((task) => task.name === FIXTURE_NAME);
 
