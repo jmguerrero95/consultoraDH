@@ -305,6 +305,12 @@ final class AiAssistantController extends Controller
         $this->conversations->applyDerivedTitle($conversation, $data['question']);
         $conversation->touch();
 
+        // The turn just added evidence (a recent answer and, when applicable,
+        // observed tool use). Drop the cached status so the interface's refresh
+        // after this turn reports the new proof instead of the previous
+        // "unverified" snapshot for the remainder of the cache window.
+        Cache::forget('ai.status');
+
         return response()->json([
             'conversation_id' => $conversation->id,
             'title' => $conversation->title,
@@ -483,6 +489,12 @@ final class AiAssistantController extends Controller
         // the first question asked in it.
         $this->conversations->applyDerivedTitle($conversation, $data['message']);
         $conversation->touch();
+
+        // The turn just added evidence (a recent answer and, when applicable,
+        // observed tool use). Drop the cached status so the widget's refresh
+        // after this turn reports the new proof instead of the previous
+        // "unverified" snapshot for the remainder of the cache window.
+        Cache::forget('ai.status');
 
         return response()->json([
             'conversation_id' => $conversation->id,

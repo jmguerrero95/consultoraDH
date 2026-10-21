@@ -20,6 +20,7 @@ use App\Domain\Support\SupportAttachmentRejected;
 use App\Domain\Support\SupportConversationPriority;
 use App\Domain\Support\SupportMessageChannel;
 use App\Domain\Support\SupportMessageSenderKind;
+use App\Http\Controllers\Concerns\NormalizesPagination;
 use App\Http\Controllers\Controller;
 use App\Models\SupportConversation;
 use App\Models\SupportMessage;
@@ -36,6 +37,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SupportConversationController extends Controller
 {
+    use NormalizesPagination;
+
     /**
      * A conversation opened by staff, on behalf of a client.
      *
@@ -112,12 +115,17 @@ class SupportConversationController extends Controller
     {
         $this->authorizeConversationAccess($request->user(), $conversation);
 
-        $perPage = $request->integer('per_page', 50);
+        $perPage = $this->perPage($request, 50);
         $beforeId = $request->integer('before_id');
 
         $messagesQuery = SupportMessage::where('conversation_id', $conversation->id)
             ->with(['author', 'attachments'])
-            ->orderByDesc('created_at');
+            // The cursor is an id, so the order has to be an id order. Two
+            // messages written in the same second share `created_at` (the column
+            // has second precision) and PostgreSQL is free to return them in any
+            // order, which made a page and its cursor overlap: the same message
+            // was delivered twice and another was skipped. The id breaks the tie.
+            ->orderByDesc('id');
 
         if ($beforeId) {
             $messagesQuery->where('id', '<', $beforeId);

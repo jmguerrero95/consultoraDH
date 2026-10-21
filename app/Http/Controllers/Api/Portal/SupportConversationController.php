@@ -13,6 +13,7 @@ use App\Domain\Support\SupportAttachmentRejected;
 use App\Domain\Support\SupportConversationPriority;
 use App\Domain\Support\SupportMessageChannel;
 use App\Domain\Support\SupportMessageSenderKind;
+use App\Http\Controllers\Concerns\NormalizesPagination;
 use App\Http\Controllers\Controller;
 use App\Models\SupportConversation;
 use App\Models\SupportMessage;
@@ -25,6 +26,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SupportConversationController extends Controller
 {
+    use NormalizesPagination;
+
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -45,7 +48,7 @@ class SupportConversationController extends Controller
             $query->where('status', $request->input('status'));
         }
 
-        $conversations = $query->paginate($request->integer('per_page', 25));
+        $conversations = $query->paginate($this->perPage($request, 25));
 
         return response()->json($conversations);
     }
@@ -96,6 +99,15 @@ class SupportConversationController extends Controller
 
                 return $conversation;
             });
+        } catch (\InvalidArgumentException $e) {
+            // A deployment can legitimately have no default queue while the
+            // portal form is being used. That is configuration, not a server
+            // fault: answer with the same stable code and message the staff
+            // endpoint uses instead of leaking a 500.
+            return response()->json([
+                'message' => 'No hay una cola por defecto configurada. Elija una cola.',
+                'code' => 'no_default_queue',
+            ], 409);
         } catch (SupportAttachmentRejected $e) {
             return response()->json([
                 'message' => $e->getMessage(),
@@ -114,13 +126,16 @@ class SupportConversationController extends Controller
             return response()->json(['message' => 'Conversación no encontrada'], 404);
         }
 
-        $perPage = $request->integer('per_page', 50);
+        $perPage = $this->perPage($request, 50);
         $beforeId = $request->integer('before_id');
 
         $messagesQuery = SupportMessage::where('conversation_id', $conversation->id)
             ->where('client_visible', true)
             ->with(['author', 'attachments'])
-            ->orderByDesc('created_at');
+            // The cursor is an id, so the order has to be an id order: two
+            // messages written in the same second share `created_at`, and an
+            // arbitrary order there made a page and its cursor overlap.
+            ->orderByDesc('id');
 
         if ($beforeId) {
             $messagesQuery->where('id', '<', $beforeId);

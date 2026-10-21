@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Concerns\NormalizesPagination;
 use App\Http\Controllers\Controller;
 use App\Models\SupportConversation;
 use Illuminate\Http\JsonResponse;
@@ -11,6 +12,8 @@ use Illuminate\Http\Request;
 
 class SupportInboxController extends Controller
 {
+    use NormalizesPagination;
+
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -92,7 +95,7 @@ class SupportInboxController extends Controller
          */
         $conversations = $query->orderByRaw('last_message_at DESC NULLS LAST')
             ->orderByDesc('id')
-            ->paginate($request->integer('per_page', 25));
+            ->paginate($this->perPage($request, 25));
 
         return response()->json($conversations);
     }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Concerns\NormalizesPagination;
 use App\Http\Controllers\Controller;
 use App\Models\AuditEvent;
 use App\Models\AutomationAction;
@@ -16,6 +17,8 @@ use Illuminate\Validation\Rule;
 
 class AutomationController extends Controller
 {
+    use NormalizesPagination;
+
     public function vocabulary(Request $request): JsonResponse
     {
         return response()->json([
@@ -155,7 +158,7 @@ class AutomationController extends Controller
             $query->where('trigger_type', $request->input('trigger_type'));
         }
 
-        $rules = $query->paginate($request->integer('per_page', 25));
+        $rules = $query->paginate($this->perPage($request, 25));
 
         return response()->json($rules);
     }
@@ -322,7 +325,7 @@ class AutomationController extends Controller
         $runs = $rule->runs()
             ->with(['actionRuns.action'])
             ->latest()
-            ->paginate($request->integer('per_page', 25));
+            ->paginate($this->perPage($request, 25));
 
         return response()->json($runs);
     }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Concerns\NormalizesPagination;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\SupportConversation;
@@ -15,6 +16,8 @@ use Illuminate\Support\Facades\DB;
 
 class SupportInboundEmailController extends Controller
 {
+    use NormalizesPagination;
+
     public function index(Request $request): JsonResponse
     {
         $query = SupportInboundEmail::query()
@@ -30,7 +33,7 @@ class SupportInboundEmailController extends Controller
             });
         }
 
-        $emails = $query->paginate($request->integer('per_page', 25));
+        $emails = $query->paginate($this->perPage($request, 25));
 
         return response()->json($emails);
     }

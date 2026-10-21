@@ -222,7 +222,60 @@ const statusError = ref<string | null>(null);
  * `null` when there is nothing to warn about, including while the status is
  * still loading: the header says "Comprobando…" for that case already.
  */
-const notice = computed<{ variant: 'danger' | 'warning'; message: string } | null>(() => {
+const internalDataAvailability = computed(() => status.value?.capabilities?.internal_data ?? null);
+
+/**
+ * One honest sentence per operation state.
+ *
+ * `unverified` is not a failure: it means the server has no recent tool-use
+ * evidence yet, and the turn may well succeed. Calling that "limited" made a
+ * working XLSX generation look broken. `quota_limited`, `unavailable` and
+ * `blocked` are different walls, and the sentence must not merge them.
+ */
+function internalDataNotice(): { variant: 'warning' | 'info'; message: string } | null {
+    const internal = internalDataAvailability.value;
+
+    if (!internal) {
+        return null;
+    }
+
+    switch (internal.state) {
+        case 'unverified':
+            return {
+                variant: 'info',
+                message: 'Todavía no hay evidencia reciente de consultas internas con herramientas. El asistente puede intentarlo; esto no significa que los proveedores estén caídos.',
+            };
+        case 'degraded':
+            return {
+                variant: 'info',
+                message: 'Las consultas con datos internos pueden intentarse, pero dependen de un solo proveedor independiente, sin respaldo.',
+            };
+        case 'quota_limited':
+            return {
+                variant: 'warning',
+                message: 'La cuota de los proveedores para consultas con datos internos está agotada temporalmente. La conversación general puede seguir funcionando.',
+            };
+        case 'unavailable':
+            return {
+                variant: 'warning',
+                message: 'Los proveedores para consultas con datos internos están temporalmente en espera. No es un fallo permanente.',
+            };
+        case 'blocked':
+            return {
+                variant: 'warning',
+                message: internal.reason ?? 'Las consultas con datos internos están bloqueadas por configuración.',
+            };
+        case 'unconfigured':
+            return {
+                variant: 'warning',
+                message: 'No hay un proveedor configurado para consultas con datos internos.',
+            };
+        default:
+            return null;
+    }
+}
+
+const notice = computed<{ variant: 'danger' | 'warning' | 'info'; message: string } | null>(() => {
     if (statusError.value) {
         return { variant: 'danger', message: statusError.value };
     }
@@ -247,14 +300,10 @@ const notice = computed<{ variant: 'danger' | 'warning'; message: string } | nul
         return { variant: 'warning', message: 'No hay un proveedor de inteligencia artificial disponible en este momento. Puedes reintentar cuando vuelva a estarlo.' };
     }
 
-    // The pool-wide state can be "unchecked" while the operations that need a
-    // provider authorised for private data are not ready. Saying so is honest;
-    // claiming it is simply "sin comprobar" is not.
-    if (status.value.capabilities?.internal_data && !status.value.capabilities.internal_data.available) {
-        return { variant: 'warning', message: 'La conversación general está disponible, pero las operaciones con datos internos están limitadas en este momento.' };
-    }
-
-    return null;
+    // The pool-wide state can be healthy while the operations that need a
+    // provider authorised for private data are not. Explain the specific state
+    // instead of calling every non-ready operation "limited".
+    return internalDataNotice();
 });
 
 const statusLabel = computed(() => {
@@ -276,15 +325,19 @@ const statusLabel = computed(() => {
             // that has not answered is not claimed to be working.
             return status.value.active_model ? `Disponible · ${status.value.active_model}` : 'Disponible';
         default:
-            // `unchecked`: configured, but with no recent proof it answers. Say
-            // something useful rather than leaving a permanent "sin comprobar":
-            // what the pool is configured for, and whether private work is
-            // currently limited.
-            if (status.value.capabilities?.internal_data && !status.value.capabilities.internal_data.available) {
-                return 'Disponibilidad limitada';
+            // `unchecked`: configured, but with no recent proof it answers.
+            // `unverified` is not the same as "down" or "limited"; the notice
+            // explains the specific operation state without overstating it.
+            switch (internalDataAvailability.value?.state) {
+                case 'quota_limited':
+                    return 'Límite en consultas internas';
+                case 'unavailable':
+                    return 'Consulta interna en espera';
+                case 'blocked':
+                    return 'Consulta interna bloqueada';
+                default:
+                    return 'Listo · sin verificar';
             }
-
-            return 'Listo · sin verificar';
     }
 });
 
@@ -549,6 +602,10 @@ async function send(retry?: ChatMessage): Promise<void> {
         error.value = failure;
     } finally {
         sending.value = false;
+        // The turn changed what the server knows about the pool (a recent
+        // answer, or observed tool use). Re-read the status so the notice and
+        // badge reflect that evidence instead of the pre-turn snapshot.
+        void loadStatus();
     }
 }
 
