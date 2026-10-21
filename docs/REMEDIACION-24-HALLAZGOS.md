@@ -327,3 +327,49 @@ Riesgos residuales aceptados y documentados:
 
 Con 1 y 2 resueltos, la rama cumple la condición de GO de la auditoría. La
 publicación, cuando se autorice, es fast-forward y sin `--force`.
+
+---
+
+# FINAL_INDEPENDENT_AUDIT_REMEDIATION
+
+Remediación de los hallazgos de la **auditoría independiente final**, posterior al
+commit `e8f88525ef58b4ed00f53e1022291a3272a364e3` (base auditada).
+
+Rama: `fix/a07-xlsx-01-formulas` · `main` intacto en `d20195e`.
+
+> **Continuidad de la sesión.** Este bloque se actualiza al cerrar cada lote.
+> La última línea es el estado que la siguiente sesión debe retomar.
+
+## Continuidad
+
+| Lote | Estado | Commit |
+| --- | --- | --- |
+| A01-SEC | CERRADO | `d9581fc` |
+| A05-REP | CERRADO | `87e8147` |
+| A06-AUTO | PENDIENTE | — |
+| A01-OPS | PENDIENTE | — |
+| PERF-UX | PENDIENTE | — |
+| Certificación final | PENDIENTE | — |
+
+**Pendiente inmediato:** continuar con el lote A06-AUTO (A06-AUTO-02,
+A06-AUTO-03, A06-TG-01).
+
+## Matriz de defectos nuevos
+
+| ID | Estado | Causa confirmada | Corrección | Commit | Test | Runtime |
+|---|---|---|---|---|---|---|
+| A01-AUTH-01 | CORREGIDO | El login encendía el query log, volcar las consultas al log, buscaba el usuario dos veces, verificaba el hash dos veces y escribía correo, IP, cuenta y nombre de base de datos en el log | Se elimina sólo la instrumentación: una consulta, una comparación, sin logs y sin query log | `d9581fc` | `tests/Feature/Auth/LoginInstrumentationTest.php` (10) | 4 tests fallan contra el código original |
+| A01-AUD-01 | CORREGIDO | `AuditRecorder::record()` tragaba toda excepción: un pago, una aplicación, una anulación, una reversión, una afiliación o una importación aplicada podían persistir sin su entrada de auditoría | `AuditAction::isCritical()` declara la clase; `recordRequired()` lanza y la transacción revierte la mutation; las auxiliares siguen tolerantes, con savepoint | `d9581fc` | `tests/Feature/Audit/CriticalAuditAtomicityTest.php` (12) | 9 tests fallan contra el código original |
+| A05-REP-02 | CORREGIDO | Una ejecución `running` cuyo ejecutor moría quedaba `running` para siempre; además `occurrence_key` no estaba en la lista fillable de `GeneratedReport`, así que **cada reintento generaba un segundo reporte** | Lease `lease_expires_at` + fence `claim_token`; la clave pasa a fillable y a índice único | `87e8147` | `tests/Feature/A05/ReportScheduleLeaseTest.php` (12) | Claim real observado durante la generación; recuperación probada desde una **segunda sesión PostgreSQL** |
+| A05-REP-03 | CORREGIDO | El reintento no comprobaba que la programación siguiera activa | La ocurrencia pendiente o fallida de una programación desactivada se bloquea con `schedule_inactive`; la reactivación no la revive | `87e8147` | mismo archivo | — |
+| A05-REP-04 | CORREGIDO | Un `file_put_contents` fallido sólo avisa y deja un artefacto vacío; la auditoría de la solicitud era tolerante | Comprobación de archivo escrito, borrado de bytes parciales y auditoría de la solicitud obligatoria | `87e8147` | mismo archivo | — |
+| A06-AUTO-02 | PENDIENTE | | | | | |
+| A06-AUTO-03 | PENDIENTE | | | | | |
+| A06-TG-01 | PENDIENTE | | | | | |
+| A01-CI-01 | PENDIENTE | | | | | |
+| A01-OPS-02 | PENDIENTE | | | | | |
+| A01-OPS-03 | PENDIENTE | | | | | |
+| A01-OPS-04 | PENDIENTE | | | | | |
+| A05-PERF-01 | PENDIENTE | | | | | |
+| A07-REL-01 | PENDIENTE | | | | | |
+| QA-UI-01 | PENDIENTE | | | | | |
