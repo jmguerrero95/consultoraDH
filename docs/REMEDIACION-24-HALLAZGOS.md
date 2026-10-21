@@ -522,7 +522,7 @@ despliegue es la decisión explícita del operador, y el preflight lo dice.
 | R5 | Telegram LIVE no ejecutado | P3 | `TELEGRAM_BOT_TOKEN` está vacío en el entorno: no hay con qué enviar a un bot real. Lo que sí se probó es el camino de código con respuestas HTTP simuladas, incluida la recuperación de una reclamación abandonada |
 | R6 | SMTP LIVE no ejecutado | P3 | El correo se configured en el entorno (`MAIL_HOST`, `MAIL_USERNAME`), pero no hay un buzón de destino autorizado y no se envía a nadie sin autorización. Se probó la ruta de código con el mailer de pruebas |
 | R7 | `failed_jobs` con las cuatro filas | P3 | Se conservan a propósito (§FINAL.2) |
-| R8 | Sin ejecución real de GitHub Actions | P3 | No hay runner de GitHub en este entorno. El workflow está escrito y es válido, y su puerta de frontend es **exactamente** la que esta intervención dejó en verde (typecheck, lint, build y pruebas), pero **no hay evidencia de una ejecución en GitHub** y no se inventa |
+| R8 | Sin ejecución real de GitHub Actions | P3 | **Comprobado, no supuesto**: la rama se publicó en `audit/a07-xlsx-premerge` por fast-forward (`e8f8852..cf8b2bb`) y la API de Actions responde `total_count=0` con `workflows: []`. La razón es concreta: GitHub registra los workflows **de la rama por defecto**, y `main` no tiene `.github/workflows/` — el `ci.yml` vive en la rama de remediación. `workflow_dispatch` no puede dispararse de un workflow que GitHub no registra, y `main` no puede tocarse en esta intervención. El workflow está escrito y es válido, y su puerta de frontend es **exactamente** la que esta intervención dejó en verde (typecheck, lint, build y pruebas), pero **no hay evidencia de una ejecución en GitHub** y no se inventa |
 
 ## FINAL.7 Conclusiones por módulo
 
@@ -595,8 +595,11 @@ BACKUP_SNAPSHOT_CONSISTENCY=PASS (backup con escrituras concurrentes: el volcado
   y los conteos describen la misma instantánea)
 READINESS=PASS (público mínimo; detalle operativo tras `settings.view`)
 FAILED_JOBS_TRIAGE=PASS (4 clasificados y conservados; ninguno operativo)
-CI_GITHUB_RUN=BLOCKED_EXTERNAL (sin runner de GitHub en este entorno; la puerta
-  de frontend del workflow es la que esta intervención dejó en verde)
+CI_GITHUB_RUN=BLOCKED_EXTERNAL (la rama se publicó por fast-forward en
+  audit/a07-xlsx-premerge y la API de Actions responde 0 workflows: GitHub sólo
+  registra los workflows de la rama por defecto, y main no tiene
+  .github/workflows; main no puede tocarse. La puerta de frontend del workflow es
+  la que esta intervención dejó en verde)
 
 A07_XLSX_DETERMINISTIC=PASS (suite A07 verde, incluidos los 22 archivos de
   XLSX y sus fórmulas)
@@ -644,7 +647,10 @@ por lo que está fuera de este repositorio.
 
 ### Lo que falta para que la puerta pase
 
-1. Una ejecución real de GitHub Actions sobre la rama, con su evidencia adjunta.
+1. Una ejecución real de GitHub Actions. La rama ya está publicada por
+   fast-forward en `audit/a07-xlsx-premerge`; hace falta que `main` reciba el
+   `ci.yml` (o una rama por defecto que lo contenga) para que GitHub lo registre,
+   y eso es una decisión de la persona que publica `main`.
 2. Un buzón SMTP y un token de Telegram autorizados, y la certificación LIVE de
    esos dos canales.
 3. La clasificación de los catorce journeys E2E que no pasan: seis de ellos fallan
