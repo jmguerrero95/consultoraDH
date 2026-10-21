@@ -469,6 +469,13 @@ it('keeps the delivery result when the delivery runs on a real redis worker', fu
         'queue.connections.redis.queue' => $queue,
     ]);
 
+    // The connection was already resolved by the seeding, with the old
+    // default queue. It is dropped so it is resolved again with the queue of
+    // this test: otherwise the job lands in the shared `default` queue and
+    // stays there, and the readiness probe of another test finds it.
+    app()->forgetInstance('queue');
+    Illuminate\Support\Facades\Queue::clearResolvedInstance('queue');
+
     [$rule, $action] = auto06Rule('send_email', [
         'recipient_type' => 'specific_user',
         'specific_user_id' => auto06Owner()->id,

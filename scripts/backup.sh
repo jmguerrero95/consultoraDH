@@ -31,6 +31,13 @@ BACKUP_ENCRYPTION_PASSPHRASE="${BACKUP_ENCRYPTION_PASSPHRASE:-}"
 BACKUP_ENCRYPTION_KEY_FILE="${BACKUP_ENCRYPTION_KEY_FILE:-}"
 BACKUP_OFFSITE_DIR="${BACKUP_OFFSITE_DIR:-}"
 
+# The snapshot's state. Declared here so the cleanup trap can close the
+# transaction even when the script fails before the snapshot section.
+SNAPSHOT_FIFO=""
+SNAPSHOT_OUT=""
+SNAPSHOT_PID=""
+SNAPSHOT_ID=""
+
 TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
 BACKUP_NAME="consultora_dh_${TIMESTAMP}"
 WORK_DIR="${BACKUP_DIR}/${BACKUP_NAME}"
@@ -49,6 +56,10 @@ cleanup() {
     echo "[ERROR] Backup incompleto; se elimina ${WORK_DIR}" >&2
     rm -rf "${WORK_DIR}"
   fi
+
+  # The snapshot's transaction is closed even when the script fails, so the
+  # connection does not stay open holding it.
+  snapshot_close
 }
 trap cleanup EXIT
 
@@ -61,6 +72,93 @@ psql_run() {
     --no-psqlrc \
     --set=ON_ERROR_STOP=1 \
     "$@"
+}
+
+# ---------------------------------------------------------------------------
+# One snapshot for the dump and for the counts
+# ---------------------------------------------------------------------------
+#
+# The dump and the counts have to describe the *same* state of the database.
+# Taken separately, a write that lands between them makes the restore proof
+# compare a dump with the counts of a later state, and the comparison fails
+# although both are perfectly correct — a false alarm that trains people to
+# ignore the alarm.
+#
+# So the two share one snapshot. A REPEATABLE READ transaction exports it,
+# `pg_dump --snapshot` reads it, and every count imports it. The transaction
+# stays open until the dump and the counts are done, because PostgreSQL
+# invalidates an exported snapshot as soon as its transaction ends.
+snapshot_open() {
+  SNAPSHOT_FIFO="$(mktemp -u)"
+  SNAPSHOT_OUT="$(mktemp)"
+  mkfifo "${SNAPSHOT_FIFO}"
+
+  # The session reads its commands from the pipe and writes its answers to a
+  # file, so the transaction stays open while the dump runs.
+  psql_run --quiet --no-align --tuples-only < "${SNAPSHOT_FIFO}" > "${SNAPSHOT_OUT}" 2>&1 &
+  SNAPSHOT_PID=$!
+
+  # Opening the pipe for writing waits for the reader, which is now there.
+  exec 3>"${SNAPSHOT_FIFO}"
+
+  printf 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n' >&3
+  printf 'SELECT pg_export_snapshot();\n' >&3
+
+  local attempt=0
+  while [[ ${attempt} -lt 200 ]]; do
+    # The identifier is hexadecimal: `XXXXXXXX-XXXXXXXX-1`. A pattern that
+    # only matched digits would cut it in half and hand `pg_dump` a snapshot
+    # that does not exist.
+    SNAPSHOT_ID="$(grep -oE '[0-9A-Fa-f]+-[0-9A-Fa-f]+-[0-9]+' "${SNAPSHOT_OUT}" 2>/dev/null | head -1 || true)"
+
+    if [[ -n "${SNAPSHOT_ID}" ]]; then
+      return 0
+    fi
+
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+
+  echo "[ERROR] No se pudo exportar una instantánea coherente de la base." >&2
+  return 1
+}
+
+snapshot_close() {
+  if [[ -n "${SNAPSHOT_PID:-}" ]]; then
+    printf 'COMMIT;\n' >&3 2>/dev/null || true
+    exec 3>&- 2>/dev/null || true
+    wait "${SNAPSHOT_PID}" 2>/dev/null || true
+  fi
+
+  rm -f "${SNAPSHOT_FIFO}" "${SNAPSHOT_OUT}" 2>/dev/null || true
+  SNAPSHOT_FIFO=""
+  SNAPSHOT_OUT=""
+  SNAPSHOT_PID=""
+  SNAPSHOT_ID=""
+}
+
+# A count taken from the very same snapshot the dump was taken from.
+snapshot_count() {
+  local table="$1"
+
+  psql_run --quiet --no-align --tuples-only --command="
+    BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+    SET TRANSACTION SNAPSHOT '${SNAPSHOT_ID}';
+    SELECT count(*) FROM public.${table};
+    COMMIT;
+  " 2>/dev/null | tr -d '[:space:]'
+}
+
+# Whether the table exists, also read from the snapshot.
+snapshot_table_exists() {
+  local table="$1"
+
+  psql_run --quiet --no-align --tuples-only --command="
+    BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+    SET TRANSACTION SNAPSHOT '${SNAPSHOT_ID}';
+    SELECT to_regclass('public.${table}') IS NOT NULL;
+    COMMIT;
+  " 2>/dev/null | tr -d '[:space:]'
 }
 
 encryption_configured() {
@@ -106,42 +204,53 @@ fi
 
 mkdir -p "${WORK_DIR}"
 
-# 1. PostgreSQL - custom format (compressed)
+# 1. One coherent snapshot of PostgreSQL, shared by the dump and the counts.
+echo "[${TIMESTAMP}] Exportando instantánea coherente..."
+if ! snapshot_open; then
+  echo "[ERROR] Sin instantánea coherente; el backup se aborta." >&2
+  exit 1
+fi
+
+# 2. PostgreSQL - custom format (compressed), read from that snapshot.
 echo "[${TIMESTAMP}] Dumping PostgreSQL..."
 pg_dump \
   --host="${PG_HOST}" \
   --port="${PG_PORT}" \
   --username="${PG_USER}" \
   --dbname="${PG_DB}" \
+  --snapshot="${SNAPSHOT_ID}" \
   --format=custom \
   --compress=9 \
   --no-owner \
   --no-privileges \
   --file="${WORK_DIR}/postgres.dump"
 
-# 2. Counts at the exact moment of the dump. The restore proof compares these
-#    against the restored database, which is stronger than "the table exists".
+# 3. Counts at the exact moment of the dump — the same moment, because both
+#    read the same snapshot. The restore proof compares these against the
+#    restored database, which is stronger than "the table exists".
 echo "[${TIMESTAMP}] Registrando conteos de tablas críticas..."
 : > "${WORK_DIR}/COUNTS.tsv"
 for table in "${CRITICAL_TABLES[@]}"; do
-  exists=$(psql_run --tuples-only --no-align \
-    --command="SELECT to_regclass('public.${table}') IS NOT NULL")
+  exists=$(snapshot_table_exists "${table}")
 
   if [[ "${exists}" == "t" ]]; then
-    count=$(psql_run --tuples-only --no-align \
-      --command="SELECT count(*) FROM public.${table}")
+    count=$(snapshot_count "${table}")
     printf '%s\t%s\n' "${table}" "${count}" >> "${WORK_DIR}/COUNTS.tsv"
   else
     printf '%s\tmissing\n' "${table}" >> "${WORK_DIR}/COUNTS.tsv"
   fi
 done
 
-# 3. Private storage - archive contents, not the parent directory name.
+# The snapshot is not needed any more, and the transaction that holds it can
+# end: PostgreSQL invalidates it as soon as that happens.
+snapshot_close
+
+# 4. Private storage - archive contents, not the parent directory name.
 echo "[${TIMESTAMP}] Archiving private storage..."
 STORAGE_FILES=$(find "${PRIVATE_STORAGE}" -type f | wc -l | tr -d ' ')
 tar -czf "${WORK_DIR}/private_storage.tar.gz" -C "${PRIVATE_STORAGE}" .
 
-# 4. Encrypt payload files before writing the manifest. The manifest then
+# 5. Encrypt payload files before writing the manifest. The manifest then
 #    authenticates the bytes that are actually stored on disk.
 ENCRYPTED="no"
 if encryption_configured; then
@@ -152,7 +261,7 @@ if encryption_configured; then
   ENCRYPTED="yes"
 fi
 
-# 5. Manifest with checksums and enough metadata for the restore proof.
+# 6. Manifest with checksums and enough metadata for the restore proof.
 echo "[${TIMESTAMP}] Generando manifest..."
 {
   echo "# Backup: ${BACKUP_NAME}"
@@ -166,14 +275,14 @@ echo "[${TIMESTAMP}] Generando manifest..."
 
 COMPLETE=1
 
-# 6. Optional off-host copy. BACKUP_OFFSITE_DIR must be a different mount.
+# 7. Optional off-host copy. BACKUP_OFFSITE_DIR must be a different mount.
 if [[ -n "${BACKUP_OFFSITE_DIR}" ]]; then
   echo "[${TIMESTAMP}] Copiando a almacenamiento externo: ${BACKUP_OFFSITE_DIR}"
   mkdir -p "${BACKUP_OFFSITE_DIR}"
   cp -a "${WORK_DIR}" "${BACKUP_OFFSITE_DIR}/"
 fi
 
-# 7. Retention, local and off-host.
+# 8. Retention, local and off-host.
 echo "[${TIMESTAMP}] Limpiando backups antiguos (>${RETENTION_DAYS} días)..."
 find "${BACKUP_DIR}" -maxdepth 1 -type d -name "consultora_dh_*" -mtime +"${RETENTION_DAYS}" -exec rm -rf {} +
 
@@ -181,7 +290,7 @@ if [[ -n "${BACKUP_OFFSITE_DIR}" ]]; then
   find "${BACKUP_OFFSITE_DIR}" -maxdepth 1 -type d -name "consultora_dh_*" -mtime +"${RETENTION_DAYS}" -exec rm -rf {} +
 fi
 
-# 8. Success marker for the container health check. Written last, only after
+# 9. Success marker for the container health check. Written last, only after
 #    every previous step succeeded.
 date -u +%s > "${BACKUP_DIR}/.last-success"
 

@@ -199,6 +199,16 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         ->get('/settings', SettingsController::class)
         ->name('api.settings');
 
+    // The operational detail behind the public readiness answer: the depth of
+    // each queue, the age of its oldest job and the failed jobs.
+    //
+    // The public `/api/ready` says whether the deployment can take work. This
+    // says why, and who may read it is the same authority that may read the
+    // configuration of the application it describes.
+    Route::middleware('can:'.SettingsController::PERMISSION)
+        ->get('/settings/readiness', [HealthController::class, 'operations'])
+        ->name('api.settings.readiness');
+
     // --- A02: clients -------------------------------------------------------
     //
     // Read and write are separate permissions. A role may consult the portfolio

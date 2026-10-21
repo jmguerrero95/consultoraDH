@@ -54,6 +54,20 @@ final class HealthController extends Controller
     /**
      * The readiness probe.
      *
+     * ## What a visitor gets
+     *
+     * The answer and nothing else: whether the database, Redis and the queues
+     * are in a state where this deployment can take work. The size of a queue,
+     * the age of its oldest job and the number of failed jobs are **operational
+     * metrics**, and an endpoint that a load balancer, a crawler or a curious
+     * visitor can reach is not the place to publish them: they describe the
+     * inside of the deployment, and they tell an attacker how busy it is and
+     * whether its workers are alive.
+     *
+     * The detail lives in {@see self::operations()}, behind the same authority
+     * that may read the application's configuration, and in the `queue:health`
+     * command for whoever has console access.
+     *
      * The queue check is what separates "nothing to do" from "nobody is doing
      * it": an empty queue is healthy, and a queue whose oldest job has been
      * waiting longer than the configured age is not, even though its backlog
@@ -61,19 +75,37 @@ final class HealthController extends Controller
      */
     public function readiness(QueueInspector $inspector): JsonResponse
     {
+        $queues = $this->queues($inspector);
+
         $checks = [
             'database' => $this->check(static fn (): bool => DB::select('select 1') !== []),
             'redis' => $this->check(static fn (): bool => Redis::connection()->ping() !== null),
+            'queues' => $queues['ok'],
         ];
-
-        $queues = $this->queues($inspector);
-        $checks['queues'] = $queues['ok'];
 
         $healthy = ! in_array(false, $checks, true);
 
         return response()->json([
             'status' => $healthy ? 'ready' : 'not_ready',
             'checks' => $checks,
+        ], $healthy ? 200 : 503);
+    }
+
+    /**
+     * The operational detail behind the readiness answer.
+     *
+     * The numbers a release gate needs and a visitor must not have: the depth
+     * of each queue, the age of its oldest job, the failed jobs and the
+     * thresholds they are judged against.
+     */
+    public function operations(QueueInspector $inspector): JsonResponse
+    {
+        $queues = $this->queues($inspector);
+
+        $healthy = $queues['ok'];
+
+        return response()->json([
+            'status' => $healthy ? 'ready' : 'not_ready',
             'queues' => $queues['queues'],
             'failed_jobs' => $queues['failed_jobs'],
             'thresholds' => $queues['thresholds'],

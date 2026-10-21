@@ -36,7 +36,47 @@ set -euo pipefail
 
 EVIDENCE_DIR="${1:-evidence}"
 USER_ID="${LIVE_USER_ID:-}"
-ARTISAN="${ARTISAN:-php artisan}"
+
+# The artisan command, as an array: `php artisan` is two words, and a single
+# string would be looked for as one executable.
+read -r -a ARTISAN_CMD <<< "${ARTISAN:-php artisan}"
+
+# The credentials live in the application's `.env`, which the shell does not
+# read on its own: Laravel loads it inside the process, not in the environment
+# of the shell that runs this script. Only the names this script uses are
+# loaded, and only when the environment does not already provide them, so an
+# operator can still point the certification somewhere else.
+#
+# The values are never printed: the evidence records the provider, the model
+# and the result, never the key.
+load_env_key() {
+  local file="${LIVE_ENV_FILE:-.env}"
+  local key="$1"
+
+  [[ -n "${!key:-}" ]] && return 0
+  [[ -f "${file}" ]] || return 0
+
+  local line
+  line="$(grep -E "^${key}=" "${file}" | tail -n 1 || true)"
+
+  [[ -z "${line}" ]] && return 0
+
+  local value="${line#*=}"
+  value="${value%$'\r'}"
+  value="${value%\"}"; value="${value#\"}"
+  value="${value%\'}"; value="${value#\'}"
+
+  export "${key}=${value}"
+}
+
+for name in \
+  GROQ_API_KEY GROQ_BASE_URL GROQ_MODELS GROQ_DATA_POLICY \
+  GEMINI_API_KEY GEMINI_BASE_URL GEMINI_MODELS GEMINI_DATA_POLICY \
+  CLOUDFLARE_AI_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_AI_BASE_URL \
+  CLOUDFLARE_AI_MODELS CLOUDFLARE_AI_DATA_POLICY \
+  OPENROUTER_API_KEY OPENROUTER_BASE_URL OPENROUTER_MODELS OPENROUTER_DATA_POLICY; do
+  load_env_key "${name}"
+done
 
 mkdir -p "${EVIDENCE_DIR}"
 
@@ -48,16 +88,26 @@ fi
 # --- Preflight ------------------------------------------------------------
 # La configuración efectiva primero: sin ella, la certificación describe un
 # despliegue que nadie ha mirado.
-"${ARTISAN}" ai:preflight --json > "${EVIDENCE_DIR}/ai-preflight.json" || true
+"${ARTISAN_CMD[@]}" ai:preflight --json > "${EVIDENCE_DIR}/ai-preflight.json" || true
 
 # --- Proveedores a comprobar ----------------------------------------------
 # Cada uno: nombre, URL base, clave, modelos y política de datos declarada.
 # La política es la que el despliegue afirma; la evidencia LIVE no cambia una
 # clasificación, la confirma o la desmiente.
+# The default URLs live in their own variables.
+#
+# They cannot be written inline as `${VAR:-https://.../accounts/{account_id}/ai/v1}`:
+# the `}` of `{account_id}` closes the parameter expansion early, so the
+# expansion ends at `{account_id` and the rest of the default is appended to the
+# value as literal text. The URL that reached Cloudflare was
+# `.../accounts/<id>/ai/v1/ai/v1}`, and the provider answered every request
+# with "No route for that URI".
+CLOUDFLARE_BASE_DEFAULT='https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1'
+
 PROVIDERS=(
   "groq|${GROQ_BASE_URL:-https://api.groq.com/openai/v1}|${GROQ_API_KEY:-}|${GROQ_MODELS:-}|${GROQ_DATA_POLICY:-standard}"
   "gemini|${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}|${GEMINI_API_KEY:-}|${GEMINI_MODELS:-}|${GEMINI_DATA_POLICY:-training}"
-  "cloudflare|${CLOUDFLARE_AI_BASE_URL:-https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1}|${CLOUDFLARE_AI_API_TOKEN:-}|${CLOUDFLARE_AI_MODELS:-}|${CLOUDFLARE_AI_DATA_POLICY:-standard}"
+  "cloudflare|${CLOUDFLARE_AI_BASE_URL:-${CLOUDFLARE_BASE_DEFAULT}}|${CLOUDFLARE_AI_API_TOKEN:-}|${CLOUDFLARE_AI_MODELS:-}|${CLOUDFLARE_AI_DATA_POLICY:-standard}"
   "openrouter|${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}|${OPENROUTER_API_KEY:-}|${OPENROUTER_MODELS:-}|${OPENROUTER_DATA_POLICY:-training}"
 )
 
@@ -99,7 +149,12 @@ for entry in "${PROVIDERS[@]}"; do
   fi
 
   # Cloudflare lleva el id de cuenta en la URL.
-  resolved_url="${base_url//\{account_id\}/${CLOUDFLARE_ACCOUNT_ID:-}}"
+  #
+  # The substitution is done with `sed` and not with bash's parameter
+  # expansion: `${var//\{account_id\}/${OTHER:-}}` does not mean what it
+  # looks like, and the URL that came out of it had the account id *and* a
+  # duplicated path, which the provider answered with "No route for that URI".
+  resolved_url="$(printf '%s' "${base_url}" | sed "s|{account_id}|${CLOUDFLARE_ACCOUNT_ID:-}|g")"
 
   echo "[live] comprobando ${name} (${model})…"
 
@@ -115,7 +170,7 @@ for entry in "${PROVIDERS[@]}"; do
     AI_FALLBACK_MODEL="" \
     $(others "${name}") \
     OPENROUTER_INCLUDE_FREE_ROUTER=false \
-    ${ARTISAN} ai:check-provider --user="${USER_ID}" \
+    "${ARTISAN_CMD[@]}" ai:check-provider --user="${USER_ID}" \
       > "${EVIDENCE_DIR}/provider-${name}.txt" 2>&1
   status=$?
   set -e
@@ -145,6 +200,67 @@ for entry in "${PROVIDERS[@]}"; do
 
   echo "[live] ${name}: ${result} en ${latency} ms" >&2
 done
+
+# --- Failover --------------------------------------------------------------
+#
+# The failover is not a property of the transport: it is the resolver walking
+# down its candidates inside ONE turn. So the check induces a real failure --
+# the primary slot is pointed at an address that answers nothing -- and asks
+# for a real answer with a provider behind it.
+#
+# The evidence is the diagnostics of that single turn: a row for the provider
+# that failed and a row for the provider that answered.
+echo "[live] comprobando el failover..." >&2
+
+FALLBACK_NAME=""
+FALLBACK_BASE=""
+FALLBACK_KEY=""
+FALLBACK_MODEL=""
+for entry in "${PROVIDERS[@]}"; do
+  IFS='|' read -r name base_url api_key models policy <<< "${entry}"
+
+  if [[ -n "${api_key}" && -n "${models}" ]]; then
+    FALLBACK_NAME="${name}"
+    FALLBACK_BASE="${base_url}"
+    FALLBACK_KEY="${api_key}"
+    FALLBACK_MODEL="${models%%,*}"
+    break
+  fi
+done
+
+if [[ -z "${FALLBACK_NAME}" ]]; then
+  echo "[live] sin proveedor con credencial: no hay failover que comprobar." >&2
+  missing=$((missing + 1))
+else
+  set +e
+  env \
+    AI_PRIMARY_BASE_URL="http://127.0.0.1:9/v1" \
+    AI_PRIMARY_API_KEY="credencial-inexistente" \
+    AI_PRIMARY_MODEL="modelo-inexistente" \
+    AI_FALLBACK_BASE_URL="${FALLBACK_BASE}" \
+    AI_FALLBACK_API_KEY="${FALLBACK_KEY}" \
+    AI_FALLBACK_MODEL="${FALLBACK_MODEL}" \
+    GROQ_ENABLED=false \
+    GEMINI_ENABLED=false \
+    CLOUDFLARE_AI_ENABLED=false \
+    OPENROUTER_ENABLED=false \
+    "${ARTISAN_CMD[@]}" ai:check-failover \
+      > "${EVIDENCE_DIR}/provider-failover.txt" 2>&1
+  failover_status=$?
+  set -e
+
+  if [[ ${failover_status} -eq 0 ]]; then
+    echo "[live] failover: ok (${FALLBACK_NAME})" >&2
+    printf 'failover\t%s\t%s\t%s\t-\t-\tok\t-\tsí (mismo turno)\n' \
+      "fallover" "${FALLBACK_NAME}" "${FALLBACK_MODEL}" \
+      >> "${EVIDENCE_DIR}/live-certification.tsv"
+  else
+    echo "[live] failover: fallo" >&2
+    printf 'failover\t%s\t%s\t%s\t-\t-\tfallo\t-\tno\n' \
+      "fallover" "${FALLBACK_NAME}" "${FALLBACK_MODEL}" \
+      >> "${EVIDENCE_DIR}/live-certification.tsv"
+  fi
+fi
 
 # --- Informe legible ------------------------------------------------------
 {
