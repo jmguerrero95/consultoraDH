@@ -892,7 +892,10 @@ CI_WORKFLOW_LOCAL_VALIDATION=YES (YAML válido; la puerta y la matriz probadas
 CI_GITHUB_RUN=BLOCKED_EXTERNAL (GitHub registra los workflows de la rama por
   defecto y main no tiene .github/workflows; main no se toca)
 
-BACKEND_TARGETED=PASS (Auth, Audit, Authorization, Profile)
+BACKEND_TARGETED=PASS (Auth, Audit, Authorization, Profile: 130 pruebas, 493
+  aserciones) y SUITE GLOBAL PASS (2332 pruebas, 1 omitida, 10653 aserciones,
+  1655 s) — se repitió porque el middleware de la cookie de sesión toca todas las
+  peticiones, y no hubo ninguna regresión
 FRONTEND_TYPECHECK=PASS (SHA 8ec24b5, sin cambios de frontend en este bloque)
 FRONTEND_LINT=PASS (SHA 8ec24b5)
 FRONTEND_BUILD=PASS (SHA 8ec24b5)
@@ -903,8 +906,8 @@ PINT=PASS (el PHP modificado; los avisos de bootstrap/cache son de archivos
 A07_PREVIOUS_LIVE_CERTIFICATION_PRESERVED=YES (Groq, Gemini y Cloudflare con
   herramientas y failover en el mismo turno; no se volvió a gastar cuota)
 A07_PREVIOUS_XLSX_ACCEPTANCE_PRESERVED=YES
-ORIGINAL_24_REMEDIATIONS_PRESERVED=YES (2325 pruebas backend en verde en 049451b;
-  este bloque no toca ningún módulo de las 24 remediaciones)
+ORIGINAL_24_REMEDIATIONS_PRESERVED=YES (suite global en verde: 2332 pruebas tras
+  este bloque, 2325 antes; este bloque no toca ningún módulo de las 24 remediaciones)
 
 DEVELOPMENT_DATABASE_UNCHANGED=YES (medido por scripts/run-e2e.sh antes y después)
 QA_RESOURCES_CLEANED=YES (la base E2E quedó vacía; las copias de QA, la cuenta QA y
