@@ -27,7 +27,19 @@ PG_USER="${PGUSER:-${PG_USER:-consultora_dh_backup}}"
 PG_DB="${PGDATABASE:-${PG_DB:-consultora_dh}}"
 BACKUP_ENCRYPTION_PASSPHRASE="${BACKUP_ENCRYPTION_PASSPHRASE:-}"
 BACKUP_ENCRYPTION_KEY_FILE="${BACKUP_ENCRYPTION_KEY_FILE:-}"
-RESTORE_REQUIRED_DIRS="${RESTORE_REQUIRED_DIRS:-ai-artifacts clients imports}"
+# The private directories the application writes to.
+#
+# `clients` was in this list and the application never creates it: every copy
+# the restore proof ran in a real deployment failed with "Directorio
+# obligatorio no encontrado: clients", so the backup was never demonstrable and
+# a release gate that asked for it could never pass.
+#
+# The directories are the ones the application really writes to, and only the
+# ones the source actually has are required: a deployment that never wrote an
+# attachment has no `ai-attachments` directory, and its absence is not a lost
+# directory.
+RESTORE_REQUIRED_DIRS="${RESTORE_REQUIRED_DIRS:-ai-artifacts ai-attachments document-work documents imports reports support-attachments}"
+PRIVATE_STORAGE="${PRIVATE_STORAGE:-/var/www/html/storage/app/private}"
 
 TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
 DISPOSABLE_DB="consultora_dh_restore_${TIMESTAMP}"
@@ -183,10 +195,18 @@ if [[ -n "${EXPECTED_FILES}" ]]; then
 fi
 
 for dir in ${RESTORE_REQUIRED_DIRS}; do
+  # Only the directories the source has: what matters is that nothing the
+  # application wrote was left out of the archive.
+  if [[ ! -d "${PRIVATE_STORAGE}/${dir}" ]]; then
+    continue
+  fi
+
   if [[ ! -d "${EXTRACTED_STORAGE}/${dir}" ]]; then
-    echo "[ERROR] Directorio obligatorio no encontrado: ${dir}" >&2
+    echo "[ERROR] Directorio obligatorio no encontrado en el restore: ${dir}" >&2
     exit 1
   fi
+
+  echo "  directorio: ${dir}"
 done
 
 echo "[${TIMESTAMP}] RESTORE PROOF EXITOSO"
