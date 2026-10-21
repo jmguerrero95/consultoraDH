@@ -8,6 +8,7 @@ use App\Domain\Documents\Actions\DocumentNotApplicable;
 use App\Domain\Documents\Actions\RespondToDocumentRequest;
 use App\Domain\Documents\DocumentFileStore;
 use App\Domain\Documents\DocumentVisibility;
+use App\Http\Controllers\Concerns\StreamsPrivateFiles;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\ClientDocument;
@@ -18,6 +19,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class PortalDocumentController extends Controller
 {
+    use StreamsPrivateFiles;
+
     public function __construct(
         private readonly DocumentFileStore $files,
         private readonly RespondToDocumentRequest $responder,
@@ -64,9 +67,7 @@ final class PortalDocumentController extends Controller
             abort(404);
         }
 
-        return response()->streamDownload(function () use ($path): void {
-            echo file_get_contents($path);
-        }, $document->original_name, [
+        return $this->streamPrivateFile($path, $document->original_name, [
             'Content-Type' => $document->mime_type,
         ]);
     }

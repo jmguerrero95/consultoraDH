@@ -48,4 +48,31 @@ final class OperationNotApplicable extends RuntimeException
     {
         return new self('assignee_not_active', 'La cuenta asignada no está activa.');
     }
+
+    /** A referenced novelty/document/sheet does not belong to the client on the task. */
+    public static function subjectClientMismatch(string $subject): self
+    {
+        return new self(
+            'subject_client_mismatch',
+            sprintf('El/la %s indicado/a no pertenece al cliente de la tarea.', $subject),
+        );
+    }
+
+    /** Two referenced objects point at different clients and there is no explicit client. */
+    public static function subjectReferencesDisagree(): self
+    {
+        return new self(
+            'subject_client_mismatch',
+            'Los objetos vinculados a la tarea pertenecen a clientes diferentes.',
+        );
+    }
+
+    /** The subject disappeared between HTTP existence validation and the write. */
+    public static function subjectNotFound(string $subject): self
+    {
+        return new self(
+            'subject_not_found',
+            sprintf('El/la %s indicado/a ya no existe.', $subject),
+        );
+    }
 }

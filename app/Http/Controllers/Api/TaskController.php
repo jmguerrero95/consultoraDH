@@ -13,6 +13,7 @@ use App\Domain\Operations\OperationNotApplicable;
 use App\Domain\Operations\TaskAssignee;
 use App\Domain\Operations\TaskPriority;
 use App\Domain\Operations\TaskStatus;
+use App\Domain\Operations\TaskSubject;
 use App\Http\Controllers\Controller;
 use App\Models\OperationalTask;
 use App\Models\User;
@@ -67,7 +68,13 @@ final class TaskController extends Controller
             'document_request_id' => ['nullable', 'integer', 'exists:client_document_requests,id'],
             'contribution_sheet_id' => ['nullable', 'integer', 'exists:contribution_sheets,id'],
             'title' => ['required', 'string', 'max:200'],
-            'description' => ['nullable', 'string'],
+            // The database CHECK requires at least one subject. Without this
+            // rule the request reaches PostgreSQL and the user gets a 500.
+            'description' => [
+                'nullable',
+                'string',
+                'required_without_all:client_id,novelty_id,document_request_id,contribution_sheet_id',
+            ],
             'assigned_to' => ['required', 'integer', 'exists:users,id'],
             'priority' => ['required', 'string', 'in:'.implode(',', array_column(TaskPriority::options(), 'value'))],
             'due_on' => ['nullable', 'date'],
@@ -77,6 +84,7 @@ final class TaskController extends Controller
         // §R1: an internal task goes to a colleague, never to a portal account.
         try {
             TaskAssignee::assertAssignable(User::query()->findOrFail($data['assigned_to']));
+            TaskSubject::assertConsistent($data);
         } catch (ModelNotFoundException) {
             return response()->json(['message' => 'La cuenta asignada no existe.', 'code' => 'assignee_not_found'], 422);
         } catch (OperationNotApplicable $e) {

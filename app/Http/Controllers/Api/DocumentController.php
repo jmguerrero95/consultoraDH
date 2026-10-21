@@ -12,6 +12,7 @@ use App\Domain\Documents\Actions\RequestDocument;
 use App\Domain\Documents\Actions\ReviewDocumentRequest;
 use App\Domain\Documents\DocumentFileStore;
 use App\Domain\Documents\DocumentRequestStatus;
+use App\Http\Controllers\Concerns\StreamsPrivateFiles;
 use App\Http\Controllers\Controller;
 use App\Models\ClientDocument;
 use App\Models\ClientDocumentRequest;
@@ -24,6 +25,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class DocumentController extends Controller
 {
+    use StreamsPrivateFiles;
+
     public function __construct(
         private readonly RequestDocument $requester,
         private readonly ReviewDocumentRequest $reviewer,
@@ -292,9 +295,7 @@ final class DocumentController extends Controller
             abort(404);
         }
 
-        return response()->streamDownload(function () use ($path): void {
-            echo file_get_contents($path);
-        }, $document->original_name, [
+        return $this->streamPrivateFile($path, $document->original_name, [
             'Content-Type' => $document->mime_type,
         ]);
     }

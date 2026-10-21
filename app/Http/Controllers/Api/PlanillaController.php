@@ -22,6 +22,7 @@ use App\Domain\Planillas\PlanillaOperator;
 use App\Domain\Planillas\PlanillaPdfExport;
 use App\Domain\Planillas\PlanillaXlsxExport;
 use App\Domain\Planillas\SheetNotApplicable;
+use App\Http\Controllers\Concerns\StreamsPrivateFiles;
 use App\Http\Controllers\Controller;
 use App\Models\Company;
 use App\Models\ContributionSheet;
@@ -35,6 +36,8 @@ use Throwable;
 
 final class PlanillaController extends Controller
 {
+    use StreamsPrivateFiles;
+
     public const PERMISSION = 'planillas.view';
 
     public function __construct(
@@ -240,9 +243,7 @@ final class PlanillaController extends Controller
             abort(404);
         }
 
-        return response()->streamDownload(function () use ($path): void {
-            echo file_get_contents($path);
-        }, $file->original_name, [
+        return $this->streamPrivateFile($path, $file->original_name, [
             'Content-Type' => $file->mime_type,
         ]);
     }
@@ -251,22 +252,24 @@ final class PlanillaController extends Controller
     {
         $path = $this->xlsxExport->generate($planilla);
 
-        return response()->streamDownload(function () use ($path): void {
-            echo file_get_contents($path);
-        }, 'planilla_'.$planilla->id.'.xlsx', [
-            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        ]);
+        return $this->streamPrivateFile(
+            $path,
+            'planilla_'.$planilla->id.'.xlsx',
+            ['Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+            deleteAfterSend: true,
+        );
     }
 
     public function exportPdf(ContributionSheet $planilla): StreamedResponse
     {
         $path = $this->pdfExport->generate($planilla);
 
-        return response()->streamDownload(function () use ($path): void {
-            echo file_get_contents($path);
-        }, 'planilla_'.$planilla->id.'.pdf', [
-            'Content-Type' => 'application/pdf',
-        ]);
+        return $this->streamPrivateFile(
+            $path,
+            'planilla_'.$planilla->id.'.pdf',
+            ['Content-Type' => 'application/pdf'],
+            deleteAfterSend: true,
+        );
     }
 
     /**

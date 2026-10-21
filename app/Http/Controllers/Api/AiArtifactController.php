@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Concerns\StreamsPrivateFiles;
 use App\Models\AiArtifact;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -18,6 +19,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  */
 final class AiArtifactController extends Controller
 {
+    use StreamsPrivateFiles;
+
     public function download(Request $request, AiArtifact $artifact): StreamedResponse
     {
         // Ownership, answered exactly like an artifact that does not exist.
@@ -43,11 +46,15 @@ final class AiArtifactController extends Controller
             abort(404, 'El archivo no existe.');
         }
 
-        return response()->streamDownload(function () use ($disk, $path): void {
-            echo $disk->get($path);
-        }, $artifact->display_filename, [
+        $stream = $disk->readStream($path);
+
+        if (! is_resource($stream)) {
+            abort(404, 'El archivo no existe.');
+        }
+
+        return $this->streamPrivateResource($stream, $artifact->display_filename, [
             'Content-Type' => $artifact->mime_type,
-            'Content-Length' => $artifact->size_bytes,
+            'Content-Length' => (string) $artifact->size_bytes,
         ]);
     }
 }
