@@ -73,6 +73,22 @@ return [
             'replace_placeholders' => true,
         ],
 
+        /*
+         * The MCP channel.
+         *
+         * The MCP endpoint answers with stable public codes and keeps the
+         * exception itself here. A separate file with its own permissions
+         * means the traces of a machine surface are not mixed with the
+         * application's own log and are not served with it.
+         */
+        'mcp' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/mcp.log'),
+            'level' => env('MCP_LOG_LEVEL', 'info'),
+            'max_files' => env('MCP_LOG_MAX_FILES', 14),
+            'replace_placeholders' => true,
+        ],
+
         'monthly' => [
             'driver' => 'monthly',
             'path' => storage_path('logs/laravel.log'),

@@ -258,6 +258,14 @@ export interface AiCapabilityAvailability {
     preferred_model: string | null;
     last_success: string | null;
     retry_after_seconds: number | null;
+    /**
+     * The worst case, when the eligible accounts recover at different times.
+     *
+     * The value above is the *earliest* moment some provider is usable again,
+     * because that is what "when does the assistant work again?" means. When
+     * this one is larger, the truth is a range and both ends of it are known.
+     */
+    retry_after_max_seconds?: number | null;
     reason: string | null;
 }
 

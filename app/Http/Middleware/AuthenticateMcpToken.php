@@ -53,6 +53,11 @@ class AuthenticateMcpToken
         // Record usage
         $mcpToken->recordUsage();
 
+        // The presented token is the credential the quota is counted against:
+        // two tokens for the same person are two credentials. Only the id is
+        // exposed, never the token.
+        $request->attributes->set('mcp_token_id', (int) $mcpToken->id);
+
         // Set the authenticated user
         $request->setUserResolver(fn () => $mcpToken->user);
 

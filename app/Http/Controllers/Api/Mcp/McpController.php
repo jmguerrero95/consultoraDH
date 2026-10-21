@@ -9,9 +9,11 @@ use App\Models\AiActionProposal;
 use App\Models\AiConversation;
 use App\Models\User;
 use App\Services\Ai\AiToolRegistry;
+use App\Services\Mcp\McpRateLimiter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Log;
 
 /**
  * MCP (Model Context Protocol) server - JSON-RPC 2.0 compatible.
@@ -29,11 +31,27 @@ use Illuminate\Routing\Controller;
  *
  * Uses the SAME AiToolRegistry as the REST API.
  * Write tools create normal AI action proposals (not direct mutations).
+ *
+ * ## What the caller is told, and what is kept in the log
+ *
+ * An MCP token is a machine credential. It may belong to an account with a
+ * narrower scope than an administrator, and a message like "SQLSTATE[42P01]:
+ * relation ... does not exist" or a provider exception tells a caller about
+ * the inside of this deployment. So the protocol answers with a stable public
+ * code and a sentence meant for the caller; the exception itself goes to the
+ * MCP log channel, which is a file with its own permissions and is never
+ * served.
+ *
+ * The endpoint also has a quota of its own (`McpRateLimiter`): it is not a
+ * session, so the session throttle group does not cover it.
  */
 final class McpController extends Controller
 {
+    private const METHODS = ['initialize', 'tools/list', 'tools/call'];
+
     public function __construct(
         private readonly AiToolRegistry $registry,
+        private readonly McpRateLimiter $limiter,
     ) {}
 
     /**
@@ -57,15 +75,39 @@ final class McpController extends Controller
 
         $data = $request->json()->all();
         $id = $data['id'] ?? null;
-        $method = $data['method'] ?? '';
-        $params = $data['params'] ?? [];
+        $method = is_string($data['method'] ?? null) ? $data['method'] : '';
+        $params = is_array($data['params'] ?? null) ? $data['params'] : [];
+
+        if (! in_array($method, self::METHODS, true)) {
+            return $this->jsonRpcError($id, -32601, 'Method not found.', 200, [
+                'code' => 'mcp_method_not_found',
+            ]);
+        }
+
+        $tool = is_string($params['name'] ?? null) ? $params['name'] : null;
+
+        if ($method === 'tools/call' && ($tool === null || ! $this->registry->has($tool))) {
+            return $this->jsonRpcError($id, -32602, 'Tool not found.', 200, [
+                'code' => 'mcp_tool_not_found',
+            ]);
+        }
+
+        // The MCP endpoint is not a session, so it does not inherit the session
+        // throttle. It carries a quota of its own, per token and per tool.
+        $refusal = $this->limiter->check($request, $method, $tool);
+
+        if ($refusal !== null) {
+            return $this->jsonRpcError($id, -32000, 'Rate limit exceeded for the MCP endpoint.', 429, [
+                'code' => $refusal['code'],
+                'retry_after' => $refusal['retry_after'],
+            ]);
+        }
 
         try {
             $result = match ($method) {
                 'initialize' => $this->handleInitialize($params, $user),
                 'tools/list' => $this->handleToolsList($params, $user),
                 'tools/call' => $this->handleToolsCall($params, $user),
-                default => throw new \InvalidArgumentException("Method not found: {$method}"),
             };
 
             return response()->json([
@@ -73,12 +115,24 @@ final class McpController extends Controller
                 'id' => $id,
                 'result' => $result,
             ]);
-        } catch (\InvalidArgumentException $e) {
-            return $this->jsonRpcError($id, -32601, $e->getMessage());
         } catch (AiToolRejected $e) {
-            return $this->jsonRpcError($id, -32602, $e->getMessage());
+            // A refusal is a decision, not a failure: its message is written for
+            // the person who asked and names no internals.
+            return $this->jsonRpcError($id, -32602, $e->getMessage(), 200, [
+                'code' => 'mcp_tool_rejected',
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            $this->log('mcp_invalid_params', $e, ['method' => $method, 'user_id' => $user->id]);
+
+            return $this->jsonRpcError($id, -32602, 'Invalid params.', 200, [
+                'code' => 'mcp_invalid_params',
+            ]);
         } catch (\Throwable $e) {
-            return $this->jsonRpcError($id, -32603, 'Internal error: '.$e->getMessage());
+            $this->log('mcp_internal_error', $e, ['method' => $method, 'user_id' => $user->id]);
+
+            return $this->jsonRpcError($id, -32603, 'Internal error.', 200, [
+                'code' => 'mcp_internal_error',
+            ]);
         }
     }
 
@@ -156,8 +210,8 @@ final class McpController extends Controller
         $name = $params['name'] ?? '';
         $arguments = $params['arguments'] ?? [];
 
-        if (! $this->registry->has($name)) {
-            throw new \InvalidArgumentException("Tool not found: {$name}");
+        if (! is_string($name) || ! $this->registry->has($name)) {
+            throw new \InvalidArgumentException('Tool not found.');
         }
 
         $tool = $this->registry->get($name);
@@ -223,31 +277,72 @@ final class McpController extends Controller
                 ],
                 'isError' => false,
             ];
-        } catch (\Throwable $e) {
+        } catch (AiToolRejected $e) {
+            // A refusal is meant for the caller: it names the permission or the
+            // argument, and nothing about the inside of this deployment.
             return [
                 'content' => [
                     [
                         'type' => 'text',
-                        'text' => 'Error ejecutando '.$name.': '.$e->getMessage(),
+                        'text' => $e->getMessage(),
                     ],
                 ],
                 'isError' => true,
+                '_meta' => ['code' => 'mcp_tool_rejected'],
+            ];
+        } catch (\Throwable $e) {
+            // Anything else is an internal failure. The caller gets a stable
+            // sentence; the trace stays in the MCP log.
+            $this->log('mcp_tool_failed', $e, ['tool' => $name, 'user_id' => $user->id]);
+
+            return [
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => 'La herramienta no pudo ejecutarse.',
+                    ],
+                ],
+                'isError' => true,
+                '_meta' => ['code' => 'mcp_internal_error'],
             ];
         }
     }
 
     /**
      * JSON-RPC error response.
+     *
+     * `data` carries the stable public code the caller may branch on. It never
+     * carries the exception message: that is what the log is for.
+     *
+     * @param  array<string, mixed>  $data
      */
-    private function jsonRpcError(mixed $id, int $code, string $message, int $httpStatus = 200): JsonResponse
+    private function jsonRpcError(mixed $id, int $code, string $message, int $httpStatus = 200, array $data = []): JsonResponse
     {
+        $error = [
+            'code' => $code,
+            'message' => $message,
+        ];
+
+        if ($data !== []) {
+            $error['data'] = $data;
+        }
+
         return response()->json([
             'jsonrpc' => '2.0',
             'id' => $id,
-            'error' => [
-                'code' => $code,
-                'message' => $message,
-            ],
+            'error' => $error,
         ], $httpStatus);
+    }
+
+    /**
+     * Keep the trace in the MCP channel, never in the reply.
+     *
+     * @param  array<string, mixed>  $context
+     */
+    private function log(string $code, \Throwable $e, array $context = []): void
+    {
+        Log::channel((string) config('mcp.log_channel', 'mcp'))->error($code, array_merge($context, [
+            'exception' => $e,
+        ]));
     }
 }

@@ -20,7 +20,7 @@ import { ai, groupArtifactsByMessage, groupProposalsByMessage, newClientTurnId }
 import { useAuthStore } from '@/stores/auth';
 import { readDraft, writeDraft } from '@/utils/drafts';
 
-import type { AiArtifact, AiAttachmentSummary, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
+import type { AiArtifact, AiAttachmentSummary, AiCapabilityAvailability, AiConversationSummary, AiMessagePayload, AiProposal, AiStatusPayload } from '@/services/ai';
 import type { AiTaskPayload } from '@/composables/useTasks';
 
 /**
@@ -299,6 +299,44 @@ const limitedOperations = computed(() =>
     capabilityRows.value.filter((row) => !row.available),
 );
 
+/**
+ * When the assistant works again.
+ *
+ * The server reports the *earliest* moment some eligible provider comes back,
+ * and the worst case as the other end of the range. Both are shown when they
+ * differ: a single number would be a promise the server cannot keep, and the
+ * old worst-case number was a promise it should never make.
+ */
+function recoveryPhrase(row: AiCapabilityAvailability | undefined): string {
+    const earliest = row?.retry_after_seconds ?? null;
+    const latest = row?.retry_after_max_seconds ?? null;
+
+    if (earliest === null || earliest <= 0) {
+        return '';
+    }
+
+    if (latest !== null && latest > earliest) {
+        return ` Vuelve a estar disponible entre ${formatRecovery(earliest)} y ${formatRecovery(latest)}.`;
+    }
+
+    return ` Vuelve a estar disponible en ${formatRecovery(earliest)}.`;
+}
+
+/** A short, human duration: "45 s" or "3 min". */
+function formatRecovery(seconds: number): string {
+    if (seconds < 60) {
+        return `${seconds} s`;
+    }
+
+    const minutes = Math.round(seconds / 60);
+
+    if (minutes < 60) {
+        return `${minutes} min`;
+    }
+
+    return `${Math.round(minutes / 60)} h`;
+}
+
 /** An unconfigured provider is reported plainly rather than as a failure. */
 const availability = computed(() => {
     if (!status.value) {
@@ -320,16 +358,20 @@ const availability = computed(() => {
         const privateReady = status.value.capabilities?.internal_data;
 
         if (privateReady && !privateReady.available) {
-            return privateReady.reason
+            const reason = privateReady.reason
                 ?? 'La consulta de datos internos está limitada en este momento.';
+
+            return reason + recoveryPhrase(privateReady);
         }
 
         const degraded = limitedOperations.value.length > 0;
 
         if (status.value.state === 'quota_limited' || status.value.state === 'unavailable') {
-            return status.value.state === 'quota_limited'
+            const recovery = recoveryPhrase(status.value.capabilities?.internal_data);
+
+            return (status.value.state === 'quota_limited'
                 ? 'El servicio de inteligencia artificial alcanzó temporalmente su límite de uso. Puedes reintentar cuando vuelva a estar disponible.'
-                : 'No hay un proveedor de inteligencia artificial disponible en este momento; se reintentará automáticamente.';
+                : 'No hay un proveedor de inteligencia artificial disponible en este momento; se reintentará automáticamente.') + recovery;
         }
 
         if (status.value.state === 'unchecked') {

@@ -104,6 +104,7 @@ final class AiAvailability
      *     preferred_model: ?string,
      *     last_success: ?string,
      *     retry_after_seconds: ?int,
+     *     retry_after_max_seconds: ?int,
      *     reason: ?string
      * }>
      */
@@ -147,7 +148,7 @@ final class AiAvailability
      * @return array{
      *     label: string, state: string, available: bool, eligible: int, ready: int,
      *     independent_providers: int, preferred_model: ?string, last_success: ?string,
-     *     retry_after_seconds: ?int, reason: ?string
+     *     retry_after_seconds: ?int, retry_after_max_seconds: ?int, reason: ?string
      * }
      */
     private function evaluate(string $name, array $operation): array
@@ -190,12 +191,21 @@ final class AiAvailability
 
         $ready = [];
         $rateLimited = 0;
-        $maxRetry = null;
+
+        // The recovery time of each *account*, not of each model.
+        //
+        // Two models behind one credential share one quota, so the account
+        // becomes usable again when its last blocked model does: taking the
+        // minimum per model would promise a recovery that the account's own
+        // wall does not allow.
+        $blockedByAccount = [];
 
         foreach ($candidates as $candidate) {
             if ($this->resolver->blocked($candidate)) {
-                $seconds = $this->resolver->blockedFor($candidate);
-                $maxRetry = $maxRetry === null ? $seconds : max($maxRetry, $seconds);
+                $seconds = max(0, $this->resolver->blockedFor($candidate));
+                $account = $candidate->endpointHash();
+
+                $blockedByAccount[$account] = max($blockedByAccount[$account] ?? 0, $seconds);
 
                 if ($this->health->endpointRateLimited($candidate)) {
                     $rateLimited++;
@@ -207,6 +217,15 @@ final class AiAvailability
             $ready[] = $candidate;
         }
 
+        // "When will the assistant work again?" is answered by the *earliest*
+        // account that comes back, not by the latest one. The worst case is
+        // still reported, as the upper end of a range: with two independent
+        // providers, one free in a minute and the other tomorrow, the truth is
+        // a range and both ends of it are known.
+        $timers = array_values(array_filter($blockedByAccount, static fn (int $seconds): bool => $seconds > 0));
+        $earliestRetry = $timers === [] ? null : min($timers);
+        $latestRetry = $timers === [] ? null : max($timers);
+
         if ($ready === []) {
             if ($rateLimited > 0) {
                 return $this->row(
@@ -216,8 +235,10 @@ final class AiAvailability
                     0,
                     null,
                     null,
-                    $maxRetry,
+                    $earliestRetry,
                     'La cuota de los proveedores elegibles está agotada temporalmente.',
+                    0,
+                    $latestRetry,
                 );
             }
 
@@ -228,8 +249,10 @@ final class AiAvailability
                 0,
                 null,
                 null,
-                $maxRetry,
+                $earliestRetry,
                 'Todos los proveedores elegibles están temporalmente en espera.',
+                0,
+                $latestRetry,
             );
         }
 
@@ -341,7 +364,7 @@ final class AiAvailability
      * @return array{
      *     label: string, state: string, available: bool, eligible: int, ready: int,
      *     independent_providers: int, preferred_model: ?string, last_success: ?string,
-     *     retry_after_seconds: ?int, reason: ?string
+     *     retry_after_seconds: ?int, retry_after_max_seconds: ?int, reason: ?string
      * }
      */
     private function row(
@@ -354,6 +377,7 @@ final class AiAvailability
         ?int $retryAfter,
         ?string $reason,
         int $providers = 0,
+        ?int $retryAfterMax = null,
     ): array {
         return [
             'label' => $label,
@@ -367,7 +391,11 @@ final class AiAvailability
             'independent_providers' => $providers,
             'preferred_model' => $preferred,
             'last_success' => $lastSuccess,
+            // The earliest moment some eligible account is usable again.
             'retry_after_seconds' => $retryAfter,
+            // The worst case, when the accounts recover at different times. It
+            // is the other end of the same range, not a second promise.
+            'retry_after_max_seconds' => $retryAfterMax,
             'reason' => $reason,
         ];
     }

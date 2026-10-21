@@ -35,6 +35,7 @@ use App\Services\Ai\Tools\SupportSummaryTool;
 use App\Services\Ai\Tools\TeamDirectoryTool;
 use App\Services\Ai\Tools\WebFetchTool;
 use App\Services\Ai\Tools\WebSearchTool;
+use App\Services\Mcp\McpRateLimiter;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -50,6 +51,15 @@ final class AppServiceProvider extends ServiceProvider
         // The turn's clock, shared by the assistant (which sets it) and every
         // outbound tool (which caps its own timeout by what is left of it).
         $this->app->singleton(AiToolDeadline::class);
+
+        // The MCP endpoint's own quota. The values come from the effective
+        // configuration, so an operator can tighten or disable them without a
+        // code change; zero means "no local limit", the same convention the
+        // provider quota uses.
+        $this->app->singleton(McpRateLimiter::class, fn ($app): McpRateLimiter => new McpRateLimiter(
+            requestsPerMinute: (int) $app['config']->get('mcp.requests_per_minute', 60),
+            toolCallsPerMinute: (int) $app['config']->get('mcp.tool_calls_per_minute', 15),
+        ));
 
         // The single privacy boundary. It is stateless, but it must be an
         // explicit binding: Laravel returns a parameter's default value for an

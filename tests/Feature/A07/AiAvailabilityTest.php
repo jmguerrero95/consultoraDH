@@ -341,6 +341,48 @@ final class AiAvailabilityTest extends TestCase
         $this->assertSame(2, $row['independent_providers']);
     }
 
+    public function test_the_countdown_names_the_first_provider_to_come_back_not_the_last(): void
+    {
+        config(['ai.providers' => [
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-model'], 1),
+            'gemini' => $this->provider(self::GEMINI, 'gemini-key', ['gemini-model'], 2),
+        ]]);
+
+        // Two independent providers, two different walls: one frees up in a
+        // minute, the other tomorrow.
+        $this->health()->markEndpointRateLimited($this->candidate('groq-model'), 60);
+        $this->health()->markEndpointRateLimited($this->candidate('gemini-model'), 3600);
+
+        $row = $this->availability()->report()['internal_data'];
+
+        $this->assertSame('quota_limited', $row['state']);
+
+        // "When does the assistant work again?" is answered by the first
+        // provider that comes back, not by the one that comes back last.
+        $this->assertGreaterThanOrEqual(55, (int) $row['retry_after_seconds']);
+        $this->assertLessThanOrEqual(60, (int) $row['retry_after_seconds']);
+
+        // The worst case is still reported, as the other end of the range.
+        $this->assertGreaterThan(3500, (int) $row['retry_after_max_seconds']);
+    }
+
+    public function test_two_models_behind_one_account_share_one_recovery_time(): void
+    {
+        config(['ai.providers' => [
+            'groq' => $this->provider(self::GROQ, 'groq-key', ['groq-a', 'groq-b'], 1),
+        ]]);
+
+        // One credential, one quota: the account is not usable again until its
+        // wall clears, so the two models do not produce two countdowns.
+        $this->health()->markEndpointRateLimited($this->candidate('groq-a'), 600);
+        $this->health()->markEndpointRateLimited($this->candidate('groq-b'), 600);
+
+        $row = $this->availability()->report()['internal_data'];
+
+        $this->assertSame('quota_limited', $row['state']);
+        $this->assertGreaterThan(500, (int) $row['retry_after_seconds']);
+    }
+
     public function test_status_endpoint_exposes_capabilities_and_independent_count(): void
     {
         $permission = Permission::firstOrCreate(['name' => 'ai.use', 'guard_name' => 'web']);

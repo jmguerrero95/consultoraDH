@@ -591,6 +591,40 @@ curl -s http://localhost:8080/up                     # comprobación de Laravel
 La comprobación del contenedor `app` usa el `ping` nativo de PHP-FPM, que
 responde sin ejecutar PHP ni tocar la base de datos.
 
+### 13.1 Preflight de la IA
+
+```bash
+docker compose exec app php artisan ai:preflight
+docker compose exec app php artisan ai:preflight --json
+docker compose exec app php artisan ai:preflight --strict   # sale con 1 si no cumple
+```
+
+El informe describe la **configuración efectiva** de este despliegue: qué
+proveedores están configurados, cómo se clasifica su política de datos, cuántos
+proveedores independientes pueden recibir datos de clientes, y cuándo vuelve
+cada uno. `AI_ALLOW_TRAINING_PROVIDERS` se compara con su valor por defecto
+documentado (`false`), porque activarlo es una decisión explícita del operador
+y no un valor por defecto.
+
+El informe **no certifica** a nadie: un proveedor configurado no es un
+proveedor que respondió una petición real. La certificación LIVE exige una
+petición por proveedor, con credenciales reales y datos sintéticos, y su
+evidencia.
+
+### 13.2 Cuotas del endpoint MCP
+
+El endpoint MCP (`POST /api/mcp/rpc`) se autentica con un token de larga vida,
+así que no hereda el `throttle` de sesión. Tiene cuotas propias, contadas por
+token: `MCP_REQUESTS_PER_MINUTE` para el endpoint y `MCP_TOOL_CALLS_PER_MINUTE`
+para cada herramienta (`0` desactiva cada límite). Cuando se agotan, la
+respuesta es un error JSON-RPC con `error.data.code`
+(`mcp_request_quota_exhausted` o `mcp_tool_quota_exhausted`) y
+`error.data.retry_after`.
+
+Las excepciones internas nunca salen en la respuesta: se registran en el canal
+`mcp` (`storage/logs/mcp-*.log`) y el llamador recibe un código público
+estable.
+
 ## 14. Problemas frecuentes
 
 | Síntoma | Causa y solución |
