@@ -205,28 +205,32 @@ jobs:
         run: php artisan migrate --force
 
       # The credentials come from the repository secrets, never from the
-      # repository itself. The run fails loudly if one of them is missing: a
-      # LIVE certification without a credential is not a certification.
+      # repository itself.
+      #
+      # ## Why this checks three and not four
+      #
+      # The policy (`docs/RELEASE_ACCEPTANCE_POLICY.md`) asks for **three
+      # independent providers certified**. Demanding four particular ones was
+      # stricter than the policy: a deployment with Groq, Gemini and Cloudflare
+      # — three independent providers — could not run the certification at all,
+      # because OpenRouter happened not to be configured. The gate now counts
+      # the providers that are really usable and requires three of them.
+      #
+      # `scripts/live_provider_gate.sh` holds the decision, and
+      # `scripts/test-live-provider-gate.sh` proves it against synthetic
+      # credentials, so the rule is the same in the workflow and in the tests.
       - name: Provider credentials
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODELS: ${{ vars.GROQ_MODELS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODELS: ${{ vars.GEMINI_MODELS }}
           CLOUDFLARE_AI_API_TOKEN: ${{ secrets.CLOUDFLARE_AI_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_AI_MODELS: ${{ vars.CLOUDFLARE_AI_MODELS }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          set -euo pipefail
-          missing=0
-          for name in GROQ_API_KEY GEMINI_API_KEY CLOUDFLARE_AI_API_TOKEN OPENROUTER_API_KEY; do
-            if [ -z "${!name:-}" ]; then
-              echo "missing secret: ${name}" >&2
-              missing=1
-            fi
-          done
-          if [ "${missing}" -ne 0 ]; then
-            echo "A LIVE certification needs a real credential for every provider." >&2
-            exit 1
-          fi
+          OPENROUTER_MODELS: ${{ vars.OPENROUTER_MODELS }}
+        run: bash scripts/live_provider_gate.sh --print
 
       - name: Configuration preflight
         run: php artisan ai:preflight --json
@@ -236,10 +240,14 @@ jobs:
       - name: LIVE certification
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODELS: ${{ vars.GROQ_MODELS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODELS: ${{ vars.GEMINI_MODELS }}
           CLOUDFLARE_AI_API_TOKEN: ${{ secrets.CLOUDFLARE_AI_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_AI_MODELS: ${{ vars.CLOUDFLARE_AI_MODELS }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODELS: ${{ vars.OPENROUTER_MODELS }}
         run: |
           set -euo pipefail
           mkdir -p evidence

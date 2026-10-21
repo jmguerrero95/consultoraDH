@@ -14,6 +14,7 @@ use App\Domain\Reports\Exceptions\UnknownReportFormat;
 use App\Domain\Reports\Exceptions\UnknownReportType;
 use App\Http\Middleware\AuthenticateMcpToken;
 use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\PreserveSessionCookies;
 use App\Http\Middleware\RequireAnyAbility;
 use App\Http\Middleware\SecurityHeaders;
 use App\Http\Middleware\TrustHosts;
@@ -115,6 +116,16 @@ return Application::configure(dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         // Baseline security headers on every dynamic response.
         $middleware->append(SecurityHeaders::class);
+
+        // Keeps a response from putting an old session back in the browser.
+        //
+        // It is appended to the `web` group and not to the global stack
+        // because it has to run **after** the session middleware: it reads the
+        // session's name from the request and it removes the cookie from the
+        // response, and both only exist once the session has been started.
+        // The JSON API is registered with the `web` group too, so it gets the
+        // same guarantee.
+        $middleware->web(append: [PreserveSessionCookies::class]);
 
         // Terminates sessions whose stored password hash no longer matches,
         // which is what invalidates the other sessions of an account after a

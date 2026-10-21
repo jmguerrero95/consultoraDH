@@ -216,6 +216,18 @@ services:
     # One worker is enough for the isolated E2E database, but it must listen on
     # every queue the journeys dispatch to and allow the import budget (600 s).
     command: ["php", "artisan", "queue:work", "--queue=default,imports,support,notifications,automations,ai-tasks", "--sleep=1", "--tries=3", "--timeout=630", "--max-time=3600", "--verbose"]
+    # The worker stops by itself after `--max-time=3600`, exactly like the
+    # development workers do. The difference is what happens next: the
+    # development services carry `restart: unless-stopped`, so Docker brings
+    # the worker back, and this one did not.
+    #
+    # The consequence was silent and total: the worker exited on 2026-10-19 and
+    # never came back, so `BuildLegacyImportPlan` and `RunAiTask` were accepted
+    # by the API, shown to the person as "En cola", and never run at all. The
+    # import journeys waited for a plan digest that no worker was going to
+    # produce, and the assistant journeys waited for an answer that no worker
+    # was going to write. Nothing failed loudly anywhere.
+    restart: unless-stopped
     volumes:
       - .:/var/www/html
       - vendor:/var/www/html/vendor
