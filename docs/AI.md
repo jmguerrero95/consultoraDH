@@ -85,6 +85,41 @@ $registry->executeWrite($name, $args, $user);  // Solo escritura (desde proposal
 - **No** fallback para 401/403 (credenciales) ni 400/422 (request malformado)
 - Claves **nunca** en logs, status, auditoría, respuestas
 
+### Política de datos y preflight
+
+`AI_ALLOW_TRAINING_PROVIDERS` decide si un proveedor clasificado como
+`training` puede recibir datos de clientes. Su valor por defecto es `false`
+(fail-closed) y activarlo es una **decisión explícita del operador**, no un
+valor por defecto.
+
+```bash
+php artisan ai:preflight          # informe legible
+php artisan ai:preflight --json   # informe legible por máquina
+php artisan ai:preflight --strict # sale con 1 si no hay 3 proveedores independientes
+```
+
+El informe describe la **configuración efectiva**: proveedores configurados,
+política de datos de cada uno, cuántos pueden recibir datos de clientes, quién
+queda excluido y por qué, y los tiempos de recuperación. El preflight **no
+certifica**: un proveedor configurado no es un proveedor que respondió.
+
+### Recuperación: el primero que vuelve, y el rango
+
+Cuando todos los candidatos están bloqueados, `AiAvailability` informa del
+**primer** momento en que algún proveedor vuelve a estar disponible, agrupado
+por cuenta (dos modelos detrás de la misma credencial comparten un muro de
+cuota) y del peor caso como el otro extremo del rango. La interfaz muestra el
+rango cuando los extremos difieren.
+
+### Certificación LIVE
+
+La certificación exige una petición real a cada proveedor, con credenciales
+reales y datos sintéticos, y su evidencia: proveedor, modelo, clasificación,
+herramientas observadas, datos privados, resultado, latencia y failover. El
+flujo `.github/workflows/ci.yml` (job `live`, sólo `workflow_dispatch`) ejecuta
+el preflight y guarda la evidencia como artefacto. Un proveedor configurado, o
+un mock, no es una certificación.
+
 ## Propuestas — Exactamente-Una-Vez
 
 1. Modelo llama tool de escritura → `AiActionProposal` persistida (status=PENDING, expires_at=+15min)
@@ -173,6 +208,20 @@ Protecciones implementadas:
 - Verificaciones: existe, no expirado, no revocado, user activo, user autorizado (`mcp.use` implícito por token válido)
 
 **Gestión tokens**: `api.mcp.tokens.*` (requiere `mcp.tokens.manage`)
+
+**Cuotas propias**: el endpoint MCP se autentica con un token de larga vida, así
+que no hereda el `throttle` de sesión. Tiene cuotas propias, contadas por
+token: `MCP_REQUESTS_PER_MINUTE` para el endpoint y
+`MCP_TOOL_CALLS_PER_MINUTE` para cada herramienta (`0` desactiva cada límite).
+Al agotarse, la respuesta es un error JSON-RPC con `error.data.code`
+(`mcp_request_quota_exhausted` o `mcp_tool_quota_exhausted`) y
+`error.data.retry_after`.
+
+**Errores**: el llamador nunca recibe el mensaje de una excepción interna. La
+respuesta lleva un código público estable (`mcp_method_not_found`,
+`mcp_tool_not_found`, `mcp_invalid_params`, `mcp_tool_rejected`,
+`mcp_internal_error`) y la traza queda en el canal `mcp`
+(`storage/logs/mcp-*.log`).
 
 **OpenCode Config**:
 ```json

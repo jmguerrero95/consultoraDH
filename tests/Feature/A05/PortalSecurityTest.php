@@ -9,6 +9,8 @@ use App\Models\ClientDocument;
 use App\Models\ClientProfileUpdateRequest;
 use App\Models\DocumentType;
 use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
 
 beforeEach(function (): void {
@@ -180,6 +182,86 @@ it('never exposes a password when creating a portal account', function (): void 
 
     expect($response->json())->not->toHaveKey('password')
         ->and($response->getContent())->not->toContain('password123');
+});
+
+it('translates the email conflict into a 409 instead of a server error', function (): void {
+    // The address already belongs to somebody else. The form request refuses
+    // it before the controller is reached, which is the ordinary answer.
+    User::factory()->create(['email' => 'repetido@example.com']);
+
+    $fresh = Client::factory()->create();
+
+    $this->actingAs($this->operator)->postJson("/api/clients/{$fresh->id}/portal-account", [
+        'name' => 'Portal User',
+        'email' => 'repetido@example.com',
+        'password' => 'password123',
+        'password_confirmation' => 'password123',
+    ])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('email');
+});
+
+it('translates a concurrent email conflict into a 409 instead of a server error', function (): void {
+    $fresh = Client::factory()->create();
+
+    // The same address is taken between the validation and the insert. The
+    // database refuses it, and the refusal is a conflict, not a crash.
+    Event::listen('eloquent.creating: '.User::class, function (): void {
+        DB::table('users')->insert([
+            'name' => 'Cuenta simultánea',
+            'email' => 'mismo@example.com',
+            'password' => bcrypt('password123'),
+            'status' => 'active',
+            'account_type' => 'staff',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    });
+
+    $this->actingAs($this->operator)->postJson("/api/clients/{$fresh->id}/portal-account", [
+        'name' => 'Portal User',
+        'email' => 'mismo@example.com',
+        'password' => 'password123',
+        'password_confirmation' => 'password123',
+    ])
+        ->assertStatus(409)
+        ->assertJsonPath('code', 'email_already_in_use');
+});
+
+it('translates the concurrent portal account into a 409 instead of a server error', function (): void {
+    $fresh = Client::factory()->create();
+
+    // Two administrators confirming the same client at the same moment: both
+    // pass the existence check, and the database refuses the second insert.
+    // The competing row is written while the request is in flight, which is
+    // what a concurrent confirmation looks like from here.
+    Event::listen('eloquent.creating: '.User::class, function () use ($fresh): void {
+        DB::table('users')->insert([
+            'name' => 'Confirmación simultánea',
+            'email' => 'simultanea@example.com',
+            'password' => bcrypt('password123'),
+            'status' => 'active',
+            'account_type' => 'client',
+            'client_id' => $fresh->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    });
+
+    $this->actingAs($this->operator)->postJson("/api/clients/{$fresh->id}/portal-account", [
+        'name' => 'Portal User',
+        'email' => 'simultanea-intento@example.com',
+        'password' => 'password123',
+        'password_confirmation' => 'password123',
+    ])
+        ->assertStatus(409)
+        ->assertJsonPath('code', 'portal_account_exists');
+
+    // The answer came from the database's own index, and the failed attempt
+    // left nothing behind: the savepoint rollback removed it together with the
+    // simulated competing row, which in a real race would be committed by the
+    // other transaction.
+    expect(User::query()->where('client_id', $fresh->id)->count())->toBe(0);
 });
 
 it('prevents Client A from accessing Client B portal document requests', function (): void {

@@ -122,6 +122,18 @@ foreach ([
 Route::get('/health', HealthController::class)->name('api.health');
 
 /*
+| Readiness, not liveness.
+|
+| `/health` and nginx's own `/healthz` answer "is this process alive?", which
+| is the right question for a container that must not be restarted. A release
+| gate asks a different one: "can this deployment take work and finish it?".
+| That one needs the database, Redis and the queues, including the age of the
+| oldest job still waiting — a deployment whose workers are all dead passes a
+| liveness probe and fails this.
+*/
+Route::get('/ready', [HealthController::class, 'readiness'])->name('api.ready');
+
+/*
 | Public: authentication.
 |
 | Three separate policies, never shared. Password recovery requests are not

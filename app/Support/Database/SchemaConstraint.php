@@ -129,6 +129,19 @@ final class SchemaConstraint
     public const IMPORT_MAPPING_SOURCE = 'import_source_mappings_source_unique';
 
     /**
+     * One portal login per client.
+     *
+     * A partial unique index over `client_id` where it is not null. The
+     * database is what makes "one login per client" a fact; the API reads it
+     * first to answer with a friendly message, and translates the violation
+     * when two administrators confirm the same client at the same time.
+     */
+    public const PORTAL_ACCOUNT_PER_CLIENT = 'users_portal_client_unique';
+
+    /** One account per email address. */
+    public const USER_EMAIL = 'users_email_unique';
+
+    /**
      * Constraints that exist in the history but no longer in the schema.
      *
      * Separated from `all()` on purpose: `all()` is what the schema test asserts

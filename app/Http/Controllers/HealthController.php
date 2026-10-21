@@ -4,22 +4,35 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Services\Ops\QueueInspector;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Throwable;
 
 /**
- * Machine readable health endpoint for monitoring and for the local toolchain.
+ * Machine readable health endpoints for monitoring and for the local toolchain.
  *
- * This endpoint is public, so it reveals only what a monitor needs: whether the
- * application as a whole is able to serve, and whether each dependency answers.
+ * ## Two different questions
  *
- * It deliberately does NOT report software versions, host names, container
- * names, connection strings or any other fingerprinting detail. Precise
- * PostgreSQL and Redis versions remain available to an authenticated
- * administrator on the dashboard, where the audience has already been
- * authorised.
+ * `/api/health` answers "does this process answer?", and nginx's own
+ * `/healthz` answers the same question without PHP. That is a *liveness*
+ * probe, and it is supposed to be cheap: a container that is merely slow to
+ * boot must not be restarted for it.
+ *
+ * `/api/ready` answers a different question: "can this deployment serve a
+ * request and finish the work it accepts?". It therefore checks the things a
+ * liveness probe deliberately ignores — the database, Redis, and the queues,
+ * including the age of the oldest job still waiting. A deployment whose
+ * workers are all dead passes a liveness probe and fails this one, which is
+ * exactly the difference a release gate needs to see.
+ *
+ * ## What it does not report
+ *
+ * Neither endpoint reports software versions, host names, container names,
+ * connection strings or any other fingerprinting detail. Precise PostgreSQL
+ * and Redis versions remain available to an authenticated administrator on the
+ * dashboard, where the audience has already been authorised.
  */
 final class HealthController extends Controller
 {
@@ -36,6 +49,97 @@ final class HealthController extends Controller
             'status' => $healthy ? 'ok' : 'degraded',
             'checks' => $checks,
         ], $healthy ? 200 : 503);
+    }
+
+    /**
+     * The readiness probe.
+     *
+     * The queue check is what separates "nothing to do" from "nobody is doing
+     * it": an empty queue is healthy, and a queue whose oldest job has been
+     * waiting longer than the configured age is not, even though its backlog
+     * is short.
+     */
+    public function readiness(QueueInspector $inspector): JsonResponse
+    {
+        $checks = [
+            'database' => $this->check(static fn (): bool => DB::select('select 1') !== []),
+            'redis' => $this->check(static fn (): bool => Redis::connection()->ping() !== null),
+        ];
+
+        $queues = $this->queues($inspector);
+        $checks['queues'] = $queues['ok'];
+
+        $healthy = ! in_array(false, $checks, true);
+
+        return response()->json([
+            'status' => $healthy ? 'ready' : 'not_ready',
+            'checks' => $checks,
+            'queues' => $queues['queues'],
+            'failed_jobs' => $queues['failed_jobs'],
+            'thresholds' => $queues['thresholds'],
+        ], $healthy ? 200 : 503);
+    }
+
+    /**
+     * @return array{ok: bool, queues: array<string, array<string, mixed>>, failed_jobs: int|null, thresholds: array<string, int>}
+     */
+    private function queues(QueueInspector $inspector): array
+    {
+        $maxBacklog = (int) config('queue.monitoring.max_backlog', 1000);
+        $maxAge = (int) config('queue.monitoring.max_age_seconds', 300);
+        $maxFailed = (int) config('queue.monitoring.max_failed', 0);
+
+        $queues = [];
+        $ok = true;
+
+        foreach ((array) config('queue.monitoring.queues', []) as $queue) {
+            $queue = (string) $queue;
+
+            try {
+                $pending = $inspector->pendingSize($queue);
+                $delayed = $inspector->delayedSize($queue);
+                $reserved = $inspector->reservedSize($queue);
+                $oldest = $inspector->oldestPendingSeconds($queue);
+            } catch (Throwable) {
+                $queues[$queue] = ['error' => 'The queue could not be inspected.'];
+                $ok = false;
+
+                continue;
+            }
+
+            $overBacklog = $pending > $maxBacklog;
+            $overAge = $oldest !== null && $oldest > $maxAge;
+
+            if ($overBacklog || $overAge) {
+                $ok = false;
+            }
+
+            $queues[$queue] = [
+                'pending' => $pending,
+                'delayed' => $delayed,
+                'reserved' => $reserved,
+                'oldest_pending_seconds' => $oldest,
+                'over_backlog' => $overBacklog,
+                'over_age' => $overAge,
+            ];
+        }
+
+        $failed = $inspector->failedCount();
+
+        if ($failed !== null && $failed > $maxFailed) {
+            $ok = false;
+        }
+
+        return [
+            'ok' => $ok,
+            'queues' => $queues,
+            'failed_jobs' => $failed,
+            'thresholds' => [
+                'max_backlog' => $maxBacklog,
+                'max_age_seconds' => $maxAge,
+                'max_failed' => $maxFailed,
+            ],
+        ];
     }
 
     /**

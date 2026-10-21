@@ -58,6 +58,10 @@
 /backups-offsite/
 /docker/secrets/
 
+# LIVE certification evidence: it carries provider responses and is produced
+# by a run, not by a commit.
+/evidence/
+
 # --- Test and analysis artefacts -------------------------------------------
 # Screenshots taken while inspecting the interface are local evidence, not
 # project files, and they contain real screen contents.

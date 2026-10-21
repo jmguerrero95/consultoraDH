@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Ops\QueueInspector;
 use Illuminate\Console\Command;
-use Illuminate\Queue\DatabaseQueue;
-use Illuminate\Queue\RedisQueue;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Throwable;
 
@@ -69,15 +67,16 @@ final class QueueHealthCommand extends Command
         ];
 
         $degraded = false;
+        $inspector = new QueueInspector($connectionName);
 
         foreach ($queues as $queue) {
             $queue = (string) $queue;
 
             try {
-                $pending = (int) $connection->pendingSize($queue);
-                $delayed = (int) $connection->delayedSize($queue);
-                $reserved = (int) $connection->reservedSize($queue);
-                $oldest = $this->oldestPendingSeconds($connectionName, $connection, $queue);
+                $pending = $inspector->pendingSize($queue);
+                $delayed = $inspector->delayedSize($queue);
+                $reserved = $inspector->reservedSize($queue);
+                $oldest = $inspector->oldestPendingSeconds($queue);
             } catch (Throwable $exception) {
                 $report['status'] = 'degraded';
                 $report['queues'][$queue] = [
@@ -105,13 +104,9 @@ final class QueueHealthCommand extends Command
             ];
         }
 
-        try {
-            $report['failed'] = (int) DB::table('failed_jobs')->count();
-        } catch (Throwable) {
-            // A database queue that has never been migrated has no failed_jobs
-            // table. That is not an outage of the inspected queue.
-            $report['failed'] = null;
-        }
+        // A database queue that has never been migrated has no failed_jobs
+        // table. That is not an outage of the inspected queue.
+        $report['failed'] = $inspector->failedCount();
 
         if ($report['failed'] !== null && $report['failed'] > $maxFailed) {
             $degraded = true;
@@ -128,44 +123,6 @@ final class QueueHealthCommand extends Command
         }
 
         return self::SUCCESS;
-    }
-
-    /**
-     * Milliseconds are rounded down: a monitor only needs whole seconds.
-     */
-    private function oldestPendingSeconds(string $connectionName, mixed $connection, string $queue): ?int
-    {
-        if ($connection instanceof RedisQueue) {
-            $payload = $connection->getConnection()->lindex($connection->getQueue($queue), 0);
-
-            if (! is_string($payload)) {
-                return null;
-            }
-
-            $decoded = json_decode($payload, true);
-            $createdAt = $decoded['createdAt'] ?? null;
-
-            return is_numeric($createdAt)
-                ? max(0, now()->getTimestamp() - (int) $createdAt)
-                : null;
-        }
-
-        if ($connection instanceof DatabaseQueue) {
-            $database = config("queue.connections.{$connectionName}.connection") ?: config('database.default');
-            $table = (string) config("queue.connections.{$connectionName}.table", 'jobs');
-
-            $createdAt = DB::connection($database)
-                ->table($table)
-                ->where('queue', $queue)
-                ->whereNull('reserved_at')
-                ->min('created_at');
-
-            return is_numeric($createdAt)
-                ? max(0, now()->getTimestamp() - (int) $createdAt)
-                : null;
-        }
-
-        return null;
     }
 
     /**

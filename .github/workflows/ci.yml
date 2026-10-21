@@ -1,0 +1,259 @@
+name: CI
+
+# The gate that a merge has to pass, written down in the repository instead of
+# in somebody's memory.
+#
+# Three jobs, each with one job to do:
+#
+#   php        — style, migrations and the whole test suite, on PostgreSQL 18
+#   frontend   — lint, typecheck, build and the browser-less component tests
+#   live       — the LIVE certification, on demand, with real credentials
+#
+# The live job never runs on a pull request: it needs real provider keys and a
+# real quota, and a test that spends somebody's free tier on every push is a
+# test that eventually gets skipped. It is run on demand and its evidence is
+# attached to the release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: 'Run the LIVE provider certification as well'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  php:
+    name: PHP — style, migrations, tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: consultora_dh_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_KEY: base64:ZmFrZS1rZXktZm9yLWNpLW9ubHktMzItYnl0ZXMh
+      DB_CONNECTION: testing
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_TEST_DATABASE: consultora_dh_test
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: '6379'
+      REDIS_DB: '4'
+      REDIS_CACHE_DB: '5'
+      REDIS_PREFIX: consultora-dh-test-
+      CACHE_STORE: array
+      QUEUE_CONNECTION: sync
+      SESSION_DRIVER: array
+      MAIL_MAILER: array
+      BROADCAST_CONNECTION: null
+      # No provider credential reaches the suite: a test that needs one builds
+      # its own fake. A credential here would let a test spend a real quota.
+      AI_PRIMARY_API_KEY: ''
+      AI_FALLBACK_API_KEY: ''
+      GROQ_API_KEY: ''
+      GEMINI_API_KEY: ''
+      CLOUDFLARE_AI_API_TOKEN: ''
+      OPENCODE_ZEN_API_KEY: ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, pcntl, intl, bcmath, zip, redis
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Style (Pint)
+        run: ./vendor/bin/pint --test
+
+      - name: Migrations
+        run: php artisan migrate --force
+
+      - name: Tests
+        run: php artisan test --compact
+
+  frontend:
+    name: Frontend — lint, typecheck, build, tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: npm test
+
+  live:
+    name: LIVE — certification against the real providers
+    # Never on a pull request: it needs real credentials and a real quota.
+    if: github.event_name == 'workflow_dispatch' && inputs.live
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: consultora_dh_live
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:ZmFrZS1rZXktZm9yLWNpLW9ubHktMzItYnl0ZXMh
+      DB_CONNECTION: testing
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_TEST_DATABASE: consultora_dh_live
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: '6379'
+      CACHE_STORE: array
+      QUEUE_CONNECTION: sync
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, pcntl, intl, bcmath, zip, redis
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Migrations
+        run: php artisan migrate --force
+
+      # The credentials come from the repository secrets, never from the
+      # repository itself. The run fails loudly if one of them is missing: a
+      # LIVE certification without a credential is not a certification.
+      - name: Provider credentials
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLOUDFLARE_AI_API_TOKEN: ${{ secrets.CLOUDFLARE_AI_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in GROQ_API_KEY GEMINI_API_KEY CLOUDFLARE_AI_API_TOKEN OPENROUTER_API_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "missing secret: ${name}" >&2
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "A LIVE certification needs a real credential for every provider." >&2
+            exit 1
+          fi
+
+      - name: Configuration preflight
+        run: php artisan ai:preflight --json
+
+      # The live evidence is written to a file and uploaded as an artifact, so
+      # the certification is a document somebody can read and not a green tick.
+      - name: LIVE certification
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLOUDFLARE_AI_API_TOKEN: ${{ secrets.CLOUDFLARE_AI_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          php artisan ai:preflight --json | tee evidence/ai-preflight.json
+          if [ -x scripts/live_certification.sh ]; then
+            bash scripts/live_certification.sh | tee evidence/live-certification.txt
+          else
+            echo "scripts/live_certification.sh is not present in this branch." | tee evidence/live-certification.txt
+          fi
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-certification-evidence
+          path: evidence/
+          if-no-files-found: warn

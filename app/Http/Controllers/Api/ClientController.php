@@ -53,6 +53,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Clients, and the relationships and affiliations that hang off them.
@@ -933,14 +934,30 @@ final class ClientController extends Controller
             ], 409);
         }
 
-        $user = User::query()->create([
-            'name' => $data['name'],
-            'email' => $data['email'],
-            'password' => $data['password'],
-            'account_type' => 'client',
-            'client_id' => $client->id,
-            'status' => UserStatus::Active,
-        ]);
+        try {
+            // The insert runs inside a transaction of its own so a unique
+            // violation can be undone before the answer is produced. PostgreSQL
+            // aborts the whole transaction when a statement fails, so a
+            // violation inside an enclosing transaction would leave the
+            // connection unusable for the answer that follows; the savepoint
+            // rollback clears that.
+            $user = DB::transaction(fn (): User => User::query()->create([
+                'name' => $data['name'],
+                'email' => $data['email'],
+                'password' => $data['password'],
+                'account_type' => 'client',
+                'client_id' => $client->id,
+                'status' => UserStatus::Active,
+            ]));
+        } catch (QueryException $e) {
+            $conflict = $this->portalAccountConflict($e);
+
+            if ($conflict !== null) {
+                return $conflict;
+            }
+
+            throw $e;
+        }
 
         $this->audit->record(AuditAction::PortalAccountCreated, $request->user(), [
             'client_id' => $client->id,
@@ -952,6 +969,39 @@ final class ClientController extends Controller
             'email' => $user->email,
             'account_type' => $user->account_type,
         ], 201);
+    }
+
+    /**
+     * The conflict two administrators can create at the same time.
+     *
+     * The existence check above answers the ordinary case with a friendly
+     * message. Two administrators confirming the same client at the same moment
+     * both pass it, and the database is what stops the second insert. That
+     * violation is a conflict, not a server error, so it is translated here
+     * into the same answer the check would have given.
+     *
+     * Only these two indexes are translated. An unrelated database failure
+     * keeps travelling to the central handler, where it is logged and rendered
+     * as a safe server error: dressing it up as a duplicate would tell the
+     * operator to change something that was not the problem.
+     */
+    private function portalAccountConflict(QueryException $e): ?JsonResponse
+    {
+        if (UniqueViolation::isFor($e, SchemaConstraint::PORTAL_ACCOUNT_PER_CLIENT)) {
+            return response()->json([
+                'message' => 'El cliente ya tiene una cuenta de portal.',
+                'code' => 'portal_account_exists',
+            ], 409);
+        }
+
+        if (UniqueViolation::isFor($e, SchemaConstraint::USER_EMAIL)) {
+            return response()->json([
+                'message' => 'Ese correo ya está en uso por otra cuenta.',
+                'code' => 'email_already_in_use',
+            ], 409);
+        }
+
+        return null;
     }
 
     public function deactivatePortalAccount(Request $request, User $user): JsonResponse
