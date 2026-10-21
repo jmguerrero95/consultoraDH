@@ -59,7 +59,13 @@ final class ClientListResource extends JsonResource
         // Eager loaded by the controller, so a client in three companies still costs
         // one query for the whole page.
         return $identity + [
-            'companies_count' => $client->companies_count ?? null,
+            // The count of the companies the row lists, taken from the relation the
+            // controller already loaded: a client with no active company showed
+            // an empty list and a null count, and the interface had to print "—"
+            // where the honest answer was "0".
+            'companies_count' => $client->relationLoaded('companyAssignments')
+                ? $client->companyAssignments->count()
+                : ($client->companies_count ?? null),
             'companies' => $client->relationLoaded('companyAssignments')
                 ? CompanySummaryResource::collection(
                     $client->companyAssignments

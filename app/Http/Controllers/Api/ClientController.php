@@ -821,7 +821,14 @@ final class ClientController extends Controller
         bool $maySeeRelationships = true,
         bool $maySeeAffiliations = true,
     ): array {
+        // The actor is read for every entry, so the user is eager loaded: fifty
+        // entries cost one query for the users instead of fifty.
+        //
+        // The comment below says the answer "was already one eager-load away" —
+        // it was, and it was not taken. A client's history cost one query per
+        // event.
         $entries = AuditEvent::query()
+            ->with('user')
             ->where('subject_type', Client::class)
             ->where('subject_id', $client->id)
             ->orderByDesc('created_at')
@@ -832,6 +839,7 @@ final class ClientController extends Controller
         // `relationships.view` rather than to `clients.view`.
         $relationshipEntries = $maySeeRelationships
             ? AuditEvent::query()
+                ->with('user')
                 ->where('subject_type', ClientCompanyAssignment::class)
                 ->whereIn('subject_id', $client->companyAssignments()->select('id'))
                 ->orderByDesc('created_at')
@@ -845,6 +853,7 @@ final class ClientController extends Controller
         // that role is not allowed to ask.
         $affiliationEntries = $maySeeAffiliations
             ? AuditEvent::query()
+                ->with('user')
                 ->where('subject_type', ClientAffiliation::class)
                 ->whereIn('subject_id', $client->affiliations()->select('id'))
                 ->orderByDesc('created_at')

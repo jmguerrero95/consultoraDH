@@ -30,7 +30,10 @@ final class PortalDocumentController extends Controller
     {
         $client = $this->client($request);
 
+        // The type of every document is read, so it is eager loaded: the list
+        // cost one query per document before.
         $documents = ClientDocument::query()
+            ->with('documentType')
             ->where('client_id', $client->id)
             ->where('visibility', 'client')
             ->whereNull('archived_at')
