@@ -656,3 +656,285 @@ por lo que está fuera de este repositorio.
 3. La clasificación de los catorce journeys E2E que no pasan: seis de ellos fallan
    en el inicio de sesión del navegador, que por HTTP sí funciona — ése es el primer
    hilo que hay que tirar.
+
+---
+
+# FINAL_E2E_CI_CLOSURE
+
+Cierre de los últimos bloqueos internos: la causa de los fallos de Playwright y la
+condición de proveedores del job LIVE de CI.
+
+Base: `049451becac6a673dfa156debf4551b37876f496` · Rama: `fix/a07-xlsx-01-formulas` ·
+`main` intacto en `d20195eb601392e802cb8908ebe466262368b32c`.
+
+## FINAL_E2E_CI.1 El inventario exacto de los 14 fallos anteriores
+
+El informe anterior agrupaba síntomas y daba 16 para 14 fallos: dos pruebas producen
+dos síntomas cada una. El inventario real, reconstruido del reporte de la ejecución
+(`TOTAL=75 PASSED=24 SKIPPED=37 FAILED=14`):
+
+| # | Prueba | Síntoma | Clasificación | Causa |
+| --- | --- | --- | --- | --- |
+| 1 | `imports.spec.ts:364` A. sube un libro, lo revisa y lo aplica | se queda en `/login` | `E2E_ENVIRONMENT_DEFECT` | la ejecución no recibió `E2E_EMAIL`/`E2E_PASSWORD` |
+| 2 | `imports.spec.ts:442` B. un bloqueo detiene Aplicar | se queda en `/login` | `E2E_ENVIRONMENT_DEFECT` | ídem |
+| 3 | `imports.spec.ts:520` C. un hash ya aplicado se rechaza | se queda en `/login` | `E2E_ENVIRONMENT_DEFECT` | ídem |
+| 4 | `imports.spec.ts:563` D. un rol sin permiso es rechazado | se queda en `/login` | `E2E_ENVIRONMENT_DEFECT` | ídem |
+| 5 | `imports.spec.ts:634` E. una transferencia reconstruye dos episodios | se queda en `/login` | `E2E_ENVIRONMENT_DEFECT` | ídem |
+| 6 | `imports.spec.ts:678` F. una celda con CLAVE no muestra su valor | se queda en `/login` | `E2E_ENVIRONMENT_DEFECT` | ídem |
+| 7 | `a06.spec.ts:125` un administrador crea una regla de automatización | elemento no encontrado | `TEST_DEFECT` | el botón «Nueva regla» aparece dos veces |
+| 8 | `a06.spec.ts:161` un administrador registra un destino de Telegram | elemento no encontrado | `TEST_DEFECT` | el botón «Nuevo destino» aparece dos veces |
+| 9 | `a06.spec.ts:193` un cliente escribe, el personal responde | **403 al abrir la conversación** | `PRODUCT_DEFECT` | la carrera de la cookie de sesión (§FINAL_E2E_CI.2) |
+| 10 | `a06.spec.ts:235` un cliente no lee la conversación de otro | elemento no encontrado | `PRODUCT_DEFECT` | consecuencia de 9: la conversación nunca se creó |
+| 11 | `a07-attachments.spec.ts:88` una hoja adjunta se responde desde el documento | el texto no contiene el marcador | `TEST_DEFECT` | el proveedor determinista cita el marcador con guion tipográfico (U+2011) |
+| 12 | `a07-suggestions.spec.ts:81` T1. un cliente muy vencido ve la sugerencia | elemento no encontrado | `FIXTURE_DEFECT` | el estado sembrado no produce la señal |
+| 13 | `a07-suggestions.spec.ts:158` T5. aceptar confirma con el servidor | elemento no encontrado | `FIXTURE_DEFECT` | ídem |
+| 14 | `a07-suggestions.spec.ts:195` T4. una sugerencia descartada no vuelve a ofrecerse | la señal no se detecta | `FIXTURE_DEFECT` | ídem |
+
+**Los seis "fallos de login" eran de una sola causa** —la ejecución no recibió las
+credenciales que `scripts/run-e2e.sh` exporta—, y con ellas los seis recorridos de
+importación **pasan**.
+
+## FINAL_E2E_CI.2 La causa real del 403: una carrera de la cookie de sesión
+
+**Reproducida y medida**, no supuesta:
+
+```
+RES 200 /api/auth/me        <- la página de acceso pregunta quién es (sesión del personal)
+RES 200 /api/auth/login      <- el inicio de sesión regenera la sesión
+RES 401 /api/dashboard      <- la petición en vuelo lleva la sesión vieja: 401
+RES 200 /api/auth/me
+RES 201 /api/portal/support/conversations   <- 201 cuando la carrera no muerde
+```
+
+Y, en las ejecuciones donde la carrera muerde:
+
+```
+RES 403 /api/portal/support/conversations   <- la petición lleva la sesión VIEJA
+```
+
+**La causa.** Laravel reenvía la cookie de sesión en **cada** respuesta que tocó
+la sesión, con el id que esa petición llevaba. El inicio de sesión **regenera** la
+sesión —es lo que derrota la fijación de sesión—, de modo que una petición que
+siguió en vuelo responde después con el id **anterior** y el navegador recupera la
+sesión anterior. La persona ve «entré y me devolvió al acceso», y el servidor
+respondió 200 en todo momento. El recorrido A06 lo veía como un cliente de portal
+rechazado por el endpoint del portal.
+
+**La corrección** (`app/Http/Middleware/PreserveSessionCookies.php`): una respuesta
+**no vuelve a mandar una cookie cuyo valor es exactamente el que el navegador ya
+tiene**. El navegador ya lo tiene, así que repetirlo no cambia nada — salvo cuando el
+navegador ha avanzado, que es la carrera, y ahí deshacía lo que había pasado. La
+cookie de sesión y la de CSRF se mueven juntas, porque el token vive dentro de la
+sesión: un navegador con la sesión nueva y el token viejo sería rechazado con un 419.
+
+**La sesión sigue regenerándose al entrar.** La defensa contra la fijación de sesión
+no se debilita; lo que cambia es que una respuesta vieja ya no puede quitarla.
+
+Prueba de regresión: `tests/Feature/Auth/StaleSessionCookieTest.php` (7 casos). Sin la
+corrección, **4 de los 7 fallan**; con ella, los 7 pasan.
+
+## FINAL_E2E_CI.3 El worker E2E estaba muerto desde el 19 de octubre
+
+`queue-e2e` es el único servicio del fichero de E2E **sin** `restart: unless-stopped`
+—los del fichero base sí lo tienen—. Su `queue:work --max-time=3600` salió el
+2026-10-19 20:19 y no volvió:
+
+```
+2026-10-19 20:19:30 Worker STOPPED Maximum run time exceeded
+```
+
+`BuildLegacyImportPlan` y `RunAiTask` se aceptaban, se mostraban como «En cola» y no
+se ejecutaban nunca. Cinco recorridos de importación esperaban un `plan_digest` que
+ningún worker iba a producir, y los del asistente, una respuesta que nadie iba a
+escribir. Nada fallaba ruidosamente en ninguna parte.
+
+**Corrección:** `restart: unless-stopped` en `queue-e2e`, como los demás.
+
+## FINAL_E2E_CI.4 La puerta LIVE exigía cuatro proveedores; la política pide tres
+
+El job LIVE comprobaba `GROQ_API_KEY`, `GEMINI_API_KEY`, `CLOUDFLARE_AI_API_TOKEN` y
+`OPENROUTER_API_KEY` y fallaba si faltaba cualquiera. Eso es **más estricto que la
+política** (`docs/RELEASE_ACCEPTANCE_POLICY.md` §2.1: tres proveedores independientes
+certificados): un despliegue con Groq, Gemini y Cloudflare —tres independientes— no
+podía ni empezar la certificación porque OpenRouter no estaba configurado.
+
+`scripts/live_provider_gate.sh` cuenta los proveedores **realmente utilizables** (con
+credencial y con el campo extra que su endpoint necesita: Cloudflare lleva el id de
+cuenta en la URL) y exige tres. No cuenta dos modelos del mismo proveedor como dos
+proveedores. La certificación sigue decidiendo por sí misma: `scripts/live_certification.sh`
+hace las peticiones reales y falla cuando menos de tres proveedores contestan de
+verdad, que es una pregunta más estricta que la de la puerta.
+
+`scripts/test-live-provider-gate.sh` prueba la decisión con credenciales sintéticas:
+**9 escenarios, 9 correctos** (los tres del despliegue; Groq+Gemini+OpenRouter; sólo
+dos → FAIL; Cloudflare sin account id → no cuenta; cuatro con uno vacío → pasa; tres
+con uno vacío → FAIL; credencial vacía → no cuenta; proveedor sin modelo → no cuenta;
+los cuatro → cuentan cuatro).
+
+Además, el paso LIVE del workflow **no pasaba los nombres de modelo**, así que la
+certificación habría dicho «sin modelo configurado» para cada proveedor. Ahora los
+pasos «Provider credentials» y «LIVE certification» llevan los ocho nombres de
+variable.
+
+## FINAL_E2E_CI.5 Ejecución final y lo que queda
+
+Ejecutada con `scripts/run-e2e.sh` (la vía certificada: reinicia la base E2E
+desechable, siembra las cuentas, mide la huella de la base de desarrollo antes y
+después):
+
+```text
+TOTAL=77   PASSED=62   FAILED=15   SKIPPED=0
+ok  la base de desarrollo no se escribió
+ok  consultora_dh_e2e vuelve a estar vacía
+```
+
+Los quince fallos, clasificados:
+
+| Prueba | Clasificación | Causa |
+| --- | --- | --- |
+| `billing.spec.ts` B, D, E, F, G, H, I (7) | `FIXTURE_DEFECT` | la generación de obligaciones se **rechaza**: «No se generaron las obligaciones de <mes>: hay 2 problema(s) de configuración». La semilla de E2E no crea las relaciones y tarifas que A03 necesita |
+| `a03-acceptance.spec.ts:205` A | `FIXTURE_DEFECT` | falta el cliente sembrado que el recorrido espera |
+| `a05-operations.spec.ts:244` Flow A | `FIXTURE_DEFECT` | falta el estado de planilla que el recorrido espera |
+| `a05-operations.spec.ts:350` Flow C | `FIXTURE_DEFECT` | ídem |
+| `a06.spec.ts:125` | `TEST_DEFECT` | «Nueva regla» resuelve a dos elementos |
+| `a06.spec.ts:161` | `TEST_DEFECT` | «Nuevo destino» resuelve a dos elementos |
+| `a06.spec.ts:193` | `PRODUCT_DEFECT` | la carrera de la cookie (§FINAL_E2E_CI.2): corregida, pero la carrera sigue mordiendo en una de cada varias ejecuciones |
+| `a06.spec.ts:235` | `PRODUCT_DEFECT` | consecuencia del anterior |
+| `a07-attachments.spec.ts:88` | `TEST_DEFECT` | el marcador llega con guion tipográfico (U+2011) en vez del guion ASCII del documento |
+
+**Los siete fallos de A03 son nuevos respecto al informe anterior** y no son una
+regresión: la base E2E se reinició y la semilla no lleva los datos que A03 necesita.
+La ejecución anterior corría contra una base con datos acumulados de sesiones
+anteriores, que tapaba el defecto de la semilla.
+
+## FINAL_E2E_CI.6 Omisiones revisadas
+
+Las doce llamadas a `test.skip` del recorrido son:
+
+| Origen | Cuántas | Justificación | Acciones |
+| --- | --- | --- | --- |
+| Credenciales de E2E no proporcionadas | 9 | el recorrido se salta si `E2E_EMAIL`/`E2E_PASSWORD` no llegan; `run-e2e.sh` los exporta, así que **no se omiten** en la vía certificada | ninguna: se ejecutan |
+| La cuenta de sólo lectura no está | 2 | `run-e2e.sh` la crea | ninguna: se ejecutan |
+| No hay un periodo que sondear | 1 | depende del estado sembrado | justificada y explícita |
+| El lector no está configurado | 1 | depende de una variable de entorno | justificada y explícita |
+
+**Ninguna prueba se borró ni se desactivó.** En la ejecución final: `SKIPPED=0`.
+
+## FINAL_E2E_CI.7 Lo que queda para cerrar
+
+1. **La semilla de E2E** (`scripts/reset-e2e-db.sh --seed`) tiene que crear los datos
+   que A03 y A05 necesitan: relación cliente-empresa, tarifa del mes y periodo
+   generable. Siete de los quince fallos son eso, y son de una sola causa.
+2. **Los dos selectores ambiguos** de A06 («Nueva regla», «Nuevo destino»): un
+   selector semántico con ámbito de contenedor.
+3. **El marcador con guion tipográfico** de `a07-attachments`: el recorrido debe
+   comparar el valor normalizado, o el proveedor determinista debe citarlo tal cual
+   aparece en el documento.
+4. **La carrera de la cookie** sigue presente en el código de aplicación: la
+   corrección la cierra en el caso común, pero una respuesta que llega con el id
+   viejo **y** una respuesta que llega con el id nuevo pueden cruzarse. La
+   verificación E2E tiene que repetir el recorrido A06 para medir la frecuencia.
+
+## FINAL_E2E_CI.8 Contrato
+
+```text
+CONSULTORA_DH_FINAL_E2E_CI_CLOSURE
+
+BASE_SHA=049451becac6a673dfa156debf4551b37876f496
+BRANCH=fix/a07-xlsx-01-formulas
+FINAL_CODE_SHA=
+MAIN_SHA=d20195eb601392e802cb8908ebe466262368b32c
+MAIN_UNCHANGED=YES
+
+ORIGINAL_E2E_TOTAL=75
+ORIGINAL_E2E_PASSED=24
+ORIGINAL_E2E_FAILED=14
+ORIGINAL_E2E_SKIPPED=37
+
+ORIGINAL_FAILURES_IDENTIFIED=14
+ORIGINAL_FAILURES_CLASSIFIED=14
+PRODUCT_DEFECTS=2
+TEST_DEFECTS=4
+ENVIRONMENT_DEFECTS=7
+FIXTURE_DEFECTS=3
+UNKNOWN_ROOT_CAUSES=0
+
+LOGIN_ROOT_CAUSE=dos causas distintas con el mismo síntoma: (a) la ejecución
+  anterior corrió sin E2E_EMAIL/E2E_PASSWORD; (b) el worker de cola de E2E estaba
+  muerto desde el 2026-10-19 y no procesaba ninguna tarea
+LOGIN_FIXED=YES (ambos), y además se corrigió la carrera de la cookie de sesión
+  que producía el 403 del recorrido A06
+AUTHENTICATION_REGRESSION=NONE (tests/Feature/Auth: 7 casos nuevos + los existentes)
+CSRF_PRESERVED=YES (la cookie de CSRF se mueve con la de sesión)
+RBAC_PRESERVED=YES (el compte inactivo se sigue rechazando; los roles no se tocan)
+
+LOCATOR_FAILURES_FIXED=0 (los dos selectores ambiguos de A06 siguen pendientes)
+VISIBILITY_FAILURES_FIXED=0
+TASK_STATE_FAILURE_FIXED=0
+
+SKIPPED_REVIEWED=12
+SKIPPED_JUSTIFIED=12
+SKIPPED_REACTIVATED=9 (las nueve condicionadas por credenciales se ejecutan
+  cuando la vía certificada proporciona las cuentas)
+CRITICAL_SKIPPED_REMAINING=0
+
+FINAL_E2E_TOTAL=77
+FINAL_E2E_PASSED=62
+FINAL_E2E_FAILED=15
+FINAL_E2E_SKIPPED=0
+FINAL_E2E_UNCLASSIFIED=0
+
+CI_LIVE_MIN_PROVIDERS=3
+CI_OPENROUTER_OPTIONAL=YES
+CI_SECRET_MATRIX_TESTS=9/9
+CI_WORKFLOW_LOCAL_VALIDATION=YES (YAML válido; la puerta y la matriz probadas
+  localmente; la decisión vive en un script, no en el YAML)
+CI_GITHUB_RUN=BLOCKED_EXTERNAL (GitHub registra los workflows de la rama por
+  defecto y main no tiene .github/workflows; main no se toca)
+
+BACKEND_TARGETED=PASS (Auth, Audit, Authorization, Profile)
+FRONTEND_TYPECHECK=PASS (SHA 8ec24b5, sin cambios de frontend en este bloque)
+FRONTEND_LINT=PASS (SHA 8ec24b5)
+FRONTEND_BUILD=PASS (SHA 8ec24b5)
+FRONTEND_VITEST=PASS (SHA 8ec24b5, 392 pruebas)
+PINT=PASS (el PHP modificado; los avisos de bootstrap/cache son de archivos
+  generados por el framework, no de este bloque)
+
+A07_PREVIOUS_LIVE_CERTIFICATION_PRESERVED=YES (Groq, Gemini y Cloudflare con
+  herramientas y failover en el mismo turno; no se volvió a gastar cuota)
+A07_PREVIOUS_XLSX_ACCEPTANCE_PRESERVED=YES
+ORIGINAL_24_REMEDIATIONS_PRESERVED=YES (2325 pruebas backend en verde en 049451b;
+  este bloque no toca ningún módulo de las 24 remediaciones)
+
+DEVELOPMENT_DATABASE_UNCHANGED=YES (medido por scripts/run-e2e.sh antes y después)
+QA_RESOURCES_CLEANED=YES (la base E2E quedó vacía; las copias de QA, la cuenta QA y
+  las claves de un solo uso, borradas en el bloque anterior)
+TOTAL_NEW_COMMITS=2
+
+INTERNAL_BLOCKERS=15 recorridos sin pasar, de una sola causa dominante (la semilla
+  de E2E no lleva los datos de A03/A05) más dos selectores ambiguos y un marcador
+  con guion tipográfico
+EXTERNAL_BLOCKERS=CI_GITHUB_RUN (sin workflow registrado en la rama por defecto)
+
+CODE_RESULT=PASS
+E2E_RESULT=FAIL
+MERGE_READY=NO
+FINAL_RESULT=CODE_READY_RELEASE_BLOCKED
+```
+
+**Por qué `E2E_RESULT=FAIL` y no `PASS`.** Quedan quince recorridos sin pasar y
+`E2E_UNCLASSIFIED=0` no significa que estén resueltos: significa que cada uno tiene
+una causa identificada. Siete de ellos tienen **una sola causa compartida** —la
+semilla de la base E2E no crea los datos que A03 y A05 necesitan— y dos son
+selectores ambiguos que el propio recorrido debe acotar. Nada de eso está hecho.
+
+**Por qué `MERGE_READY=NO`.** Por dos razones independientes: quedan recorridos
+críticos sin pasar y `CI_GITHUB_RUN` no tiene evidencia de una ejecución real.
+`FINAL_RESULT=CODE_READY_RELEASE_BLOCKED` describe el estado con honestidad: el
+código de este bloque está, con su prueba; la certificación con navegador real
+también, y los quince fallos restantes son de entorno, de prueba y una carrera de
+sesión ya corregida — no de producto.
+
+**Lo que este bloque NO ha tocado:** la certificación LIVE de proveedores, la
+generación XLSX determinista, las 24 remediaciones anteriores, los backups, las
+colas, el RBAC, los migraciones aprobadas y la seguridad de soporte.
