@@ -150,12 +150,22 @@ Este documento verifica que la aplicación está lista para producción. Cada it
 
 ## 8. Health Checks
 
-- [ ] `GET /api/health` → 200 OK
+- [ ] `GET /api/health` → 200 OK (liveness: el proceso responde)
+- [ ] `GET /api/ready` → 200 `ready` (readiness: base de datos, Redis y colas)
 - [ ] `GET /api/mcp/health` → 200 OK
 - [ ] `GET /api/ai/status` → `ai_enabled=true`, `primary.configured=true`
 - [ ] `GET /reverb/health` → 200 OK
+- [ ] `php artisan queue:health --strict` → 0 (backlog, edad y fallos dentro de umbral)
+- [ ] `php artisan ai:preflight --strict` → 0 (tres proveedores independientes para datos privados)
 - [ ] Database: `php artisan db:show` sin errores
 - [ ] Redis: `redis-cli -a $REDIS_PASSWORD ping` → PONG
+
+> Liveness y readiness son preguntas distintas. `/healthz` (nginx) y
+> `/api/health` contestan «¿responde el proceso?», que es lo que un reinicio
+> de contenedor debe mirar. `/api/ready` contesta «¿puede este despliegue
+> tomar trabajo y terminarlo?», e incluye la edad del job más antiguo
+> esperando: un despliegue sin workers vivos pasa liveness y falla readiness.
+> El monitor externo y la puerta de release deben usar `/api/ready`.
 
 ---
 
@@ -262,6 +272,7 @@ systemctl restart supervisor
 
 ## 15. Verificación Post-Despliegue
 
+- [ ] `/api/ready` → 200 `ready` **después** de reiniciar los workers
 - [ ] Login funcional
 - [ ] Dashboard carga datos
 - [ ] `/asistente` accesible con `ai.use`

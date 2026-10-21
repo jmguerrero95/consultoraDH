@@ -30,29 +30,45 @@ use Throwable;
  */
 final class QueueInspector
 {
-    public function __construct(private readonly string $connectionName = 'redis') {}
+    public function __construct(private readonly ?string $connectionName = null) {}
 
     /**
      * The connection this inspector reads.
+     *
+     * The deployment's own default, when that is a queue with a backlog to
+     * read. A connection that answers jobs synchronously has no backlog to
+     * inspect, so the Redis one is used instead of reporting an empty queue
+     * that means nothing.
      */
     public function connectionName(): string
     {
-        return $this->connectionName;
+        if ($this->connectionName !== null) {
+            return $this->connectionName;
+        }
+
+        $default = (string) config('queue.default', 'redis');
+        $connection = Queue::connection($default);
+
+        if ($connection instanceof RedisQueue || $connection instanceof DatabaseQueue) {
+            return $default;
+        }
+
+        return 'redis';
     }
 
     public function pendingSize(string $queue): int
     {
-        return (int) Queue::connection($this->connectionName)->pendingSize($queue);
+        return (int) Queue::connection($this->connectionName())->pendingSize($queue);
     }
 
     public function delayedSize(string $queue): int
     {
-        return (int) Queue::connection($this->connectionName)->delayedSize($queue);
+        return (int) Queue::connection($this->connectionName())->delayedSize($queue);
     }
 
     public function reservedSize(string $queue): int
     {
-        return (int) Queue::connection($this->connectionName)->reservedSize($queue);
+        return (int) Queue::connection($this->connectionName())->reservedSize($queue);
     }
 
     /**
@@ -64,7 +80,7 @@ final class QueueInspector
      */
     public function oldestPendingSeconds(string $queue): ?int
     {
-        $connection = Queue::connection($this->connectionName);
+        $connection = Queue::connection($this->connectionName());
 
         try {
             if ($connection instanceof RedisQueue) {
@@ -83,8 +99,8 @@ final class QueueInspector
             }
 
             if ($connection instanceof DatabaseQueue) {
-                $database = config("queue.connections.{$this->connectionName}.connection") ?: config('database.default');
-                $table = (string) config("queue.connections.{$this->connectionName}.table", 'jobs');
+                $database = config("queue.connections.{$this->connectionName()}.connection") ?: config('database.default');
+                $table = (string) config("queue.connections.{$this->connectionName()}.table", 'jobs');
 
                 $createdAt = DB::connection($database)
                     ->table($table)
