@@ -346,13 +346,13 @@ Rama: `fix/a07-xlsx-01-formulas` · `main` intacto en `d20195e`.
 | --- | --- | --- |
 | A01-SEC | CERRADO | `d9581fc` |
 | A05-REP | CERRADO | `87e8147` |
-| A06-AUTO | PENDIENTE | — |
-| A01-OPS | PENDIENTE | — |
-| PERF-UX | PENDIENTE | — |
-| Certificación final | PENDIENTE | — |
+| A06-AUTO | CERRADO | `df2e78f` |
+| A01-OPS | CERRADO | `8ec24b5`, `5c91388`, `f2ed798` |
+| PERF-UX | CERRADO | `252a28c` |
+| Certificación final | CERRADO | este commit |
 
-**Pendiente inmediato:** continuar con el lote A06-AUTO (A06-AUTO-02,
-A06-AUTO-03, A06-TG-01).
+**Pendiente inmediato:** ninguno dentro de esta intervención. Lo que queda
+abierto está en §FINAL.6 (residuales y bloqueos).
 
 ## Matriz de defectos nuevos
 
@@ -363,13 +363,290 @@ A06-AUTO-03, A06-TG-01).
 | A05-REP-02 | CORREGIDO | Una ejecución `running` cuyo ejecutor moría quedaba `running` para siempre; además `occurrence_key` no estaba en la lista fillable de `GeneratedReport`, así que **cada reintento generaba un segundo reporte** | Lease `lease_expires_at` + fence `claim_token`; la clave pasa a fillable y a índice único | `87e8147` | `tests/Feature/A05/ReportScheduleLeaseTest.php` (12) | Claim real observado durante la generación; recuperación probada desde una **segunda sesión PostgreSQL** |
 | A05-REP-03 | CORREGIDO | El reintento no comprobaba que la programación siguiera activa | La ocurrencia pendiente o fallida de una programación desactivada se bloquea con `schedule_inactive`; la reactivación no la revive | `87e8147` | mismo archivo | — |
 | A05-REP-04 | CORREGIDO | Un `file_put_contents` fallido sólo avisa y deja un artefacto vacío; la auditoría de la solicitud era tolerante | Comprobación de archivo escrito, borrado de bytes parciales y auditoría de la solicitud obligatoria | `87e8147` | mismo archivo | — |
-| A06-AUTO-02 | PENDIENTE | | | | | |
-| A06-AUTO-03 | PENDIENTE | | | | | |
-| A06-TG-01 | PENDIENTE | | | | | |
-| A01-CI-01 | PENDIENTE | | | | | |
-| A01-OPS-02 | PENDIENTE | | | | | |
-| A01-OPS-03 | PENDIENTE | | | | | |
-| A01-OPS-04 | PENDIENTE | | | | | |
-| A05-PERF-01 | PENDIENTE | | | | | |
-| A07-REL-01 | PENDIENTE | | | | | |
-| QA-UI-01 | PENDIENTE | | | | | |
+| A06-AUTO-02 | CORREGIDO | El padre despachaba el job de correo o Telegram y **después** marcaba la acción `queued`: con la cola en línea el hijo terminaba antes y su `succeeded`/`failed` era sobrescrito | El estado preliminar se escribe **antes** del despacho; el padre no vuelve a escribir un estado preliminar y el estado del run se deriva de sus acciones | `df2e78f` | `tests/Feature/A06/AutomationDeliveryReliabilityTest.php` (14) | 8 de los 14 fallan contra el código original; un caso corre sobre un **worker Redis real** |
+| A06-AUTO-03 | CORREGIDO | La tarea creada por una automatización no tenía origen durable: una caída entre el INSERT y el registro de `succeeded` producía una segunda tarea. El correo no distinguía un fallo definitivo de una entrega incierta, y con varios destinatarios el último en terminar decidía el resultado | La tarea lleva la acción que la originó, con índice único; el correo registra el intento antes de salir, marca lo incierto como incierto y no reenvía a ciegas; el estado de la acción se deriva del progreso de cada destinatario | `df2e78f` | mismo archivo | — |
+| A06-TG-01 | CORREGIDO | Telegram reclamaba la fila `support_deliveries` **antes** de comprobar el token: sin token la fila quedaba `pending` para siempre y la clave de deduplicación bloqueaba todo envío posterior | La configuración se comprueba antes de reclamar; un fallo registrado deja la fila en `failed`; una reclamación `pending` abandonada se recupera por su antigüedad sin robarle la reclamación a un worker vivo | `df2e78f` | mismo archivo | — |
+| A01-CI-01 | CORREGIDO | `npm run typecheck` fallaba con 46 errores y `npm run lint` con 116: la puerta de CI nunca había estado verde | Se corrigen los errores de tipos reales (entre ellos un `''` donde el modelo espera `null` y un vocabulario de tareas desactualizado), las pruebas del frontend pasan a su propio proyecto de TypeScript con los tipos de Node, y los cien `any` del cliente de API y del canal de tiempo real se sustituyen por tipos derivados | `8ec24b5` | `npm run typecheck` (0), `npm run lint` (0), `npm run build`, `npm test` (39 ficheros, 392 pruebas) | El typecheck falla con 46 errores antes de la corrección |
+| A01-OPS-02 | CORREGIDO | La lista de verificación decía «el sidecar de backup está configurado», que es una afirmación sobre un archivo. Además, la prueba de restore exigía el directorio `clients`, que la aplicación **nunca** crea: toda restauración real fallaba | `scripts/backup_gate.sh` hace las siete comprobaciones (habilitada, clave, destino persistente, retención, copia reciente, estado del sidecar, recuperación demostrable) | `f2ed798` | ejecución real contra la base de desarrollo | 7/7 OK con la prueba de restore incluida |
+| A01-OPS-03 | CORREGIDO | El volcado y los conteos se tomaban por separado: una escritura entre ambos hacía fallar la prueba de restore comparando un volcado con los conteos de un estado posterior | Los dos leen **la misma instantánea** (transacción REPEATABLE READ que la exporta, `pg_dump --snapshot` la lee, cada conteo la importa) | `5c91388` | `scripts/test-backup-consistency.sh` | Con el script anterior falla (`clients: backup=503, restore=501`); con el nuevo pasa |
+| A01-OPS-04 | CORREGIDO | `/api/ready` publicaba a cualquier visitante la profundidad de cada cola, la edad del job más viejo y los jobs fallidos | La respuesta pública dice sólo si el despliegue puede tomar trabajo; el detalle queda en `/api/settings/readiness`, detrás de `settings.view` | `5c91388` | `tests/Feature/Ops/ReadinessTest.php` (8) | — |
+| A05-PERF-01 | CORREGIDO | La historia de un cliente leía el actor de cada entrada (50 consultas) y la lista de documentos del portal leía el tipo de cada documento (una por documento). `companies_count` era siempre `null` | Las dos relaciones se cargan con `with()`; el conteo sale de la relación ya cargada | `252a28c` | `tests/Feature/A05/QueryCountTest.php` (3 nuevos) | Los tres casos nuevos fallan contra el código original |
+| A07-REL-01 | CORREGIDO | **Todo** el catálogo de herramientas lo rechazaba un proveedor real: `properties` vacío serializado como `[]` en vez de `{}`, y `"required": []` que los proveedores no aceptan | La corrección está en el único punto donde una herramienta se convierte en payload (`AiToolDefinition::toWire()`) | `5c91388` | certificación LIVE contra Groq, Gemini y Cloudflare | Los tres proveedores pasaron las cinco comprobaciones sólo después de la corrección |
+| QA-UI-01 | PARCIAL | El recorrido con navegador real deja 14 de 75 journeys sin pasar: 6 se quedan en `/login` tras enviar el formulario (el mismo inicio de sesión por HTTP **sí** responde 200), 4 no encuentran un elemento visible, 4 no encuentran un elemento, 1 choca con la regla de elemento único de Playwright y 1 ve un estado de tarea distinto del esperado | No se corrige: no se ha reproducido ni clasificado cada fallo dentro de esta intervención | — | `scripts/run-e2e.sh` contra `consultora_dh_e2e` | 24 journeys pasaron, 37 omitidos, 14 sin pasar | El navegador **sí** está disponible y el recorrido **sí** corre contra la base E2E aislada |
+
+---
+
+## FINAL.1 Qué se cambió y con qué evidencia
+
+### A01-SEC — autenticación y auditoría
+
+| Defecto | Causa comprobada | Corrección | Evidencia de la reproducción |
+| --- | --- | --- | --- |
+| A01-AUTH-01 | El login encendía el query log, volcaba las consultas de la conexión al log, buscaba el usuario dos veces, verificaba el hash dos veces y escribía correo, IP, cuenta y nombre de base de datos | Se elimina **sólo** la instrumentación: una consulta, una comparación, ningún log, ningún query log | `tests/Feature/Auth/LoginInstrumentationTest.php`: 4 de los 10 casos fallan contra el código original |
+| A01-AUD-01 | `AuditRecorder::record()` tragaba toda excepción: un pago, una aplicación, una anulación, una reversión, una afiliación o una importación aplicada podían persistir sin su entrada de auditoría | `AuditAction::isCritical()` declara la clase de cada acción; `recordRequired()` lanza `AuditWriteFailed` y la transacción revierte la mutation; las auxiliares siguen tolerantes, ahora con **savepoint** (en PostgreSQL un INSERT fallido aborta la transacción entera aunque el error se trague en PHP) | `tests/Feature/Audit/CriticalAuditAtomicityTest.php`: 9 de los 12 casos fallan contra el código original. El fallo se fuerza con una **restricción CHECK real** sobre `audit_events`, no con un simulacro |
+
+Clasificación de la auditoría crítica: pagos (registro, aplicación, reversión, anulación),
+obligaciones y sus ajustes, periodos (cierre y reapertura), tarifas y reglas de corte,
+afiliaciones, relaciones, la aplicación de una importación histórica, la creación de
+un administrador y la solicitud de un reporte generado. Todo lo demás es auxiliar.
+
+### A05-REP — reportes programados
+
+- **A05-REP-02**: una ejecución `running` cuyo ejecutor moría quedaba `running` para
+  siempre. Ahora la reclamación lleva **lease** (`lease_expires_at`) y **fence**
+  (`claim_token`): el lease detecta al ejecutor muerto y el token impide que el
+  ejecutor antiguo sobrescriba el resultado del nuevo, envíe una segunda notificación
+  o cierre una reclamación que ya no es suya. La duración del lease es configurable
+  (`REPORT_SCHEDULE_LEASE_SECONDS`, 1800 s por defecto) y **el fence es lo que hace
+  segura la recuperación aunque el lease resultara corto**.
+- **Defecto real encontrado de paso**: `occurrence_key` no estaba en la lista fillable
+  de `GeneratedReport`, así que la protección de asignación masiva lo descartaba en
+  silencio. Toda reporte programada se guardaba sin clave, la comprobación «¿ya existe
+  el artefacto de esta ocurrencia?» nunca encontraba nada y **cada reintento generaba
+  un segundo reporte** de la misma ocurrencia. La columna pasa a ser única.
+- **A05-REP-03**: desactivar una programación ya no reintenta sus ocurrencias
+  pendientes ni fallidas: se bloquean con el motivo registrado (`schedule_inactive`),
+  de modo que la historia dice por qué no se generó nada y la reactivación no revive
+  trabajo cancelado en silencio. Una ejecución ya en marcha no se interrumpe.
+- **A05-REP-04**: el ciclo de vida comprueba que el archivo se escribió de verdad (un
+  `file_put_contents` fallido sólo avisa y deja un artefacto vacío), borra los bytes
+  parciales y trata la auditoría de la solicitud como obligatoria.
+
+### A06-AUTO — automatizaciones
+
+- **A06-AUTO-02**: el estado preliminar se escribe **antes** del despacho y el padre
+  nunca vuelve a escribir un estado preliminar sobre un resultado terminal.
+- **A06-AUTO-03**: la tarea creada por una automatización lleva la acción que la
+  originó, con **índice único** — la garantía es la base de datos, no una búsqueda
+  previa. El correo registra el intento antes de que el mensaje salga, distingue el
+  fallo definitivo de la entrega incierta, no reenvía a ciegas lo que no sabe y
+  conserva la trazabilidad de los intentos. Con varios destinatarios, el estado de la
+  acción se **deriva** del progreso de cada uno.
+- **A06-TG-01**: la configuración se comprueba antes de reclamar la fila; un fallo
+  registrado deja la fila en `failed`; una reclamación `pending` abandonada por un
+  worker muerto se recupera por su antigüedad, sin robarle la reclamación a un worker
+  vivo (la ventana es más larga que el timeout del propio job).
+
+### A01-OPS — CI, backups y readiness
+
+- **A01-CI-01**: el typecheck global pasa sin un solo error y el lint sin un solo
+  error. Entre los errores de tipos reales corregidos están un `''` donde el modelo
+  espera `null` (el formulario de documentos se vaciaba con un valor que el servidor
+  iba a rechazar) y un vocabulario de tareas al que le faltaban `assignees` y
+  `current_user_id`. Las pruebas del frontend pasan a su propio proyecto de
+  TypeScript con los tipos de Node, porque leen el `manifest.json` y el `sw.js`
+  entregados desde el disco: la aplicación —un bundle de navegador— no puede seguir
+  alcanzan `process` ni `node:fs`.
+- **A01-OPS-02**: `scripts/backup_gate.sh` hace las siete comprobaciones que deciden
+  si se puede restaurar ahora mismo. Al ejecutarlo contra este entorno salió un
+  defecto más: la prueba de restore exigía el directorio `clients`, que la aplicación
+  **nunca** crea, así que toda restauración real fallaba y una puerta que lo pidiera
+  nunca podía pasar.
+- **A01-OPS-03**: el volcado y los conteos leen **la misma instantánea**.
+- **A01-OPS-04**: `/api/ready` responde lo único que una sonda necesita; el detalle
+  operativo queda en `/api/settings/readiness`, detrás de `settings.view`.
+
+## FINAL.2 Los cuatro jobs fallidos, clasificados
+
+No se borró ninguno: `failed_jobs` sigue con sus cuatro filas y sus trazas.
+
+| # | Job | Cuándo | Clasificación |
+| --- | --- | --- | --- |
+| 1 | `RunAiTask` (tarea 3) | 2026-10-17 09:28 | `AiToolRejected: El archivo se guardó, pero no fue posible extraer su contenido`. El adjunto se guardó; lo que falló fue la extracción de su contenido. La tarea 3 ya no existe: fue limpiada por el recorrido E2E. **Artefacto de una prueba sintética**, no un fallo operativo |
+| 2 | `RunAiTask` (tarea 4) | 2026-10-17 09:36 | Ídem |
+| 3 | closure serializada | 2026-10-20 16:37 | `Call to a member function bindTo() on null`: el cierre no pudo deserializarse porque su código fuente ya no estaba disponible (el payload guarda el nombre de la función vacío). Ningún código de la aplicación encola closures; pertenece a la herramienta de QA de aquella sesión |
+| 4 | closure serializada | 2026-10-20 16:37 | Ídem, en el mismo segundo |
+
+**Conclusión:** los cuatro son residuos de la actividad de pruebas (E2E y QA) de dos
+días, no fallos operativos. Se conservan; borrar `failed_jobs` para que la sonda
+pareciera limpia sería falsear la disponibilidad.
+
+## FINAL.3 Certificación LIVE de proveedores (Q30)
+
+Ejecutada con `scripts/live_certification.sh` contra los proveedores reales, con
+credenciales reales y datos sintéticos. La evidencia queda **fuera del repositorio**
+(`/tmp/opencode/evidence/`); aquí sólo hay identificadores y resultados.
+
+| Proveedor | Modelo | Clasificación | Herramientas | Datos privados | Resultado | Latencia | Failover |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Groq | `openai/gpt-oss-120b` | standard | sí (`client_search`, y el registro rechaza lo no registrado) | sí | **ok** — 5/5 comprobaciones | 65 363 ms | — |
+| Gemini | `gemini-3.5-flash-lite` | training | sí | sí (política del despliegue: `AI_ALLOW_TRAINING_PROVIDERS=true`) | **ok** — 5/5 | 68 627 ms | — |
+| Cloudflare | `@cf/openai/gpt-oss-120b` | standard | sí | sí | **ok** — 5/5 | 75 389 ms | — |
+| OpenRouter | — | training | — | — | **sin credencial**: no hay `OPENROUTER_API_KEY` en el entorno | — | — |
+
+Las cinco comprobaciones de cada proveedor: pregunta general en español, contexto
+entre turnos, llamada a una herramienta registrada, rechazo de una herramienta fuera
+del registro y serialización con el catálogo real de 22 herramientas.
+
+**Failover real (mismo turno): PASS.** El primario se apuntó a una dirección que no
+contesta (`127.0.0.1:9`), se preguntó de verdad y el turno **continuó** con Groq:
+
+```text
+· groq      openai/gpt-oss-120b   ok
+· 127.0.0.1 modelo-inexistente    failed   HTTP 503 — error de transporte
+El turno continuó: 127.0.0.1 falló y groq respondió con openai/gpt-oss-120b
+```
+
+**`CERTIFIED_INDEPENDENT_PROVIDERS = 3`**, **`PRIVATE_TOOL_CAPABLE_PROVIDERS = 3`**,
+**`FAILOVER_LIVE = PASS`**. Coste: 0 (sólo niveles gratuitos). El valor por defecto
+del código de `AI_ALLOW_TRAINING_PROVIDERS` sigue siendo `false`; el `true` del
+despliegue es la decisión explícita del operador, y el preflight lo dice.
+
+## FINAL.4 Backup y restore
+
+- **A01-OPS-03**: `scripts/test-backup-consistency.sh` levanta una base sintética
+  desechable, escribe sin parar durante el backup y exige que la prueba de restore
+  pase. Con el script anterior falla (`clients: backup=503, restore=501` — un falso
+  FAIL causado por la escritura concurrente); con el nuevo pasa.
+- **A01-OPS-02**: la puerta de backup pasa las **siete** comprobaciones contra la base
+  de desarrollo, con la prueba de restore incluida. La copia y la clave de un solo
+  uso se borraron después.
+
+## FINAL.5 Recorrido con navegador real (Q31)
+
+| Qué | Resultado |
+| --- | --- |
+| Navegador | **Disponible**: Chromium 1243 en `/ms-playwright` del contenedor `node` |
+| Base | **Aislada**: `consultora_dh_e2e` (no la de desarrollo) |
+| Resultado | **24 journeys pasaron, 37 omitidos, 14 sin pasar** (75 en total) |
+| Por qué no se corrige | 6 se quedan en `/login` tras enviar el formulario —el mismo inicio de sesión por HTTP responde 200—, 4 no encuentran un elemento visible, 4 no encuentran un elemento, 1 choca con la regla de elemento único de Playwright y 1 ve un estado de tarea distinto del esperado. **No se ha reproducido ni clasificado cada fallo**, así que no se declaran cerrados |
+
+## FINAL.6 Residuales y bloqueos
+
+| # | Residuo | Gravedad | Por qué queda así |
+| --- | --- | --- | --- |
+| R1 | 14 journeys E2E sin pasar | P2 | Sin clasificación reproducible dentro de esta intervención. El navegador y la base E2E están disponibles; lo que falta es el diagnóstico de cada fallo |
+| R2 | `POST /api/imports/{id}/issues/bulk-resolve` amplification de escrituras | P2 | Hasta 500 incidencias ejecutan al menos 4 consultas cada una dentro de una transacción. **No es un N+1 de lectura** (cada incidencia se valida y escribe por separado, y un fallo individual no puede afectar a las demás): el arreglo sería agrupar bloqueos y lecturas, que es un rediseño del servicio de resolución |
+| R3 | `AI_ALLOW_TRAINING_PROVIDERS` sigue en `true` en el despliegue | P3 | Es la decisión del operador y así lo declara el preflight. El valor por defecto del **código** sigue siendo `false` |
+| R4 | OpenRouter sin credencial | P3 | No hay `OPENROUTER_API_KEY` en el entorno. La aceptación exige tres proveedores y hay tres; un cuarto es objetivo operativo, no puerta |
+| R5 | Telegram LIVE no ejecutado | P3 | `TELEGRAM_BOT_TOKEN` está vacío en el entorno: no hay con qué enviar a un bot real. Lo que sí se probó es el camino de código con respuestas HTTP simuladas, incluida la recuperación de una reclamación abandonada |
+| R6 | SMTP LIVE no ejecutado | P3 | El correo se configured en el entorno (`MAIL_HOST`, `MAIL_USERNAME`), pero no hay un buzón de destino autorizado y no se envía a nadie sin autorización. Se probó la ruta de código con el mailer de pruebas |
+| R7 | `failed_jobs` con las cuatro filas | P3 | Se conservan a propósito (§FINAL.2) |
+| R8 | Sin ejecución real de GitHub Actions | P3 | No hay runner de GitHub en este entorno. El workflow está escrito y es válido, y su puerta de frontend es **exactamente** la que esta intervención dejó en verde (typecheck, lint, build y pruebas), pero **no hay evidencia de una ejecución en GitHub** y no se inventa |
+
+## FINAL.7 Conclusiones por módulo
+
+| Módulo | Veredicto | Con qué está probado |
+| --- | --- | --- |
+| **A01 — Seguridad e infraestructura** | PASS en el código; bloqueos externos declarados | Login completo (10 pruebas nuevas), recuperación de contraseña, sesión rotada, cuenta inactiva, CSRF, RBAC intacto. Auditoría transaccional: 12 pruebas que fuerzan el fallo real del INSERT. Readiness público mínimo y detalle operativo tras `settings.view`. Backup cifrado con restore proof y puerta de siete comprobaciones. Typecheck y lint globales en verde |
+| **A02 — Clientes, empresas y afiliaciones** | PASS | Suite A02 completa dentro de la suite global. La importación dejó de escribir una segunda fila de auditoría por cada creación. El conteo de empresas de la ficha ahora es un número y no `null` |
+| **A03 — Facturación, obligaciones y pagos** | PASS | Suite A03 completa. La aplicación de un pago y su evento de auditoría son una unidad: si el evento no se puede escribir, el pago se revierte. Reversiones y anulaciones con la misma garantía |
+| **A04 — Importación** | PASS | Suite A04 completa. La aplicación de un lote es atómica con su auditoría obligatoria. La fila de la tarea creada por una automatización lleva su origen con índice único |
+| **A05 — Operaciones, documentos y portal** | PASS | Suite A05 completa. Las ejecuciones de reporte abandonadas se recuperan, el resultado antiguo no pisa al nuevo, desactivar una programación detiene su trabajo pendiente y la lista de documentos del portal no cuesta una consulta por fila |
+| **A06 — Soporte y automatizaciones** | PASS | Suite A06 completa. El estado de una automatización es el último que se escribe; la entrega es idempotente y su incertidumbre se declara; Telegram no vuelve a bloquearse por una reclamación `pending` |
+| **A07 — Asistente y documentos** | PASS con evidencia LIVE | **Tres proveedores independientes** con herramientas y failover real en el mismo turno. El catálogo de herramientas es aceptado por los proveedores reales, cosa que antes no lo era |
+
+## FINAL.8 Contrato final
+
+```text
+CONSULTORA_DH_FINAL_RELEASE_GATE
+
+AUDITED_BASE_SHA=e8f88525ef58b4ed00f53e1022291a3272a364e3
+
+BRANCH=fix/a07-xlsx-01-formulas
+FINAL_CODE_SHA=252a28c42cf1ff192813ba15379af803215f452b
+MAIN_SHA=d20195eb601392e802cb8908ebe466262368b32c
+MAIN_UNCHANGED=YES
+GIT_WORKTREE_STATUS= sólo este informe modificado; tres informes de sesiones
+  anteriores (CONSULTORA_DH_IMPORT_6_POST_APPLY_VALIDATION_INFORME.md,
+  LOCAL-RUN-01-INFORME.md, LOCAL-RUN-01-INFORME-CIERRE.md) preservados sin tocar
+
+ORIGINAL_24_REMEDIATIONS_REGRESSION=PASS (suite global verde, 2325 pruebas)
+NEW_P1_FOUND=9
+NEW_P1_FIXED=9
+NEW_P1_OPEN=0
+NEW_P2_FIXED=1
+NEW_P2_OPEN=2 (R1 journeys E2E sin clasificar, R2 amplificación de escrituras
+  en la resolución masiva de incidencias de importación)
+
+AUTH_SECURITY=PASS
+CRITICAL_AUDIT_ATOMICITY=PASS
+REPORT_CRASH_RECOVERY=PASS
+REPORT_DISABLE_SEMANTICS=PASS
+AUTOMATION_STATE_RACE=PASS
+AUTOMATION_IDEMPOTENCY=PASS
+TELEGRAM_DEDUPE_RECOVERY=PASS
+
+A01_TEST_RESULT=PASS
+A02_TEST_RESULT=PASS
+A03_TEST_RESULT=PASS
+A04_TEST_RESULT=PASS
+A05_TEST_RESULT=PASS
+A06_TEST_RESULT=PASS
+A07_TEST_RESULT=PASS
+
+BACKEND_PEST=PASS (2325 passed, 1 skipped, 10641 assertions, 2487 s)
+BACKEND_ASSERTIONS=10641
+PINT=PASS (619 archivos revisados, 0 problemas)
+FRONTEND_ESLINT=PASS (0 errores)
+FRONTEND_TYPECHECK=PASS (0 errores)
+FRONTEND_BUILD=PASS
+FRONTEND_VITEST=PASS (39 ficheros, 392 pruebas, 1 omitida)
+PLAYWRIGHT_Q31=PARTIAL (24 journeys pasaron, 37 omitidos, 14 sin pasar; base E2E
+  aislada, navegador disponible; las 14 no se declaran cerradas)
+
+POSTGRESQL_MIGRATIONS=PASS (4 migraciones nuevas aplicadas y comprobadas sobre la
+  base de pruebas y sobre la base E2E)
+REDIS_QUEUE_PROBE=PASS (un worker Redis real consumió la entrega y el resultado
+  del hijo quedó como último)
+BACKUP_RESTORE=PASS (restore proof sobre base desechable, conteos y archivos
+  comparados uno a uno)
+BACKUP_SNAPSHOT_CONSISTENCY=PASS (backup con escrituras concurrentes: el volcado
+  y los conteos describen la misma instantánea)
+READINESS=PASS (público mínimo; detalle operativo tras `settings.view`)
+FAILED_JOBS_TRIAGE=PASS (4 clasificados y conservados; ninguno operativo)
+CI_GITHUB_RUN=BLOCKED_EXTERNAL (sin runner de GitHub en este entorno; la puerta
+  de frontend del workflow es la que esta intervención dejó en verde)
+
+A07_XLSX_DETERMINISTIC=PASS (suite A07 verde, incluidos los 22 archivos de
+  XLSX y sus fórmulas)
+A07_LIVE_INDEPENDENT_PROVIDERS=3 (Groq, Gemini, Cloudflare — con herramientas)
+A07_REAL_FAILOVER=PASS (mismo turno, primario 127.0.0.1 → Groq)
+SMTP_LIVE=BLOCKED_EXTERNAL (sin buzón de destino autorizado; ruta de código probada)
+TELEGRAM_LIVE=BLOCKED_EXTERNAL (TELEGRAM_BOT_TOKEN vacío; ruta de código probada,
+  incluida la recuperación de una reclamación abandonada)
+
+RUNTIME_TEST_DATABASE_ISOLATED=YES (consultora_dh_test; la huella de la base de
+  desarrollo no se movió)
+PRODUCTION_DATA_UNCHANGED=YES (no hay despliegue de producción en este entorno;
+  la base de desarrollo no recibió escrituras de la certificación, y la cuenta QA
+  y sus conversaciones se borraron)
+QA_RESOURCES_CLEANED=YES (cuenta QA, conversaciones, copias de backup, clave de
+  un solo uso, procesos y sesiones de prueba eliminados)
+TOTAL_NEW_COMMITS=8
+TOTAL_CHANGED_FILES=77
+
+EXTERNAL_BLOCKERS=CI_GITHUB_RUN (sin runner), SMTP_LIVE (sin buzón autorizado),
+  TELEGRAM_LIVE (sin token), OPENROUTER sin credencial (3 de 3 proveedores
+  certificados, el cuarto es objetivo operativo)
+INTERNAL_BLOCKERS=14 journeys E2E sin clasificar; amplificación de escrituras en
+  la resolución masiva de incidencias de importación
+
+CODE_REMEDIATION_RESULT=PASS
+RELEASE_CERTIFICATION=BLOCKED
+MERGE_READY=NO
+FINAL_RESULT=CODE_READY_RELEASE_BLOCKED
+```
+
+**Por qué `RELEASE_CERTIFICATION=BLOCKED` y no `PASS`.** El código de los nueve
+defectos P1 está corregido, probado y con evidencia de reproducción, y la
+certificación LIVE de proveedores está **completa** (tres independientes, con
+herramientas y con failover real en el mismo turno). Lo que falta es externo y no
+depende de este repositorio: no hay runner de GitHub para ejecutar el workflow, no
+hay buzón SMTP autorizado y no hay token de Telegram. A eso se suma un residuo
+interno: catorce journeys del recorrido con navegador siguen sin pasar y no han sido
+clasificados uno a uno.
+
+**`MERGE_READY=NO`**, y por dos razones independientes: quedan journeys E2E sin
+clasificar y `CI_GITHUB_RUN` no tiene evidencia. `FINAL_RESULT=CODE_READY_RELEASE_BLOCKED`
+describe exactamente el estado: el código está listo y la publicación está bloqueada
+por lo que está fuera de este repositorio.
+
+### Lo que falta para que la puerta pase
+
+1. Una ejecución real de GitHub Actions sobre la rama, con su evidencia adjunta.
+2. Un buzón SMTP y un token de Telegram autorizados, y la certificación LIVE de
+   esos dos canales.
+3. La clasificación de los catorce journeys E2E que no pasan: seis de ellos fallan
+   en el inicio de sesión del navegador, que por HTTP sí funciona — ése es el primer
+   hilo que hay que tirar.
