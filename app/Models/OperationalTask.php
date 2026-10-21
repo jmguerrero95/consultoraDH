@@ -21,6 +21,10 @@ class OperationalTask extends Model
         'novelty_id',
         'document_request_id',
         'contribution_sheet_id',
+        // The automation action that produced this task, when there was one.
+        // The unique index on the column is what makes the creation
+        // idempotent across a retry.
+        'automation_action_run_id',
         'title',
         'description',
         'assigned_to',

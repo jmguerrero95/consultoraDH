@@ -29,6 +29,17 @@ class ExecuteAutomationRun implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    /** The preliminary state of an action whose effect is still in flight. */
+    public const ACTION_QUEUED = 'queued';
+
+    /**
+     * The states that say the effect already happened, one way or the other.
+     *
+     * A preliminary state is never written over one of them: a confirmed
+     * result is not erased by a late transition.
+     */
+    private const TERMINAL_ACTION_STATUSES = ['succeeded', 'failed', 'blocked'];
+
     public int $tries = 3;
 
     public int $maxExceptions = 3;
@@ -116,12 +127,16 @@ class ExecuteAutomationRun implements ShouldQueue
             try {
                 $outcome = $this->executeAction($action, $run, $actionRun);
 
-                $this->recordActionStatus($actionRun, [
-                    'status' => $outcome,
-                    // An asynchronous delivery has not happened yet; its job
-                    // closes the row when the mailer or Telegram answers.
-                    'finished_at' => $outcome === 'queued' ? null : now(),
-                ]);
+                // A preliminary state is never written after the effect: the
+                // action that dispatches a delivery job has already written
+                // `queued` **before** the dispatch, so a child that finished
+                // first keeps the result it recorded.
+                if ($outcome !== self::ACTION_QUEUED) {
+                    $this->recordActionStatus($actionRun, [
+                        'status' => $outcome,
+                        'finished_at' => now(),
+                    ]);
+                }
             } catch (\Throwable $e) {
                 Log::error('Automation action failed', [
                     'run_id' => $run->id,
@@ -137,6 +152,33 @@ class ExecuteAutomationRun implements ShouldQueue
         }
 
         $this->finish($run);
+    }
+
+    /**
+     * Write the preliminary state of an action **before** the effect is
+     * attempted.
+     *
+     * The dispatcher used to mark the action `queued` *after* it had
+     * dispatched the delivery job. With an inline queue the child job runs
+     * inside that call and records `succeeded` or `failed`; the parent then
+     * overwrote it with `queued`, and the confirmed result was lost — the
+     * action looked like it was still waiting for a worker that had already
+     * answered.
+     *
+     * Writing it first makes the order irrelevant: the child always finds the
+     * action already marked, and its own write is the last one.
+     */
+    private function markActionQueued(AutomationActionRun $actionRun): void
+    {
+        AutomationActionRun::query()
+            ->whereKey($actionRun->id)
+            ->whereNotIn('status', self::TERMINAL_ACTION_STATUSES)
+            ->update([
+                'status' => self::ACTION_QUEUED,
+                'finished_at' => null,
+            ]);
+
+        $actionRun->refresh();
     }
 
     /**
@@ -305,15 +347,19 @@ class ExecuteAutomationRun implements ShouldQueue
                 $this->executeInternalNotification($action, $run);
                 break;
             case 'create_task':
-                $this->executeCreateTask($action, $run);
+                $this->executeCreateTask($action, $run, $actionRun);
                 break;
             case 'send_email':
+                // The preliminary state goes first: see `markActionQueued()`.
+                $this->markActionQueued($actionRun);
                 $this->executeSendEmail($action, $run, $actionRun);
-                $outcome = 'queued';
+                $outcome = self::ACTION_QUEUED;
                 break;
             case 'send_telegram':
+                // The preliminary state goes first: see `markActionQueued()`.
+                $this->markActionQueued($actionRun);
                 $this->executeSendTelegram($action, $run, $actionRun);
-                $outcome = 'queued';
+                $outcome = self::ACTION_QUEUED;
                 break;
             case 'assign_support_queue':
                 $this->executeAssignSupportQueue($action, $run);
@@ -351,7 +397,7 @@ class ExecuteAutomationRun implements ShouldQueue
         }
     }
 
-    private function executeCreateTask(AutomationAction $action, AutomationRun $run): void
+    private function executeCreateTask(AutomationAction $action, AutomationRun $run, AutomationActionRun $actionRun): void
     {
         $config = $action->config;
         $assignee = User::find($config['assignee_user_id'] ?? 0);
@@ -360,15 +406,26 @@ class ExecuteAutomationRun implements ShouldQueue
             throw new \InvalidArgumentException('Invalid or inactive assignee');
         }
 
-        // Use A05's authoritative column names
-        OperationalTask::create([
-            'title' => $config['title'],
-            'description' => $config['description'] ?? '',
-            'assigned_to' => $assignee->id,
-            'priority' => $config['priority'] ?? 'normal',
-            'due_on' => $config['due_on'],
-            'created_by' => $run->rule->owner_user_id,
-        ]);
+        // The action run is the origin of the task, and the unique index on
+        // `automation_action_run_id` is what makes the creation idempotent.
+        //
+        // A crash between the INSERT and the recording of `succeeded` used to
+        // produce a **second** task on the retry: the effect had happened and
+        // nobody could tell, because the only record of it was the action's
+        // own status. A search on its own would not have been enough — two
+        // workers can search at the same moment — so the guarantee is the
+        // index, and the search is only the read path.
+        OperationalTask::query()->firstOrCreate(
+            ['automation_action_run_id' => $actionRun->id],
+            [
+                'title' => $config['title'],
+                'description' => $config['description'] ?? '',
+                'assigned_to' => $assignee->id,
+                'priority' => $config['priority'] ?? 'normal',
+                'due_on' => $config['due_on'] ?? null,
+                'created_by' => $run->rule->owner_user_id,
+            ],
+        );
     }
 
     private function executeSendEmail(AutomationAction $action, AutomationRun $run, AutomationActionRun $actionRun): void

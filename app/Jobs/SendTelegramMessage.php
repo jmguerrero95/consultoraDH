@@ -27,6 +27,21 @@ class SendTelegramMessage implements ShouldQueue
 
     public int $timeout = 30;
 
+    /**
+     * How long a `pending` delivery is honoured before it is considered
+     * abandoned.
+     *
+     * A delivery row is claimed before the message leaves, so a worker that
+     * dies leaves the row `pending`. Nothing else would ever move it: the
+     * retry path only takes over rows that are `failed`. The delivery would
+     * stay `pending` for ever and the dedupe key would refuse every future
+     * send with that key.
+     *
+     * The window is the job's own timeout plus a margin, so a worker that is
+     * still sending is never robbed of its claim.
+     */
+    public const ABANDONED_AFTER_SECONDS = 60;
+
     public function __construct(
         public int $endpointId,
         public string $message,
@@ -41,6 +56,22 @@ class SendTelegramMessage implements ShouldQueue
         if (! $endpoint || ! $endpoint->enabled) {
             Log::info('Telegram endpoint not found or disabled', ['endpoint_id' => $this->endpointId]);
             $this->recordOutcome('failed', 'telegram_endpoint_unavailable');
+
+            return;
+        }
+
+        // The configuration is checked **before** the claim.
+        //
+        // The claim used to come first, so a missing token left a `pending`
+        // delivery row behind: the retry path only takes over rows that are
+        // `failed`, and the unique index refused a second row with the same
+        // key. The delivery stayed `pending` for ever and every future send
+        // with that key was declined as "already in flight".
+        $token = config('services.telegram.bot_token') ?? env('TELEGRAM_BOT_TOKEN');
+
+        if (! $token) {
+            Log::error('Telegram bot token not configured');
+            $this->recordOutcome('failed', 'telegram_token_missing');
 
             return;
         }
@@ -61,15 +92,6 @@ class SendTelegramMessage implements ShouldQueue
             // declare, so the action stays queued until that worker reports.
             $existing = SupportDelivery::query()->where('dedupe_key', $dedupeKey)->value('status');
             $this->recordOutcome($existing === 'sent' ? 'succeeded' : 'queued', $existing === 'sent' ? null : 'delivery_in_flight');
-
-            return;
-        }
-
-        $token = config('services.telegram.bot_token') ?? env('TELEGRAM_BOT_TOKEN');
-
-        if (! $token) {
-            Log::error('Telegram bot token not configured');
-            $this->recordOutcome('failed', 'telegram_token_missing');
 
             return;
         }
@@ -144,6 +166,34 @@ class SendTelegramMessage implements ShouldQueue
      */
     private function claimDedupeKey(string $dedupeKey): ?SupportDelivery
     {
+        // An abandoned claim: a `pending` row whose worker is gone.
+        //
+        // The row is the claim, and the claim is taken before the message
+        // leaves. A worker that dies leaves it `pending`, and the retry path
+        // only takes over rows that are `failed` — so the delivery stayed
+        // `pending` for ever and every later send with that key was declined
+        // as "already in flight".
+        //
+        // The age is the evidence: a worker that is still sending has not
+        // touched the row, and the window is longer than the job's own
+        // timeout, so a live worker is never robbed of its claim.
+        $abandonedBefore = now()->subSeconds(self::ABANDONED_AFTER_SECONDS);
+
+        $reclaimed = SupportDelivery::query()
+            ->where('dedupe_key', $dedupeKey)
+            ->where('status', 'pending')
+            ->where('updated_at', '<', $abandonedBefore)
+            ->update([
+                'status' => 'pending',
+                'attempts' => DB::raw('support_deliveries.attempts + 1'),
+                'last_error_code' => null,
+                'updated_at' => now(),
+            ]);
+
+        if ($reclaimed > 0) {
+            return SupportDelivery::where('dedupe_key', $dedupeKey)->first();
+        }
+
         $retried = SupportDelivery::query()
             ->where('dedupe_key', $dedupeKey)
             ->where('status', 'failed')
