@@ -25,13 +25,15 @@ final class CreateClient
 {
     /**
      * @param  array<string, string|null>  $attributes
+     * @param  array<string, mixed>  $auditContext  extra trail context (the batch that caused
+     *                                              the change), merged into the audit entry
      */
-    public function execute(array $attributes, User $actor): Client
+    public function execute(array $attributes, User $actor, array $auditContext = []): Client
     {
         $documentType = DocumentType::from($attributes['document_type']);
         $documentNumber = DocumentNumber::normalise($attributes['document_number'], $documentType);
 
-        return DB::transaction(function () use ($attributes, $actor, $documentType, $documentNumber): Client {
+        return DB::transaction(function () use ($attributes, $actor, $documentType, $documentNumber, $auditContext): Client {
             $client = Client::query()->create([
                 'document_type' => $documentType->value,
                 'document_number' => $documentNumber,
@@ -47,7 +49,7 @@ final class CreateClient
                 'status' => $attributes['status'] ?? RecordStatus::Active->value,
             ]);
 
-            event(new ClientCreated($client, $actor));
+            event(new ClientCreated($client, $actor, $auditContext));
 
             return $client;
         });

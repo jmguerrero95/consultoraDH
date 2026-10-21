@@ -194,7 +194,11 @@ final class ApplyImportPlan
                     throw $this->strandedFailure($counts['stranded']);
                 }
 
-                $this->audit->record(
+                // Mandatory: a batch applied is a bulk financial write, and an applied
+                // batch without its trail entry is a set of masters nobody can trace.
+                // `recordRequired()` raises if the row cannot be written, and the apply
+                // transaction rolls the whole batch back with it.
+                $this->audit->recordRequired(
                     AuditAction::ImportApplied,
                     $claimed->creator,
                     [
@@ -1078,16 +1082,15 @@ final class ApplyImportPlan
         // Through A02's own action, which normalises the NIT through `TaxIdParts` and fires
         // `CompanyCreated`. A04-R1 used `firstOrCreate`, which bypassed both — so a company
         // created by an import had no audit event and whatever normalisation A02 guarantees.
+        //
+        // The batch linkage travels *inside* that event rather than as a second row: the
+        // company used to get two `company.created` entries for one creation, which reads
+        // in the trail as a company created twice.
         $company = $this->companies->execute(
             ['tax_id' => $taxId] + $attributes,
             $import->creator,
+            $this->importContext($import, $action),
         );
-
-        $this->audit->record(AuditAction::CompanyCreated, $import->creator, [
-            'import_uuid' => $import->uuid,
-            'action_fingerprint' => $action->batch_fingerprint,
-            'source_rows' => $action->source_row_ids,
-        ], subject: $company);
 
         return ['type' => Company::class, 'id' => (int) $company->id];
     }
@@ -1161,15 +1164,17 @@ final class ApplyImportPlan
             // records which of the two moved. `forceFill()` could not: §7.2's rule is that the
             // digit travels with the NIT, and writing one without the other is exactly the
             // inconsistency A02's `TaxIdUpdate` exists to prevent.
-            $company = $this->companyUpdates->execute($company, $changes, $import->creator);
+            //
+            // The batch linkage travels inside that event instead of as a second row, and when
+            // nothing actually changed no event is fired at all: the plan asked for a change
+            // that turned out to be a no-op, and there is nothing to audit.
+            $company = $this->companyUpdates->execute(
+                $company,
+                $changes,
+                $import->creator,
+                $this->importContext($import, $action) + ['fields' => $fields],
+            );
         }
-
-        $this->audit->record(AuditAction::CompanyUpdated, $import->creator, [
-            'import_uuid' => $import->uuid,
-            'action_fingerprint' => $action->batch_fingerprint,
-            'fields' => $fields,
-            'source_rows' => $action->source_row_ids,
-        ], subject: $company);
 
         return ['type' => Company::class, 'id' => (int) $company->id];
     }
@@ -1216,13 +1221,14 @@ final class ApplyImportPlan
         // A04-R1's `firstOrCreate` did neither: an imported client's document was stored exactly
         // as the spreadsheet wrote it, so `CC 10101010` and `10101010` were two different people
         // even though §7.1 says identity is `DocumentType + DocumentNumber` *using A02's classes*.
-        $client = $this->clients->execute($attributes + $values, $import->creator);
-
-        $this->audit->record(AuditAction::ClientCreated, $import->creator, [
-            'import_uuid' => $import->uuid,
-            'action_fingerprint' => $action->batch_fingerprint,
-            'source_rows' => $action->source_row_ids,
-        ], subject: $client);
+        //
+        // The batch linkage travels inside that event rather than as a second row: the client
+        // used to get two `client.created` entries for one creation.
+        $client = $this->clients->execute(
+            $attributes + $values,
+            $import->creator,
+            $this->importContext($import, $action),
+        );
 
         return ['type' => Client::class, 'id' => (int) $client->id];
     }
@@ -1280,15 +1286,16 @@ final class ApplyImportPlan
             // `ClientUpdated` with exactly the fields that moved. `forceFill()->save()` wrote
             // straight to the table and left the audit trail to this class's own record — so a
             // client's profile changed with no event for anything else in the system to observe.
-            $client = $this->clientUpdates->execute($client, $changes, $import->creator);
+            //
+            // The batch linkage travels inside that event instead of as a second row, and when
+            // nothing actually changed no event is fired at all.
+            $client = $this->clientUpdates->execute(
+                $client,
+                $changes,
+                $import->creator,
+                $this->importContext($import, $action) + ['fields' => $fields],
+            );
         }
-
-        $this->audit->record(AuditAction::ClientUpdated, $import->creator, [
-            'import_uuid' => $import->uuid,
-            'action_fingerprint' => $action->batch_fingerprint,
-            'fields' => $fields,
-            'source_rows' => $action->source_row_ids,
-        ], subject: $client);
 
         return ['type' => Client::class, 'id' => (int) $client->id];
     }
@@ -1331,13 +1338,7 @@ final class ApplyImportPlan
             'name' => $name,
             'code' => null,
             'tax_id' => null,
-        ], $import->creator);
-
-        $this->audit->record(AuditAction::SocialSecurityEntityCreated, $import->creator, [
-            'import_uuid' => $import->uuid,
-            'action_fingerprint' => $action->batch_fingerprint,
-            'source_rows' => $action->source_row_ids,
-        ], subject: $entity);
+        ], $import->creator, $this->importContext($import, $action));
 
         return $this->withApprovedMapping($import, $action, $payload, $type, $name, $entity);
     }
@@ -1371,6 +1372,26 @@ final class ApplyImportPlan
      * created by hand in the meantime" case is handled by `durableEffect()` at review time instead.
      * Both reach the same helper.
      */
+    /**
+     * The batch linkage that travels inside the audit entry of a domain action.
+     *
+     * The import used to write its *own* `company.created` / `client.created` row in
+     * addition to the one the domain action fired, so a single creation left two rows
+     * with the same action and the same subject — which reads in the trail as a company
+     * created twice. The linkage now rides inside the domain event, so there is one row
+     * per change and it still says which batch caused it.
+     *
+     * @return array<string, mixed>
+     */
+    private function importContext(LegacyImport $import, LegacyImportAction $action): array
+    {
+        return [
+            'import_uuid' => $import->uuid,
+            'action_fingerprint' => $action->batch_fingerprint,
+            'source_rows' => $action->source_row_ids,
+        ];
+    }
+
     private function withApprovedMapping(
         LegacyImport $import,
         LegacyImportAction $action,
@@ -1835,7 +1856,10 @@ final class ApplyImportPlan
             // one amount per pair per month, and the write made two.
             $existing->forceFill(['amount_cop' => $amount])->save();
 
-            $this->audit->record(AuditAction::RateUpdated, $import->creator, [
+            // A rate decides how much is charged, so its trail entry is mandatory:
+            // `recordRequired()` raises if the row cannot be written, and the apply
+            // transaction rolls the amount back with it.
+            $this->audit->recordRequired(AuditAction::RateUpdated, $import->creator, [
                 'import_uuid' => $import->uuid,
                 'action_fingerprint' => $action->batch_fingerprint,
                 'effective_month' => $effectiveMonth,
@@ -1852,7 +1876,7 @@ final class ApplyImportPlan
             'amount_cop' => $amount,
         ]);
 
-        $this->audit->record(AuditAction::RateCreated, $import->creator, [
+        $this->audit->recordRequired(AuditAction::RateCreated, $import->creator, [
             'import_uuid' => $import->uuid,
             'action_fingerprint' => $action->batch_fingerprint,
             'effective_month' => $effectiveMonth,

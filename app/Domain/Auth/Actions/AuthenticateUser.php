@@ -11,7 +11,6 @@ use App\Domain\Users\UserStatus;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 
@@ -28,6 +27,12 @@ use Illuminate\Validation\ValidationException;
  *    response time does not reveal whether the account exists.
  *  - The session identifier is regenerated on success, which defeats session
  *    fixation.
+ *  - The attempt is described in the audit trail, not in the application log.
+ *    A sign in writes one query and one hash comparison, and says nothing else:
+ *    the address, the address' owner and the connection's database name are
+ *    not written to a log file, and the query log is never switched on, because
+ *    a diagnostic switch left enabled for the life of the connection keeps
+ *    every later statement — with its bindings — in memory.
  */
 final class AuthenticateUser
 {
@@ -43,48 +48,20 @@ final class AuthenticateUser
      */
     public function execute(Request $request, string $email, string $password, bool $remember = false): User
     {
-        \Log::info('AuthenticateUser execute', [
-            'email_received' => $email,
-            'password_length' => strlen($password),
-            'email_normalized' => mb_strtolower(trim($email)),
-            'request_ip' => $request->ip(),
-        ]);
-
         $email = mb_strtolower(trim($email));
 
         $user = User::query()->where('email', $email)->first();
 
-        DB::enableQueryLog();
-        $user = User::query()->where('email', $email)->first();
-        $queries = DB::getQueryLog();
-        \Log::info('AuthenticateUser query', ['queries' => $queries]);
-
-        \Log::info('AuthenticateUser connection', [
-            'connection' => $user?->getConnectionName() ?? 'no user',
-            'table' => $user?->getTable() ?? 'no user',
-            'db_name' => DB::connection()->getDatabaseName(),
-            'app_env' => app()->environment(),
-            'config_db' => config('database.connections.pgsql.database'),
-        ]);
-
-        \Log::info('AuthenticateUser user lookup', [
-            'user_found' => $user !== null,
-            'user_id' => $user?->id,
-            'user_email' => $user?->email,
-            'user_status' => $user?->status?->value,
-            'user_account_type' => $user?->account_type,
-        ]);
-
         if ($user === null) {
+            // The same work is done for an unknown address, so the time the
+            // endpoint takes does not disclose whether the account exists.
             $this->burnTime();
 
             $this->reject($request, $email, null);
         }
 
-        \Log::info('AuthenticateUser password check', [
-            'password_check' => Hash::check($password, $user->password),
-        ]);
-
+        // One comparison per attempt. Verifying the hash twice would double
+        // the cost of every rejection for no reason.
         if (! Hash::check($password, $user->password)) {
             $this->reject($request, $email, $user);
         }

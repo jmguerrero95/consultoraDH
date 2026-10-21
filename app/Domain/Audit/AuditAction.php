@@ -195,4 +195,72 @@ enum AuditAction: string
     case AiProposalConfirmed = 'ai.proposal.confirmed';
     case AiProposalRejected = 'ai.proposal.rejected';
     case AiProposalFailed = 'ai.proposal.failed';
+
+    /**
+     * Whether the action is a *mandatory* audit event.
+     *
+     * ## What this decides
+     *
+     * A critical action is one whose business effect cannot exist without its
+     * trail entry: money in, money applied, money taken back, a debt adjusted,
+     * a period closed, a rate changed, an affiliation or a relation changed, a
+     * historical batch applied, an administrator created with a role.
+     *
+     * For those, the audit write and the business write are **one transactional
+     * unit**. If the trail entry cannot be written, the mutation is rolled back
+     * with it: a payment that exists without a `payment.created` row is money
+     * nobody can explain, and a trail that can be missing an entry is not a
+     * trail.
+     *
+     * Everything else is an *auxiliary* event: informative, worth recording, but
+     * not worth failing a request over. A missing `support.note.created` row
+     * must not roll back the note.
+     *
+     * The classification is declared here, next to the catalogue, so that
+     * adding an action means deciding its class at the same time.
+     */
+    public function isCritical(): bool
+    {
+        return match ($this) {
+            // A03 — money. Registering, applying, reversing and voiding a payment
+            // are the four movements of the ledger.
+            self::PaymentCreated,
+            self::PaymentAllocated,
+            self::PaymentAutoAllocated,
+            self::PaymentAllocationReversed,
+            self::PaymentVoided => true,
+
+            // A03 — what is owed, and the period that owns it.
+            self::ObligationGenerated,
+            self::ObligationAdjusted,
+            self::ObligationAdjustmentReversed,
+            self::PeriodCreated,
+            self::PeriodClosed,
+            self::PeriodReopened => true,
+
+            // A03 — the rules that decide how much is charged.
+            self::RateCreated,
+            self::RateUpdated,
+            self::CutoffRuleCreated,
+            self::CutoffRuleUpdated => true,
+
+            // A02 — who is covered by whom, and by which company. These decide
+            // which obligations exist at all.
+            self::RelationshipCreated,
+            self::RelationshipClosed,
+            self::RelationshipTransferred,
+            self::RelationshipParallelAuthorized,
+            self::AffiliationCreated,
+            self::AffiliationClosed,
+            self::AffiliationChanged => true,
+
+            // A04 — a historical batch applied is a bulk financial write.
+            self::ImportApplied => true,
+
+            // A01 — an administrator is a role and a set of permissions.
+            self::AdministratorCreated => true,
+
+            default => false,
+        };
+    }
 }

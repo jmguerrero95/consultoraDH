@@ -91,6 +91,13 @@ final class CreateAdminCommand extends Command
 
                 $admin->assignRole($roleName);
 
+                // Inside the transaction on purpose. `admin.created` is a mandatory
+                // audit event: an administrator is a role and a set of permissions, and
+                // an account that exists without its trail entry is an account nobody
+                // can explain later. Dispatched outside, a failed write would leave
+                // the account committed and the trail empty.
+                event(new AdministratorCreated($admin));
+
                 return $admin;
             });
         } catch (Throwable $e) {
@@ -98,8 +105,6 @@ final class CreateAdminCommand extends Command
 
             return self::FAILURE;
         }
-
-        event(new AdministratorCreated($admin));
 
         $this->newLine();
         $this->info('Administrador creado correctamente.');

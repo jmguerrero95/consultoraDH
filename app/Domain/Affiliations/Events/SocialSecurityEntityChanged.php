@@ -28,14 +28,17 @@ final readonly class SocialSecurityEntityChanged implements AuditableEvent, Subj
         public array $changed,
         public ?string $from = null,
         public ?string $to = null,
+        /** @var array<string, mixed> */
+        public array $context = [],
     ) {}
 
     /**
      * @param  list<string>  $changed
+     * @param  array<string, mixed>  $context  extra trail context supplied by the caller
      */
-    public static function created(SocialSecurityEntity $entity, User $actor): self
+    public static function created(SocialSecurityEntity $entity, User $actor, array $context = []): self
     {
-        return new self($entity, $actor, AuditAction::SocialSecurityEntityCreated, []);
+        return new self($entity, $actor, AuditAction::SocialSecurityEntityCreated, [], null, null, $context);
     }
 
     /**
@@ -90,6 +93,6 @@ final readonly class SocialSecurityEntityChanged implements AuditableEvent, Subj
             $metadata['to'] = $this->to;
         }
 
-        return $metadata;
+        return array_merge($metadata, $this->context);
     }
 }

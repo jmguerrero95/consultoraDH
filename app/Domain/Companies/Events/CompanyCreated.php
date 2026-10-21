@@ -13,9 +13,15 @@ use Illuminate\Database\Eloquent\Model;
 
 final readonly class CompanyCreated implements AuditableEvent, SubjectAware
 {
+    /**
+     * @param  array<string, mixed>  $context  extra trail context supplied by the caller
+     *                                         (for example the historical batch that caused
+     *                                         the creation), merged into the audit entry
+     */
     public function __construct(
         public Company $company,
         public User $actor,
+        public array $context = [],
     ) {}
 
     public function auditAction(): AuditAction
@@ -38,12 +44,12 @@ final readonly class CompanyCreated implements AuditableEvent, SubjectAware
      */
     public function auditMetadata(): array
     {
-        return [
+        return array_merge([
             'legal_name' => $this->company->legal_name,
             'tax_id' => $this->company->tax_id,
             // The display form, so a history reader sees `900.123.456-3`
             // instead of a bare column value.
             'tax_id_label' => $this->company->taxIdLabel(),
-        ];
+        ], $this->context);
     }
 }

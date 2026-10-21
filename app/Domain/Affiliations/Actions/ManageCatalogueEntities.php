@@ -28,12 +28,14 @@ final class ManageCatalogueEntities
 {
     /**
      * @param  array<string, string|null>  $attributes
+     * @param  array<string, mixed>  $auditContext  extra trail context (the batch that caused
+     *                                              the change), merged into the audit entry
      */
-    public function create(array $attributes, User $actor): SocialSecurityEntity
+    public function create(array $attributes, User $actor, array $auditContext = []): SocialSecurityEntity
     {
         $type = SocialSecurityEntityType::from($attributes['type']);
 
-        return DB::transaction(function () use ($attributes, $actor, $type): SocialSecurityEntity {
+        return DB::transaction(function () use ($attributes, $actor, $type, $auditContext): SocialSecurityEntity {
             $entity = SocialSecurityEntity::query()->create([
                 'type' => $type->value,
                 'name' => $attributes['name'],
@@ -66,7 +68,7 @@ final class ManageCatalogueEntities
                 'regulatory_class_source' => $this->nullIfBlank($attributes['regulatory_class_source'] ?? null),
             ], static fn (mixed $value): bool => $value !== null))->save();
 
-            event(SocialSecurityEntityChanged::created($entity, $actor));
+            event(SocialSecurityEntityChanged::created($entity, $actor, $auditContext));
 
             return $entity;
         });

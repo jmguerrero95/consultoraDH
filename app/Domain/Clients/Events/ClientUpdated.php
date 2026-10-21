@@ -23,11 +23,13 @@ final readonly class ClientUpdated implements AuditableEvent, SubjectAware
 {
     /**
      * @param  list<string>  $changed
+     * @param  array<string, mixed>  $context  extra trail context supplied by the caller
      */
     public function __construct(
         public Client $client,
         public User $actor,
         public array $changed,
+        public array $context = [],
     ) {}
 
     public function auditAction(): AuditAction
@@ -50,8 +52,8 @@ final readonly class ClientUpdated implements AuditableEvent, SubjectAware
      */
     public function auditMetadata(): array
     {
-        return [
+        return array_merge([
             'changed_fields' => $this->changed,
-        ];
+        ], $this->context);
     }
 }

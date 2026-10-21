@@ -26,11 +26,14 @@ final class CreateCompany
 {
     /**
      * @param  array<string, string|null>  $attributes
+     * @param  array<string, mixed>  $auditContext  extra trail context (the batch
+     *                                              that caused the change), merged into
+     *                                              the audit entry of this action
      *
      * @throws InvalidTaxId when the NIT is present and is not a NIT
      * @throws InvalidVerificationDigit when a verification digit is not a single digit
      */
-    public function execute(array $attributes, User $actor): Company
+    public function execute(array $attributes, User $actor, array $auditContext = []): Company
     {
         $parts = TaxIdParts::from($attributes);
         $taxId = $parts['tax_id'];
@@ -48,7 +51,7 @@ final class CreateCompany
             );
         }
 
-        return DB::transaction(function () use ($attributes, $actor, $taxId, $digit): Company {
+        return DB::transaction(function () use ($attributes, $actor, $taxId, $digit, $auditContext): Company {
             $company = Company::query()->create([
                 'legal_name' => $attributes['legal_name'],
                 'trade_name' => $attributes['trade_name'] ?? null,
@@ -62,7 +65,7 @@ final class CreateCompany
                 'status' => $attributes['status'] ?? RecordStatus::Active->value,
             ]);
 
-            event(new CompanyCreated($company, $actor));
+            event(new CompanyCreated($company, $actor, $auditContext));
 
             return $company;
         });

@@ -21,9 +21,15 @@ use Illuminate\Database\Eloquent\Model;
  */
 final readonly class ClientCreated implements AuditableEvent, SubjectAware
 {
+    /**
+     * @param  array<string, mixed>  $context  extra trail context supplied by the caller
+     *                                         (for example the historical batch that caused
+     *                                         the creation), merged into the audit entry
+     */
     public function __construct(
         public Client $client,
         public User $actor,
+        public array $context = [],
     ) {}
 
     public function auditAction(): AuditAction
@@ -50,9 +56,9 @@ final readonly class ClientCreated implements AuditableEvent, SubjectAware
         // already reachable through the subject, so a second copy of someone's
         // name is personal data stored for no operational reason, and it is the
         // kind of copy that later drifts from the original.
-        return [
+        return array_merge([
             'document_type' => $this->client->document_type->value,
             'document_number' => $this->client->document_number,
-        ];
+        ], $this->context);
     }
 }

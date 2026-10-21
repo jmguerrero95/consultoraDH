@@ -25,8 +25,10 @@ final class UpdateClient
 {
     /**
      * @param  array<string, string|null>  $attributes
+     * @param  array<string, mixed>  $auditContext  extra trail context, merged into the
+     *                                              audit entry of this action
      */
-    public function execute(Client $client, array $attributes, User $actor): Client
+    public function execute(Client $client, array $attributes, User $actor, array $auditContext = []): Client
     {
         $editable = [
             'first_names',
@@ -40,7 +42,7 @@ final class UpdateClient
 
         $changed = [];
 
-        return DB::transaction(function () use ($client, $attributes, $actor, $editable, &$changed): Client {
+        return DB::transaction(function () use ($client, $attributes, $actor, $editable, &$changed, $auditContext): Client {
             foreach ($editable as $field) {
                 if (! array_key_exists($field, $attributes)) {
                     continue;
@@ -61,7 +63,7 @@ final class UpdateClient
             if ($changed !== []) {
                 $client->save();
 
-                event(new ClientUpdated($client, $actor, $changed));
+                event(new ClientUpdated($client, $actor, $changed, $auditContext));
             }
 
             return $client->refresh();
