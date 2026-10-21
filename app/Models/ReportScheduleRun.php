@@ -14,6 +14,17 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * (schedule, occurrence) is the claim: two scheduler ticks cannot both own the
  * same occurrence, and a failed one stays recoverable instead of disappearing
  * behind an advanced `next_run_at`.
+ *
+ * ## The lease and the fence
+ *
+ * `lease_expires_at` says how long the current claim is honoured. A `running`
+ * occurrence whose lease has expired is a claim nobody is honouring any more
+ * — the executor died — and the next tick may take it over.
+ *
+ * `claim_token` is the fence. The executor writes its outcome with
+ * `WHERE claim_token = :token`, so an executor whose lease expired while it
+ * was still working cannot overwrite the result of the executor that took the
+ * occurrence over.
  */
 class ReportScheduleRun extends Model
 {
@@ -36,12 +47,15 @@ class ReportScheduleRun extends Model
         'generated_report_id',
         'started_at',
         'finished_at',
+        'lease_expires_at',
+        'claim_token',
     ];
 
     protected $casts = [
         'attempts' => 'integer',
         'started_at' => 'datetime',
         'finished_at' => 'datetime',
+        'lease_expires_at' => 'datetime',
     ];
 
     public function schedule(): BelongsTo

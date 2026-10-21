@@ -29,6 +29,15 @@ class GeneratedReport extends Model
         'status',
         'failure_code',
         'failure_message',
+        // The idempotency key of a scheduled occurrence.
+        //
+        // It was missing from this list, and mass-assignment protection
+        // dropped it silently: every scheduled report was stored with a null
+        // key, so the runner's "does the artifact already exist?" lookup never
+        // found anything and every retry produced a **second** report of the
+        // same occurrence. The unique index on the column was there, guarding
+        // a value that was never written.
+        'occurrence_key',
     ];
 
     protected $casts = [

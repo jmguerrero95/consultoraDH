@@ -92,11 +92,33 @@ final class ReportGenerator
         $absolute = $this->disk()->path($relative);
         $directory = dirname($absolute);
 
-        if (! is_dir($directory)) {
-            mkdir($directory, 0o750, true);
+        if (! is_dir($directory) && ! @mkdir($directory, 0o750, true) && ! is_dir($directory)) {
+            // A storage that refuses the directory is a storage that will
+            // refuse the file. Saying so here is what keeps an empty
+            // "successful" report out of the archive.
+            throw new \RuntimeException('No se pudo crear el directorio del reporte.');
         }
 
-        $this->writeToFile($workbook, $type, $format, $absolute);
+        try {
+            $this->writeToFile($workbook, $type, $format, $absolute);
+        } catch (\Throwable $e) {
+            // A writer that failed half way may have left bytes behind. They
+            // point at nothing, so they go.
+            $this->disk()->delete($relative);
+
+            throw $e;
+        }
+
+        // The exporters are not modified: they work. But `file_put_contents()`
+        // does not throw when the disk is full — it warns and writes nothing,
+        // and the report would be registered as a zero-byte artifact. The
+        // check belongs in the lifecycle, which is where the artifact is
+        // published.
+        if (! is_file($absolute) || filesize($absolute) <= 0) {
+            $this->disk()->delete($relative);
+
+            throw new \RuntimeException('El archivo del reporte no se pudo escribir.');
+        }
 
         // The file is written first and the row second, so a database failure can be
         // cleaned up by hand; the reverse order would leave a row claiming a file that
@@ -116,7 +138,7 @@ final class ReportGenerator
                 'occurrence_key' => $occurrence,
             ]);
 
-            $this->audit->record(AuditAction::GeneratedReportRequested, $actor, [
+            $this->audit->recordRequired(AuditAction::GeneratedReportRequested, $actor, [
                 'report_type' => $type->value,
                 'format' => $format->value,
                 'generated_report_id' => (int) $row->id,

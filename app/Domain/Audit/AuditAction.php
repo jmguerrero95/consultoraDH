@@ -257,6 +257,13 @@ enum AuditAction: string
             // A04 — a historical batch applied is a bulk financial write.
             self::ImportApplied => true,
 
+            // A05 — a generated report is a private artifact full of personal
+            // data and money. It is published for download only if the request
+            // that produced it is in the trail, so the audit entry and the
+            // artifact are one unit: a failure to record it removes the file
+            // and the row instead of leaving an untraceable download.
+            self::GeneratedReportRequested => true,
+
             // A01 — an administrator is a role and a set of permissions.
             self::AdministratorCreated => true,
 
