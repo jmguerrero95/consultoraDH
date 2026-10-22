@@ -65,7 +65,18 @@ jobs:
     env:
       APP_ENV: testing
       APP_DEBUG: 'false'
-      APP_KEY: base64:ZmFrZS1rZXktZm9yLWNpLW9ubHktMzItYnl0ZXMh
+      # 32 bytes, base64-encoded, because AES-256-CBC accepts exactly that:
+      #   `php -r 'echo strlen(base64_decode("..."));'`
+      #
+      # The value this job used before decoded to 30 bytes, and the encrypter
+      # refuses it with
+      #
+      #     RuntimeException: Unsupported cipher or incorrect key length.
+      #
+      # That made 1065 tests fail in CI while every one of them passed locally,
+      # where `.env` holds a real key. It is a fixed, public, fake key on
+      # purpose: the suite needs a key, not a secret.
+      APP_KEY: base64:Y29uc3VsdG9yYS1kaC1jaS1mYWtlLWtleS0zMmJ5dGU=
       DB_CONNECTION: testing
       DB_HOST: 127.0.0.1
       DB_PORT: '5432'
@@ -188,7 +199,9 @@ jobs:
 
     env:
       APP_ENV: testing
-      APP_KEY: base64:ZmFrZS1rZXktZm9yLWNpLW9ubHktMzItYnl0ZXMh
+      # The same 32-byte fake key as the `php` job: the LIVE run also boots the
+      # encrypter, and a 30-byte key cannot.
+      APP_KEY: base64:Y29uc3VsdG9yYS1kaC1jaS1mYWtlLWtleS0zMmJ5dGU=
       DB_CONNECTION: testing
       DB_HOST: 127.0.0.1
       DB_PORT: '5432'
