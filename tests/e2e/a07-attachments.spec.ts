@@ -155,7 +155,21 @@ test.describe('GATE 7: attached documents reach the assistant', () => {
         expect(typeof answer.body.reply).toBe('string');
 
         // The value from the spreadsheet, and not merely some text.
-        expect(answer.body.reply).toContain(EXPECTED_VALUE);
+        //
+        // The comparison is made on the **normalised** answer, because a text
+        // formatter may quote the marker with a typographic hyphen — U+2011, the
+        // non-breaking one — where the document carries the ASCII hyphen. What
+        // has to be the same is the *identifier*, so the hyphens that are
+        // typographic substitutes for the ASCII one are folded before the
+        // comparison.
+        //
+        // It is still an exact match of the whole identifier: a different
+        // identifier, a prefix of it, or a figure that merely looks like it
+        // still fails. The document is not touched, and neither is the answer:
+        // only the comparison normalises.
+        const normalizada = (answer.body.reply as string).replace(/[\u2010\u2011\u2012]/g, '-');
+
+        expect(normalizada).toContain(EXPECTED_VALUE);
 
         // 6. And the retrieval is scoped to that conversation.
         //

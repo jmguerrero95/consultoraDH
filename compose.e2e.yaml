@@ -269,6 +269,51 @@ services:
     networks:
       - consultora-dh
 
+  # The front-end server the suite's browser loads, with the file watcher off.
+  #
+  # ## Why the watcher is off here and on in development
+  #
+  # The development stack polls the filesystem (`VITE_USE_POLLING=1`) because the
+  # documented stack bind-mounts the project from a Windows directory through
+  # WSL, and that mount delivers no inotify events: with polling off the server
+  # would go on serving the transformation from its last start, and the browser
+  # would show an interface that no longer matches the source, with nothing
+  # failing to say so. That is a real problem for a person editing code.
+  #
+  # It is **not** a problem for the suite, and it costs the suite a great deal.
+  # Polling a project tree that lives on a Windows-mounted filesystem is slow,
+  # and Vite waits for the watcher to settle before it answers a module it has
+  # not transformed yet. Measured on this stack, the first request for a page
+  # component took **about ten seconds**:
+  #
+  #     polling on   /resources/js/app.ts                   9345 ms
+  #     polling off  /resources/js/app.ts                     76 ms
+  #     polling on   /resources/js/pages/portal/SupportInbox.vue   9775 ms
+  #     polling off  /resources/js/pages/portal/SupportInbox.vue    250 ms
+  #     polling on   /resources/js/pages/clients/ClientDetailPage.vue  10202 ms
+  #     polling off  /resources/js/pages/clients/ClientDetailPage.vue    169 ms
+  #
+  # Ten seconds is longer than the suite's whole per-assertion budget, so the
+  # first visit to a screen could not finish inside it: the journey failed on a
+  # screen that was about to be correct. That is not a defect of the product and
+  # it is not a reason to raise the timeouts: the honest fix is to stop paying
+  # for a watcher the suite does not use.
+  #
+  # ## Nothing stale can be served
+  #
+  # The watcher is what invalidates a module that has already been transformed.
+  # `scripts/run-e2e.sh` **recreates** this service on every run, so the server
+  # always starts from the tree as it is at that moment and transforms every
+  # module from disk. The browser and the application are therefore on the same
+  # version of the code, which is the property that matters — and it is
+  # guaranteed by the recreation rather than by the watcher.
+  #
+  # The development stack keeps its own service with polling on, so a person
+  # editing code still sees the change.
+  node:
+    environment:
+      VITE_USE_POLLING: "0"
+
   nginx-e2e:
     image: nginx:1.31-alpine
     container_name: consultora-dh-nginx-e2e

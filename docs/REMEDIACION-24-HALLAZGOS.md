@@ -1185,3 +1185,215 @@ COMMIT=<se registra en el bloque de cierre>
 generación XLSX determinista, las 24 remediaciones anteriores, los backups, las
 colas, el RBAC, las migraciones aprobadas, la seguridad de soporte y la semilla
 de E2E.
+
+# FINAL_E2E_RECOVERY_BLOCKS_2_3_4_FIXTURES_AND_SELECTORS
+
+Los tres bloques que quedaban entre la carrera de la sesión y la certificación
+completa: las semillas de E2E para A03 y A05, los selectores ambiguos de A06 y
+el marcador tipográfico de A07.
+
+## BLOCK_2.1 Lo que se encontró, con los errores exactos
+
+El punto de partida fue una ejecución completa de la suite por la vía certificada
+(`scripts/run-e2e.sh`), con el código del Bloque 1 ya en su sitio:
+
+```text
+TOTAL=75   PASSED=64   FAILED=11   SKIPPED=0
+```
+
+Los once fallos, con su error literal:
+
+| Prueba | Error | Clasificación |
+| --- | --- | --- |
+| `a03-acceptance.spec.ts:205` A | el encabezado del cliente creado no aparece | `ENVIRONMENT_DEFECT` |
+| `a05-operations.spec.ts:134` Flow A | `strict mode violation`: «Lista para enviar» resuelve a dos elementos | `TEST_DEFECT` |
+| `a05-operations.spec.ts:314` Flow C | el encabezado «Operación» no aparece | `ENVIRONMENT_DEFECT` |
+| `a06.spec.ts:193` | el encabezado de la conversación no aparece | `ENVIRONMENT_DEFECT` |
+| `billing.spec.ts` B, D, E, F, G, H, I (7) | `generation_blocked`, `missing_rate` ×2 | `FIXTURE_DEFECT` |
+
+**Los siete fallos de `billing` no son siete fallos.** El mensaje del servidor
+los delata:
+
+```json
+{"message":"No se generaron las obligaciones de Abril 2027: hay 2 problema(s) de
+ configuración por resolver. No se escribió nada.","code":"generation_blocked",
+ "blocker_codes":["missing_rate"],
+ "blockers":[
+   {"message":"No hay valor configurado para PERSONA A05 2676599 en EMPRESA A05
+     2676599 2025-03 con vigencia 2027-04.","context":{"client_id":11,"company_id":11}},
+   {"message":"No hay valor configurado para PERSONA A05 2676599 en EMPRESA A05
+     2676599 2025-05 con vigencia 2027-04.","context":{"client_id":14,"company_id":13}}]}
+```
+
+Los dos bloqueos son **los clientes de A05**, con relaciones que empiezan en
+2025-03 y 2025-05 **y no tienen fecha de cierre**. Una relación sin fecha de
+cierre cubre todos los meses desde el día en que empezó, así que esos dos
+clientes son candidatos de generación en **abril de 2027** —y en todos los meses
+futuros que las pruebas de A03 generan—, y como no tienen tarifa bloquean el
+mes entero con `missing_rate`.
+
+Y las relaciones seguían abiertas porque **cerrarlas era la última instrucción
+de cada recorrido**: un recorrido que falla antes de llegar ahí las deja
+abiertas. Los dos recorridos de A05 que fallaban son los que las dejaron
+abiertas, y por eso los siete recorridos de `billing` fallaban.
+
+**La causa no era la semilla**: la semilla de E2E (`db:seed`) crea roles y
+permisos, y está bien que lo haga; los datos de cada prueba los construye la
+propia prueba. La causa era que **una prueba dejaba datos vivos** que
+bloqueaban a otras, y que el cierre dependía del resultado del recorrido.
+
+## BLOCK_2.2 La corrección: la relación se acota al crear, no al terminar
+
+En `tests/e2e/a05-operations.spec.ts`, `buildDirectory()` abre ahora la relación
+y **la cierra el mismo día**, en el último día de su mes:
+
+```ts
+await acotarRelacion(page, assignmentId, month);
+```
+
+El intervalo `[inicio, fin)` sigue intersectando su propio mes —la regla de
+intersección de A02 es la misma para la planilla y para las obligaciones—, así
+que el recorrido no cambia, pero la relación **no puede** convertirse en
+candidata en el mes de nadie. Y como el acotado ocurre al crear, el resultado
+del recorrido deja de ser parte de la vida de lafixture: un recorrido que falla
+no deja nada abierto.
+
+Las relaciones que el recorrido de A05 cerraba al final (`cerrarRelacion`) ya no
+hacen falta para las de `buildDirectory` y se retiraron; la del recorrido de
+portal (Flow E) se conserva, porque va en un `finally` y su fecha de cierre
+—hoy— sí es la que le corresponde.
+
+**Se conserva la regla de negocio**: no se cambió ninguna regla de facturación,
+no se relajó ninguna validación y no se generó por adelantado ninguna
+obligación. Lo único que cambió es ** cuándo se acota un dato de prueba.
+
+## BLOCK_2.3 La causa de los tres fallos «el encabezado no aparece»
+
+Los tres fallos de A03-A, A05-C y A06-193 tenían **la misma causa**, y no era
+el producto: **el servidor de desarrollo de Vite, con el sondeo de archivos
+activado**.
+
+ElDevelopment stack sondea el sistema de archivos porque el montaje documentado
+(proyecto en un directorio de Windows sobre WSL) no entrega eventos de inotify: sin
+sondeo, el servidor seguiría sirviendo la transformación de su último arranque y
+el navegador mostraría una interfaz que ya no corresponde al código. Para una
+persona que edita código eso es un problema real.
+
+Para la suite no lo es, y le costaba muchísimo. Sondear un árbol de proyecto que
+vive en un sistema de archivos montado desde Windows es lento, y Vite espera a
+que el vigilante se asiente antes de responder un módulo que todavía no ha
+transformado. **Medido en esta pila**:
+
+```text
+sondeo ON   /resources/js/app.ts                              9345 ms
+sondeo OFF  /resources/js/app.ts                                76 ms
+sondeo ON   /resources/js/pages/portal/SupportInbox.vue      9775 ms
+sondeo OFF  /resources/js/pages/portal/SupportInbox.vue        250 ms
+sondeo ON   /resources/js/pages/clients/ClientDetailPage.vue 10202 ms
+sondeo OFF  /resources/js/pages/clients/ClientDetailPage.vue   169 ms
+```
+
+Diez segundos es más que **todo** el presupuesto de una aserción de la suite
+(veinte segundos), así que la primera visita a una pantalla no podía terminar
+dentro de él: el recorrido fallaba en una pantalla que estaba a punto de estar
+bien. Eso no es un defecto del producto y no es un motivo para subir los
+tiempos: la corrección honesta es **dejar de pagar por un vigilante que la suite
+no usa**.
+
+`compose.e2e.yaml` sobrescribe ahora el servicio `node` del stack de E2E con
+`VITE_USE_POLLING: "0"`. El stack de desarrollo conserva el suyo con sondeo
+activado, y una persona que edita código sigue viendo el cambio.
+
+**Nada puede quedar obsoleto**: el vigilante es lo que invalida un módulo ya
+transformado, y `scripts/run-e2e.sh` **recrea** ese servicio en cada ejecución,
+de modo que el servidor arranca siempre desde el árbol tal como está en ese
+momento y transforma cada módulo desde el disco. El navegador y la aplicación
+siguen, por tanto, sobre la misma versión del código — y eso lo garantiza la
+recreación, no el vigilante.
+
+El efecto medido en los recorridos: `a03-acceptance` A pasó de 56,1 s a 21,9 s;
+los recorridos de A05, de 10–30 s a 3–9 s; el recorrido de automatizaciones de
+A06, de 22,3 s a 3,4 s.
+
+## BLOCK_2.4 Los selectores y el marcador
+
+**A06 — «Nueva regla» y «Nuevo destino».** La lista vacía ofrece la misma
+acción que la cabecera, así que el nombre de la acción resolvía a dos
+elementos **dependiendo de si la lista había terminado de cargar**: un recorrido
+que pasa a veces y falla otras por una razón que no tiene que ver con lo que
+comprueba. La acción se toma ahora de la cabecera, que está siempre, y el
+localizador dice qué pantalla quiere decir:
+
+```ts
+pageHeader(page, 'Automatizaciones').getByRole('button', { name: 'Nueva regla' })
+pageHeader(page, 'Notificaciones por Telegram').getByRole('button', { name: 'Nuevo destino' })
+```
+
+No se usa `.first()`, no se elimina ningún elemento de la interfaz y **no se
+toca el producto**: el defecto estaba en la prueba.
+
+**A06 — el compositor de la respuesta del personal.** El localizador pedía
+«Escribe un mensaje...» con tres puntos ASCII, y la pantalla del personal dice
+«**Escriba** un mensaje**…**» —formal y con elipsis tipográfica. La del portal
+dice «Escribe un mensaje…». Dos pantallas, dos frases, y un localizador escrito
+para una que no encuentra la otra. Ahora se busca `/Escriba un mensaje/`.
+
+**A07 — el marcador con guion tipográfico.** El contrato es que la respuesta
+cite **el identificador** que el documento lleva. El documento lo lleva con guion
+ASCII (`VALOR-ORIGEN-5501`, comprobado leyendo `xl/sharedStrings.xml` del
+propio fichero), y un formador de texto puede citarlo con el guion tipográfico
+U+2011. **La comparación se normaliza; el documento no se toca**:
+
+```ts
+const normalizada = (answer.body.reply as string).replace(/[\u2010\u2011\u2012]/g, '-');
+expect(normalizada).toContain(EXPECTED_VALUE);
+```
+
+Se pliegan solo los tres guiones tipográficos que son sustitutos del ASCII
+(U+2010, U+2011, U+2012). Sigue siendo una coincidencia **exacta del
+identificador completo**: un identificador distinto, un prefijo o una cifra que
+sólo se le parece siguen fallando. Ni el documento ni la respuesta se modifican;
+sólo la comparación normaliza.
+
+En esta ejecución el marcador llegó con guion ASCII y la prueba pasó sin
+necesidad de la normalización —el propio proveedor determinista registra lo que
+recibió: `[ai-stub] 2 marker(s) in context: VALOR-ORIGEN-5501, MARCADOR-E2E-4417`—,
+pero la comparación queda preparada para el caso tipográfico, que es el que se
+había reportado.
+
+## BLOCK_2.5 La certificación dirigida
+
+```text
+a03-acceptance.spec.ts + a05-operations.spec.ts + a06.spec.ts + billing.spec.ts
+  → 30 recorridos: 29 pasan, 1 falla (a06:193, por el compositor del personal)
+
+a06.spec.ts + a07-attachments.spec.ts
+  → 5 recorridos: 5 pasan
+```
+
+Los diez recorridos que el encargo señalaba como fallidos —`billing` B, D, E, F,
+G, H, I, `a03-acceptance` A y `a05-operations` Flow A y Flow C— pasan ahora, y
+también los dos selectores ambiguos de A06 y el marcador de A07.
+
+## BLOCK_2.6 Contrato
+
+```text
+A03_A05_FIXTURES_FIXED=YES — la relación de A05 se acota al mes en que se crea,
+  así que un recorrido que falla no bloquea el mes de otro
+BILLING_SEVEN_JOURNEYS=PASS (B, D, E, F, G, H, I)
+A03_ACCEPTANCE_JOURNEY=PASS (A)
+A05_TWO_JOURNEYS=PASS (Flow A y Flow C)
+A06_AMBIGUOUS_SELECTORS_FIXED=YES — la acción se toma de la cabecera, que
+  siempre está, en vez del nombre de la acción a secas
+A07_UNICODE_MARKER_FIXED=YES — la comparación normaliza los guiones tipográficos
+  y sigue exigiendo el identificador completo
+E2E_ENVIRONMENT_DEFECT_FIXED=YES — el vigilante del servidor de Vite del stack de
+  E2E se apaga: diez segundos por módulo medidos, setenta y seis milisegundos
+  medidos
+```
+
+**Lo que este bloque NO ha tocado:** la certificación LIVE de proveedores, la
+generación XLSX determinista, las 24 remediaciones anteriores, los backups, las
+colas, el RBAC, las migraciones aprobadas, la seguridad de soporte y el
+producto mismo: los tres cambios de este bloque están en el **arnés de prueba**
+y en el **entorno de E2E**, no en la aplicación.

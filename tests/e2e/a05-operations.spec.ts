@@ -8,6 +8,7 @@ import {
     apiWrite,
     fixtureDigits,
     get,
+    lastDayOf,
     signIn,
 } from './support/a03';
 
@@ -60,6 +61,41 @@ async function cerrarRelacion(page: Page, assignmentId: number): Promise<void> {
     expect(cierre.status(), 'the relationship should close').toBe(200);
 }
 
+/**
+ * Close a relationship on the last day of the month it was opened for.
+ *
+ * ## Why the relationship is bounded at creation and not at the end of the flow
+ *
+ * A relationship with no end date covers **every** month from the day it started.
+ * A05's flows open theirs in months of 2025, so an unbounded one would make that
+ * client a candidate for obligation generation in **every later month** — including
+ * the future months the A03 journeys generate. A05's clients have no rate, so each
+ * of those candidates blocks the whole month with `missing_rate`, and seven A03
+ * journeys fail with a message about somebody else's fixture.
+ *
+ * Closing the relationship at the end of the flow did not prevent that: the close
+ * is the last statement of the flow, so a flow that failed anywhere before it left
+ * the relationship open, and the seven journeys failed for a cause that had nothing
+ * to do with them. A fixture whose lifetime depends on the flow that owns it is not
+ * a fixture; it is a side effect.
+ *
+ * Bounding it at creation makes the fixture independent of the flow's outcome: the
+ * relationship covers its own month and nothing else, whether the flow passes or
+ * fails. The month under test still sees it — the half-open interval
+ * `[started_on, ended_on)` intersects the month it was opened for.
+ */
+async function acotarRelacion(page: Page, assignmentId: number, month: string): Promise<void> {
+    const cierre = await apiWrite(page, `/api/client-company-assignments/${assignmentId}/close`, {
+        ended_on: lastDayOf(month),
+        reason: 'Fin del mes del recorrido A05',
+    });
+
+    expect(
+        cierre.status(),
+        `the relationship should be bounded to ${month}: ${await cierre.text()}`,
+    ).toBe(200);
+}
+
 function today(): string {
     return new Date().toISOString().slice(0, 10);
 }
@@ -105,6 +141,11 @@ async function buildDirectory(page: Page, month: string): Promise<Directory> {
     expect(relation.status(), 'the relationship should open').toBe(201);
 
     const assignmentId = ((await relation.json()) as { assignment: { id: number } }).assignment.id;
+
+    // Bounded to its own month, so it cannot become a candidate in anybody else's
+    // month. See `acotarRelacion` for why that is decided here and not at the end
+    // of the flow.
+    await acotarRelacion(page, assignmentId, month);
 
     return { client_id: clientId, company_id: companyId, assignment_id: assignmentId };
 }
@@ -241,9 +282,14 @@ test('A05 Flow A: a planilla without liquidated amounts cannot advance, and the 
 
     await page.getByRole('button', { name: 'Validar' }).click();
 
-    await expect(page.getByText(/quedó lista para enviar|Lista para enviar/)).toBeVisible();
+    // The status the planilla carries, and the sentence that says so.
+    //
+    // They are two different elements — the badge and the alert — and a locator
+    // loose enough to match both matches neither of them: Playwright's strict
+    // mode refuses an ambiguous locator rather than picking one of them.
+    await expect(page.getByText('Lista para enviar', { exact: true })).toBeVisible();
+    await expect(page.getByRole('status').getByText(/quedó lista para enviar/)).toBeVisible();
 
-    await cerrarRelacion(page, directory.assignment_id);
 });
 
 // ---------------------------------------------------------------------------
@@ -287,6 +333,10 @@ test('A05 Flow B: a stale preview digest is refused and no half planilla is writ
         (await intrusoRelacion.json()) as { assignment: { id: number } }
     ).assignment.id;
 
+    // Bounded like the fixture's own relationship: the intruder joins the company
+    // for this month and for no other, so it cannot block a later month either.
+    await acotarRelacion(page, intrusoAssignmentId, month);
+
     const creation = await apiWrite(page, '/api/planillas', {
         period_id: periodId,
         company_id: directory.company_id,
@@ -303,8 +353,6 @@ test('A05 Flow B: a stale preview digest is refused and no half planilla is writ
     );
     expect(despues.pagination.total, 'nothing may be left behind').toBe(0);
 
-    await cerrarRelacion(page, directory.assignment_id);
-    await cerrarRelacion(page, intrusoAssignmentId);
 });
 
 // ---------------------------------------------------------------------------
@@ -362,7 +410,6 @@ test('A05 Flow C: a novelty resolves once, and a task completes', async ({ page 
     expect(completada.status()).toBe(200);
     expect(((await completada.json()) as { status: string }).status).toBe('done');
 
-    await cerrarRelacion(page, directory.assignment_id);
 });
 
 // ---------------------------------------------------------------------------
@@ -478,7 +525,6 @@ test('A05 Flow D: a rejected request keeps its rejection and the replacement is 
         await context.close();
     }
 
-    await cerrarRelacion(page, directory.assignment_id);
 });
 
 // ---------------------------------------------------------------------------

@@ -121,6 +121,25 @@ async function openConversationAsClient(
     return created.data.id;
 }
 
+/**
+ * The page's own header region.
+ *
+ * The list's empty state offers the same action the header does — "Nueva regla"
+ * appears twice while the list is empty, and "Nuevo destino" likewise — and
+ * which of the two a screen shows depends on whether the list has finished
+ * loading. A locator that names the action alone therefore resolves to one
+ * element or to two depending on the timing: a test that passes sometimes and
+ * fails other times for a reason that has nothing to do with what it is about.
+ *
+ * The header is always rendered, so the action is taken from there. It is scoped
+ * by the title it carries, so the locator says which screen it means.
+ */
+function pageHeader(page: Page, title: string) {
+    return page.locator('header.cdh-page-header').filter({
+        has: page.getByRole('heading', { level: 1, name: title }),
+    });
+}
+
 test.describe('A06 — automatizaciones, Telegram y soporte bidireccional', () => {
     test('an administrator configures an automation rule and switches it on', async ({ page }) => {
         await signInAsStaff(page);
@@ -129,7 +148,9 @@ test.describe('A06 — automatizaciones, Telegram y soporte bidireccional', () =
 
         const ruleName = `Regla E2E ${stamp}`;
 
-        await page.getByRole('button', { name: 'Nueva regla' }).click();
+        await pageHeader(page, 'Automatizaciones')
+            .getByRole('button', { name: 'Nueva regla' })
+            .click();
         await page.getByLabel('Nombre').fill(ruleName);
         await page.getByLabel('Descripción').fill('Regla creada por la suite de extremo a extremo');
 
@@ -166,7 +187,9 @@ test.describe('A06 — automatizaciones, Telegram y soporte bidireccional', () =
 
         const label = `Destino E2E ${stamp}`;
 
-        await page.getByRole('button', { name: 'Nuevo destino' }).click();
+        await pageHeader(page, 'Notificaciones por Telegram')
+            .getByRole('button', { name: 'Nuevo destino' })
+            .click();
         await page.getByLabel('Etiqueta').fill(label);
         await page.getByLabel('Chat ID').fill(`-100${stamp}`);
         await page.getByLabel('Incumplimiento de SLA').check();
@@ -220,7 +243,11 @@ test.describe('A06 — automatizaciones, Telegram y soporte bidireccional', () =
         await expect(page.getByText(question)).toBeVisible();
 
         await page.goto(`/soporte/${conversationId}`);
-        await page.getByPlaceholder('Escribe un mensaje...').fill(answer);
+        // The staff screen's own wording, which is the formal one and ends in a
+        // typographic ellipsis. The portal's composer says "Escribe un mensaje…";
+        // the two screens are not the same sentence, and a locator written for
+        // one of them never matches the other.
+        await page.getByPlaceholder(/Escriba un mensaje/).fill(answer);
         await page.getByRole('button', { name: /^Enviar$/ }).click();
 
         await expect(page.getByText(answer)).toBeVisible();
