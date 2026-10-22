@@ -81,7 +81,20 @@ jobs:
       QUEUE_CONNECTION: sync
       SESSION_DRIVER: array
       MAIL_MAILER: array
-      BROADCAST_CONNECTION: null
+      # `'null'`, quoted, and not the YAML null.
+      #
+      # The framework's own convention for "no broadcasting" is the *string*
+      # `null` — `config/broadcasting.php` reads `env('BROADCAST_CONNECTION',
+      # 'null')`. Written unquoted, YAML turns it into the null value, GitHub
+      # Actions passes it as the empty string, and `composer install` dies in
+      # its `post-autoload-dump` step with
+      #
+      #     In BroadcastManager.php line 304:
+      #       Broadcast connection [] is not defined.
+      #
+      # before a single test has run. The quoted form is what `phpunit.xml`
+      # already uses for the same variable.
+      BROADCAST_CONNECTION: 'null'
       # No provider credential reaches the suite: a test that needs one builds
       # its own fake. A credential here would let a test spend a real quota.
       AI_PRIMARY_API_KEY: ''
