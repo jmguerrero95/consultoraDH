@@ -474,7 +474,7 @@ it('keeps the delivery result when the delivery runs on a real redis worker', fu
     // this test: otherwise the job lands in the shared `default` queue and
     // stays there, and the readiness probe of another test finds it.
     app()->forgetInstance('queue');
-    Illuminate\Support\Facades\Queue::clearResolvedInstance('queue');
+    Queue::clearResolvedInstance('queue');
 
     [$rule, $action] = auto06Rule('send_email', [
         'recipient_type' => 'specific_user',
