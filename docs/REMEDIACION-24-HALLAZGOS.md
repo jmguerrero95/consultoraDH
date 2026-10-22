@@ -941,3 +941,247 @@ sesión ya corregida — no de producto.
 **Lo que este bloque NO ha tocado:** la certificación LIVE de proveedores, la
 generación XLSX determinista, las 24 remediaciones anteriores, los backups, las
 colas, el RBAC, los migraciones aprobadas y la seguridad de soporte.
+
+# SESSION_RECOVERY_AFTER_MINIMAX_INTERRUPTION
+
+Recuperación del estado de la sesión interrumpida (`OpenAI Chat stream ended
+without finish_reason` con MiniMax M3.1 Flash Free) y punto de partida del
+cierre E2E definitivo.
+
+## SESSION_RECOVERY.1 Qué se encontró
+
+```text
+RECOVERY_BASE_SHA=dda2542fedee51cac66f1610f5661156e303715b
+CURRENT_HEAD=dda2542fedee51cac66f1610f5661156e303715b
+CURRENT_BRANCH=fix/a07-xlsx-01-formulas
+UNCOMMITTED_FILES=app/Http/Middleware/PreserveSessionCookies.php, bootstrap/app.php, tests/Feature/Auth/StaleSessionCookieTest.php
+RECOVERED_WORK=la reescritura del middleware de la cookie de sesión, el registro del middleware en el grupo `web` y la reescritura del fichero de pruebas para que usara el pipeline real
+ALREADY_COMPLETED_TASKS=la hipótesis del orden del middleware (análisis), la reescritura del middleware, el cambio de registro, la reescritura de las pruebas, un `Log::debug` de instrumentación sin quitar
+INCOMPLETE_TASKS=quitar la instrumentación de depuración, corregir el ayudante de cookies del arnés de pruebas, añadir la prueba del orden del middleware, la carrera con 20 iteraciones, la prueba de CSRF y la de cambio de cuenta, ejecutar, confirmar y commit
+NEXT_TASK=Bloque 1 — cerrar la carrera de la cookie de sesión
+```
+
+**No había ningún commit nuevo** después de `dda2542`: la rama estaba exactamente en
+la base, con tres archivos modificados sin confirmar. El trabajo en curso se
+**conservó**: no se sobrescribió ni se restauró nada, y la reescritura del
+middleware que la sesión anterior había dejado se terminó en lugar de
+rehacerse.
+
+Los tres ficheros `.md` sin seguimiento (`CONSULTORA_DH_IMPORT_6_POST_APPLY_VALIDATION_INFORME.md`,
+`LOCAL-RUN-01-INFORME.md`, `LOCAL-RUN-01-INFORME.md`) son **ajenos** a este
+trabajo: son de julio, de sesiones anteriores, y se han dejado intactos.
+
+## SESSION_RECOVERY.2 Lo que estaba a medias y por qué no funcionaba
+
+La reescritura del middleware era correcta en su idea y **estaba a medio
+implementar**:
+
+1. **La instrumentación de depuración** (`\Log::debug('PSC', …)`) escribía en el
+   registro los primeros caracteres de la cookie de sesión y de su valor
+   descifrado en cada respuesta. Eso es una fuga de identificadores de sesión al
+   registro y no podía quedarse.
+2. **Las pruebas usaban el ayudante equivocado del arnés.** El middleware
+   comparaba el valor **descifrado** de la cookie, y eso es lo correcto: el
+   framework cifra cada respuesta con un vector inicial aleatorio, así que dos
+   respuestas con el mismo contenido llevan valores distintos y la comparación
+   en crudo nunca coincidiría. Pero las pruebas entregaban la cookie ya
+   cifrada con `withCookie()`, que **vuelve a cifrar** el valor que se le da
+   (`Illuminate\Foundation\Testing\Concerns\MakesHttpRequests::prepareCookiesForRequest`).
+   La cookie salía **cifrada dos veces**, no se podía descifrar, y la
+   comparación fallaba siempre: la prueba era verde contra un middleware que no
+   hacía nada, y el defecto seguía en Chromium. Un navegador manda la cookie
+   tal cual, que es `withUnencryptedCookie()`.
+
+El diagnóstico quedó **medido**, no supuesto: el registro mostraba que el valor
+«llegado» seguía siendo el sobre cifrado (`eyJpdiI6…`) mientras que el
+«enviado» sí se descifraba (`N1WCLFXDwm`, el inicio de un id de sesión).
+
+# FINAL_E2E_RECOVERY_BLOCK_1_SESSION_RACE
+
+Cierre del Bloque 1: la carrera de la cookie de sesión, con la causa
+demostrada sobre el pipeline real.
+
+Base: `dda2542fedee51cac66f1610f5661156e303715b` · Rama: `fix/a07-xlsx-01-formulas` ·
+`main` intacto en `d20195eb601392e802cb8908ebe466262368b32c`.
+
+## BLOCK_1.1 La causa, medida sobre el código instalado
+
+`Illuminate\Session\Middleware\StartSession::handleStatefulRequest()` hace, en
+este orden:
+
+```php
+$response = $next($request);          // ← aquí corre el resto del grupo
+$this->addCookieToResponse($response, $session);   // ← la cookie entra AQUÍ
+```
+
+La cookie de sesión se pone en la respuesta **después** de que corren los
+middleware que están **dentro** de `StartSession`. El grupo `web` de Laravel 13
+es, en este repositorio y con el código de `HEAD`:
+
+```text
+0  EncryptCookies
+1  AddQueuedCookiesToResponse
+2  StartSession
+3  ShareErrorsFromSession
+4  PreventRequestForgery
+5  SubstituteBindings
+6  PreserveSessionCookies      ← el que había
+```
+
+`PreserveSessionCookies` estaba en el índice **6**: dentro de `StartSession`, de
+modo que inspeccionaba una respuesta que **todavía no tenía** la cookie de
+sesión y, por tanto, no podía quitarla. El middleware era inerte y sus pruebas
+—que lo invocaban en aislamiento con una respuesta fabricada a mano— pasaban.
+
+**La hipótesis del encargo era correcta, y queda comprobada sobre el código
+real de `vendor/`, no sobre una lectura.**
+
+Medida directa, con el código de `HEAD` restaurado y las pruebas nuevas en su
+sitio:
+
+```text
+Failed asserting that 6 is less than 2.
+```
+
+(6 = la posición del middleware; 2 = la de `StartSession`.)
+
+## BLOCK_1.2 Qué se cambió
+
+**Una sola causa, un solo cambio de sitio, ninguna otra alteration.**
+
+`PreserveSessionCookies` **extiende** `Illuminate\Cookie\Middleware\EncryptCookies`
+y **reemplaza** a `EncryptCookies` en el grupo `web`:
+
+```php
+$middleware->replaceInGroup('web', EncryptCookies::class, PreserveSessionCookies::class);
+```
+
+Eso lo coloca en el índice **0**, que es el único sitio que cumple las dos
+condiciones a la vez:
+
+- está **fuera** de `StartSession`, así que la cookie de sesión ya está en la
+  respuesta cuando se la inspecciona;
+- está **dentro** de `EncryptCookies`, así que puede descifrar tanto la cookie
+  que llegó como la que la respuesta lleva —y el framework sigue cifrando y
+  descifrando exactamente igual que antes, con la misma lista de cookies que no
+  cifra.
+
+**La regla**, sin cambios respecto a la que la sesión anterior dejó escrita:
+
+> Una respuesta **no vuelve a mandar** una cookie cuyo valor es exactamente el
+> que la petición ya traía. El navegador ya lo tiene; repetirlo no cambia nada
+> — salvo cuando el navegador ha avanzado, que es la carrera, y ahí deshacía lo
+> que había pasado.
+
+Lo que **no** se tocó:
+
+- `session()->regenerate()` al entrar: sigue igual. La defensa contra la
+  fijación de sesión no se debilita; lo que cambia es que una respuesta vieja
+  ya no puede quitarla.
+- La protección CSRF: la cookie de CSRF se compara con el mismo método y se
+  mueve con la de sesión. La cookie de CSRF lleva el token que vive **dentro**
+  de la sesión, y `regenerate()` genera un token nuevo, así que la respuesta del
+  acceso lleva un token distinto del que llegó y **se conserva**.
+- El RBAC, los roles, la auditoría y los límites de herramientas: intactos.
+- `CookieValuePrefix`, `EncryptCookies::$except` y `EncryptCookies::$neverEncrypt`:
+  los usa la clase del framework, así que su comportamiento es el de siempre.
+
+## BLOCK_1.3 Lo que cuesta, dicho con claridad
+
+Una respuesta que repite el mismo identificador **ya no renueva la caducidad de
+la cookie**: el navegador conserva la que tiene, con la caducidad que recibió
+al crearse la sesión. La sesión que una persona sostiene queda acotada por
+`session.lifetime` (120 minutos) **contados desde el último cambio de
+identificador** —es decir, desde el acceso—, en lugar de correr hacia adelante
+con cada petición.
+
+Es el precio de quitar la carrera, y es el mismo precio que pagan los
+frameworks que no reenvían la cookie de sesión en cada respuesta: **el servidor
+no puede distinguir una respuesta actual de una tardía**, así que la única
+regla que puede aplicar es «no repitas lo que el navegador ya tiene». La
+sesión del lado del servidor sigue caducando por su propio tiempo de inactividad
+(`session.lifetime`), así que **el servidor no confía en una sesión más tiempo
+que antes**. Queda anotado como residual, no escondido.
+
+## BLOCK_1.4 Las pruebas
+
+`tests/Feature/Auth/StaleSessionCookieTest.php`: **12 casos, 194 aserciones**,
+todos por el **pipeline real** (la petición entra con la cookie que la propia
+aplicación emitió y la aserción es sobre la cookie que la propia aplicación
+manda de vuelta). Las pruebas unitarias del middleware son complementarias; no
+sustituyen a la del pipeline.
+
+| Caso | Qué prueba |
+| --- | --- |
+| el orden del middleware | `PreserveSessionCookies` está antes de `StartSession` en el grupo `web`, y `EncryptCookies` ya no está: es la causa, medida |
+| no repite la cookie de sesión | la segunda respuesta con la misma sesión no lleva cookie |
+| no repite la cookie de CSRF | la cookie de CSRF se mueve con la de sesión |
+| el acceso sigue rotando | la sesión rota es distinta y el navegador la recibe |
+| no debilita la sesión de una cuenta | `/api/auth/me` sigue respondiendo con la cuenta |
+| la cuenta inactiva se sigue rechazando | 422 y `last_login_at` intacto |
+| la cookie va cifrada | el valor del cable es el sobre cifrado del framework, no el id en claro, y es `httpOnly` |
+| **la carrera, 20 iteraciones** | acceso → respuesta tardía → el navegador conserva la sesión nueva |
+| cambio de cuenta | el navegador es la segunda cuenta y una respuesta vieja no devuelve la primera |
+| cierre de sesión | la sesión se invalida, la vieja deja de servir y la nueva tampoco |
+| CSRF | una escritura con token válido pasa; sin token, 419 |
+| RBAC | una cuenta sin el permiso recibe 403 |
+
+**La prueba de la carrera, en detalle.** Veinte repeticiones con el orden de las
+respuestas bajo control: el acceso responde primero y **después** responde la
+petición que ya estaba en vuelo, que lleva la sesión anónima. En cada
+iteración se comprueba que la respuesta tardía **no** lleva cookie de sesión y
+que el navegador —que tomó la sesión nueva— sigue autenticado.
+
+**Con la corrección restaurada a `HEAD`, 5 de los 12 casos fallan**; con la
+corrección, los 12 pasan:
+
+```text
+HEAD   →  5 failed, 7 passed  (55 aserciones)
+corregido → 12 passed         (194 aserciones)
+```
+
+Los que fallan sin la corrección son exactamente los que describen el defecto:
+el orden del middleware, la cookie de sesión repetida, la cookie de CSRF
+repetida, la carrera y el cambio de cuenta.
+
+## BLOCK_1.5 Regresión
+
+```text
+BACKEND_TARGETED_TESTS=PASS — tests/Feature/Auth + tests/Feature/Profile +
+  tests/Feature/Authorization + tests/Feature/Audit: 135 pruebas, 675
+  aserciones, 58 s
+PINT=PASS (los tres ficheros PHP del bloque)
+```
+
+El middleware está en el grupo `web`, que usa **toda** la aplicación, así que
+esta regresión dirigida no es opcional: cubre el acceso, el cierre de sesión,
+el cambio de contraseña, el perfil, los permisos y la auditoría.
+
+## BLOCK_1.6 Contrato
+
+```text
+SESSION_RACE_ROOT_CAUSE=PreserveSessionCookies estaba registrado con
+  $middleware->web(append: [...]), es decir en el índice 6 del grupo `web`,
+  dentro de StartSession; y StartSession pone la cookie de sesión en la
+  respuesta DESPUÉS de que corren los middleware que están dentro de él
+  (StartSession::handleStatefulRequest: $next($request) y luego
+  addCookieToResponse()). El middleware inspeccionaba una respuesta sin
+  cookie y no podía quitar nada.
+MIDDLEWARE_ORDER_VERIFIED=YES — el orden efectivo se leyó del contenedor
+  (getMiddlewareGroups) y la prueba lo afirma: antes de la corrección
+  «Failed asserting that 6 is less than 2»
+COOKIE_ENCRYPTION_VERIFIED=YES — la cookie sale con el sobre cifrado del
+  framework y con el prefijo de CookieValuePrefix; se descifra con las
+  llaves del propio framework; es httpOnly
+SESSION_RACE_FIXED=YES
+SESSION_PIPELINE_TEST=PASS — 12 casos, 194 aserciones, sobre el pipeline real
+SESSION_CONCURRENCY_TEST_20_RUNS=PASS — 20 iteraciones con el orden de
+  respuestas controlado
+AUTH_REGRESSION=PASS — 135 pruebas, 675 aserciones
+COMMIT=<se registra en el bloque de cierre>
+```
+
+**Lo que este bloque NO ha tocado:** la certificación LIVE de proveedores, la
+generación XLSX determinista, las 24 remediaciones anteriores, los backups, las
+colas, el RBAC, las migraciones aprobadas, la seguridad de soporte y la semilla
+de E2E.

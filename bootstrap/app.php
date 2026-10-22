@@ -24,6 +24,7 @@ use App\Services\Ai\AiTurnFailed;
 use App\Support\Security\TrustedHostsNotConfigured;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -119,13 +120,26 @@ return Application::configure(dirname(__DIR__))
 
         // Keeps a response from putting an old session back in the browser.
         //
-        // It is appended to the `web` group and not to the global stack
-        // because it has to run **after** the session middleware: it reads the
-        // session's name from the request and it removes the cookie from the
-        // response, and both only exist once the session has been started.
+        // It **replaces** `EncryptCookies` in the `web` group instead of
+        // joining it, and the position matters:
+        //
+        //   - inside `StartSession` it would inspect the response *before* the
+        //     session cookie was put on it, and could not remove it;
+        //   - outside `EncryptCookies` it would see the response's cookie
+        //     still encrypted, and could not compare it with what the request
+        //     arrived with.
+        //
+        // Replacing `EncryptCookies` puts it in the only place that satisfies
+        // both: outermost of the two, and still able to decrypt. It extends
+        // the framework's class, so the encryption behaviour is unchanged.
+        //
         // The JSON API is registered with the `web` group too, so it gets the
         // same guarantee.
-        $middleware->web(append: [PreserveSessionCookies::class]);
+        $middleware->replaceInGroup(
+            'web',
+            EncryptCookies::class,
+            PreserveSessionCookies::class,
+        );
 
         // Terminates sessions whose stored password hash no longer matches,
         // which is what invalidates the other sessions of an account after a
