@@ -118,6 +118,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The suite boots the framework for every test, and the framework reads
+      # `.env`. Without the file, phpdotenv emits a warning per test (2 296 of
+      # them in this job) and every test is reported as a warning instead of a
+      # pass; `EndToEndIsolationTest`, which checks that the environment names
+      # three different databases, also has nothing to read. The example file is
+      # the repository's own template, so this checks the template as well. The
+      # real values still come from the job `env:` block: Dotenv is immutable, so
+      # an existing environment variable wins over the file.
+      - name: Create the environment file from the template
+        run: cp .env.example .env
+
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
