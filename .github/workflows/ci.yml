@@ -135,6 +135,24 @@ jobs:
       - name: Migrations
         run: php artisan migrate --force
 
+      # The Blade views call `@vite`, so the PHP suite needs the manifest that
+      # `npm run build` writes to `public/build`. In CI there is no `public/hot`
+      # either, so without this step every test that renders a page receives a
+      # 500 `ViteManifestNotFoundException` — 25 of them here, while all of them
+      # pass locally, where `public/build` already exists. Building the assets
+      # is the faithful fix: the suite then renders the views the same way the
+      # application does, instead of being told to skip them.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Build the assets the views reference
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
       - name: Tests
         run: php artisan test --compact
 
