@@ -28,6 +28,7 @@ use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Session\Middleware\AuthenticateSession;
@@ -488,6 +489,19 @@ return Application::configure(dirname(__DIR__))
             // ValidationException answered 422 in development and 500 there.
             if ($e instanceof ValidationException) {
                 return null;
+            }
+
+            // A thrown response is a finished answer, not a fault. The throttle
+            // limiters build their 429 this way: `Limit::response()` returns the
+            // JSON, the middleware wraps it in an HttpResponseException, and the
+            // framework sends it. This branch was missing, so the exception fell
+            // to the generic handling below, was classified as a 500, and — with
+            // APP_DEBUG off — the 429 was replaced by the generic error body.
+            // With debug on the branch below returned null and the framework
+            // sent the 429, which is why the defect only appeared in the end to
+            // end stack and in CI, both of which run with debug off.
+            if ($e instanceof HttpResponseException) {
+                return $e->getResponse();
             }
 
             $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;

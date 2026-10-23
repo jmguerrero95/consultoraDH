@@ -14,6 +14,11 @@ uses(TestCase::class, RefreshDatabase::class)->in('Feature');
 beforeEach(function (): void {
     seedRoles();
 
+    // The suite must not depend on an operator's `.env` for this: the endpoint
+    // answers 503 when no key is configured, and this is a test of the endpoint
+    // with a key. A clearly fake value is enough — the endpoint only reads it.
+    config(['services.webpush.public_key' => 'test-vapid-public-key-not-a-real-key']);
+
     $this->user = User::factory()->create(['account_type' => 'staff']);
     $this->user->assignRole('Support');
 });
@@ -25,6 +30,14 @@ test('public VAPID key endpoint returns key only', function (): void {
     $response->assertOk();
     $response->assertJsonStructure(['public_key']);
     expect($response->json('public_key'))->toBeString()->not->toBeEmpty();
+});
+
+test('public VAPID key endpoint refuses when no key is configured', function (): void {
+    config(['services.webpush.public_key' => null]);
+
+    $this->actingAs($this->user)
+        ->getJson('/api/push/vapid-public-key')
+        ->assertStatus(503);
 });
 
 test('private VAPID key never exposed', function (): void {

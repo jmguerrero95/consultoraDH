@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use App\Models\User;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Session;
 use Illuminate\Testing\TestResponse;
@@ -50,6 +51,27 @@ it('limits repeated sign in attempts from one source', function (): void {
 });
 
 it('returns 429 with the documented shape when sign in is exhausted', function (): void {
+    User::factory()->withPassword(LIMIT_CLAVE)->create(['email' => 'objetivo@consultora-dh.test']);
+
+    $last = null;
+
+    for ($attempt = 0; $attempt < 25; $attempt++) {
+        $last = postAuth('/api/auth/login', loginPayload('objetivo@consultora-dh.test'));
+    }
+
+    $last->assertStatus(429)
+        ->assertJsonPath('code', 'too_many_requests')
+        ->assertJsonStructure(['message', 'code', 'retry_after']);
+});
+
+it('keeps the throttled response when debug is off', function (): void {
+    // The end to end stack and CI run with APP_DEBUG=false; development runs
+    // with it on, and that difference hid a real defect: the limiter's
+    // JsonResponse travels wrapped in an HttpResponseException, and the generic
+    // handler classified it as a 500 and replaced the body with the generic
+    // error. Pinning the flag makes this guard independent of the machine.
+    config(['app.debug' => false]);
+
     User::factory()->withPassword(LIMIT_CLAVE)->create(['email' => 'objetivo@consultora-dh.test']);
 
     $last = null;
@@ -326,8 +348,11 @@ it('reads the general API budget from the environment, and defaults to the docum
     // requests in a couple of minutes, and the production budget refuses that on
     // purpose. Nothing else raises it, and these two tests are what stop that from
     // quietly becoming the normal figure.
-    expect(env('API_RATE_LIMIT_PER_MINUTE'))->toBeNull();
-
+    //
+    // The assertion is about the *effective* budget, not about whether the variable
+    // happens to be absent. A deployment that writes the documented figure into its
+    // `.env` is not raising anything, and the previous form failed it anyway. What
+    // must never pass is a budget above the documented one.
     $budget = RateLimiter::limiter('api');
 
     expect($budget)->not->toBeNull();
@@ -337,9 +362,14 @@ it('reads the general API budget from the environment, and defaults to the docum
     $documented = (string) (preg_match(
         '/^API_RATE_LIMIT_PER_MINUTE=(\d+)$/m',
         (string) file_get_contents(base_path('.env.example')),
-        $matches) === 1 ? $matches[1] : '');
+        $matches,
+    ) === 1 ? $matches[1] : '');
 
     expect($documented)->toBe('120');
+
+    $limit = $budget(Request::create('/api/dashboard'));
+
+    expect($limit->maxAttempts)->toBe((int) $documented);
 });
 
 it('does not let the authentication limiters affect a session at all', function (): void {

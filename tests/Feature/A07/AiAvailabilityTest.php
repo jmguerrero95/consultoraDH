@@ -101,6 +101,12 @@ final class AiAvailabilityTest extends TestCase
 
     public function test_an_empty_pool_is_unconfigured_for_every_operation(): void
     {
+        // The search backend is a separate configuration question: with it off,
+        // `web_research` is honestly reported as blocked by configuration, which
+        // has nothing to do with the pool. This test is about the pool, so the
+        // rest of the environment is set explicitly instead of inherited.
+        config(['ai.web_search.enabled' => true]);
+
         $report = $this->availability()->report();
 
         foreach ($report as $operation) {

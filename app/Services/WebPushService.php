@@ -13,11 +13,20 @@ use Minishlink\WebPush\WebPush;
 
 class WebPushService
 {
-    private WebPush $webPush;
+    /**
+     * Built on first use, not in the constructor.
+     *
+     * `new WebPushService` is also how the subscription eligibility is read
+     * (`activeSubscriptions`), and that question has nothing to do with VAPID:
+     * asking "which devices would be written to" must not require a key pair.
+     * Building the client eagerly made the class impossible to instantiate in an
+     * environment without VAPID keys, which is exactly what the suite is.
+     */
+    private ?WebPush $webPush = null;
 
-    public function __construct()
+    private function client(): WebPush
     {
-        $this->webPush = new WebPush([
+        return $this->webPush ??= new WebPush([
             'VAPID' => [
                 'subject' => config('services.webpush.subject', 'mailto:support@consultora-dh.local'),
                 'publicKey' => config('services.webpush.public_key'),
@@ -75,8 +84,9 @@ class WebPushService
                 'requireInteraction' => true,
             ]);
 
-            $this->webPush->sendNotification($webPushSubscription, $payload);
-            $this->webPush->flush();
+            $webPush = $this->client();
+            $webPush->sendNotification($webPushSubscription, $payload);
+            $webPush->flush();
 
             $subscription->update(['last_success_at' => now()]);
         } catch (\Throwable $e) {
