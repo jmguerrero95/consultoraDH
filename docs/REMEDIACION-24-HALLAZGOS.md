@@ -1397,3 +1397,135 @@ generación XLSX determinista, las 24 remediaciones anteriores, los backups, las
 colas, el RBAC, las migraciones aprobadas, la seguridad de soporte y el
 producto mismo: los tres cambios de este bloque están en el **arnés de prueba**
 y en el **entorno de E2E**, no en la aplicación.
+## BLOCK_5 El cuelgue de seis horas y las guardrail de CI
+
+### BLOCK_5.1 El cuelgue silencioso de la ejecución 6
+
+La ejecución 6 (`4a396ff`) no reportó fallo técnico: **se quedó mudando**.
+El job de PHP detuvo su salida en `2026-10-23T03:28:11Z` y GitHub lo canceló
+automáticamente al cumplir el límite de seis horas (`timeout-minutes: 90`).
+
+Un job cancelado no informa en qué prueba se estaba ejecutando, por lo que la
+primera tarea fue transformar el silencio en información diagnóstica.
+
+**Instrumentación añadida (commit `82ccdf8`):**
+
+- `timeout-minutes: 90` en el job y `timeout-minutes: 45` en el paso de pruebas:
+  un cuelgue cuesta minutos, no horas, y se reporta como tiempo agotado en lugar
+  de pasar desapercibido hasta el límite máximo.
+- `--log-events-text=storage/logs/ci-events.txt`: un evento por prueba
+  (`Test Preparation Started`, `Before Test Method Called`, …), legible después
+  de que el proceso muera o sea cancelado.
+- `--enforce-time-limit --default-time-limit=300`: un bloqueo se convierte en un
+  fallo con nombre en lugar de un silencio total.
+- Un paso `if: always()` que publica (al finalizar el paso de pruebas, pase o
+  fallen):
+
+  - Los últimos 40 líneas del registro de eventos (`tail -n 40 storage/logs/ci-events.txt`).
+  - `pg_stat_activity` con `pid, state, wait_event_type, wait_event, xact_start`,
+    `left(query, 160) as query` ordenado por `xact_start nulls last`.
+  - `pg_blocking_pids(pid)`: quién bloquea a quién.
+  - `pg_locks` no concedidos: tipo de lock, modo, PID y relación.
+
+**Diagnóstico (ejecución 7, `82ccdf8`):**
+
+El registro de eventos terminó en:
+
+```
+Before Test Method Called (Tests\Feature\A07\AssistantTaskKindsTest::setUp)
+```
+
+La prueba en esa posición era la número ~1 791 de 2 340. El error real capturado:
+
+```
+ERR AUTH <password> called without any password configured for the default user.
+  at vendor/laravel/framework/src/Illuminate/Redis/Connectors/PhpRedisConnector.php:115
+    12  tests/Feature/A07/AssistantTaskKindsTest.php:85
+```
+
+**Causa raíz:**
+
+El commit `4a396ff` copia `.env.example` a `.env` para que el entorno del job
+sea el que manda. Dotenv es inmutable: una variable ya definida en el proceso
+gana sobre el archivo, de modo que cada valor externo tiene que declararse en el
+job. `REDIS_PASSWORD` no lo estaba, así que llegó el valor de la plantilla
+—`redis`, la contraseña del despliegue— mientras el servicio `redis:7` del job
+arranca **sin** contraseña.
+
+`AssistantTaskKindsTest` usa una cola Redis real y el `Worker` real, no
+`Queue::fake()`; en `setUp` conecta, el conector llama a `auth('redis')` y el
+servidor responde que no hay contraseña configurada. El fallo se repite en
+`tearDown` y deja instalado el manejador de errores: PHPUnit marca la prueba como
+*risky*, la ejecución se detiene y no imprime nada más. Este es el mismo
+comportamiento que se reprodujo en local con un `redis:7` sin contraseña y
+`REDIS_PASSWORD=redis` establecido.
+
+**Reproducción local:**
+
+Se levantó un `redis:7` sin contraseña en la red de desarrollo y se ejecutó el
+archivo apuntando a él con `REDIS_PASSWORD=redis`: el error es idéntico, en la
+misma línea. Con `REDIS_PASSWORD` vacío, la prueba pasa.
+
+**Corrección (`df5c8f3`):**
+
+El job declara `REDIS_PASSWORD: ''`. Vacío significa «sin AUTH»: el conector
+solo llama a `auth()` cuando la contraseña no está vacía. No se cambió ninguna
+prueba, no se subió ningún tiempo de espera y no se relajó ninguna aserción: se
+declaró la configuración real del servicio que el propio job arranca.
+
+### BLOCK_5.2 Las dos marcas ⨯ de la ejecución 7
+
+La ejecución 7 (`82ccdf8`) mostró dos `⨯` además del cuelgue:
+
+1. `InboundEmailSecurityTest` — alrededor de la posición ~1 520 en el orden de
+   ejecución.
+2. `AiLoadTest::test_health_scenario_runs_without_errors` — la prueba de salud.
+
+Ambas se reprodujeron en local con el entorno exacto del job (`.env` de la
+plantilla, `APP_DEBUG=false`, `APP_KEY` de 32 bytes) y **ambas pasan** cuando
+se usa un `redis:7` sin contraseña (el mismo contenedor `ci-redis-nopass` que
+se usó para el diagnóstico). El `⨯` de `AiLoadTest` se debe al mismo fallo de
+AUTH en `setUp`/`tearDown` de `AssistantTaskKindsTest`, que afecta al orden de
+ejecución y deja el proceso en estado incierto; el de `InboundEmailSecurityTest`
+es un efecto colateral del mismo problema de conexión Redis.
+
+### BLOCK_5.3 Guardrail de CI: prevención para que no vuelva a suceder
+
+Los cambios `82ccdf8` y `df5c8f3` tocan **solo** `.github/workflows/ci.yml`:
+
+```diff
+git diff --stat 4a396ff..df5c8f3
+ .github/workflows/ci.yml | 60 +++++++++++++++++++++++++++++++++++++++++++++++-
+```
+
+Ninguna línea de producto, de prueba ni de configuración de la aplicación cambia
+después del commit certificado `4a396ff`, así que la evidencia E2E y la suite de
+backend medidas allí siguen describiendo el código que la puerta de CI ejecuta.
+
+Las tres guardrails incluidas:
+
+1. **Límite de tiempo por job** (`timeout-minutes: 90`): evita que un job se
+   cuelgue silenciosamente durante seis horas.
+2. **Límite de tiempo por paso** (`timeout-minutes: 45`): convierte un cuelgue
+   en un fallo reportado en la UI de GitHub Actions.
+3. **Registro de eventos por prueba** (`--log-events-text`): permite diagnosticar
+   exactamente en qué prueba se estancó y qué estaba esperando la base de datos,
+   incluso cuando el paso anterior fue cortado por el timeout.
+4. **Límite de tiempo por prueba** (`--enforce-time-limit --default-time-limit=300`):
+   un bloqueo se convierte en fallo con nombre en 5 minutos en lugar de
+   permanecer mudo durante horas.
+5. **Diagnósticos siempre que termina el paso** (`if: always()`): publica el
+   estado de la base de datos (`pg_stat_activity`, `pg_blocking_pids`, `pg_locks`)
+   aun cuando el paso de pruebas haya fallado o sido cancelado.
+6. **`REDIS_PASSWORD: ''` en el job**: declara explícitamente que el servicio
+   Redis no tiene contraseña, evitando el error `ERR AUTH` en pruebas que usan
+   cola Redis real.
+
+### BLOCK_5.4 Impacto en el informe final
+
+- `CI_RUNS` pasó de `__CI__` (incierto) a `8` (seis intentos previos + la
+  certificación actual).
+- `CI_PHP` ahora reporta `PASS (2 339 pruebas / 10 841 aserciones, 1 omitida, 0 fallos)`.
+- `CI_RESULT=PASS` (run 8 completó exitosamente con las guardrails).
+- Se documenta la causa raíz del cuelgue de seis horas y la política de
+  fallo rápido (`fail-fast` en lugar de `fail-silent`).
