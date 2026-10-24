@@ -37,6 +37,14 @@ jobs:
     name: PHP — style, migrations, tests
     runs-on: ubuntu-latest
 
+    # A suite that stops making progress must fail, not spend six hours of
+    # runner time: run 6 (4a396ff) sat silent from test 1 748 until GitHub
+    # cancelled the job at the six-hour limit, and a cancelled job reports
+    # nothing about where it stopped. Ninety minutes is roughly twice the
+    # slowest observed full run (28 min locally, 26 min in CI on 4a396ff's
+    # predecessor), so it cannot cut a healthy run short.
+    timeout-minutes: 90
+
     services:
       postgres:
         image: postgres:18
@@ -165,7 +173,47 @@ jobs:
           npm run build
 
       - name: Tests
-        run: php artisan test --compact
+        # Belt and braces with the job limit: the step gets its own ceiling so a
+        # hang is reported as a step timeout and the diagnostics below still run.
+        timeout-minutes: 45
+        run: >-
+          php artisan test --compact
+          --log-events-text=storage/logs/ci-events.txt
+          --enforce-time-limit --default-time-limit=300
+
+      # Run 6 proved that a silent hang is the least useful failure there is:
+      # the log ended mid-progress-bar, the job was cancelled six hours later,
+      # and the culprit test had no name anywhere. This step answers the two
+      # questions a hang raises — which test was running, and what the database
+      # was waiting for — even when the step above was killed by its timeout.
+      - name: Where the suite stopped, and what the database was waiting for
+        if: always()
+        run: |
+          set -uo pipefail
+          echo '=== last test events ==='
+          tail -n 40 storage/logs/ci-events.txt 2>/dev/null || echo '(no event log)'
+          if command -v psql >/dev/null 2>&1; then
+            export PGPASSWORD=postgres
+            echo '=== sessions ==='
+            psql -h 127.0.0.1 -U postgres -d consultora_dh_test -X -c \
+              "select pid, state, wait_event_type, wait_event, xact_start, left(query, 160) as query
+                 from pg_stat_activity
+                where datname = current_database()
+                order by xact_start nulls last;" || true
+            echo '=== who is blocked by whom ==='
+            psql -h 127.0.0.1 -U postgres -d consultora_dh_test -X -c \
+              "select pid, pg_blocking_pids(pid) as blocked_by, state, wait_event_type, left(query, 160) as query
+                 from pg_stat_activity
+                where cardinality(pg_blocking_pids(pid)) > 0;" || true
+            echo '=== locks ==='
+            psql -h 127.0.0.1 -U postgres -d consultora_dh_test -X -c \
+              "select locktype, mode, granted, pid, relation::regclass as relation
+                 from pg_locks
+                where not granted or locktype = 'advisory'
+                order by pid;" || true
+          else
+            echo 'psql is not available on this runner'
+          fi
 
   frontend:
     name: Frontend — lint, typecheck, build, tests
