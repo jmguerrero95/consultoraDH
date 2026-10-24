@@ -96,6 +96,16 @@ jobs:
       REDIS_DB: '4'
       REDIS_CACHE_DB: '5'
       REDIS_PREFIX: consultora-dh-test-
+      # The `redis:7` service above runs without a password; `.env.example`
+      # documents the *deployment's* password (`redis`) and now reaches the job
+      # through the `.env` copied from the template, because Dotenv only lets
+      # an already-set variable win. Leaving this out made the real Redis queue
+      # in `AssistantTaskKindsTest` send `AUTH redis` to a server that has no
+      # password: the test errored in `setUp`, `tearDown`, and again in the
+      # error handler, the run stalled, and GitHub cancelled the job six hours
+      # later. An empty value is exactly "no AUTH" — the connector only calls
+      # `auth()` when the password is non-empty.
+      REDIS_PASSWORD: ''
       CACHE_STORE: array
       QUEUE_CONNECTION: sync
       SESSION_DRIVER: array
