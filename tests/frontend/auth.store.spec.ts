@@ -247,6 +247,66 @@ describe('authentication store', () => {
         expect(notified).toBe(1);
     });
 
+    it('keeps the signed-in user when the session check fails transiently', async () => {
+        mockApi({
+            'sanctum/csrf-cookie': csrfOk,
+            '/api/auth/login': () => jsonResponse({ user: user() }),
+        });
+
+        const auth = useAuthStore();
+        await auth.login('ana@consultora-dh.test', 'Contrasena2026', true);
+
+        // The connection drops. That says nothing about whether the server
+        // still holds the session, so the user must not be signed out.
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async () => {
+                throw new TypeError('network down');
+            }),
+        );
+
+        await expect(auth.resolveSession(true)).resolves.toBe(true);
+
+        expect(auth.user?.email).toBe('ana@consultora-dh.test');
+        expect(auth.isAuthenticated).toBe(true);
+    });
+
+    it('keeps the signed-in user when the session check answers 5xx', async () => {
+        mockApi({
+            'sanctum/csrf-cookie': csrfOk,
+            '/api/auth/login': () => jsonResponse({ user: user() }),
+        });
+
+        const auth = useAuthStore();
+        await auth.login('ana@consultora-dh.test', 'Contrasena2026', true);
+
+        mockApi({
+            '/api/auth/me': () => jsonResponse({ message: 'Servicio no disponible' }, 503),
+        });
+
+        await expect(auth.resolveSession(true)).resolves.toBe(true);
+
+        expect(auth.isAuthenticated).toBe(true);
+    });
+
+    it('retries a first session resolution that failed transiently instead of caching "guest"', async () => {
+        mockApi({
+            '/api/auth/me': () => {
+                throw new TypeError('offline');
+            },
+        });
+
+        const auth = useAuthStore();
+
+        await expect(auth.resolveSession()).resolves.toBe(false);
+        expect(auth.initialised).toBe(false);
+
+        mockApi({ '/api/auth/me': () => jsonResponse({ user: user() }) });
+
+        await expect(auth.resolveSession()).resolves.toBe(true);
+        expect(auth.isAuthenticated).toBe(true);
+    });
+
     it('answers permission questions from the permissions of the signed in user', async () => {
         const auth = useAuthStore();
 

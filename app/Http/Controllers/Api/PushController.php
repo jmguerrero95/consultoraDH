@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\OperationalTask;
 use App\Models\PushSubscription;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -13,10 +14,9 @@ class PushController extends Controller
 {
     public function vapidPublicKey(Request $request): JsonResponse
     {
-        // The keys live in config/services.php under `webpush`, alongside the
-        // Telegram bot token. Reading them from `app` returned nothing, so this
-        // endpoint answered 503 for every deployment and no browser could ever
-        // subscribe.
+        // The keys live in config/services.php under `webpush`. Reading them
+        // from `app` returned nothing, so this endpoint answered 503 for every
+        // deployment and no browser could ever subscribe.
         $publicKey = config('services.webpush.public_key');
 
         if (! $publicKey) {
@@ -60,6 +60,69 @@ class PushController extends Controller
         $subscription->delete();
 
         return response()->json(['message' => 'Suscripción eliminada']);
+    }
+
+    /**
+     * The device says it displayed the reminder.
+     *
+     * This is the only writer of `reminder_received_at`. The signed URL names
+     * one task and one employee, so the worker that the backend itself asked to
+     * show the notification is the only caller that can state reception. The
+     * push service accepting the message is not evidence of this: it only says
+     * the endpoint took delivery.
+     */
+    public function acknowledge(Request $request, OperationalTask $task): JsonResponse
+    {
+        if (! $this->signedFor($request, $task)) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
+
+        if ($task->reminder_received_at === null) {
+            $task->forceFill(['reminder_received_at' => now()])->save();
+        }
+
+        return response()->json([
+            'acknowledged' => true,
+            'task_id' => $task->id,
+            'received_at' => $task->fresh()?->reminder_received_at?->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * The person pressed "Descartar" on the notification.
+     *
+     * Persisted, not just closed in the notification tray: closing the visible
+     * notification changes nothing on the server, and the next scheduler run
+     * would send the second reminder anyway. Idempotent, so two taps (or a
+     * background-sync replay) are one dismissal.
+     */
+    public function dismiss(Request $request, OperationalTask $task): JsonResponse
+    {
+        if (! $this->signedFor($request, $task)) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
+
+        if ($task->reminder_dismissed_at === null) {
+            $task->forceFill(['reminder_dismissed_at' => now()])->save();
+        }
+
+        return response()->json([
+            'dismissed' => true,
+            'task_id' => $task->id,
+            'dismissed_at' => $task->fresh()?->reminder_dismissed_at?->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * The signature is validated by the `signed` middleware; this checks that
+     * the employee the link was signed for is the task's assignee. A valid
+     * signature for somebody else's task is still a refusal.
+     */
+    private function signedFor(Request $request, OperationalTask $task): bool
+    {
+        $userId = (int) $request->query('user', 0);
+
+        return $userId > 0 && (int) $task->assigned_to === $userId;
     }
 
     private function encrypt(string $value): string

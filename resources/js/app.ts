@@ -5,6 +5,7 @@ import iconsFontUrl from 'bootstrap-icons/font/fonts/bootstrap-icons.woff2?url';
 
 import App from '@/App.vue';
 import { router } from '@/router';
+import { usePWAInstallation } from '@/composables/usePWAInstallation';
 
 /**
  * Consultora DH - front-end entry point.
@@ -14,6 +15,23 @@ import { router } from '@/router';
  * an expired session all behave identically.
  */
 const app = createApp(App);
+
+/**
+ * Initialize PWA installation UX: capture the install prompt, detect standalone
+ * mode, and expose the one install function the account menu calls.
+ *
+ * The composable keeps its state at module scope, so this call and the one in
+ * `UserMenu.vue` observe the same captured prompt.
+ */
+function initializePWA(): void {
+    const { install } = usePWAInstallation();
+
+    ;(window as unknown as { consultoraDH?: { installPWA: () => Promise<boolean> } }).consultoraDH = {
+        installPWA: install,
+    };
+}
+
+initializePWA();
 
 /**
  * Start fetching the icon font immediately.

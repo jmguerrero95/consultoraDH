@@ -170,29 +170,41 @@ self.addEventListener('push', (event) => {
     return;
   }
 
+  const ackUrl = typeof data.ackUrl === 'string' ? data.ackUrl : null;
+  const dismissUrl = typeof data.dismissUrl === 'string' ? data.dismissUrl : null;
+
   const options = {
     body: data.body || 'Hay algo nuevo en Consultora DH.',
     icon: '/icons/icon-192x192.png',
     badge: '/icons/badge-72x72.png',
     vibrate: [200, 100, 200],
-    // The deep link is carried through `url`, which is what `WebPushService`
-    // actually sends. It used to be read as `route`, which that service never
-    // sets, so every notification - a finished document included - opened the
-    // support inbox. The two were written apart from each other and nothing
-    // tested the join.
+    // url and taskId are direct properties of the payload (see WebPushService).
+    // The URL is validated here as well as on click: `options.data` is written
+    // to the notification store, which outlives this worker, so a payload that
+    // is only checked when it arrives is a payload that has already been kept.
     data: {
       url: safeDestination(data.url),
-      taskId: data.task_id ?? null,
+      taskId: data.taskId ?? null,
+      dismissUrl,
     },
     actions: [
       { action: 'open', title: 'Ver' },
-      { action: 'close', title: 'Cerrar' },
+      { action: 'dismiss', title: 'Descartar' },
     ],
     requireInteraction: true,
   };
 
   event.waitUntil(
-    self.registration.showNotification(data.title || 'Consultora DH', options)
+    (async () => {
+      await self.registration.showNotification(data.title || 'Consultora DH', options);
+
+      // The device states that it displayed the reminder. This is what writes
+      // `reminder_received_at`; the push service accepting the message is not
+      // the same fact, so the worker reports it explicitly.
+      if (ackUrl !== null) {
+        await postOrQueue(ackUrl);
+      }
+    })()
   );
 });
 
@@ -223,7 +235,14 @@ function safeDestination(candidate) {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
-  if (event.action === 'close') {
+  // "Descartar" is a write, not a way to hide the tray entry.
+  //
+  // Closing the notification changes nothing on the server: the scheduler
+  // would still send the second reminder ten minutes later. The signed URL in
+  // the payload is posted back so `reminder_dismissed_at` is recorded, and a
+  // failure is queued for background sync instead of being lost.
+  if (event.action === 'dismiss') {
+    event.waitUntil(postOrQueue(event.notification.data?.dismissUrl));
     return;
   }
 
@@ -248,6 +267,54 @@ self.addEventListener('notificationclick', (event) => {
     })
   );
 });
+
+/**
+ * POST a signed action URL, queueing it for background sync if the network is
+ * not there right now.
+ *
+ * A 4xx is a refusal (expired signature, wrong employee) and is not retried:
+ * asking again will produce the same refusal. Anything else — offline, a
+ * timeout, a 5xx — is about the moment, so the entry is kept in the same
+ * outbox the write-behind requests use and replayed when connectivity returns.
+ */
+async function postOrQueue(url) {
+  if (typeof url !== 'string' || url === '') {
+    return;
+  }
+
+  // Same origin only. The payload decides where a button posts, so an absolute
+  // URL pointing elsewhere is refused rather than trusted.
+  try {
+    if (new URL(url, self.location.origin).origin !== self.location.origin) {
+      return;
+    }
+  } catch {
+    return;
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+    });
+
+    if (response.ok || (response.status >= 400 && response.status < 500)) {
+      return;
+    }
+  } catch {
+    // Fall through to the outbox.
+  }
+
+  await enqueueOutbox({ url, method: 'POST', headers: {}, body: null });
+
+  if (self.registration.sync) {
+    try {
+      await self.registration.sync.register('cdh-outbox');
+    } catch {
+      // Best effort: the page also retries on reconnect.
+    }
+  }
+}
 
 // Background Sync: replay writes that were made while offline.
 //
@@ -335,6 +402,27 @@ async function deleteOutboxEntry(id) {
   });
 }
 
+/**
+ * Add one write to the outbox. Shared by the page's failed requests and by the
+ * notification actions above, so both are replayed by the same `sync`.
+ */
+async function enqueueOutbox(entry) {
+  const db = await openOutbox();
+
+  return new Promise((resolve) => {
+    const tx = db.transaction('requests', 'readwrite');
+    tx.objectStore('requests').add({
+      url: entry.url,
+      method: entry.method || 'POST',
+      headers: entry.headers || {},
+      body: entry.body ?? null,
+      queuedAt: Date.now(),
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+
 async function notifyClient(message) {
   const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
 
@@ -353,19 +441,11 @@ self.addEventListener('message', (event) => {
 
   event.waitUntil(
     (async () => {
-      const db = await openOutbox();
-
-      await new Promise((resolve) => {
-        const tx = db.transaction('requests', 'readwrite');
-        tx.objectStore('requests').add({
-          url: message.url,
-          method: message.method,
-          headers: message.headers,
-          body: message.body,
-          queuedAt: Date.now(),
-        });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
+      await enqueueOutbox({
+        url: message.url,
+        method: message.method,
+        headers: message.headers,
+        body: message.body,
       });
 
       if (self.registration.sync) {

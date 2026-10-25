@@ -18,6 +18,10 @@ class TelegramEndpoint extends Model
         'label',
         'chat_id',
         'conversation_id',
+        // The employee the chat belongs to. Null for an admin-wide delivery
+        // endpoint that no person can query through; a chat that carries a
+        // question must be bound to exactly one active employee.
+        'user_id',
         'enabled',
         'event_preferences',
         'created_by',
@@ -31,6 +35,14 @@ class TelegramEndpoint extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    /**
+     * The employee this chat speaks for, when it is a private binding.
+     */
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
     }
 
     /**

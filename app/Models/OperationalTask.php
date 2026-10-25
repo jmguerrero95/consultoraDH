@@ -34,6 +34,10 @@ class OperationalTask extends Model
         'due_on',
         'reminder_at',
         'reminder_sent_at',
+        'reminder_received_at',
+        'reminder_dismissed_at',
+        'reminder_second_sent_at',
+        'reminder_attempts',
         'completed_at',
         'completed_by',
         'cancelled_at',
@@ -47,6 +51,13 @@ class OperationalTask extends Model
             'due_on' => 'date',
             'reminder_at' => 'datetime',
             'reminder_sent_at' => 'datetime',
+            // Cast to datetime, not left as the raw string the driver returns.
+            // The second-reminder comparison calls `copy()` on this value, and
+            // a string there is a fatal "call to a member function on string".
+            'reminder_received_at' => 'datetime',
+            'reminder_dismissed_at' => 'datetime',
+            'reminder_second_sent_at' => 'datetime',
+            'reminder_attempts' => 'integer',
             'completed_at' => 'datetime',
             'cancelled_at' => 'datetime',
         ];

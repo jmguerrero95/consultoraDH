@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
 import { api } from '@/services/api';
-import { onUnauthorized, resetCsrfState } from '@/services/http';
+import { ApiError, onUnauthorized, resetCsrfState } from '@/services/http';
 import { clearDrafts } from '@/utils/drafts';
 
 import type { AuthUser } from '@/types/api';
@@ -61,6 +61,20 @@ export const useAuthStore = defineStore('auth', () => {
     /**
      * Ask the server who we are. Safe to call repeatedly: the answer is cached
      * by the caller, and a 401 simply leaves the store unauthenticated.
+     *
+     * ## A network failure is not a logout
+     *
+     * Only a 401 ends the session. A request that never reached the server, a
+     * timeout, or a 5xx says nothing about whether the session is still valid,
+     * and treating it as a 401 signed the person out for a dropped connection:
+     * the next successful request carried a session that still existed, but the
+     * interface had already thrown away the user and the router had already
+     * sent them to the login screen.
+     *
+     * So a transient failure keeps the user we already know about. If we know
+     * nobody yet, the resolution is left uninitialised instead of cached as
+     * "guest", so the next navigation tries again rather than locking the
+     * answer in place for the rest of the page's life.
      */
     async function resolveSession(force = false): Promise<boolean> {
         if (initialised.value && !force) {
@@ -68,6 +82,7 @@ export const useAuthStore = defineStore('auth', () => {
         }
 
         loading.value = true;
+        let resolved = true;
 
         try {
             const response = await api.auth.me();
@@ -75,17 +90,39 @@ export const useAuthStore = defineStore('auth', () => {
             user.value = response.user;
 
             return true;
-        } catch {
-            // A 401 is the expected answer for a guest. Anything else (network
-            // failure, server error) also leaves us unauthenticated, which the
-            // router turns into a redirect to the login screen.
+        } catch (error) {
+            if (isTransient(error)) {
+                resolved = user.value !== null;
+
+                return isAuthenticated.value;
+            }
+
+            // A 401 is the expected answer for a guest. Any other definitive
+            // refusal also leaves us unauthenticated.
             clear();
 
             return false;
         } finally {
             loading.value = false;
-            initialised.value = true;
+
+            if (resolved) {
+                initialised.value = true;
+            }
         }
+    }
+
+    /**
+     * A failure that does not answer "is this session valid?".
+     *
+     * `isNetworkError` covers a request that never reached the server. A 5xx is
+     * the server saying it could not answer, which is equally not a 401.
+     */
+    function isTransient(error: unknown): boolean {
+        if (!(error instanceof ApiError)) {
+            return false;
+        }
+
+        return error.isNetworkError || error.status >= 500;
     }
 
     async function login(email: string, password: string, remember: boolean): Promise<AuthUser> {

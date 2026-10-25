@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 
 import AppModal from '@/components/ui/AppModal.vue';
 import { usePushNotifications } from '@/composables/usePushNotifications';
+import { usePWAInstallation } from '@/composables/usePWAInstallation';
 import { useAuthStore } from '@/stores/auth';
 import { useToastStore } from '@/stores/toast';
 
@@ -24,6 +25,7 @@ const confirmOpen = ref(false);
 const busy = ref(false);
 
 const push = usePushNotifications();
+const { isInstalled, canInstall, install } = usePWAInstallation();
 
 function toggle(): void {
     open.value = !open.value;
@@ -94,6 +96,18 @@ async function togglePush(): Promise<void> {
     }
 }
 
+async function installPWA(): Promise<void> {
+    if (!canInstall.value) {
+        return;
+    }
+
+    const result = await install();
+
+    if (result) {
+        toasts.success('Aplicación instalada', 'Consultora DH ahora se abre como aplicación independiente.');
+    }
+}
+
 onMounted(() => {
     document.addEventListener('pointerdown', onDocumentPointerDown);
     document.addEventListener('keydown', onDocumentKeydown);
@@ -161,6 +175,22 @@ onBeforeUnmount(() => {
                     aria-hidden="true"
                 />
                 <span>{{ push.subscribed.value ? 'Notificaciones: activadas' : 'Notificaciones: desactivadas' }}</span>
+            </button>
+
+            <!--
+                §A1: Install PWA option.
+                Shows an "Instalar Consultora DH" item when the app is installable
+                and not yet installed. Hidden when already installed.
+            -->
+            <button
+                v-if="!isInstalled && canInstall"
+                type="button"
+                class="cdh-dropdown__item"
+                role="menuitem"
+                @click="installPWA"
+            >
+                <i class="bi bi-window-install" aria-hidden="true" />
+                <span>Instalar Consultora DH</span>
             </button>
 
             <button

@@ -76,8 +76,12 @@ return Application::configure(dirname(__DIR__))
         health: '/up',
     )
     ->withSchedule(function (Schedule $schedule): void {
+        // Minute resolution for the first reminder: a task scheduled for
+        // 09:01 must not wait until 09:05. The five-minute interval belongs to
+        // the technical retry and is enforced by the dispatcher itself
+        // (`ReminderDispatcher::RETRY_AFTER_MINUTES`), not by the cron entry.
         $schedule->command('operations:dispatch-reminders')
-            ->everyFiveMinutes()
+            ->everyMinute()
             ->withoutOverlapping()
             ->onOneServer();
 
@@ -193,8 +197,24 @@ return Application::configure(dirname(__DIR__))
         | endpoint below is still covered.
         |
         */
+        /*
+        | The push actions are the other exception, and for the same reason: their
+        | caller is the service worker, which has no page and no CSRF token. They
+        | are authorised by a signed URL that names one task and one employee
+        | and expires; the controller refuses a signature that belongs to
+        | somebody else's task.
+        |
+        | The Telegram webhook is the third: it is called by Telegram's servers,
+        | which send no cookie and no token, and it is authenticated by the
+        | bot-API secret header the controller checks first.
+        |
+        | All three are named exactly, like the mail webhook. Not `api/push/*`.
+        */
         $middleware->validateCsrfTokens(except: [
             'api/internal/support-email/inbound',
+            'api/push/reminders/*/ack',
+            'api/push/reminders/*/dismiss',
+            'api/telegram/webhook',
         ]);
 
         /*

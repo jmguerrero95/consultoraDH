@@ -134,6 +134,22 @@ Route::get('/health', HealthController::class)->name('api.health');
 Route::get('/ready', [HealthController::class, 'readiness'])->name('api.ready');
 
 /*
+| Push notification actions.
+|
+| These are called by the service worker, not by a page: there is no form and
+| no CSRF token. The authorisation is the signature on the URL, which binds one
+| task and one employee and expires. CSRF is deliberately not the control here
+| (see bootstrap/app.php); a valid signature for somebody else's task is still
+| refused by the controller.
+*/
+Route::middleware(['signed', 'throttle:api'])->group(function (): void {
+    Route::post('/push/reminders/{task}/ack', [PushController::class, 'acknowledge'])
+        ->name('api.push.reminders.ack');
+    Route::post('/push/reminders/{task}/dismiss', [PushController::class, 'dismiss'])
+        ->name('api.push.reminders.dismiss');
+});
+
+/*
 | Public: authentication.
 |
 | Three separate policies, never shared. Password recovery requests are not
@@ -887,6 +903,12 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     // A06: Telegram Admin
     // =================================================================
 
+    // Any active member of staff may ask for a private binding token for their
+    // own account. The token is what proves, to the bot, that the chat belongs
+    // to that employee; nobody can bind a chat to somebody else.
+    Route::post('/telegram/binding-token', [TelegramController::class, 'issueBindingToken'])
+        ->name('api.telegram.binding-token');
+
     Route::middleware('can:notification_channels.manage')->group(function (): void {
         Route::get('/telegram/endpoints', [TelegramController::class, 'index'])
             ->name('api.telegram.endpoints.index');
@@ -998,6 +1020,23 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::apiResource('mcp-tokens', McpTokenController::class)
             ->names('api.mcp.tokens');
     });
+});
+
+/*
+| A06: Telegram webhook.
+|
+| Deliberately outside the authenticated group above: Telegram pushes to this
+| endpoint, there is no session and no browser. It was declared there with a
+| comment saying "no authentication middleware", and every update was therefore
+| rejected by the `auth` middleware it was still inside of.
+|
+| Authentication is the bot-API secret token, checked by the controller before
+| anything in the body is read: without a configured secret, or without a
+| matching `X-Telegram-Bot-Api-Secret-Token`, the request is refused.
+*/
+Route::middleware('throttle:10,10')->group(function (): void {
+    Route::post('/telegram/webhook', [TelegramController::class, 'webhook'])
+        ->name('api.telegram.webhook');
 });
 
 // A07: MCP server - separate auth (Bearer token based, not session)

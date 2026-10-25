@@ -4,19 +4,24 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\Users\UserStatus;
 use App\Http\Controllers\Controller;
 use App\Jobs\SendTelegramMessage;
 use App\Models\TelegramEndpoint;
+use App\Services\Telegram\TelegramBotService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 
 class TelegramController extends Controller
 {
+    public function __construct(private readonly TelegramBotService $bot) {}
+
     public function index(Request $request): JsonResponse
     {
         $endpoints = TelegramEndpoint::query()
-            ->with(['creator', 'conversation'])
+            ->with(['creator', 'conversation', 'user'])
             ->orderByDesc('created_at')
             ->get();
 
@@ -76,9 +81,68 @@ class TelegramController extends Controller
 
         $message = $validated['message'] ?? 'Mensaje de prueba desde Consultora DH';
 
-        // Queue the test message with endpoint ID
         SendTelegramMessage::dispatch($endpoint->id, $message);
 
         return response()->json(['message' => 'Mensaje de prueba encolado']);
+    }
+
+    /**
+     * Issue a private binding code for the authenticated employee.
+     *
+     * The code is returned once. Only its hash is stored, it expires in ten
+     * minutes, and it is consumed by the first `/start` that presents it. This
+     * is what replaces the old flow, where a chat could bind itself by typing
+     * somebody else's id.
+     */
+    public function issueBindingToken(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        if ($user === null
+            || $user->status !== UserStatus::Active
+            || $user->account_type !== 'staff') {
+            return response()->json(
+                ['message' => 'Solo una cuenta de personal activa puede vincular un chat.'],
+                403,
+            );
+        }
+
+        return response()->json($this->bot->issueBindingToken($user), 201);
+    }
+
+    /**
+     * Receive an update from Telegram.
+     *
+     * Fails closed. Telegram sends the secret it was registered with in
+     * `X-Telegram-Bot-Api-Secret-Token`; without a configured secret, or with a
+     * value that does not match it, the update is rejected before anything is
+     * read. An unauthenticated webhook is an endpoint through which anybody can
+     * make the bot act.
+     */
+    public function webhook(Request $request): JsonResponse
+    {
+        $secret = config('services.telegram.webhook_secret');
+
+        if (! is_string($secret) || $secret === '') {
+            Log::error('Telegram webhook rejected: no webhook secret configured');
+
+            return response()->json(['status' => 'rejected'], 401);
+        }
+
+        $provided = (string) $request->header('X-Telegram-Bot-Api-Secret-Token', '');
+
+        if ($provided === '' || ! hash_equals($secret, $provided)) {
+            return response()->json(['status' => 'rejected'], 401);
+        }
+
+        $update = $request->json()->all();
+
+        if (! is_array($update) || $update === []) {
+            return response()->json(['status' => 'ignored']);
+        }
+
+        $this->bot->handleUpdate($update);
+
+        return response()->json(['status' => 'ok']);
     }
 }

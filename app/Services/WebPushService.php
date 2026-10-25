@@ -8,19 +8,27 @@ use App\Models\PushSubscription;
 use App\Models\User;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\URL;
 use Minishlink\WebPush\Subscription as WebPushSubscription;
 use Minishlink\WebPush\WebPush;
 
 class WebPushService
 {
     /**
+     * How long the signed acknowledgement and dismissal links stay valid.
+     *
+     * Long enough for a notification that sat on a lock screen overnight, short
+     * enough that a leaked payload is not a permanent capability. The link is
+     * the authorisation: it is signed for one task and one employee.
+     */
+    private const ACTION_LINK_TTL_DAYS = 2;
+
+    /**
      * Built on first use, not in the constructor.
      *
      * `new WebPushService` is also how the subscription eligibility is read
      * (`activeSubscriptions`), and that question has nothing to do with VAPID:
      * asking "which devices would be written to" must not require a key pair.
-     * Building the client eagerly made the class impossible to instantiate in an
-     * environment without VAPID keys, which is exactly what the suite is.
      */
     private ?WebPush $webPush = null;
 
@@ -37,6 +45,26 @@ class WebPushService
 
     public function sendNotification(User $user, string $title, string $body, array $data = []): void
     {
+        $data['user_id'] = $user->id;
+
+        // A reminder carries two signed actions. The device posts them back to
+        // say "I displayed this" and "I dismissed this". Neither is inferred
+        // from the push service accepting the message: a 201 from the push
+        // endpoint is not a person seeing anything.
+        if (isset($data['task_id'])) {
+            $data['ack_url'] = URL::temporarySignedRoute(
+                'api.push.reminders.ack',
+                now()->addDays(self::ACTION_LINK_TTL_DAYS),
+                ['task' => (int) $data['task_id'], 'user' => $user->id],
+            );
+
+            $data['dismiss_url'] = URL::temporarySignedRoute(
+                'api.push.reminders.dismiss',
+                now()->addDays(self::ACTION_LINK_TTL_DAYS),
+                ['task' => (int) $data['task_id'], 'user' => $user->id],
+            );
+        }
+
         foreach ($this->activeSubscriptions($user) as $subscription) {
             $this->sendToSubscription($subscription, $title, $body, $data);
         }
@@ -46,12 +74,7 @@ class WebPushService
      * The subscriptions this person can still be reached on.
      *
      * A subscription the push service has told us is gone is skipped forever
-     * rather than retried: every attempt at a dead endpoint is latency on a
-     * notification that cannot arrive, and the endpoint will not come back.
-     *
-     * Exposed so "who would be written to" is answerable without sending
-     * anything - it is a question about eligibility, and eligibility should not
-     * require a network call to observe.
+     * rather than retried.
      *
      * @return Collection<int, PushSubscription>
      */
@@ -71,15 +94,21 @@ class WebPushService
                 'authToken' => decrypt($subscription->auth),
             ]);
 
+            // The payload format matches what sw.js expects: title and body at
+            // the root, url/taskId as direct properties, and the signed action
+            // links the worker posts back.
             $payload = json_encode([
                 'title' => $title,
                 'body' => $body,
                 'icon' => '/icons/icon-192x192.png',
                 'badge' => '/icons/badge-72x72.png',
-                'data' => $data,
+                'url' => $data['url'] ?? null,
+                'taskId' => $data['task_id'] ?? null,
+                'ackUrl' => $data['ack_url'] ?? null,
+                'dismissUrl' => $data['dismiss_url'] ?? null,
                 'actions' => [
                     ['action' => 'open', 'title' => 'Ver'],
-                    ['action' => 'close', 'title' => 'Cerrar'],
+                    ['action' => 'dismiss', 'title' => 'Descartar'],
                 ],
                 'requireInteraction' => true,
             ]);
@@ -97,16 +126,6 @@ class WebPushService
             ]);
 
             // Only retire a subscription the push service says is gone.
-            //
-            // This used to set `failed_at` on every error through two identical
-            // branches, so a momentary network blip permanently silenced that
-            // device - and `sendNotification()` skips subscriptions with a
-            // `failed_at`, so one failed attempt meant the person stopped being
-            // reachable for good, with no way back.
-            //
-            // A 404 or 410 is the browser telling us the endpoint is invalid or
-            // gone. Anything else - a timeout, a 500, a DNS failure - is about
-            // the moment, and the subscription is still good.
             $message = $e->getMessage();
 
             if (str_contains($message, '404') || str_contains($message, '410')) {

@@ -43,5 +43,13 @@ return [
 
     'telegram' => [
         'bot_token' => env('TELEGRAM_BOT_TOKEN'),
+        /*
+         * Telegram sends this value back in `X-Telegram-Bot-Api-Secret-Token`.
+         * The webhook fails closed when it is not configured: an endpoint that
+         * accepts an unauthenticated POST is an endpoint anybody can make the
+         * bot act through.
+         */
+        'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET'),
+        'bot_username' => env('TELEGRAM_BOT_USERNAME'),
     ],
 ];
