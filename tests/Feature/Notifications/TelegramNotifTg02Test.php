@@ -607,3 +607,40 @@ it('R03 entrega propio documento con documentos.view', function (): void {
         ->and(implode("\n", ntg2SentTexts()))->not->toContain('stored_path')
         ->and(implode("\n", ntg2SentTexts()))->not->toContain('clients/');
 });
+
+/* -------------------------------------------------------------------------
+ | BLOQUE R05 — Pruebas nuevas de fiabilidad del webhook
+ | ---------------------------------------------------------------------- */
+
+it('R05 update_id inválido no ejecuta acciones', function (): void {
+    $payload = [
+        'message' => [
+            'message_id' => 99,
+            'date' => now()->timestamp,
+            'chat' => ['id' => '7F01', 'type' => 'private'],
+            'from' => ['id' => '7F01', 'is_bot' => false, 'first_name' => 'QA'],
+            'text' => 'Comando inválido',
+        ],
+        'callback_query' => null,
+    ];
+
+    $this->app->make('App\Services\Telegram\TelegramBotService')->handleUpdate($payload);
+
+    expect(OperationalTask::query()->count())->toBe(0);
+});
+
+it('R05 update_id repetido no crea tarea duplicada', function (): void {
+    ntg2Bind($this->employee, '7F02');
+
+    $msg = ntg2Message('7F02', 'Crea una tarea de prueba.');
+    $bot = $this->app->make('App\Services\Telegram\TelegramBotService');
+
+    $bot->handleUpdate($msg);
+    $bot->handleUpdate($msg);  // Mismo update_id, debería ser ignorado
+
+    # Con la deduplicación por update_id, solo debería procesarse una vez.
+    # El count puede ser 0 o 1 dependiendo de si el primer handleUpdate
+    # creó una tarea; lo importante es que el segundo no creó otra.
+    # Aquí verificamos que no haya creado de más:
+    expect(OperationalTask::query()->count())->toBeLessThanOrEqual(1);
+});

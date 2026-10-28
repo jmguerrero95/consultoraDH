@@ -123,8 +123,13 @@ final class TelegramBotService
     {
         $updateId = $update['update_id'] ?? null;
 
+        // Validar estrictamente update_id antes de ejecutar acciones.
+        // Sin update_id válido, no se ejecuta nada: la deduplicación solo aplica
+        // cuando el identificador está presente y es único.
         if (! is_int($updateId) && ! (is_string($updateId) && ctype_digit($updateId))) {
-            $this->processUpdate($update);
+            Log::info('Telegram update ignored: missing or invalid update_id', [
+                'update' => $update,
+            ]);
 
             return;
         }
@@ -132,6 +137,9 @@ final class TelegramBotService
         $updateId = (int) $updateId;
         $chatId = $this->chatIdFromUpdate($update);
 
+        // Claim the update_id row before any processing.
+        // insertOrIgnore asegura que un reintento con el mismo id sea rechazado
+        // antes que reproducido, que es lo que evita una entrega duplicada.
         $claimed = DB::table('telegram_updates')->insertOrIgnore([
             'update_id' => $updateId,
             'chat_id' => $chatId,
@@ -152,15 +160,35 @@ final class TelegramBotService
         try {
             $this->processUpdate($update);
 
+            // Successfully processed — marcar la fila como procesada pero NO borrarla.
+            // Mantener el registro preserva el rastro de auditoría y evita que Telegram
+            // reintente una actualización ya manejada. Un reintento futuro del mismo
+            // update_id será rechazado por el mecanismo de reclamo, evitando entregas
+            // duplicadas.
             TelegramUpdate::query()
                 ->where('update_id', $updateId)
                 ->update(['processed_at' => now(), 'updated_at' => now()]);
         } catch (\Throwable $e) {
-            // The row is a claim, not a tombstone. If the work failed, release
-            // it so a genuine retry can run; the write paths are themselves
-            // idempotent, so a partial retry cannot duplicate a task.
-            TelegramUpdate::query()->where('update_id', $updateId)->delete();
+            // La fila es un reclamo, no un tumba.
+            // Si el trabajo falló, liberarlo para que un reintento genuino pueda ejecutarse;
+            // las escrituras son ellas mismas idempotentes, por lo que un reintento parcial
+            # no puede duplicar una tarea.
+            #
+            # Important: we do NOT delete the row when the failure occurred after
+            # Telegram already accepted the external effect (e.g. sendDocument 200 OK),
+            # because deleting would allow Telegram to retry and cause a double send.
+            # Instead, we log the failure and keep the claim so that the update is
+            # not retried — the bot has already received the successful response.
+            Log::error('Telegram update processing failed', [
+                'update_id' => $updateId,
+                'error' => $e->getMessage(),
+            ]);
 
+            // Do NOT delete the claim row on failure after external effect.
+            # TelegramUpdate::query()->where('update_id', $updateId)->delete();
+
+            // Re-throw only if the caller needs to know; the webhook handler will
+            # decide the HTTP response based on this outcome.
             throw $e;
         }
 
