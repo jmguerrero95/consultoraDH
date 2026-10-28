@@ -21,6 +21,7 @@ use App\Models\User;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiTurnFailed;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -248,10 +249,30 @@ final class TelegramBotService
         }
 
         if ($row->external_started_at !== null) {
-            // The worker died after starting an external effect. We cannot know
-            // whether Telegram accepted it, so automatic replay is forbidden.
-            DB::table('telegram_updates')
+            $claimedAt = $row->claimed_at === null
+                ? null
+                : Carbon::parse((string) $row->claimed_at);
+
+            $leaseIsActive = $row->claim_token !== null
+                && $claimedAt !== null
+                && $claimedAt->greaterThan($staleBefore);
+
+            if ($leaseIsActive) {
+                // The first worker is still waiting for Telegram. This delivery
+                // is a temporary busy duplicate: do not touch its row or token.
+                throw new \RuntimeException('Telegram update is already being processed by another worker.');
+            }
+
+            // Only an expired lease may be resolved. The condition is part of
+            // the UPDATE, so a concurrent worker cannot block a live claim.
+            $blocked = DB::table('telegram_updates')
                 ->where('update_id', $updateId)
+                ->where('state', 'pending')
+                ->whereNotNull('external_started_at')
+                ->where(function ($query) use ($staleBefore): void {
+                    $query->whereNull('claimed_at')
+                        ->orWhere('claimed_at', '<=', $staleBefore);
+                })
                 ->update([
                     'state' => 'failed_external',
                     'claim_token' => null,
@@ -259,11 +280,21 @@ final class TelegramBotService
                     'updated_at' => $now,
                 ]);
 
-            Log::warning('Telegram update blocked: external effect outcome unknown', [
-                'update_id' => $updateId,
-            ]);
+            if ($blocked === 1) {
+                Log::warning('Telegram update blocked: external effect outcome unknown', [
+                    'update_id' => $updateId,
+                ]);
 
-            return null;
+                return null;
+            }
+
+            $fresh = DB::table('telegram_updates')->where('update_id', $updateId)->first();
+
+            if ($fresh !== null && in_array($fresh->state, ['succeeded', 'failed_external'], true)) {
+                return null;
+            }
+
+            throw new \RuntimeException('Telegram update is already being processed by another worker.');
         }
 
         throw new \RuntimeException('Telegram update is already being processed by another worker.');

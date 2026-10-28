@@ -4,6 +4,7 @@
 **Base SHA:** `2df9c9ec3b6af5fee00142117502ec815d1b2f3d`
 **Previous published HEAD:** `56b727d9f41edbc81381d879fbc18989d4d784e3`
 **R05 repair implementation SHA:** `529eff50e11030cf7a48424e20af2a2d4098389a`
+**R05 concurrency adjustment based on:** `81032fd1d7d1360cc851795b84f35afa36aaf403` (published in the commit that contains this update)
 **Documentation commit:** the commit that contains this file
 **Ready for external review:** YES for the hermetic code path; LIVE certification remains PENDING.
 
@@ -87,7 +88,8 @@ Claim order:
 1. `INSERT ... ON CONFLICT DO NOTHING` on the unique `update_id`; the winner owns the turn.
 2. Otherwise, one conditional `UPDATE ... WHERE state IN ('pending','failed_recoverable') AND external_started_at IS NULL AND (claim_token IS NULL OR claimed_at <= now() - lease)`.
 3. A live `pending` claim returns non-2xx so Telegram retries after the 15-minute lease.
-4. A stale `pending` row with `external_started_at` already set is moved to `failed_external` and is never replayed.
+4. A live claim that already has `external_started_at` set is still treated as busy: the duplicate never rewrites the row or invalidates the first worker's `claim_token`.
+5. Only after the lease expires is a `pending` row with `external_started_at` moved to `failed_external`, using an atomic `UPDATE` conditioned on `state = 'pending'`, `external_started_at IS NOT NULL` and the expired `claimed_at`. It is never replayed.
 
 The claim token is required for every later transition (`succeeded`, `failed_recoverable`, `failed_external`, external marker). A worker that lost the claim cannot overwrite another worker's row.
 
@@ -120,7 +122,8 @@ The seven `ok(true)` placeholders were removed and replaced with real assertions
 9. a failed `sendDocument` becomes `failed_external` and is not sent twice on retry;
 10. an existing `failed_external` does not process or send anything;
 11. logs contain neither private text nor the bot token;
-12. HTTP statuses match success, duplicate and recoverable-failure outcomes.
+12. HTTP statuses match success, duplicate and recoverable-failure outcomes;
+13. a second delivery while the first worker still holds a live lease after `external_started_at` is treated as busy, the first `claim_token` survives and the first worker can finish `succeeded`.
 
 The previous test that expected `OperationalTask::count() === 1` after an unconfirmed proposal was corrected to expect `0`.
 
@@ -131,11 +134,12 @@ The previous test that expected `OperationalTask::count() === 1` after an unconf
 | Suite / check | Result |
 |---|---|
 | `php -l` on modified PHP files | PASS |
-| `TelegramNotifTg02Test.php` | **31 passed, 159 assertions** |
+| `TelegramNotifTg02Test.php` | **32 passed, 167 assertions** |
 | `TelegramAssistantTest.php` | **11 passed, 59 assertions** |
-| `tests/Feature/Notifications` (whole directory) | **61 passed, 295 assertions** |
-| Pint on changed files | PASS (12 files) |
+| Pint on changed files | PASS |
 | `git diff --check` | clean |
+
+The previous whole-directory notifications run (61 passed, 295 assertions) predates the concurrency adjustment; this adjustment was verified with the two focused suites above.
 
 ### Baseline evidence before the repair
 
@@ -206,7 +210,7 @@ docker compose exec -T app sh -c '
 
 ## Residuals & Limitations
 
-- The concurrency test uses a real PostgreSQL row already claimed by another worker; it does not run two OS processes under load. The atomicity itself is enforced by the unique `update_id` insert and the conditional `UPDATE`, not by PHP locking.
+- The concurrency tests use real PostgreSQL rows already claimed by another worker, both with a live lease and with an expired lease; they do not run two OS processes under load. The atomicity itself is enforced by the unique `update_id` insert and the conditional `UPDATE`, not by PHP locking.
 - `failed_external` requires manual conciliation. The bot intentionally stops automatic retries after an outbound effect started, so a document or message may need to be checked by an operator.
 - A worker that dies after starting an external effect is blocked by `external_started_at` on the next retry; this is deliberate and may require manual intervention.
 - The test suites must run sequentially against `consultora_dh_test`. An accidental parallel run collided on the shared test database during verification and is not used as evidence; the results above are from sequential runs.

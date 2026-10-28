@@ -820,6 +820,51 @@ it('R05 marca el efecto externo antes de la llamada y no abre una transacción p
     }
 });
 
+it('R05 una segunda entrega no invalida un claim vigente con efecto externo iniciado', function (): void {
+    ntg2Bind($this->employee, '7G13');
+
+    $updateId = 713001;
+    $claimedAt = now();
+
+    TelegramUpdate::query()->create([
+        'update_id' => $updateId,
+        'chat_id' => '7G13',
+        'state' => 'pending',
+        'claim_token' => 'first-worker-token',
+        'claimed_at' => $claimedAt,
+        'external_started_at' => $claimedAt,
+        'attempt_count' => 1,
+    ]);
+
+    // The first worker is still waiting for Telegram. The duplicate must be
+    // treated as busy and must not rewrite the row or invalidate its token.
+    ntg2Post(ntg2Message('7G13', 'Crea una tarea de prueba.', $updateId))->assertStatus(500);
+
+    $row = TelegramUpdate::query()->where('update_id', $updateId)->firstOrFail();
+
+    expect($row->state)->toBe('pending')
+        ->and($row->claim_token)->toBe('first-worker-token')
+        ->and($row->external_started_at?->format('Y-m-d H:i:s'))->toBe($claimedAt->format('Y-m-d H:i:s'))
+        ->and(TelegramTaskProposal::query()->count())->toBe(0);
+
+    // The first worker still owns the claim and can finish normally.
+    $bot = app(TelegramBotService::class);
+
+    $finishFirstWorker = Closure::bind(
+        fn () => $this->markUpdateSucceeded($updateId, 'first-worker-token'),
+        $bot,
+        TelegramBotService::class,
+    );
+
+    $finishFirstWorker();
+
+    $row->refresh();
+
+    expect($row->state)->toBe('succeeded')
+        ->and($row->processed_at)->not->toBeNull()
+        ->and($row->claim_token)->toBeNull();
+});
+
 it('R05 un pending con efecto externo iniciado se bloquea como failed_external sin reenviar', function (): void {
     ntg2Bind($this->employee, '7G07');
 
