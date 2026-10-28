@@ -6,21 +6,17 @@ namespace App\Services\Telegram;
 
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
-use App\Domain\Documents\DocumentRequestStatus;
 use App\Domain\Operations\TaskAssignee;
 use App\Domain\Operations\TaskPriority;
 use App\Domain\Operations\TaskStatus;
-use App\Domain\Planillas\ContributionSheetStatus;
-use App\Domain\Receivables\ReceivablesService;
 use App\Domain\Users\UserStatus;
 use App\Models\AiConversation;
-use App\Models\Client;
-use App\Models\ClientDocumentRequest;
-use App\Models\ContributionSheet;
+use App\Models\ClientDocument;
 use App\Models\OperationalTask;
 use App\Models\TelegramBindingToken;
 use App\Models\TelegramEndpoint;
 use App\Models\TelegramTaskProposal;
+use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProviderException;
@@ -42,17 +38,26 @@ use Illuminate\Support\Facades\Log;
  *
  * ## What the answers are
  *
- * They are read from the same services the web application uses — the
- * receivables service for cartera, the operational tables for tasks,
- * planillas, clients and documents — subject to the bound employee's own
- * permissions. Nothing here is a canned sentence pretending to be an answer.
+ * Deterministic Spanish interpretations are answered from the same services the
+ * web application uses — the receivables service for cartera, the operational
+ * tables for tasks, planillas, clients and documents — subject to the bound
+ * employee's own permissions. A language model is consulted only when the
+ * sentence is not one the bot recognises, so an unavailable provider cannot take
+ * `/tareas` or "¿cuánto debemos?" down with it.
  *
  * ## Writes
  *
- * The bot proposes a task and waits. The proposal is a row; confirming it
- * claims that row under a lock and creates the task in the same transaction, so
- * the second tap of the same button cannot create a second task. A write never
+ * The bot proposes a task or a reminder and waits. The proposal is a row with
+ * the interpreted date and the executable `reminder_at`; confirming it claims
+ * that row under a lock and creates the task in the same transaction, so the
+ * second tap of the same button cannot create a second task. A write never
  * happens because a model or a chat asked for it.
+ *
+ * ## Webhook idempotency
+ *
+ * A Telegram update is claimed by `update_id` before anything runs. A retry
+ * carrying the same id is refused rather than replayed, which is what stops a
+ * duplicate delivery from proposing or confirming twice.
  */
 final class TelegramBotService
 {
@@ -64,7 +69,9 @@ final class TelegramBotService
     private const MAX_MESSAGE_LENGTH = 4000;
 
     public function __construct(
-        private readonly ReceivablesService $receivables,
+        private readonly TelegramIntentInterpreter $interpreter,
+        private readonly TelegramBusinessQueryService $queries,
+        private readonly TelegramDocumentDeliveryService $documents,
         private readonly AiAssistantService $assistant,
         private readonly AuditRecorder $audit,
     ) {}
@@ -108,11 +115,66 @@ final class TelegramBotService
     }
 
     /**
-     * Handle one update delivered by Telegram.
+     * Handle one update delivered by Telegram, at most once.
      *
      * @param  array<string, mixed>  $update
      */
     public function handleUpdate(array $update): void
+    {
+        $updateId = $update['update_id'] ?? null;
+
+        if (! is_int($updateId) && ! (is_string($updateId) && ctype_digit($updateId))) {
+            $this->processUpdate($update);
+
+            return;
+        }
+
+        $updateId = (int) $updateId;
+        $chatId = $this->chatIdFromUpdate($update);
+
+        $claimed = DB::table('telegram_updates')->insertOrIgnore([
+            'update_id' => $updateId,
+            'chat_id' => $chatId,
+            'processed_at' => null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        if ($claimed === 0) {
+            Log::info('Telegram update ignored: already claimed', [
+                'update_id' => $updateId,
+                'chat_id' => $chatId,
+            ]);
+
+            return;
+        }
+
+        try {
+            $this->processUpdate($update);
+
+            TelegramUpdate::query()
+                ->where('update_id', $updateId)
+                ->update(['processed_at' => now(), 'updated_at' => now()]);
+        } catch (\Throwable $e) {
+            // The row is a claim, not a tombstone. If the work failed, release
+            // it so a genuine retry can run; the write paths are themselves
+            // idempotent, so a partial retry cannot duplicate a task.
+            TelegramUpdate::query()->where('update_id', $updateId)->delete();
+
+            throw $e;
+        }
+
+        if ($updateId % 100 === 0) {
+            TelegramUpdate::query()
+                ->where('created_at', '<', now()->subDays(TelegramUpdate::RETENTION_DAYS))
+                ->delete();
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $update
+     */
+    private function processUpdate(array $update): void
     {
         $callback = $update['callback_query'] ?? null;
 
@@ -127,6 +189,20 @@ final class TelegramBotService
         if (is_array($message)) {
             $this->handleMessage($message);
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $update
+     */
+    private function chatIdFromUpdate(array $update): ?string
+    {
+        $message = $update['message'] ?? ($update['callback_query']['message'] ?? null);
+
+        if (! is_array($message) || ! isset($message['chat']['id'])) {
+            return null;
+        }
+
+        return (string) $message['chat']['id'];
     }
 
     /**
@@ -169,12 +245,42 @@ final class TelegramBotService
         match ($command) {
             'start' => $this->handleStart($chatId, $argument),
             'status' => $this->handleStatus($chatId),
-            'tasks', 'tareas' => $this->withBoundUser($chatId, fn (User $user) => $this->sendTasks($chatId, $user)),
-            'cartera', 'cobros' => $this->withBoundUser($chatId, fn (User $user) => $this->sendReceivables($chatId, $user)),
-            'planillas' => $this->withBoundUser($chatId, fn (User $user) => $this->sendSheets($chatId, $user)),
-            'clientes' => $this->withBoundUser($chatId, fn (User $user) => $this->sendClients($chatId, $user, $argument)),
-            'documentos' => $this->withBoundUser($chatId, fn (User $user) => $this->sendDocuments($chatId, $user)),
-            'tarea', 'recordar' => $this->withBoundUser($chatId, fn (User $user) => $this->proposeTask($chatId, $user, $argument)),
+            'tasks', 'tareas' => $this->withBoundUser($chatId, fn (User $user) => $this->respond(
+                $chatId,
+                $this->boundEndpoint($chatId),
+                $this->queries->tasks($user, new TelegramInterpretation(TelegramIntent::Tasks)),
+            )),
+            'recordatorios' => $this->withBoundUser($chatId, fn (User $user) => $this->respond(
+                $chatId,
+                $this->boundEndpoint($chatId),
+                $this->queries->reminders($user, new TelegramInterpretation(TelegramIntent::Reminders)),
+            )),
+            'cartera', 'cobros' => $this->withBoundUser($chatId, fn (User $user) => $this->respond(
+                $chatId,
+                $this->boundEndpoint($chatId),
+                $this->queries->receivables($user),
+            )),
+            'planillas' => $this->withBoundUser($chatId, fn (User $user) => $this->respond(
+                $chatId,
+                $this->boundEndpoint($chatId),
+                $this->queries->sheets($user, new TelegramInterpretation(TelegramIntent::Sheets)),
+            )),
+            'clientes' => $this->withBoundUser($chatId, fn (User $user) => $this->respond(
+                $chatId,
+                $this->boundEndpoint($chatId),
+                $this->queries->clients($user, new TelegramInterpretation(TelegramIntent::Clients, query: $argument)),
+            )),
+            'documentos' => $this->withBoundUser($chatId, fn (User $user) => $this->handleDocumentsCommand($chatId, $user, $argument)),
+            'tarea' => $this->withBoundUser($chatId, fn (User $user) => $this->proposeWrite(
+                $chatId,
+                $user,
+                $this->interpreter->interpret('crea una tarea '.$argument, $this->contextFor($chatId)),
+            )),
+            'recordar' => $this->withBoundUser($chatId, fn (User $user) => $this->proposeWrite(
+                $chatId,
+                $user,
+                $this->interpreter->interpret('recuerdame '.$argument, $this->contextFor($chatId)),
+            )),
             'help', 'ayuda' => $this->sendHelp($chatId),
             default => $this->sendMessage(
                 $chatId,
@@ -208,8 +314,8 @@ final class TelegramBotService
 
         $this->sendMessage($chatId, match ($result) {
             'bound' => "✅ Este chat quedó vinculado a su cuenta.\n\n"
-                ."Puede usar /tareas, /cartera, /planillas, /clientes, /documentos y /ayuda.\n"
-                .'Para crear una tarea: /tarea <título>.',
+                ."Puede usar /tareas, /recordatorios, /cartera, /planillas, /clientes, /documentos y /ayuda.\n"
+                .'Para crear una tarea: /tarea <título>. Para un recordatorio: /recordar <texto> mañana a las 9.',
             'reused' => '❌ Ese código ya fue utilizado. Solicite uno nuevo desde la aplicación.',
             'expired' => '❌ Ese código expiró. Solicite uno nuevo desde la aplicación.',
             'invalid' => '❌ El código no es válido. Solicite uno desde la aplicación e inténtelo de nuevo.',
@@ -269,6 +375,10 @@ final class TelegramBotService
                     'label' => 'Chat privado de '.$user->name,
                     'user_id' => $user->id,
                     'enabled' => true,
+                    // A binding is a new subject. The previous owner's
+                    // deterministic memory and AI thread must not survive it.
+                    'ai_conversation_id' => null,
+                    'context' => null,
                     'created_by' => $user->id,
                 ],
             );
@@ -328,195 +438,36 @@ final class TelegramBotService
 
     private function boundUser(string $chatId): ?User
     {
-        $endpoint = TelegramEndpoint::query()
-            ->with('user')
-            ->where('chat_id', $chatId)
-            ->where('enabled', true)
-            ->first();
+        $endpoint = $this->boundEndpoint($chatId);
 
         $user = $endpoint?->user;
 
         if (! $user instanceof User
             || $user->status !== UserStatus::Active
             || $user->account_type !== 'staff') {
+            $endpoint?->forgetAssistantContext();
+
             return null;
         }
 
         return $user;
     }
 
-    /* ---------------------------------------------------------------------
-     | Real business reads
-     | ------------------------------------------------------------------ */
-
-    private function sendTasks(string $chatId, User $user): void
+    private function boundEndpoint(string $chatId): ?TelegramEndpoint
     {
-        $tasks = OperationalTask::query()
-            ->where('assigned_to', $user->id)
-            ->whereIn('status', [TaskStatus::Pending->value, TaskStatus::InProgress->value])
-            ->orderByRaw('due_on IS NULL')
-            ->orderBy('due_on')
-            ->orderBy('id')
-            ->limit(10)
-            ->get();
-
-        if ($tasks->isEmpty()) {
-            $this->sendMessage($chatId, '📋 No tiene tareas pendientes asignadas.');
-
-            return;
-        }
-
-        $lines = ["📋 Sus tareas pendientes ({$tasks->count()}):", ''];
-
-        foreach ($tasks as $task) {
-            $due = $task->due_on?->format('Y-m-d') ?? 'sin fecha';
-            $lines[] = "#{$task->id} · {$task->title}";
-            $lines[] = "   Vence: {$due} · {$task->priority->label()}";
-        }
-
-        $this->sendMessage($chatId, implode("\n", $lines));
+        return TelegramEndpoint::query()
+            ->with('user')
+            ->where('chat_id', $chatId)
+            ->where('enabled', true)
+            ->first();
     }
 
-    private function sendReceivables(string $chatId, User $user): void
+    /**
+     * @return array<string, mixed>
+     */
+    private function contextFor(string $chatId): array
     {
-        if (! $user->can('receivables.view')) {
-            $this->sendMessage($chatId, '⛔ Su cuenta no tiene permiso para consultar cartera.');
-
-            return;
-        }
-
-        $page = $this->receivables->list(['overdue' => true], 1, 5);
-        $summary = $page['summary'];
-
-        $lines = [
-            '💳 Cartera vencida al '.now()->format('Y-m-d').':',
-            '',
-            'Saldo vencido: $'.number_format((int) $summary['overdue_balance_cop'], 0, ',', '.'),
-            'Clientes con deuda: '.(int) $summary['clients_with_debt'],
-            'Obligaciones vencidas: '.(int) $summary['overdue_obligations_count'],
-        ];
-
-        if ($page['items'] !== []) {
-            $lines[] = '';
-            $lines[] = 'Mayores saldos:';
-
-            foreach ($page['items'] as $row) {
-                $lines[] = '· '.$row['full_name'].' — $'.number_format((int) $row['overdue_balance_cop'], 0, ',', '.');
-            }
-        }
-
-        $this->sendMessage($chatId, implode("\n", $lines));
-    }
-
-    private function sendSheets(string $chatId, User $user): void
-    {
-        if (! $user->can('planillas.view')) {
-            $this->sendMessage($chatId, '⛔ Su cuenta no tiene permiso para consultar planillas.');
-
-            return;
-        }
-
-        $month = now()->startOfMonth();
-        $base = ContributionSheet::query()
-            ->whereHas('period', fn ($query) => $query->whereDate('period_month', $month->toDateString()));
-
-        $counts = [];
-        foreach (ContributionSheetStatus::cases() as $status) {
-            $counts[$status->value] = (clone $base)->where('status', $status->value)->count();
-        }
-
-        $total = array_sum($counts);
-
-        $lines = [
-            '📅 Planillas de '.$month->format('Y-m').':',
-            '',
-            "Total: {$total}",
-            'Borrador: '.$counts[ContributionSheetStatus::Draft->value],
-            'Listas: '.$counts[ContributionSheetStatus::Ready->value],
-            'Enviadas: '.$counts[ContributionSheetStatus::Submitted->value],
-            'Pagadas: '.$counts[ContributionSheetStatus::Paid->value],
-            'Canceladas: '.$counts[ContributionSheetStatus::Cancelled->value],
-        ];
-
-        $this->sendMessage($chatId, implode("\n", $lines));
-    }
-
-    private function sendClients(string $chatId, User $user, string $term): void
-    {
-        if (! $user->can('clients.view')) {
-            $this->sendMessage($chatId, '⛔ Su cuenta no tiene permiso para consultar clientes.');
-
-            return;
-        }
-
-        if ($term === '') {
-            $active = Client::query()->where('status', 'active')->count();
-            $this->sendMessage(
-                $chatId,
-                "🏢 Clientes activos: {$active}\n\n"
-                .'Para buscar uno: /clientes <nombre o documento>',
-            );
-
-            return;
-        }
-
-        $needle = '%'.mb_strtolower($term).'%';
-
-        $clients = Client::query()
-            ->where(function ($query) use ($needle): void {
-                $query->whereRaw('lower(first_names) like ?', [$needle])
-                    ->orWhereRaw('lower(last_names) like ?', [$needle])
-                    ->orWhereRaw('lower(document_number) like ?', [$needle]);
-            })
-            ->orderBy('last_names')
-            ->limit(10)
-            ->get();
-
-        if ($clients->isEmpty()) {
-            $this->sendMessage($chatId, '🔎 No encontré clientes que coincidan con «'.$term.'».');
-
-            return;
-        }
-
-        $lines = ['🔎 Clientes encontrados:', ''];
-
-        foreach ($clients as $client) {
-            $lines[] = "#{$client->id} · {$client->fullName()}";
-            $lines[] = '   '.$client->documentLabel();
-        }
-
-        $this->sendMessage($chatId, implode("\n", $lines));
-    }
-
-    private function sendDocuments(string $chatId, User $user): void
-    {
-        if (! $user->can('documents.view')) {
-            $this->sendMessage($chatId, '⛔ Su cuenta no tiene permiso para consultar documentos.');
-
-            return;
-        }
-
-        $pending = ClientDocumentRequest::query()
-            ->whereNotIn('status', [
-                DocumentRequestStatus::Approved->value,
-                DocumentRequestStatus::Cancelled->value,
-            ])
-            ->count();
-
-        $overdue = ClientDocumentRequest::query()
-            ->whereNotIn('status', [
-                DocumentRequestStatus::Approved->value,
-                DocumentRequestStatus::Cancelled->value,
-            ])
-            ->whereNotNull('due_on')
-            ->whereDate('due_on', '<', now()->toDateString())
-            ->count();
-
-        $this->sendMessage(
-            $chatId,
-            "📄 Solicitudes de documentos pendientes: {$pending}\n"
-            ."Vencidas: {$overdue}",
-        );
+        return $this->boundEndpoint($chatId)?->assistantContext() ?? [];
     }
 
     /* ---------------------------------------------------------------------
@@ -529,9 +480,14 @@ final class TelegramBotService
             return;
         }
 
-        $user = $this->boundUser($chatId);
+        $endpoint = $this->boundEndpoint($chatId);
+        $user = $endpoint?->user;
 
-        if ($user === null) {
+        if (! $endpoint instanceof TelegramEndpoint
+            || ! $user instanceof User
+            || $user->status !== UserStatus::Active
+            || $user->account_type !== 'staff') {
+            $endpoint?->forgetAssistantContext();
             $this->sendMessage(
                 $chatId,
                 '🔒 Este chat no está vinculado a una cuenta activa. '
@@ -541,68 +497,141 @@ final class TelegramBotService
             return;
         }
 
-        $lower = mb_strtolower($text);
+        $command = $this->interpreter->interpret($text, $endpoint->assistantContext());
 
-        if (preg_match('/(tarea|pendiente|agenda|urgente)/u', $lower) === 1) {
-            $this->sendTasks($chatId, $user);
-
-            return;
-        }
-
-        if (preg_match('/(cartera|cobrar|moros|deuda)/u', $lower) === 1) {
-            $this->sendReceivables($chatId, $user);
+        if ($command->isWrite()) {
+            $this->proposeWrite($chatId, $user, $command);
 
             return;
         }
 
-        if (preg_match('/(planilla)/u', $lower) === 1) {
-            $this->sendSheets($chatId, $user);
+        if ($command->intent !== TelegramIntent::Unknown) {
+            $this->respond($chatId, $endpoint, $this->executeRead($user, $command));
 
             return;
         }
 
-        if (preg_match('/(documento|solicitud)/u', $lower) === 1) {
-            $this->sendDocuments($chatId, $user);
-
-            return;
-        }
-
-        if (preg_match('/(cliente|empresa)/u', $lower) === 1) {
-            $this->sendClients($chatId, $user, '');
-
-            return;
-        }
-
+        // Only an unrecognised sentence reaches the assistant. A recognised
+        // business query was answered above from the database, so a provider
+        // outage cannot break it.
         if ($user->can('ai.use')) {
-            $this->askAssistant($chatId, $user, $text);
+            $this->askAssistant($chatId, $endpoint, $user, $text);
 
             return;
         }
 
         $this->sendMessage(
             $chatId,
-            'No entendí la consulta. Pruebe /tareas, /cartera, /planillas, /clientes o /ayuda.',
+            'No entendí la consulta. Pruebe /tareas, /recordatorios, /cartera, /planillas, /clientes o /ayuda.',
         );
     }
 
+    private function executeRead(User $user, TelegramInterpretation $command): TelegramQueryResult
+    {
+        return match ($command->intent) {
+            TelegramIntent::Tasks => $this->queries->tasks($user, $command),
+            TelegramIntent::Reminders => $this->queries->reminders($user, $command),
+            TelegramIntent::Clients => $this->queries->clients($user, $command),
+            TelegramIntent::ClientsByCompany => $this->queries->clientsByCompany($user, $command),
+            TelegramIntent::ClientAccount => $this->queries->clientAccount($user, $command),
+            TelegramIntent::Receivables => $this->queries->receivables($user),
+            TelegramIntent::Sheets => $this->queries->sheets($user, $command),
+            TelegramIntent::Documents => $this->queries->documents($user, $command),
+            TelegramIntent::SendDocument => $this->queries->sendDocument($user, $command),
+            TelegramIntent::Help => new TelegramQueryResult($this->helpText()),
+            default => new TelegramQueryResult(
+                'No entendí la consulta. Pruebe /tareas, /recordatorios, /cartera, /planillas, /clientes o /ayuda.',
+            ),
+        };
+    }
+
+    private function handleDocumentsCommand(string $chatId, User $user, string $argument): void
+    {
+        $endpoint = $this->boundEndpoint($chatId);
+
+        $command = $argument === ''
+            ? new TelegramInterpretation(TelegramIntent::Documents, pendingOnly: true)
+            : $this->interpreter->interpret('documentos '.$argument, $this->contextFor($chatId));
+
+        if ($command->intent === TelegramIntent::Unknown) {
+            $command = new TelegramInterpretation(TelegramIntent::Documents, pendingOnly: true);
+        }
+
+        $this->respond($chatId, $endpoint, $this->executeRead($user, $command));
+    }
+
     /**
-     * Ask the real assistant service, as the bound employee.
+     * Send a query result, materialise a requested file, and remember the subject.
+     *
+     * The context patch is merged only for a successful answer. A refusal must
+     * not overwrite which client the conversation was about.
+     */
+    private function respond(string $chatId, ?TelegramEndpoint $endpoint, TelegramQueryResult $result): void
+    {
+        $text = $result->text;
+        $delivered = true;
+
+        if (str_starts_with($text, 'FILE:')) {
+            $documentId = (int) substr($text, 5);
+
+            $document = ClientDocument::query()
+                ->with(['client', 'documentType'])
+                ->whereKey($documentId)
+                ->whereNull('archived_at')
+                ->first();
+
+            if ($document === null) {
+                $text = '⛔ Ese documento ya no está disponible.';
+                $delivered = false;
+            } else {
+                $user = $endpoint?->user;
+
+                if (! $user instanceof User) {
+                    $text = '🔒 Este chat no está vinculado a una cuenta activa.';
+                    $delivered = false;
+                } else {
+                    $delivery = $this->documents->deliver($chatId, $user, $document);
+                    $text = $delivery->text;
+                    $delivered = ! str_starts_with($text, '⚠️') && ! str_starts_with($text, '⛔');
+                }
+            }
+        }
+
+        $this->sendMessage($chatId, $text);
+
+        if ($endpoint instanceof TelegramEndpoint && $result->context !== [] && $delivered) {
+            $context = array_merge($endpoint->assistantContext(), $result->context, [
+                'updated_at' => now()->toIso8601String(),
+            ]);
+
+            // Only the small memory the bot needs. No message text, no history.
+            $endpoint->forceFill(['context' => $context])->save();
+        }
+    }
+
+    /**
+     * Ask the real assistant service in the chat's persistent conversation.
      *
      * If no provider is configured or the turn fails, the bot says so. It does
      * not invent an answer, and it does not pretend the assistant is
      * unavailable for a reason other than the one it received.
      */
-    private function askAssistant(string $chatId, User $user, string $question): void
+    private function askAssistant(string $chatId, TelegramEndpoint $endpoint, User $user, string $question): void
     {
-        $conversation = AiConversation::query()->create([
-            'user_id' => $user->id,
-            'title' => mb_substr($question, 0, 60),
-        ]);
-
         try {
+            $conversation = $this->conversationFor($endpoint, $user);
             $result = $this->assistant->ask($conversation, $question, $user);
         } catch (AiProviderException|AiTurnFailed $e) {
             Log::warning('Telegram AI turn failed', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            $this->sendMessage($chatId, '⚠️ El asistente no está disponible en este momento. Intente más tarde.');
+
+            return;
+        } catch (\Throwable $e) {
+            Log::error('Telegram AI turn crashed', [
                 'user_id' => $user->id,
                 'error' => $e->getMessage(),
             ]);
@@ -615,14 +644,51 @@ final class TelegramBotService
         $this->sendMessage($chatId, (string) ($result['reply'] ?? 'Sin respuesta del asistente.'));
     }
 
+    /**
+     * The chat's own assistant conversation, created once.
+     *
+     * The endpoint row is locked while the conversation is chosen so two
+     * concurrent messages cannot create two threads. A conversation that does
+     * not belong to the bound employee is detached, never reused: `user_id` on
+     * `ai_conversations` is the authorization boundary.
+     */
+    private function conversationFor(TelegramEndpoint $endpoint, User $user): AiConversation
+    {
+        return DB::transaction(function () use ($endpoint, $user): AiConversation {
+            $locked = TelegramEndpoint::query()
+                ->whereKey($endpoint->id)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $locked instanceof TelegramEndpoint
+                || (int) $locked->user_id !== (int) $user->id
+                || ! $locked->enabled) {
+                throw new \RuntimeException('El chat ya no está vinculado a esta cuenta.');
+            }
+
+            $conversation = $locked->aiConversation;
+
+            if ($conversation instanceof AiConversation
+                && (int) $conversation->user_id === (int) $user->id) {
+                return $conversation;
+            }
+
+            $conversation = AiConversation::query()->create([
+                'user_id' => $user->id,
+                'title' => 'Telegram · '.$user->name,
+            ]);
+
+            $locked->forceFill(['ai_conversation_id' => $conversation->id])->save();
+
+            return $conversation;
+        });
+    }
+
     /* ---------------------------------------------------------------------
      | Proposed write
      | ------------------------------------------------------------------ */
 
-    /**
-     * `/tarea <título>` records a proposal and asks for confirmation.
-     */
-    private function proposeTask(string $chatId, User $user, string $title): void
+    private function proposeWrite(string $chatId, User $user, TelegramInterpretation $command): void
     {
         if (! $user->can('tasks.create')) {
             $this->sendMessage($chatId, '⛔ Su cuenta no tiene permiso para crear tareas.');
@@ -630,10 +696,15 @@ final class TelegramBotService
             return;
         }
 
-        $title = trim($title);
+        $title = trim((string) $command->title);
 
         if ($title === '') {
-            $this->sendMessage($chatId, 'Indique el título de la tarea: /tarea Llamar al cliente');
+            $this->sendMessage(
+                $chatId,
+                $command->intent === TelegramIntent::CreateReminder
+                    ? 'Indique qué debo recordarle: /recordar llamar al cliente mañana a las 9.'
+                    : 'Indique el título de la tarea: /tarea Llamar al cliente.',
+            );
 
             return;
         }
@@ -642,23 +713,71 @@ final class TelegramBotService
             $title = mb_substr($title, 0, 200);
         }
 
+        $isReminder = $command->intent === TelegramIntent::CreateReminder;
+
+        if ($isReminder) {
+            if ($command->ambiguousTime) {
+                $this->sendMessage(
+                    $chatId,
+                    '⏰ No pude determinar la hora. Indique si es de la mañana o de la tarde, '
+                    .'por ejemplo: «mañana a las 3 de la tarde».',
+                );
+
+                return;
+            }
+
+            if ($command->reminderAt === null || $command->dueOn === null) {
+                $this->sendMessage(
+                    $chatId,
+                    '⏰ Para programar el recordatorio necesito fecha y hora. '
+                    .'Por ejemplo: «recuérdame llamar al cliente mañana a las 9».',
+                );
+
+                return;
+            }
+
+            if ($command->reminderAt->isPast()) {
+                $this->sendMessage($chatId, '⏰ La fecha y hora indicadas ya pasaron. Indique un momento futuro.');
+
+                return;
+            }
+        }
+
         $proposal = TelegramTaskProposal::query()->create([
             'user_id' => $user->id,
             'chat_id' => $chatId,
             'title' => $title,
-            'description' => 'Creada desde Telegram por '.$user->name.'.',
+            'description' => ($isReminder ? 'Recordatorio' : 'Tarea').' creado desde Telegram por '.$user->name.'.',
+            'due_on' => $command->dueOn?->toDateString(),
+            'reminder_at' => $isReminder ? $command->reminderAt : null,
             'status' => TelegramTaskProposal::PENDING,
             'expires_at' => now()->addMinutes(self::PROPOSAL_TTL_MINUTES),
         ]);
 
+        $lines = [
+            $isReminder ? '⏰ Propuesta de recordatorio:' : '📝 Propuesta de tarea:',
+            '',
+            $proposal->title,
+            'Responsable: '.$user->name,
+        ];
+
+        if ($proposal->due_on !== null) {
+            $lines[] = 'Fecha: '.$proposal->due_on->format('Y-m-d');
+        }
+
+        if ($proposal->reminder_at !== null) {
+            $lines[] = 'Recordatorio: '.$proposal->reminder_at->format('Y-m-d H:i');
+        }
+
+        $lines[] = '';
+        $lines[] = 'Confirme para crearlo; no se ha creado nada todavía.';
+
         $this->sendMessage(
             $chatId,
-            "📝 Propuesta de tarea:\n\n"
-            ."{$proposal->title}\n\n"
-            .'Se creará a su nombre. Confirme para crearla; no se ha creado nada todavía.',
+            implode("\n", $lines),
             [
                 'inline_keyboard' => [[
-                    ['text' => '✅ Crear tarea', 'callback_data' => 'task_confirm:'.$proposal->id],
+                    ['text' => $isReminder ? '✅ Crear recordatorio' : '✅ Crear tarea', 'callback_data' => 'task_confirm:'.$proposal->id],
                     ['text' => '❌ Cancelar', 'callback_data' => 'task_cancel:'.$proposal->id],
                 ]],
             ],
@@ -713,6 +832,7 @@ final class TelegramBotService
         $proposal = TelegramTaskProposal::query()
             ->whereKey($proposalId)
             ->where('user_id', $user->id)
+            ->where('chat_id', $chatId)
             ->first();
 
         if ($proposal === null) {
@@ -728,15 +848,17 @@ final class TelegramBotService
         }
 
         $proposal->forceFill(['status' => TelegramTaskProposal::CANCELLED])->save();
-        $this->sendMessage($chatId, 'Propuesta cancelada. No se creó ninguna tarea.');
+        $this->sendMessage($chatId, 'Propuesta cancelada. No se creó nada.');
     }
 
     /**
-     * Create the proposed task exactly once.
+     * Create the proposed task or reminder exactly once.
      *
      * The lock and the status transition happen in the same transaction as the
      * insert, so a double tap sees `confirmed` and refuses rather than creating
-     * a second task.
+     * a second task. The proposal also has to belong to this chat and this
+     * employee: a valid proposal id from another conversation is not a
+     * confirmation.
      */
     private function confirmProposal(string $chatId, User $user, int $proposalId): void
     {
@@ -754,13 +876,15 @@ final class TelegramBotService
             return;
         }
 
-        $outcome = DB::transaction(function () use ($user, $proposalId): array {
+        $outcome = DB::transaction(function () use ($chatId, $user, $proposalId): array {
             $proposal = TelegramTaskProposal::query()
                 ->whereKey($proposalId)
                 ->lockForUpdate()
                 ->first();
 
-            if ($proposal === null || (int) $proposal->user_id !== (int) $user->id) {
+            if ($proposal === null
+                || (int) $proposal->user_id !== (int) $user->id
+                || (string) $proposal->chat_id !== $chatId) {
                 return ['status' => 'missing'];
             }
 
@@ -778,6 +902,12 @@ final class TelegramBotService
                 return ['status' => 'expired'];
             }
 
+            if ($proposal->reminder_at !== null && $proposal->reminder_at->isPast()) {
+                $proposal->forceFill(['status' => TelegramTaskProposal::EXPIRED])->save();
+
+                return ['status' => 'past'];
+            }
+
             $task = OperationalTask::query()->create([
                 'title' => $proposal->title,
                 'description' => $proposal->description,
@@ -785,6 +915,8 @@ final class TelegramBotService
                 'created_by' => $user->id,
                 'priority' => TaskPriority::Normal->value,
                 'status' => TaskStatus::Pending->value,
+                'due_on' => $proposal->due_on?->toDateString(),
+                'reminder_at' => $proposal->reminder_at,
             ]);
 
             $proposal->forceFill([
@@ -796,16 +928,21 @@ final class TelegramBotService
             $this->audit->record(AuditAction::TaskCreated, $user, [
                 'title' => $task->title,
                 'assigned_to' => $task->assigned_to,
+                'due_on' => $task->due_on?->toDateString(),
+                'reminder_at' => $task->reminder_at?->toIso8601String(),
                 'source' => 'telegram',
             ], null, $task);
 
-            return ['status' => 'created', 'task_id' => $task->id];
+            return ['status' => 'created', 'task_id' => $task->id, 'reminder' => $task->reminder_at !== null];
         });
 
         $this->sendMessage($chatId, match ($outcome['status']) {
-            'created' => "✅ Tarea #{$outcome['task_id']} creada y asignada a usted.",
+            'created' => ($outcome['reminder'] ?? false)
+                ? "✅ Recordatorio #{$outcome['task_id']} creado y asignado a usted."
+                : "✅ Tarea #{$outcome['task_id']} creada y asignada a usted.",
             'already' => "ℹ️ Esa tarea ya fue creada (#{$outcome['task_id']}). No se creó otra.",
-            'expired' => '❌ La propuesta expiró. Vuelva a pedirla con /tarea.',
+            'expired' => '❌ La propuesta expiró. Vuelva a pedirla con /tarea o /recordar.',
+            'past' => '❌ La hora del recordatorio ya pasó. Proponga uno nuevo.',
             'not_pending' => 'Esa propuesta ya no está pendiente.',
             default => 'No encontré esa propuesta.',
         });
@@ -817,19 +954,24 @@ final class TelegramBotService
 
     private function sendHelp(string $chatId): void
     {
-        $this->sendMessage(
-            $chatId,
-            "🤖 Lo que puedo hacer:\n\n"
+        $this->sendMessage($chatId, $this->helpText());
+    }
+
+    private function helpText(): string
+    {
+        return "🤖 Lo que puedo hacer:\n\n"
             ."/tareas — sus tareas pendientes\n"
+            ."/recordatorios — sus recordatorios pendientes\n"
             ."/cartera — cartera vencida (requiere permiso)\n"
             ."/planillas — planillas del mes (requiere permiso)\n"
             ."/clientes <nombre o documento> — buscar clientes\n"
-            ."/documentos — solicitudes pendientes\n"
+            ."/documentos [cliente] — solicitudes y documentos\n"
             ."/tarea <título> — proponer una tarea (se confirma aquí)\n"
+            ."/recordar <texto> <fecha y hora> — proponer un recordatorio\n"
             ."/status — estado de la vinculación\n"
             ."/ayuda — este mensaje\n\n"
-            .'También puede escribir una consulta natural: «¿qué tareas tengo?», «¿cuánto hay por cobrar?».',
-        );
+            .'También puede escribir una consulta natural: «¿qué tareas tengo?», '
+            .'«¿cuánto debe Juan Pérez?», «envíame el documento de ese cliente».';
     }
 
     /**
@@ -855,9 +997,18 @@ final class TelegramBotService
             $payload['reply_markup'] = $replyMarkup;
         }
 
-        $response = Http::timeout(10)
-            ->asJson()
-            ->post("https://api.telegram.org/bot{$token}/sendMessage", $payload);
+        try {
+            $response = Http::timeout(10)
+                ->asJson()
+                ->post("https://api.telegram.org/bot{$token}/sendMessage", $payload);
+        } catch (\Throwable $e) {
+            Log::warning('Telegram sendMessage failed to reach the API', [
+                'chat_id' => $chatId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return;
+        }
 
         if (! $response->successful()) {
             Log::warning('Telegram sendMessage failed', [
@@ -875,10 +1026,16 @@ final class TelegramBotService
             return;
         }
 
-        Http::timeout(10)
-            ->asJson()
-            ->post("https://api.telegram.org/bot{$token}/answerCallbackQuery", [
-                'callback_query_id' => $callbackId,
+        try {
+            Http::timeout(10)
+                ->asJson()
+                ->post("https://api.telegram.org/bot{$token}/answerCallbackQuery", [
+                    'callback_query_id' => $callbackId,
+                ]);
+        } catch (\Throwable $e) {
+            Log::warning('Telegram answerCallbackQuery failed', [
+                'error' => $e->getMessage(),
             ]);
+        }
     }
 }

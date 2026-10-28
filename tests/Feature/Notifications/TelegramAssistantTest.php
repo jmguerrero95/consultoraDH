@@ -37,8 +37,11 @@ beforeEach(function (): void {
 
 function telegramMessage(string $chatId, string $text): array
 {
+    static $nextUpdateId = 1000;
+    $nextUpdateId++;
+
     return [
-        'update_id' => 1,
+        'update_id' => $nextUpdateId,
         'message' => [
             'message_id' => 10,
             'date' => now()->timestamp,
@@ -51,8 +54,11 @@ function telegramMessage(string $chatId, string $text): array
 
 function telegramCallback(string $chatId, string $data): array
 {
+    static $nextUpdateId = 2000;
+    $nextUpdateId++;
+
     return [
-        'update_id' => 2,
+        'update_id' => $nextUpdateId,
         'callback_query' => [
             'id' => 'callback-1',
             'from' => ['id' => $chatId, 'is_bot' => false, 'first_name' => 'QA'],

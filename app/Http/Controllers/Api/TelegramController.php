@@ -68,7 +68,18 @@ class TelegramController extends Controller
             ]),
         ]);
 
+        $previousChatId = (string) $endpoint->chat_id;
+
         $endpoint->update($validated);
+
+        // A chat that is moved, or switched off, must not keep the assistant
+        // thread or the "last client" memory of the previous binding.
+        $moved = array_key_exists('chat_id', $validated)
+            && (string) $validated['chat_id'] !== $previousChatId;
+
+        if ($moved || (array_key_exists('enabled', $validated) && $validated['enabled'] === false)) {
+            $endpoint->forgetAssistantContext();
+        }
 
         return response()->json($endpoint->fresh());
     }
@@ -141,7 +152,20 @@ class TelegramController extends Controller
             return response()->json(['status' => 'ignored']);
         }
 
-        $this->bot->handleUpdate($update);
+        try {
+            $this->bot->handleUpdate($update);
+        } catch (\Throwable $e) {
+            // Telegram retries a non-2xx response. A thrown handler would make
+            // it retry an update whose claim has just been released, so it is
+            // logged and acknowledged instead. The bot itself has already
+            // reported a user-safe failure where one applies.
+            Log::error('Telegram webhook handler failed', [
+                'update_id' => $update['update_id'] ?? null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json(['status' => 'error']);
+        }
 
         return response()->json(['status' => 'ok']);
     }

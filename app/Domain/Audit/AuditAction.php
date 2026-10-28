@@ -140,6 +140,7 @@ enum AuditAction: string
     case DocumentApproved = 'document.approved';
     case DocumentRejected = 'document.rejected';
     case DocumentArchived = 'document.archived';
+    case DocumentDelivered = 'document.delivered';
     case DocumentRequestCreated = 'document_request.created';
     case DocumentRequestReceived = 'document_request.received';
     case DocumentRequestReviewed = 'document_request.reviewed';

@@ -44,6 +44,8 @@ class TelegramTaskProposal extends Model
         'chat_id',
         'title',
         'description',
+        'due_on',
+        'reminder_at',
         'status',
         'expires_at',
         'confirmed_at',
@@ -53,6 +55,8 @@ class TelegramTaskProposal extends Model
     protected function casts(): array
     {
         return [
+            'due_on' => 'date',
+            'reminder_at' => 'datetime',
             'expires_at' => 'datetime',
             'confirmed_at' => 'datetime',
         ];
