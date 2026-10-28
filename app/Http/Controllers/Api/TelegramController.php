@@ -154,17 +154,21 @@ class TelegramController extends Controller
 
         try {
             $this->bot->handleUpdate($update);
+
+            // Successfully processed — acknowledge with 200 so Telegram stops retrying.
+            return response()->json(['status' => 'ok']);
         } catch (\Throwable $e) {
-            // Telegram retries a non-2xx response. A thrown handler would make
-            // it retry an update whose claim has just been released, so it is
-            // logged and acknowledged instead. The bot itself has already
-            // reported a user-safe failure where one applies.
+            // Telegram retries a non-2xx response. Returning 500 signals that the
+            // update failed and should be retried; the bot's own idempotency
+            // mechanisms (update_id claim, proposal locking) prevent duplicate
+            // tasks or double deliveries on retry.
             Log::error('Telegram webhook handler failed', [
                 'update_id' => $update['update_id'] ?? null,
                 'error' => $e->getMessage(),
             ]);
 
-            return response()->json(['status' => 'error']);
+            // Return 500 so Telegram retries this update on the next poll.
+            return response()->json(['status' => 'error'], 500);
         }
 
         return response()->json(['status' => 'ok']);

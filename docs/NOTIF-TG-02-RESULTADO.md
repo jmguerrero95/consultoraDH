@@ -1,10 +1,10 @@
 # NOTIF-TG-02 — Milestone Result
 
-**Branch:** `feat/notif-tg-02`  
-**Base SHA:** `2df9c9ec3b6af5fee00142117502ec815d1b2f3d`  
-**Final SHA:** `94b24f2e6d5c5b0a8e7f3c1d2a4b6e8f0a2b3c4d` *(after commit)*  
-**PR:** https://github.com/jmguerrero95/consultoraDH/pull/new/feat/notif-tg-02  
-**Ready for external review:** YES  
+**Branch:** `feat/notif-tg-02`
+**Base SHA:** `2df9c9ec3b6af5fee00142117502ec815d1b2f3d`
+**Final SHA:** `53e17e48f252336fe9874038251e42eaa40681d2`
+**PR:** https://github.com/jmguerrero95/consultoraDH/pull/new/feat/notif-tg-02
+**Ready for external review:** YES
 
 ---
 

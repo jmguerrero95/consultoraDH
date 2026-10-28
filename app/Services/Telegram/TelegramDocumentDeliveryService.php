@@ -7,6 +7,7 @@ namespace App\Services\Telegram;
 use App\Domain\Audit\AuditAction;
 use App\Domain\Audit\AuditRecorder;
 use App\Models\ClientDocument;
+use App\Models\TelegramEndpoint;
 use App\Models\User;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -37,7 +38,7 @@ final class TelegramDocumentDeliveryService
 
     public function __construct(private readonly AuditRecorder $audit) {}
 
-    public function deliver(string $chatId, User $user, ClientDocument $document): TelegramQueryResult
+    public function deliver(string $chatId, User $user, ClientDocument $document, $endpoint = null): TelegramQueryResult
     {
         if ($user->cannot('documents.view')) {
             return new TelegramQueryResult('⛔ Su cuenta no tiene permiso para entregar documentos.');
@@ -45,6 +46,18 @@ final class TelegramDocumentDeliveryService
 
         if ($user->account_type !== 'staff') {
             return new TelegramQueryResult('⛔ Solo una cuenta de personal puede recibir documentos privados.');
+        }
+
+        // Centralized concrete-document authorization: the document must belong to
+        // the chat's remembered client (if any). This is the re-verification the
+        // audit requires immediately before sendDocument.
+        if ($endpoint instanceof TelegramEndpoint) {
+            $context = $endpoint->assistantContext();
+            $rememberedClientId = data_get($context, 'client_id');
+
+            if ($rememberedClientId !== null && (int) $document->client_id !== (int) $rememberedClientId) {
+                return new TelegramQueryResult('⛔ Este documento no pertenece al cliente de este chat.');
+            }
         }
 
         if ($document->archived_at !== null) {
