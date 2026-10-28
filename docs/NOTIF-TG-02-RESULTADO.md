@@ -2,7 +2,7 @@
 
 **Branch:** `feat/notif-tg-02`
 **Base SHA:** `2df9c9ec3b6af5fee00142117502ec815d1b2f3d`
-**Final SHA:** `07067c9db0ad3543b0d7e2de3f0447aa546794ea`
+**Final SHA:** `e225c8a518c502b13266f77a3afa7aba19d7d8e4`
 **PR:** https://github.com/jmguerrero95/consultoraDH/pull/new/feat/notif-tg-02
 **Ready for external review:** YES
 

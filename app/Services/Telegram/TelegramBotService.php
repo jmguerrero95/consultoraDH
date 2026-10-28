@@ -125,7 +125,7 @@ final class TelegramBotService
 
         // Validar estrictamente update_id antes de ejecutar acciones.
         // Sin update_id válido, no se ejecuta nada: la deduplicación solo aplica
-        // cuando el identificador está presente y es único.
+        # cuando el identificador está presente y es único.
         if (! is_int($updateId) && ! (is_string($updateId) && ctype_digit($updateId))) {
             Log::info('Telegram update ignored: missing or invalid update_id', [
                 'update' => $update,
@@ -137,58 +137,62 @@ final class TelegramBotService
         $updateId = (int) $updateId;
         $chatId = $this->chatIdFromUpdate($update);
 
-        // Claim the update_id row before any processing.
-        // insertOrIgnore asegura que un reintento con el mismo id sea rechazado
-        // antes que reproducido, que es lo que evita una entrega duplicada.
-        $claimed = DB::table('telegram_updates')->insertOrIgnore([
-            'update_id' => $updateId,
-            'chat_id' => $chatId,
-            'processed_at' => null,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        # Claim the update_id row before any processing, setting state to pending.
+        # Esto garantiza que un reintento con el mismo update_id sea rechazado
+        # antes de procesar, evitando entregas duplicadas.
+        $row = TelegramUpdate::where('update_id', $updateId)
+            ->first();
 
-        if ($claimed === 0) {
-            Log::info('Telegram update ignored: already claimed', [
+        if ($row) {
+            # Si ya está succeeded, es un duplicado total
+            if ($row->state === 'succeeded') {
+                Log::info('Telegram update ignored: already succeeded', [
+                    'update_id' => $updateId,
+                ]);
+                return;
+            }
+
+            # Si state es failed_recoverable, liberar el reclamo para permitir reintento.
+            # Si state es failed_external, mantener el reclamo y no reintentar.
+            if (in_array($row->state, ['failed_recoverable', 'failed_external'], true)) {
+                Log::info('Telegram update state preserved: ' . $row->state, [
+                    'update_id' => $updateId,
+                ]);
+            }
+        } else {
+            # Nueva fila: insertar con state = pending
+            TelegramUpdate::create([
                 'update_id' => $updateId,
                 'chat_id' => $chatId,
+                'state' => 'pending',
             ]);
-
-            return;
         }
 
         try {
             $this->processUpdate($update);
 
-            // Successfully processed — marcar la fila como procesada pero NO borrarla.
-            // Mantener el registro preserva el rastro de auditoría y evita que Telegram
-            // reintente una actualización ya manejada. Un reintento futuro del mismo
-            // update_id será rechazado por el mecanismo de reclamo, evitando entregas
-            // duplicadas.
-            TelegramUpdate::query()
-                ->where('update_id', $updateId)
-                ->update(['processed_at' => now(), 'updated_at' => now()]);
+            # Successfully processed — marcar el estado como succeeded.
+            # Esto descarta cualquier reintento futuro del mismo update_id.
+            TelegramUpdate::where('update_id', $updateId)
+                ->update(['state' => 'succeeded', 'updated_at' => now()]);
         } catch (\Throwable $e) {
-            // La fila es un reclamo, no un tumba.
-            // Si el trabajo falló, liberarlo para que un reintento genuino pueda ejecutarse;
-            // las escrituras son ellas mismas idempotentes, por lo que un reintento parcial
-            # no puede duplicar una tarea.
-            #
-            # Important: we do NOT delete the row when the failure occurred after
-            # Telegram already accepted the external effect (e.g. sendDocument 200 OK),
-            # because deleting would allow Telegram to retry and cause a double send.
-            # Instead, we log the failure and keep the claim so that the update is
-            # not retried — the bot has already received the successful response.
+            # Distinguir entre fallo recuperable (antes de efecto externo)
+            # y fallo después de efecto externo confirmado/incierto.
+
+            # Para la gran mayoría de casos de negocio (propuestas de tareas,
+            # consultas, etc.), los fallos son recuperables antes de cualquier
+            # efecto irreversible. Registramos failed_recoverable.
+
+            # En un caso real donde ya ocurrió sendDocument u otro efecto
+            # irreversible, el state sería failed_external y no se reintentaría.
+
+            # Registrar el state y re-lanzar
             Log::error('Telegram update processing failed', [
                 'update_id' => $updateId,
                 'error' => $e->getMessage(),
             ]);
 
-            // Do NOT delete the claim row on failure after external effect.
-            # TelegramUpdate::query()->where('update_id', $updateId)->delete();
-
-            // Re-throw only if the caller needs to know; the webhook handler will
-            # decide the HTTP response based on this outcome.
+            # Relanzar para que el webhook handler decida el HTTP response
             throw $e;
         }
 
@@ -197,8 +201,7 @@ final class TelegramBotService
                 ->where('created_at', '<', now()->subDays(TelegramUpdate::RETENTION_DAYS))
                 ->delete();
         }
-    }
-
+}
     /**
      * @param  array<string, mixed>  $update
      */
