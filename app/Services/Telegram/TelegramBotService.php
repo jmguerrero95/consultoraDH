@@ -114,8 +114,20 @@ final class TelegramBotService
         ];
     }
 
+    /** How long one worker may hold a claim before another may take it. */
+    private const CLAIM_LEASE_SECONDS = 900;
+
+    private ?int $currentUpdateId = null;
+
+    private ?string $currentClaimToken = null;
+
     /**
      * Handle one update delivered by Telegram, at most once.
+     *
+     * The `telegram_updates` row is the claim. A worker runs only after an
+     * atomic INSERT ... ON CONFLICT DO NOTHING or an atomic UPDATE that wins a
+     * pending/recoverable row. The claim token travels with the turn so every
+     * transition can prove it still owns the row.
      *
      * @param  array<string, mixed>  $update
      */
@@ -123,12 +135,10 @@ final class TelegramBotService
     {
         $updateId = $update['update_id'] ?? null;
 
-        // Validar estrictamente update_id antes de ejecutar acciones.
-        // Sin update_id válido, no se ejecuta nada: la deduplicación solo aplica
-        # cuando el identificador está presente y es único.
         if (! is_int($updateId) && ! (is_string($updateId) && ctype_digit($updateId))) {
+            // Never log the payload: it contains private chat text.
             Log::info('Telegram update ignored: missing or invalid update_id', [
-                'update' => $update,
+                'reason' => 'invalid_update_id',
             ]);
 
             return;
@@ -137,91 +147,25 @@ final class TelegramBotService
         $updateId = (int) $updateId;
         $chatId = $this->chatIdFromUpdate($update);
 
-        # Claim atomic: utiliza INSERT ... ON DUPLICATE KEY UPDATE para obtener
-        # la fila reclamada de forma segura. Si la fila ya existe con state=succeeded,
-        # es un duplicado total. Si existe con state=pending de otro proceso, no
-        # proceder. Si no existe, créala con state=pending.
-        $now = now()->toDateTimeString();
+        $claimToken = $this->claimUpdate($updateId, $chatId);
 
-        $row = TelegramUpdate::where('update_id', $updateId)
-            ->withLock()
-            ->first();
-
-        if ($row) {
-            # Ya hay una fila reclamada para este update_id
-            if ($row->state === 'succeeded') {
-                # Ya fue procesado exitosamente; ignora totalmente.
-                Log::info('Telegram update ignored: already succeeded', [
-                    'update_id' => $updateId,
-                ]);
-                return;
-            }
-
-            # Si state es pending y la fila fue reclamada por otro proceso
-            # (distinto al que intenta procesar ahora), no proceder.
-            # El índice único en update_id garantiza que solo un proceso tiene
-            # la reclamación activa.
-            if ($row->state === 'pending') {
-                # Verificar si esta reclamación es la nuestra o de otro proceso.
-                # Dado que ya tenemos la fila locked, procedemos con ella.
-                Log::info('Telegram update pending (claimed by another process): ' . $row->state, [
-                    'update_id' => $updateId,
-                ]);
-            }
-
-            # Si state es failed_recoverable, liberar el reclamo para permitir reintento.
-            if ($row->state === 'failed_recoverable') {
-                Log::info('Telegram update failed_recoverable: liberando reclamo', [
-                    'update_id' => $updateId,
-                ]);
-                # Resetear state a pending para permitir un nuevo intento.
-                $row->state = 'pending';
-                $row->save();
-            }
-
-            # Si state es failed_external, prohibir automáticamente la repetición
-            # del efecto externo y registrar necesidad de conciliación manual.
-            if ($row->state === 'failed_external') {
-                Log::info('Telegram update failed_external: bloqueando reenvío automático', [
-                    'update_id' => $updateId,
-                ]);
-                return; # No vuelva a procesar este update_id
-            }
-        } else {
-            # Nueva fila: reclamar con state = pending
-            TelegramUpdate::create([
-                'update_id' => $updateId,
-                'chat_id' => $chatId,
-                'state' => 'pending',
-                'processed_at' => null,
-            ]);
+        if ($claimToken === null) {
+            return;
         }
+
+        $this->currentUpdateId = $updateId;
+        $this->currentClaimToken = $claimToken;
 
         try {
             $this->processUpdate($update);
-
-            # Successfully processed — marcar el estado como succeeded.
-            # Esto descarta cualquier reintento futuro del mismo update_id.
-            TelegramUpdate::where('update_id', $updateId)
-                ->update(['state' => 'succeeded', 'processed_at' => now(), 'updated_at' => now()]);
+            $this->markUpdateSucceeded($updateId, $claimToken);
         } catch (\Throwable $e) {
-            # Distinguir entre fallo recuperable (antes de efecto externo)
-            # y fallo después de efecto externo confirmado/incierto.
+            $this->markUpdateFailed($updateId, $claimToken, $e);
 
-            # Para la gran mayoría de casos de negocio (propuestas de tareas,
-            # consultas, etc.), los fallos son recuperables antes de cualquier
-            # efecto irreversible. Registramos failed_recoverable.
-
-            # En un caso real donde ya ocurrió sendDocument u otro efecto
-            # irreversible, el state sería failed_external y no se reintentaría.
-
-            # Registrar el state en la base de datos ANTES de relanzar.
-            # Esto permite que un reintento posterior lea el state correcto.
-            TelegramUpdate::where('update_id', $updateId)
-                ->update(['state' => 'failed_recoverable', 'updated_at' => now()]);
-
-            # Relanzar para que el webhook handler decida el HTTP response
             throw $e;
+        } finally {
+            $this->currentUpdateId = null;
+            $this->currentClaimToken = null;
         }
 
         if ($updateId % 100 === 0) {
@@ -230,8 +174,186 @@ final class TelegramBotService
                 ->delete();
         }
     }
+
+    /**
+     * Claim one update atomically.
+     *
+     * Returns the claim token when this worker owns the turn. Returns null when
+     * the update already succeeded, is blocked after an external effect, or a
+     * stale row with an unknown external outcome was just moved to
+     * `failed_external`. Throws when another live worker owns the row, so the
+     * webhook answers non-2xx and Telegram retries after the lease.
+     */
+    private function claimUpdate(int $updateId, ?string $chatId): ?string
+    {
+        $token = bin2hex(random_bytes(16));
+        $now = now();
+
+        $inserted = DB::table('telegram_updates')->insertOrIgnore([
+            'update_id' => $updateId,
+            'chat_id' => $chatId,
+            'state' => 'pending',
+            'claim_token' => $token,
+            'claimed_at' => $now,
+            'external_started_at' => null,
+            'attempt_count' => 1,
+            'failure_code' => null,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        if ($inserted === 1) {
+            return $token;
         }
-}
+
+        $staleBefore = $now->copy()->subSeconds(self::CLAIM_LEASE_SECONDS);
+
+        $claimed = DB::table('telegram_updates')
+            ->where('update_id', $updateId)
+            ->whereIn('state', ['pending', 'failed_recoverable'])
+            ->whereNull('external_started_at')
+            ->where(function ($query) use ($staleBefore): void {
+                $query->whereNull('claim_token')
+                    ->orWhere('claimed_at', '<=', $staleBefore);
+            })
+            ->update([
+                'state' => 'pending',
+                'claim_token' => $token,
+                'claimed_at' => $now,
+                'attempt_count' => DB::raw('attempt_count + 1'),
+                'failure_code' => null,
+                'updated_at' => $now,
+            ]);
+
+        if ($claimed === 1) {
+            return $token;
+        }
+
+        $row = DB::table('telegram_updates')->where('update_id', $updateId)->first();
+
+        if ($row === null) {
+            throw new \RuntimeException('Telegram update claim disappeared before processing.');
+        }
+
+        if ($row->state === 'succeeded') {
+            Log::info('Telegram update ignored: already succeeded', ['update_id' => $updateId]);
+
+            return null;
+        }
+
+        if ($row->state === 'failed_external') {
+            Log::info('Telegram update blocked: failed_external', ['update_id' => $updateId]);
+
+            return null;
+        }
+
+        if ($row->external_started_at !== null) {
+            // The worker died after starting an external effect. We cannot know
+            // whether Telegram accepted it, so automatic replay is forbidden.
+            DB::table('telegram_updates')
+                ->where('update_id', $updateId)
+                ->update([
+                    'state' => 'failed_external',
+                    'claim_token' => null,
+                    'failure_code' => 'external_outcome_unknown',
+                    'updated_at' => $now,
+                ]);
+
+            Log::warning('Telegram update blocked: external effect outcome unknown', [
+                'update_id' => $updateId,
+            ]);
+
+            return null;
+        }
+
+        throw new \RuntimeException('Telegram update is already being processed by another worker.');
+    }
+
+    private function markUpdateSucceeded(int $updateId, string $claimToken): void
+    {
+        $updated = DB::table('telegram_updates')
+            ->where('update_id', $updateId)
+            ->where('claim_token', $claimToken)
+            ->update([
+                'state' => 'succeeded',
+                'claim_token' => null,
+                'processed_at' => now(),
+                'failure_code' => null,
+                'updated_at' => now(),
+            ]);
+
+        if ($updated !== 1) {
+            throw new \RuntimeException('Telegram update claim was lost before success was recorded.');
+        }
+    }
+
+    private function markUpdateFailed(int $updateId, string $claimToken, \Throwable $error): void
+    {
+        $row = DB::table('telegram_updates')
+            ->where('update_id', $updateId)
+            ->where('claim_token', $claimToken)
+            ->first();
+
+        if ($row === null) {
+            return;
+        }
+
+        $state = $row->external_started_at !== null ? 'failed_external' : 'failed_recoverable';
+
+        DB::table('telegram_updates')
+            ->where('update_id', $updateId)
+            ->where('claim_token', $claimToken)
+            ->update([
+                'state' => $state,
+                'claim_token' => null,
+                'failure_code' => mb_substr(class_basename($error), 0, 64),
+                'updated_at' => now(),
+            ]);
+
+        Log::warning('Telegram update processing failed', [
+            'update_id' => $updateId,
+            'state' => $state,
+            'error_class' => $error::class,
+        ]);
+    }
+
+    /**
+     * Durably record that an outbound effect has started.
+     *
+     * This standalone UPDATE is committed before the HTTP call, so a crash
+     * during the call leaves the row marked. A later retry sees the mark and is
+     * blocked as `failed_external` instead of replaying the effect.
+     */
+    private function markExternalEffectStarted(): void
+    {
+        if ($this->currentUpdateId === null || $this->currentClaimToken === null) {
+            throw new \RuntimeException('Telegram external effect attempted without a claimed update.');
+        }
+
+        $updated = DB::table('telegram_updates')
+            ->where('update_id', $this->currentUpdateId)
+            ->where('claim_token', $this->currentClaimToken)
+            ->whereNull('external_started_at')
+            ->update([
+                'external_started_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+        if ($updated === 1) {
+            return;
+        }
+
+        $alreadyMarked = DB::table('telegram_updates')
+            ->where('update_id', $this->currentUpdateId)
+            ->where('claim_token', $this->currentClaimToken)
+            ->whereNotNull('external_started_at')
+            ->exists();
+
+        if (! $alreadyMarked) {
+            throw new \RuntimeException('Telegram update claim was lost before an external effect.');
+        }
+    }
+
     /**
      * @param  array<string, mixed>  $update
      */
@@ -651,7 +773,12 @@ final class TelegramBotService
                     $text = '🔒 Este chat no está vinculado a una cuenta activa.';
                     $delivered = false;
                 } else {
-                    $delivery = $this->documents->deliver($chatId, $user, $document);
+                    $delivery = $this->documents->deliver(
+                        $chatId,
+                        $user,
+                        $document,
+                        fn () => $this->markExternalEffectStarted(),
+                    );
                     $text = $delivery->text;
                     $delivered = ! str_starts_with($text, '⚠️') && ! str_starts_with($text, '⛔');
                 }
@@ -685,7 +812,7 @@ final class TelegramBotService
         } catch (AiProviderException|AiTurnFailed $e) {
             Log::warning('Telegram AI turn failed', [
                 'user_id' => $user->id,
-                'error' => $e->getMessage(),
+                'error_class' => $e::class,
             ]);
 
             $this->sendMessage($chatId, '⚠️ El asistente no está disponible en este momento. Intente más tarde.');
@@ -694,7 +821,7 @@ final class TelegramBotService
         } catch (\Throwable $e) {
             Log::error('Telegram AI turn crashed', [
                 'user_id' => $user->id,
-                'error' => $e->getMessage(),
+                'error_class' => $e::class,
             ]);
 
             $this->sendMessage($chatId, '⚠️ El asistente no está disponible en este momento. Intente más tarde.');
@@ -1058,6 +1185,10 @@ final class TelegramBotService
             $payload['reply_markup'] = $replyMarkup;
         }
 
+        // Mark the effect before the call, in its own committed statement. If
+        // the process dies here, the retry must not send the message twice.
+        $this->markExternalEffectStarted();
+
         try {
             $response = Http::timeout(10)
                 ->asJson()
@@ -1065,10 +1196,10 @@ final class TelegramBotService
         } catch (\Throwable $e) {
             Log::warning('Telegram sendMessage failed to reach the API', [
                 'chat_id' => $chatId,
-                'error' => $e->getMessage(),
+                'error_class' => $e::class,
             ]);
 
-            return;
+            throw new TelegramExternalEffectFailed('Telegram sendMessage transport failed', 0, $e);
         }
 
         if (! $response->successful()) {
@@ -1076,6 +1207,8 @@ final class TelegramBotService
                 'chat_id' => $chatId,
                 'status' => $response->status(),
             ]);
+
+            throw new TelegramExternalEffectFailed('Telegram sendMessage was rejected.');
         }
     }
 
@@ -1095,7 +1228,7 @@ final class TelegramBotService
                 ]);
         } catch (\Throwable $e) {
             Log::warning('Telegram answerCallbackQuery failed', [
-                'error' => $e->getMessage(),
+                'error_class' => $e::class,
             ]);
         }
     }

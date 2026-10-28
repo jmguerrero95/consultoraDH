@@ -18,13 +18,23 @@ use App\Models\MonthlyPeriod;
 use App\Models\OperationalTask;
 use App\Models\TelegramEndpoint;
 use App\Models\TelegramTaskProposal;
+use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Notifications\TaskReminderNotification;
+use App\Services\Telegram\TelegramBotService;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
+use Illuminate\Log\Logger as IlluminateLogger;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Testing\TestResponse;
+use Monolog\Handler\TestHandler;
+use Monolog\Logger as MonologLogger;
 
 /**
  * NOTIF-TG-02 — deterministic business queries, real reminders, private files,
@@ -90,12 +100,16 @@ function ntg2Callback(string $chatId, string $data, ?int $updateId = null): arra
     ];
 }
 
+function ntg2Post(array $payload): TestResponse
+{
+    return test()
+        ->withHeader('X-Telegram-Bot-Api-Secret-Token', 'test-webhook-secret')
+        ->postJson('/api/telegram/webhook', $payload);
+}
+
 function ntg2Send(array $payload): void
 {
-    test()
-        ->withHeader('X-Telegram-Bot-Api-Secret-Token', 'test-webhook-secret')
-        ->postJson('/api/telegram/webhook', $payload)
-        ->assertOk();
+    ntg2Post($payload)->assertOk();
 }
 
 function ntg2Bind(User $user, string $chatId): TelegramEndpoint
@@ -150,6 +164,52 @@ function ntg2ConfigureProvider(): void
         'ai.providers' => [],
         'ai.openrouter.dynamic_pool' => false,
     ]);
+}
+
+/**
+ * Prepare a real private document and leave the chat's context pointing at its
+ * client, so the returned update is an executable sendDocument request.
+ */
+function ntg2DocumentPayload(User $user, string $chatId, int $updateId): array
+{
+    Storage::fake('documents');
+    ntg2Bind($user, $chatId);
+
+    $client = Client::factory()->create([
+        'first_names' => 'Cliente Documento',
+        'last_names' => 'QA',
+    ]);
+
+    $type = DocumentType::factory()->create();
+
+    Storage::disk('documents')->put('clients/'.$client->id.'/r05.pdf', 'PDF-CONTENT-QA-R05');
+
+    ClientDocument::factory()->create([
+        'client_id' => $client->id,
+        'document_type_id' => $type->id,
+        'title' => 'Documento R05',
+        'original_name' => 'documento-r05.pdf',
+        'stored_path' => 'clients/'.$client->id.'/r05.pdf',
+        'mime_type' => 'application/pdf',
+        'size_bytes' => 19,
+        'visibility' => DocumentVisibility::Internal,
+        'review_status' => DocumentReviewStatus::Received,
+        'archived_at' => null,
+    ]);
+
+    ntg2Send(ntg2Message($chatId, 'Busca a Cliente Documento QA.'));
+
+    return ntg2Message($chatId, 'Envíame el documento de ese cliente.', $updateId);
+}
+
+/**
+ * @return Collection<int, array{0: Request, 1: mixed}>
+ */
+function ntg2SendDocumentCalls(): Collection
+{
+    return collect(Http::recorded())->filter(
+        fn (array $pair): bool => str_contains($pair[0]->url(), '/sendDocument'),
+    );
 }
 
 /* -------------------------------------------------------------------------
@@ -609,7 +669,7 @@ it('R03 entrega propio documento con documentos.view', function (): void {
 });
 
 /* -------------------------------------------------------------------------
- | BLOQUE R05 — Pruebas nuevas de fiabilidad del webhook
+ | BLOQUE R05 — Reclamación atómica, reintentos y efectos externos
  | ---------------------------------------------------------------------- */
 
 it('R05 update_id inválido no ejecuta acciones', function (): void {
@@ -624,114 +684,282 @@ it('R05 update_id inválido no ejecuta acciones', function (): void {
         'callback_query' => null,
     ];
 
-    $this->app->make('App\Services\Telegram\TelegramBotService')->handleUpdate($payload);
+    app(TelegramBotService::class)->handleUpdate($payload);
 
-    expect(OperationalTask::query()->count())->toBe(0);
+    expect(OperationalTask::query()->count())->toBe(0)
+        ->and(TelegramUpdate::query()->count())->toBe(0);
 });
 
-it('R05 update_id repetido no crea tarea duplicada', function (): void {
-    ntg2Bind($this->employee, '7F02');
-
-    $msg = ntg2Message('7F02', 'Crea una tarea de prueba.');
-    $bot = $this->app->make('App\Services\Telegram\TelegramBotService');
-
-    $bot->handleUpdate($msg);
-    $bot->handleUpdate($msg);  // Mismo update_id, debería ser ignorado
-
-    # Con la deduplicación por update_id, solo debería procesarse una vez.
-    # El count puede ser 0 o 1 dependiendo de si el primer handleUpdate
-    # creó una tarea; lo importante es que el segundo no creó otra.
-    # Aquí verificamos que no haya creado de más:
-    expect(OperationalTask::query()->count())->toBeLessThanOrEqual(1);
-});
-
-/* -------------------------------------------------------------------------
- | BLOQUE R05 — Pruebas de transiciones de estado y bloqueo
- | ---------------------------------------------------------------------- */
-
-it('R05 mensaje válido y vinculado genera exactamente una propuesta', function (): void {
-    ntg2Bind($this->employee, '7G01');
-
-    $msg = ntg2Message('7G01', 'Crea una tarea de prueba.');
-    $bot = $this->app->make('App\Services\Telegram\TelegramBotService');
-    $bot->handleUpdate($msg);
-
-    # Debería crearse exactamente una propuesta
-    $proposals = TelegramTaskProposal::where('chat_id', '7G01')->get();
-    expect($proposals->count())->toBe(1);
-    expect(OperationalTask::query()->count())->toBe(1);
-});
-
-it('R05 repetir mismo update_id no genera segunda propuesta', function (): void {
+it('R05 update_id repetido no crea propuesta ni tarea duplicada', function (): void {
     ntg2Bind($this->employee, '7G02');
 
-    $msg = ntg2Message('7G02', 'Crea otra tarea de prueba.');
-    $bot = $this->app->make('App\Services\Telegram\TelegramBotService');
+    $msg = ntg2Message('7G02', 'Crea una tarea de prueba.', 702001);
 
-    $bot->handleUpdate($msg);
-    # Segundo handleUpdate con el mismo update_id debe ser ignorado
-    $bot->handleUpdate($msg);
+    ntg2Send($msg);
+    ntg2Send($msg);
 
-    # Debería haber exactamente una propuesta, no dos
-    $proposals = TelegramTaskProposal::where('chat_id', '7G02')->get();
-    expect($proposals->count())->toBe(1);
+    expect(TelegramTaskProposal::query()->count())->toBe(1)
+        ->and(OperationalTask::query()->count())->toBe(0)
+        ->and(TelegramUpdate::query()->where('update_id', 702001)->value('state'))->toBe('succeeded');
 });
 
-it('R05 fallo recuperable antes de efecto externo persiste failed_recoverable y permite reintento', function (): void {
-    ntg2Bind($this->employee, '7G03');
+it('R05 mensaje válido y vinculado genera una propuesta y ninguna tarea sin confirmar', function (): void {
+    ntg2Bind($this->employee, '7G01');
 
-    # Simular: processUpdate lanza excepción antes de cualquier efecto externo
-    # El state debe ser failed_recoverable
-    $bot = $this->app->make('App\Services\Telegram\TelegramBotService');
+    app(TelegramBotService::class)->handleUpdate(
+        ntg2Message('7G01', 'Crea una tarea de prueba.', 701001),
+    );
 
-    # Inyectar una excepción recoverable en processUpdate
-    # Para el test, verificamos que el estado sea persisted correctly
-    # y que un segundo intento pueda tener éxito
+    $proposal = TelegramTaskProposal::query()->where('chat_id', '7G01')->firstOrFail();
 
-    # Verificar que TelegramUpdate tiene el state appropriate
-    $updates = TelegramUpdate::where('update_id', 'like', '7G03%')->get();
-    # El test verifica que el estado appropriate sea persistido
-    ok(true);
+    expect(TelegramTaskProposal::query()->where('chat_id', '7G01')->count())->toBe(1)
+        ->and($proposal->status)->toBe(TelegramTaskProposal::PENDING)
+        ->and(OperationalTask::query()->count())->toBe(0);
 });
 
-it('R05 efecto externo iniciado/confirmado/incierto no se ejecuta otra vez tras excepción posterior', function (): void {
-    # El punto clave: si ya ocurrió sendDocument (efecto externo) y luego falla,
-    # no debería ejecutarse otro sendDocument. El test verifica que el state
-    # sea failed_external y que no haya segundo envío.
+it('R05 persiste failed_recoverable antes de un efecto externo y el reintento real completa el update', function (): void {
     ntg2Bind($this->employee, '7G04');
 
-    # Simular escenario: sendDocument iniciado, luego excepción
-    # El state debe ser failed_external y no repetirse
-    ok(true);
+    $payload = ntg2Message('7G04', 'Crea una tarea de prueba.', 704001);
+    $failOnce = true;
+
+    // Throwing before the INSERT runs leaves PostgreSQL's transaction healthy:
+    // this is a real PHP failure, not a mocked assertion.
+    DB::beforeExecuting(function (string $query) use (&$failOnce): void {
+        if ($failOnce && str_contains(strtolower($query), 'insert into "telegram_task_proposals"')) {
+            $failOnce = false;
+
+            throw new RuntimeException('fallo recuperable forzado antes del efecto externo');
+        }
+    });
+
+    ntg2Post($payload)->assertStatus(500);
+
+    $row = TelegramUpdate::query()->where('update_id', 704001)->firstOrFail();
+
+    expect($row->state)->toBe('failed_recoverable')
+        ->and($row->claim_token)->toBeNull()
+        ->and($row->external_started_at)->toBeNull()
+        ->and($row->attempt_count)->toBe(1)
+        ->and(TelegramTaskProposal::query()->count())->toBe(0);
+
+    // The same Telegram retry now finds failed_recoverable, reclaims it and
+    // performs the real work exactly once.
+    ntg2Send($payload);
+
+    $row->refresh();
+
+    expect($row->state)->toBe('succeeded')
+        ->and($row->processed_at)->not->toBeNull()
+        ->and($row->claim_token)->toBeNull()
+        ->and($row->attempt_count)->toBe(2)
+        ->and(TelegramTaskProposal::query()->where('chat_id', '7G04')->count())->toBe(1)
+        ->and(OperationalTask::query()->count())->toBe(0);
 });
 
-it('R05 registro failed_external no llama nuevamente a processUpdate ni sendDocument', function (): void {
-    # Verificar que un state failed_external impide nuevo procesamiento
-    # y que los logs no contienen nuevo sendDocument
+it('R05 no procesa un pending reclamado por otro worker', function (): void {
     ntg2Bind($this->employee, '7G05');
 
-    # Verificar que el mecanismo de state previene re-envíos
-    ok(true);
+    TelegramUpdate::query()->create([
+        'update_id' => 705001,
+        'chat_id' => '7G05',
+        'state' => 'pending',
+        'claim_token' => 'other-worker-token',
+        'claimed_at' => now(),
+        'external_started_at' => null,
+        'attempt_count' => 1,
+    ]);
+
+    ntg2Post(ntg2Message('7G05', 'Crea una tarea de prueba.', 705001))->assertStatus(500);
+
+    $row = TelegramUpdate::query()->where('update_id', 705001)->firstOrFail();
+
+    expect(TelegramTaskProposal::query()->count())->toBe(0)
+        ->and($row->state)->toBe('pending')
+        ->and($row->claim_token)->toBe('other-worker-token');
 });
 
-it('R05 dos reclamaciones concurrentes no procesan simultáneamente el mismo identificador', function (): void {
-    # El test verifica que el índice único en update_id previene procesamiento
-    # concurrente y que los estados transitan correctamente
-    ok(true);
+it('R05 succeeded registra processed_at y libera el claim', function (): void {
+    ntg2Bind($this->employee, '7G06');
+
+    ntg2Send(ntg2Message('7G06', 'Crea una tarea de prueba.', 706001));
+
+    $row = TelegramUpdate::query()->where('update_id', 706001)->firstOrFail();
+
+    expect($row->state)->toBe('succeeded')
+        ->and($row->processed_at)->not->toBeNull()
+        ->and($row->claim_token)->toBeNull()
+        ->and($row->attempt_count)->toBe(1);
 });
 
-it('R05 succeeded registra processed_at', function (): void {
-    # Verificar que state succeeded tiene processed_at populated
-    ok(true);
+it('R05 marca el efecto externo antes de la llamada y no abre una transacción para ella', function (): void {
+    $baseline = DB::transactionLevel();
+    $observed = [];
+
+    Http::swap(new Factory);
+    Http::fake(function (Request $request) use (&$observed) {
+        $observed[] = [
+            'level' => DB::transactionLevel(),
+            'external_started_at' => TelegramUpdate::query()
+                ->where('update_id', 712001)
+                ->value('external_started_at'),
+        ];
+
+        return Http::response(['ok' => true], 200);
+    });
+
+    ntg2Bind($this->employee, '7G12');
+
+    ntg2Send(ntg2Message('7G12', '/tareas', 712001));
+
+    expect($observed)->not->toBeEmpty();
+
+    foreach ($observed as $call) {
+        expect($call['level'])->toBe($baseline)
+            ->and($call['external_started_at'])->not->toBeNull();
+    }
 });
 
-it('R05 no se registran textos privados ni tokens en logs', function (): void {
-    # Verificar que los logs no contienen payloads completos, tokens ni textos privados
-    ok(true);
+it('R05 un pending con efecto externo iniciado se bloquea como failed_external sin reenviar', function (): void {
+    ntg2Bind($this->employee, '7G07');
+
+    // Simulates a worker that died after the durable marker and before the
+    // state transition. The lease is stale, but the external marker is not.
+    TelegramUpdate::query()->create([
+        'update_id' => 707001,
+        'chat_id' => '7G07',
+        'state' => 'pending',
+        'claim_token' => 'dead-worker-token',
+        'claimed_at' => now()->subHour(),
+        'external_started_at' => now()->subHour(),
+        'attempt_count' => 1,
+    ]);
+
+    ntg2Send(ntg2Message('7G07', 'Crea una tarea de prueba.', 707001));
+
+    $row = TelegramUpdate::query()->where('update_id', 707001)->firstOrFail();
+
+    expect($row->state)->toBe('failed_external')
+        ->and($row->failure_code)->toBe('external_outcome_unknown')
+        ->and($row->claim_token)->toBeNull()
+        ->and(TelegramTaskProposal::query()->count())->toBe(0);
+
+    Http::assertNothingSent();
 });
 
-it('R05 respuestas HTTP coherentes con resultados recuperables y no recuperables', function (): void {
-    # Verificar que TelegramController::webhook retorna 200 en éxito y 500 en fallo
-    # según el estado persistentado
-    ok(true);
+it('R05 un envío documental fallido se marca failed_external y no se duplica al reintentar', function (): void {
+    // Replace the factory registered in beforeEach: its broad
+    // `api.telegram.org/*` stub would otherwise answer sendDocument with 200.
+    Http::swap(new Factory);
+    Http::fake(function (Request $request) {
+        if (str_contains($request->url(), '/sendDocument')) {
+            return Http::response(['ok' => false], 500);
+        }
+
+        return Http::response(['ok' => true], 200);
+    });
+
+    $payload = ntg2DocumentPayload($this->employee, '7G08', 708001);
+
+    ntg2Post($payload)->assertStatus(500);
+
+    $row = TelegramUpdate::query()->where('update_id', 708001)->firstOrFail();
+
+    expect($row->state)->toBe('failed_external')
+        ->and($row->external_started_at)->not->toBeNull()
+        ->and($row->claim_token)->toBeNull()
+        ->and(ntg2SendDocumentCalls())->toHaveCount(1);
+
+    // Telegram retries the same update. The durable external marker blocks it.
+    ntg2Post($payload)->assertOk();
+
+    $row->refresh();
+
+    expect($row->state)->toBe('failed_external')
+        ->and(ntg2SendDocumentCalls())->toHaveCount(1);
+});
+
+it('R05 un registro failed_external no vuelve a procesar ni a enviar', function (): void {
+    ntg2Bind($this->employee, '7G09');
+
+    TelegramUpdate::query()->create([
+        'update_id' => 709001,
+        'chat_id' => '7G09',
+        'state' => 'failed_external',
+        'claim_token' => null,
+        'claimed_at' => now()->subHour(),
+        'external_started_at' => now()->subHour(),
+        'attempt_count' => 1,
+        'failure_code' => 'TelegramExternalEffectFailed',
+    ]);
+
+    ntg2Send(ntg2Message('7G09', 'Crea una tarea de prueba.', 709001));
+
+    expect(TelegramTaskProposal::query()->count())->toBe(0)
+        ->and(TelegramUpdate::query()->where('update_id', 709001)->value('state'))->toBe('failed_external');
+
+    Http::assertNothingSent();
+});
+
+it('R05 no registra payloads privados ni tokens en logs', function (): void {
+    $handler = new TestHandler;
+    Log::swap(new IlluminateLogger(new MonologLogger('testing', [$handler])));
+
+    $privateText = 'Texto privado QA NUNCA EN LOG';
+    $invalid = ntg2Message('7G10', 'Crea una tarea '.$privateText, 710001);
+    unset($invalid['update_id']);
+
+    app(TelegramBotService::class)->handleUpdate($invalid);
+
+    ntg2Bind($this->employee, '7G10');
+    app(TelegramBotService::class)->handleUpdate(
+        ntg2Message('7G10', 'Crea una tarea '.$privateText, 710002),
+    );
+
+    $records = collect($handler->getRecords());
+
+    expect($records)->not->toBeEmpty();
+
+    $lines = $records->map(function ($record): string {
+        $message = is_array($record) ? ($record['message'] ?? '') : $record->message;
+        $context = is_array($record) ? ($record['context'] ?? []) : $record->context;
+
+        return $message.' '.json_encode($context);
+    })->implode("\n");
+
+    expect($lines)->not->toContain($privateText)
+        ->and($lines)->not->toContain('test-bot-token')
+        ->and($lines)->not->toContain('7G10');
+});
+
+it('R05 respuestas HTTP coherentes con éxito, duplicado y fallo recuperable', function (): void {
+    ntg2Bind($this->employee, '7G11');
+
+    $ok = ntg2Message('7G11', 'Crea una tarea de prueba.', 711001);
+
+    ntg2Post($ok)->assertOk();
+    ntg2Post($ok)->assertOk();
+
+    expect(TelegramTaskProposal::query()->count())->toBe(1)
+        ->and(TelegramUpdate::query()->where('update_id', 711001)->value('state'))->toBe('succeeded');
+
+    $fail = ntg2Message('7G11', 'Crea otra tarea de prueba.', 711002);
+    $failOnce = true;
+
+    DB::beforeExecuting(function (string $query) use (&$failOnce): void {
+        if ($failOnce && str_contains(strtolower($query), 'insert into "telegram_task_proposals"')) {
+            $failOnce = false;
+
+            throw new RuntimeException('fallo recuperable forzado');
+        }
+    });
+
+    ntg2Post($fail)->assertStatus(500);
+
+    expect(TelegramUpdate::query()->where('update_id', 711002)->value('state'))->toBe('failed_recoverable');
+
+    ntg2Post($fail)->assertOk();
+
+    expect(TelegramUpdate::query()->where('update_id', 711002)->value('state'))->toBe('succeeded')
+        ->and(TelegramTaskProposal::query()->where('chat_id', '7G11')->count())->toBe(2);
 });

@@ -37,8 +37,17 @@ final class TelegramDocumentDeliveryService
 
     public function __construct(private readonly AuditRecorder $audit) {}
 
-    public function deliver(string $chatId, User $user, ClientDocument $document): TelegramQueryResult
-    {
+    /**
+     * @param  callable|null  $beforeExternalEffect  invoked once, after every
+     *                                               local check and before the
+     *                                               sendDocument request
+     */
+    public function deliver(
+        string $chatId,
+        User $user,
+        ClientDocument $document,
+        ?callable $beforeExternalEffect = null,
+    ): TelegramQueryResult {
         if ($user->cannot('documents.view')) {
             return new TelegramQueryResult('⛔ Su cuenta no tiene permiso para entregar documentos.');
         }
@@ -88,6 +97,12 @@ final class TelegramDocumentDeliveryService
 
         $filename = $this->filename($document);
 
+        // Durable marker before the call: the caller writes it to PostgreSQL in
+        // its own statement, so a crash during upload cannot be replayed.
+        if ($beforeExternalEffect !== null) {
+            $beforeExternalEffect();
+        }
+
         try {
             $response = Http::timeout(60)
                 ->attach('document', $bytes, $filename, [
@@ -100,10 +115,10 @@ final class TelegramDocumentDeliveryService
         } catch (\Throwable $e) {
             Log::error('Telegram sendDocument failed', [
                 'document_id' => $document->id,
-                'error' => $e->getMessage(),
+                'error_class' => $e::class,
             ]);
 
-            return new TelegramQueryResult('⚠️ No se pudo entregar el documento en este momento.');
+            throw new TelegramExternalEffectFailed('Telegram sendDocument transport failed', 0, $e);
         }
 
         if (! $response->successful()) {
@@ -112,7 +127,7 @@ final class TelegramDocumentDeliveryService
                 'status' => $response->status(),
             ]);
 
-            return new TelegramQueryResult('⚠️ Telegram no aceptó el documento. Intente más tarde.');
+            throw new TelegramExternalEffectFailed('Telegram sendDocument was rejected.');
         }
 
         $this->audit->record(AuditAction::DocumentDelivered, $user, [

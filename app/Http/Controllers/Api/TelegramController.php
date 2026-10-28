@@ -164,7 +164,7 @@ class TelegramController extends Controller
             // tasks or double deliveries on retry.
             Log::error('Telegram webhook handler failed', [
                 'update_id' => $update['update_id'] ?? null,
-                'error' => $e->getMessage(),
+                'error_class' => $e::class,
             ]);
 
             // Return 500 so Telegram retries this update on the next poll.
