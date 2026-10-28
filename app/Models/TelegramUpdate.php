@@ -29,6 +29,7 @@ class TelegramUpdate extends Model
         'update_id',
         'chat_id',
         'processed_at',
+        'state',
     ];
 
     protected function casts(): array
@@ -36,6 +37,7 @@ class TelegramUpdate extends Model
         return [
             'update_id' => 'integer',
             'processed_at' => 'datetime',
+            'state' => 'string',
         ];
     }
 
