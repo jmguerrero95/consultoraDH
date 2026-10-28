@@ -590,7 +590,7 @@ final class TelegramBotService
                     $text = '🔒 Este chat no está vinculado a una cuenta activa.';
                     $delivered = false;
                 } else {
-                    $delivery = $this->documents->deliver($chatId, $user, $document, $endpoint);
+                    $delivery = $this->documents->deliver($chatId, $user, $document);
                     $text = $delivery->text;
                     $delivered = ! str_starts_with($text, '⚠️') && ! str_starts_with($text, '⛔');
                 }

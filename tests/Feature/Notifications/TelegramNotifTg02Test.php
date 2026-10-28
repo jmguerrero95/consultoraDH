@@ -532,3 +532,78 @@ it('R05 an unbound or disabled chat cannot retrieve private data', function (): 
     ntg2AssertSentText('no está vinculado');
     expect(implode("\n", ntg2SentTexts()))->not->toContain('Tarea privada QA');
 });
+
+/* -------------------------------------------------------------------------
+ | BLOQUE A — Pruebas negativas de autorización documental
+ | ---------------------------------------------------------------------- */
+
+it('R03 bloquea acceso a documento de otro cliente por ID', function (): void {
+    ntg2Bind($this->employee, '7A01');
+
+    $clientA = Client::factory()->create(['first_names' => 'Cliente', 'last_names' => 'A QA']);
+    $clientB = Client::factory()->create(['first_names' => 'Cliente', 'last_names' => 'B QA']);
+
+    $type = DocumentType::factory()->create();
+
+    $docB = ClientDocument::factory()->create([
+        'client_id' => $clientB->id,
+        'document_type_id' => $type->id,
+        'title' => 'Documento de B',
+        'original_name' => 'doc-b.pdf',
+        'stored_path' => 'clients/'.$clientB->id.'/doc-b.pdf',
+        'mime_type' => 'application/pdf',
+        'size_bytes' => 10,
+        'review_status' => DocumentReviewStatus::Received,
+        'archived_at' => null,
+    ]);
+
+    ntg2Send(ntg2Message('7A01', 'Envíame el documento número '.$docB->id.' del cliente Cliente A QA.'));
+
+    ntg2AssertSentText('no pertenece al cliente solicitado');
+
+    expect(collect(Http::recorded())->contains(
+        fn (array $pair): bool => str_contains($pair[0]->url(), '/sendDocument'),
+    ))->toBeFalse();
+});
+
+it('R03 entrega propio documento con documentos.view', function (): void {
+    ntg2Bind($this->employee, '7A02');
+
+    $client = Client::factory()->create(['first_names' => 'Cliente', 'last_names' => 'Propio QA']);
+
+    $type = DocumentType::factory()->create();
+
+    Storage::disk('documents')->put('clients/'.$client->id.'/mi-doc.pdf', 'PDF-MY-DOC');
+
+    $document = ClientDocument::factory()->create([
+        'client_id' => $client->id,
+        'document_type_id' => $type->id,
+        'title' => 'Mi documento',
+        'original_name' => 'mi-doc.pdf',
+        'stored_path' => 'clients/'.$client->id.'/mi-doc.pdf',
+        'mime_type' => 'application/pdf',
+        'size_bytes' => 15,
+        'visibility' => DocumentVisibility::Internal,
+        'review_status' => DocumentReviewStatus::Received,
+        'archived_at' => null,
+    ]);
+
+    ntg2Send(ntg2Message('7A02', 'Busca a Cliente Propio QA.'));
+    ntg2Send(ntg2Message('7A02', 'Envíame el documento de ese cliente.'));
+
+    $sentDocument = collect(Http::recorded())->first(
+        fn (array $pair): bool => str_contains($pair[0]->url(), '/sendDocument'),
+    );
+
+    expect($sentDocument)->not->toBeNull();
+
+    /** @var Request $request */
+    $request = $sentDocument[0];
+    $body = $request->body();
+
+    expect($request->url())->toContain('/sendDocument')
+        ->and($body)->toContain('mi-doc.pdf')
+        ->and(implode("\n", ntg2SentTexts()))->toContain('Documento entregado')
+        ->and(implode("\n", ntg2SentTexts()))->not->toContain('stored_path')
+        ->and(implode("\n", ntg2SentTexts()))->not->toContain('clients/');
+});
