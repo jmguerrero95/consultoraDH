@@ -536,6 +536,57 @@ export function createAppRouter(history: RouterHistory = createWebHistory()): Ro
 
     /*
     |--------------------------------------------------------------------------
+    | Selective prefetch
+    |--------------------------------------------------------------------------
+    |
+    | The heaviest list screens are kept as separate chunks, which is what makes
+    | the first load small — but it also means the first click on "Clientes"
+    | waits for a chunk. After the current page has painted, the next two or
+    | three screens a person is likely to open from here are fetched during idle
+    | time. Nothing is prefetched on a low-priority route (a report screen, the
+    | assistant), and the browser's module cache makes a later navigation free.
+    */
+
+    const PREFETCH: Record<string, Array<() => Promise<unknown>>> = {
+        dashboard: [
+            () => import('@/pages/clients/ClientListPage.vue'),
+            () => import('@/pages/receivables/ReceivablesPage.vue'),
+            () => import('@/pages/payments/PaymentListPage.vue'),
+        ],
+        clients: [() => import('@/pages/receivables/ReceivablesPage.vue')],
+        receivables: [() => import('@/pages/payments/PaymentListPage.vue')],
+    };
+
+    if (typeof window !== 'undefined') {
+        const whenIdle: (callback: () => void) => void =
+            'requestIdleCallback' in window
+                ? (callback) =>
+                      (
+                          window as unknown as {
+                              requestIdleCallback: (cb: () => void, options?: { timeout: number }) => void;
+                          }
+                      ).requestIdleCallback(callback, { timeout: 2000 })
+                : (callback) => window.setTimeout(callback, 1200);
+
+        router.afterEach((to) => {
+            const loaders = PREFETCH[String(to.name)];
+
+            if (loaders === undefined || !useAuthStore().isAuthenticated) {
+                return;
+            }
+
+            whenIdle(() => {
+                for (const load of loaders) {
+                    // A prefetch that fails is not an error the reader needs to
+                    // see: the real navigation will retry and report properly.
+                    void load().catch(() => undefined);
+                }
+            });
+        });
+    }
+
+    /*
+    |--------------------------------------------------------------------------
     | Navigation guard
     |--------------------------------------------------------------------------
     |

@@ -105,7 +105,7 @@ interface ApiClient {
 
     businessApi: {
         clients: {
-            list(params: ListParams & { company_id?: number | null }): Promise<ClientListPayload>;
+            list(params: ListParams & { company_id?: number | null }, signal?: AbortSignal): Promise<ClientListPayload>;
             show(id: number): Promise<ClientDetailPayload>;
             create(payload: Record<string, string | null>): Promise<{ message: string; client: Client }>;
             update(id: number, payload: Record<string, string | null>): Promise<{ message: string; client: Client }>;
@@ -168,7 +168,7 @@ interface ApiClient {
             void(paymentId: number, reason: string): Promise<{ message: string; payment: PaymentSummary }>;
         };
         receivables: {
-            list(params: ListParams & { as_of?: string | null; client_id?: number | null; company_id?: number | null; settlement_state?: string | null; aging_bucket?: string | null; traffic_light?: string | null; overdue?: boolean; outstanding_only?: boolean; minimum_balance?: number | null; maximum_balance?: number | null }): Promise<ReceivablesListPayload>;
+            list(params: ListParams & { as_of?: string | null; client_id?: number | null; company_id?: number | null; settlement_state?: string | null; aging_bucket?: string | null; traffic_light?: string | null; overdue?: boolean; outstanding_only?: boolean; minimum_balance?: number | null; maximum_balance?: number | null }, signal?: AbortSignal): Promise<ReceivablesListPayload>;
             clientAccount(id: number, asOf?: string | null): Promise<ClientAccountPayload>;
             vocabulary(): Promise<BillingVocabularyPayload>;
         };
@@ -408,8 +408,8 @@ export const api: ApiClient = {
 
     businessApi: {
         clients: {
-            list(params: ListParams & { company_id?: number | null } = {}): Promise<ClientListPayload> {
-                return request<ClientListPayload>('GET', '/api/clients', { query: params });
+            list(params: ListParams & { company_id?: number | null } = {}, signal?: AbortSignal): Promise<ClientListPayload> {
+                return request<ClientListPayload>('GET', '/api/clients', { query: params, signal });
             },
 
             show(id: number): Promise<ClientDetailPayload> {
@@ -675,7 +675,7 @@ export const api: ApiClient = {
             },
 
             vocabulary(): Promise<PaymentVocabularyPayload> {
-                return request('GET', '/api/payments/vocabulary');
+                return request('GET', '/api/payments/vocabulary', { cacheTtl: 5 * 60_000 });
             },
 
             previewAutoAllocation(paymentId: number): Promise<{ plan: AutoAllocationPlan }> {
@@ -724,8 +724,9 @@ export const api: ApiClient = {
                     minimum_balance?: number | null;
                     maximum_balance?: number | null;
                 } = {},
+                signal?: AbortSignal,
             ): Promise<ReceivablesListPayload> {
-                return request<ReceivablesListPayload>('GET', '/api/receivables', { query: params });
+                return request<ReceivablesListPayload>('GET', '/api/receivables', { query: params, signal });
             },
 
             clientAccount(id: number, asOf?: string | null): Promise<ClientAccountPayload> {
@@ -733,7 +734,7 @@ export const api: ApiClient = {
             },
 
             vocabulary(): Promise<BillingVocabularyPayload> {
-                return request<BillingVocabularyPayload>('GET', '/api/receivables/vocabulary');
+                return request<BillingVocabularyPayload>('GET', '/api/receivables/vocabulary', { cacheTtl: 5 * 60_000 });
             },
         },
 

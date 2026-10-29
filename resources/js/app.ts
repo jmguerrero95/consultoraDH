@@ -1,8 +1,6 @@
 import { createPinia } from 'pinia';
 import { createApp } from 'vue';
 
-import iconsFontUrl from 'bootstrap-icons/font/fonts/bootstrap-icons.woff2?url';
-
 import App from '@/App.vue';
 import { router } from '@/router';
 import { usePWAInstallation } from '@/composables/usePWAInstallation';
@@ -37,28 +35,12 @@ initializePWA();
  * Start fetching the icon font immediately.
  *
  * The icons come from Bootstrap Icons, whose stylesheet declares the font with
- * `font-display: block`: nothing is painted for an icon until its 134 KB file has
- * arrived, so the page used to appear with its labels but without its icons, and the
- * icons then popped in a moment later. The font is only discovered when the CSS is
- * parsed and its `url()` is read, which is too late for a file on the critical path.
- *
- * Declared here instead, so the browser opens the request at the same time as the
- * stylesheet. Vite rewrites the import to the same hashed file the CSS points at, so
- * the preload is used instead of being downloaded twice.
+ * `font-display: block`: nothing is painted for an icon until its file has
+ * arrived. The preload now lives in the document head (see `app.blade.php`), so
+ * the browser discovers it while parsing the HTML instead of waiting for this
+ * bundle to execute. Keeping a second, JavaScript-created preload here would add
+ * a duplicate hint after the parser has already moved on.
  */
-function preloadIconFont(): void {
-    const link = document.createElement('link');
-
-    link.rel = 'preload';
-    link.as = 'font';
-    link.type = 'font/woff2';
-    link.href = iconsFontUrl;
-    link.crossOrigin = 'anonymous';
-
-    document.head.append(link);
-}
-
-preloadIconFont();
 
 app.use(createPinia());
 app.use(router);

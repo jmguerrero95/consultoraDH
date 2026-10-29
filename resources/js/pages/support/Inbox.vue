@@ -37,6 +37,9 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const pagination = ref({ current_page: 1, last_page: 1, total: 0, per_page: 25 });
 
+/** Bumped on every list request so only the newest answer is rendered. */
+let requestId = 0;
+
 const filters = ref<InboxFilters>({
   queue: undefined,
   assigned_to_me: false,
@@ -112,6 +115,8 @@ async function loadAssignees() {
 }
 
 async function loadConversations() {
+  const current = ++requestId;
+
   loading.value = true;
   error.value = null;
 
@@ -131,6 +136,13 @@ async function loadConversations() {
     if (filters.value.client_search) params.client_search = filters.value.client_search;
 
     const response = await api.support.inbox<Conversation>(params);
+
+    // Typing quickly or paging twice can leave two requests in flight; only the
+    // last one may write, otherwise an older page replaces the one on screen.
+    if (current !== requestId) {
+      return;
+    }
+
     conversations.value = response.data;
     pagination.value = {
       current_page: response.current_page,
@@ -139,10 +151,16 @@ async function loadConversations() {
       per_page: response.per_page,
     };
   } catch (e) {
+    if (current !== requestId) {
+      return;
+    }
+
     error.value = 'Error al cargar conversaciones';
     console.error(e);
   } finally {
-    loading.value = false;
+    if (current === requestId) {
+      loading.value = false;
+    }
   }
 }
 

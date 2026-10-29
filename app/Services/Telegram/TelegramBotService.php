@@ -16,7 +16,6 @@ use App\Models\OperationalTask;
 use App\Models\TelegramBindingToken;
 use App\Models\TelegramEndpoint;
 use App\Models\TelegramTaskProposal;
-use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProviderException;
@@ -169,11 +168,9 @@ final class TelegramBotService
             $this->currentClaimToken = null;
         }
 
-        if ($updateId % 100 === 0) {
-            TelegramUpdate::query()
-                ->where('created_at', '<', now()->subDays(TelegramUpdate::RETENTION_DAYS))
-                ->delete();
-        }
+        // Retention is handled by `telegram:prune-updates` (PERF-01 A14/A18).
+        // A DELETE here ran on the webhook's response path every hundredth
+        // update; one slow prune could make Telegram time out and re-deliver.
     }
 
     /**

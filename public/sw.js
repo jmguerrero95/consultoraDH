@@ -12,7 +12,7 @@
 //      the first time they are actually requested instead.
 //   3. Only the application shell is precached, and only when it is there.
 
-const CACHE_NAME = 'consultora-dh-v3';
+const CACHE_NAME = 'consultora-dh-v4';
 const SHELL_URL = '/';
 
 // Precache entries are literal paths that must exist at install time.
@@ -77,13 +77,17 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Hashed build output and icons are immutable: cache first is safe and fast.
-  if (
-    url.pathname.startsWith('/build/') ||
-    url.pathname.startsWith('/icons/') ||
-    url.pathname === '/manifest.json'
-  ) {
+  // Hashed build output is content-addressed and immutable: cache first is safe
+  // and fast. Icons and the manifest keep their names across edits, so they use
+  // network-first with the cached copy only as an offline fallback; treating them
+  // as immutable pinned an old icon set until the next cache version.
+  if (url.pathname.startsWith('/build/')) {
     event.respondWith(cacheFirst(request));
+    return;
+  }
+
+  if (url.pathname.startsWith('/icons/') || url.pathname === '/manifest.json') {
+    event.respondWith(networkFirst(request));
     return;
   }
 
@@ -154,6 +158,34 @@ async function cacheFirst(request) {
   }
 
   return response;
+}
+
+/**
+ * Fresh when the network answers, cached when it does not.
+ *
+ * Used for names that are stable but editable (icons, the manifest): an online
+ * visitor always gets the current file, and an offline one still gets the last
+ * one that worked.
+ */
+async function networkFirst(request) {
+  try {
+    const response = await fetch(request);
+
+    if (response.ok && response.type === 'basic') {
+      const copy = response.clone();
+      void caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+    }
+
+    return response;
+  } catch (error) {
+    const cached = await caches.match(request);
+
+    if (cached) {
+      return cached;
+    }
+
+    throw error;
+  }
 }
 
 // Push notification event

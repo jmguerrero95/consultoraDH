@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
@@ -50,9 +50,15 @@ const loading = ref(true);
 const error = ref<string | null>(null);
 
 let requestId = 0;
+/** The request in flight; a newer filter makes its answer useless. */
+let inFlight: AbortController | null = null;
 
 async function load(): Promise<void> {
     const current = ++requestId;
+
+    inFlight?.abort();
+    const controller = new AbortController();
+    inFlight = controller;
 
     loading.value = true;
     error.value = null;
@@ -66,7 +72,7 @@ async function load(): Promise<void> {
             as_of: asOf.value === '' ? null : asOf.value,
             page: page.value,
             per_page: perPage.value,
-        });
+        }, controller.signal);
 
         if (current !== requestId) {
             return;
@@ -77,6 +83,10 @@ async function load(): Promise<void> {
         total.value = payload.total;
         lastPage.value = payload.last_page;
     } catch (cause) {
+        if (cause instanceof DOMException && cause.name === 'AbortError') {
+            return;
+        }
+
         if (current !== requestId) {
             return;
         }
@@ -87,6 +97,7 @@ async function load(): Promise<void> {
     } finally {
         if (current === requestId) {
             loading.value = false;
+            inFlight = null;
         }
     }
 }
@@ -105,11 +116,22 @@ onMounted(() => {
 });
 
 watch([settledSearch, agingBucket, trafficLight, overdueOnly, asOf, perPage], () => {
-    page.value = 1;
+    // Resetting the page already triggers its own watcher; loading here as well
+    // would send the same filters twice, once for the old page.
+    if (page.value !== 1) {
+        page.value = 1;
+
+        return;
+    }
+
     void load();
 });
 
 watch(page, () => void load());
+
+onBeforeUnmount(() => {
+    inFlight?.abort();
+});
 
 function clearFilters(): void {
     search.value = '';

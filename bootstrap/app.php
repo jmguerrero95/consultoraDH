@@ -90,6 +90,13 @@ return Application::configure(dirname(__DIR__))
             ->withoutOverlapping()
             ->onOneServer();
 
+        // PERF-01 A14/A18: the Telegram idempotency table is pruned here, out of
+        // the webhook's request path. Hourly is enough for a seven-day window.
+        $schedule->command('telegram:prune-updates')
+            ->hourly()
+            ->withoutOverlapping()
+            ->onOneServer();
+
         // A06: SLA scanner runs every minute
         $schedule->command('support:scan-sla')
             ->everyMinute()

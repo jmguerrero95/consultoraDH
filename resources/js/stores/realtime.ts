@@ -3,6 +3,8 @@ import { ref, computed } from 'vue'
 import Echo from 'laravel-echo'
 import Pusher from 'pusher-js'
 
+import { csrfToken } from '@/services/http'
+
 // Make Pusher available globally for Laravel Echo
 declare global {
   interface Window {
@@ -112,7 +114,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
               authEndpoint: '/broadcasting/auth',
               auth: {
                 headers: {
-                  'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '',
+                  'X-CSRF-TOKEN': csrfToken(),
                 },
               },
             })

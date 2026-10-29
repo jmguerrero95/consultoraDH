@@ -892,7 +892,13 @@ async function confirmProposal(id: number): Promise<void> {
         }));
 
         confirmation.value = describeResult(result.tool, result.result);
-        await refreshIfSelected();
+
+        // Deliberately no history reload here (PERF-01 B15). The proposal was
+        // removed from the transcript above and the server's own sentence is
+        // shown; re-downloading every message, artifact and attachment to
+        // reflect one already-known change replaced the list the reader was
+        // looking at and could move their scroll position. A reload still shows
+        // the real thread because the server is the only store.
     } catch (e) {
         error.value = readError(e, 'No fue posible confirmar la propuesta.');
     }
@@ -916,26 +922,25 @@ async function rejectProposal(id: number): Promise<void> {
     }
 }
 
-async function refreshIfSelected(): Promise<void> {
-    if (selectedId.value !== null) {
-        const payload = await ai.history(selectedId.value);
-
-        const { byMessage, orphan } = groupArtifactsByMessage(payload.artifacts ?? []);
-        const { byMessage: proposalsByMessage, orphan: orphanProposalsLoaded } = groupProposalsByMessage(payload.proposals ?? []);
-
-        messages.value = payload.messages
-            .filter((message) => message.role === 'user' || message.role === 'assistant')
-            .map((message) => ({
-                ...message,
-                status: message.status ?? 'completed',
-                artifacts: typeof message.id === 'number' ? (byMessage.get(message.id) ?? []) : [],
-                proposals: typeof message.id === 'number' ? (proposalsByMessage.get(message.id) ?? []) : [],
-            }));
-
-        artifacts.value = orphan;
-        orphanProposals.value = orphanProposalsLoaded;
-        attachments.value = payload.attachments ?? [];
+/**
+ * A key that survives appending a reply.
+ *
+ * The server assigns an id to a message that has been stored; an optimistic
+ * turn only has its `client_turn_id`. Falling back to the row index keyed the
+ * whole transcript by position, so appending a reply re-used the last key and
+ * Vue patched the wrong nodes. A local reply belongs to the turn that produced
+ * it, which is stable until the thread is reloaded.
+ */
+function messageKey(message: AiMessagePayload, index: number): string {
+    if (typeof message.id === 'number') {
+        return `server-${message.id}`;
     }
+
+    if (message.client_turn_id !== null && message.client_turn_id !== undefined) {
+        return `turn-${message.client_turn_id}-${message.role}`;
+    }
+
+    return `local-${index}`;
 }
 
 /**
@@ -1208,7 +1213,7 @@ function formatDate(value: string | null): string {
 
                     <div
                         v-for="(message, index) in messages"
-                        :key="`${message.created_at ?? 'local'}-${index}`"
+                        :key="messageKey(message, index)"
                         class="cdh-ai__message"
                         :class="message.role === 'user' ? 'cdh-ai__message--user' : 'cdh-ai__message--assistant'"
                     >

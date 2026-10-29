@@ -746,6 +746,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     // permissions above, so it cannot reach the staff sections these routes sit beside.
     Route::middleware('auth')->group(function (): void {
         Route::get('/notifications', [NotificationController::class, 'index'])->name('api.notifications.index');
+        Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount'])->name('api.notifications.unread-count');
         Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead'])->name('api.notifications.read-all');
         Route::post('/notifications/{notification}/read', [NotificationController::class, 'markRead'])->name('api.notifications.read');
     });

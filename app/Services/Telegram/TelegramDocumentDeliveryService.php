@@ -85,7 +85,14 @@ final class TelegramDocumentDeliveryService
                 return new TelegramQueryResult('⚠️ El documento supera el límite de 50 MB de Telegram.');
             }
 
-            $bytes = $disk->get($document->stored_path);
+            // A stream, not `get()`: a 50 MB document does not need to be copied
+            // into PHP memory before the upload starts. Http::attach() accepts a
+            // resource and reads it while the request body is written.
+            $bytes = $disk->readStream($document->stored_path);
+
+            if ($bytes === false || $bytes === null) {
+                throw new \RuntimeException('No se pudo abrir el archivo del documento.');
+            }
         } catch (\Throwable $e) {
             Log::error('Telegram document could not be read', [
                 'document_id' => $document->id,
@@ -119,6 +126,11 @@ final class TelegramDocumentDeliveryService
             ]);
 
             throw new TelegramExternalEffectFailed('Telegram sendDocument transport failed', 0, $e);
+        } finally {
+            // Http has already read the stream into the request body by now.
+            if (is_resource($bytes)) {
+                fclose($bytes);
+            }
         }
 
         if (! $response->successful()) {

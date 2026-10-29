@@ -9,6 +9,7 @@ use App\Models\OperationalTask;
 use App\Models\User;
 use App\Notifications\TaskReminderNotification;
 use App\Services\WebPushService;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -65,72 +66,165 @@ final class ReminderDispatcher
                 [$retryBefore, $secondBefore],
             )
             ->orderBy('id')
-            ->get();
+            // A cursor, not `get()`: the candidate set is unbounded and a large
+            // backlog should be streamed instead of hydrated whole.
+            ->cursor();
 
         foreach ($candidates as $candidate) {
-            $sent = DB::transaction(function () use ($candidate, $now, $retryBefore, $secondBefore): bool {
-                // The row is re-read under a lock: the candidate list was built
-                // before the transaction, and two workers (or a notifier and a
-                // dismissal) can change the same task in between.
-                $task = OperationalTask::query()
-                    ->whereKey($candidate->id)
-                    ->lockForUpdate()
-                    ->first();
+            $claim = $this->claim($candidate->id, $now, $retryBefore, $secondBefore);
 
-                if ($task === null
-                    || $task->status !== TaskStatus::Pending
+            if ($claim === null) {
+                continue;
+            }
+
+            // The push is a network call, possibly to several endpoints. It runs
+            // *after* the transaction commits so the row lock is not held for the
+            // duration of somebody else's HTTP timeout.
+            try {
+                $task = OperationalTask::query()->find($claim['id']);
+
+                if ($task === null) {
+                    $this->revertClaim($claim);
+
+                    continue;
+                }
+
+                // A dismissal or completion may have arrived between the commit
+                // and this line. It wins: the reminder is put back, not sent.
+                if ($task->status !== TaskStatus::Pending
                     || $task->completed_at !== null
                     || $task->cancelled_at !== null
                     || $task->reminder_dismissed_at !== null) {
-                    return false;
+                    $this->revertClaim($claim);
+
+                    continue;
                 }
 
-                if ($task->reminder_sent_at === null) {
-                    $this->send($task, stage: 'initial');
+                $this->send($task, $claim['stage']);
+            } catch (\Throwable $e) {
+                // The claim is compensated so the next run retries this stage
+                // instead of recording a push that never left.
+                $this->revertClaim($claim);
 
-                    $task->forceFill([
-                        'reminder_sent_at' => $now,
-                        'reminder_attempts' => 0,
-                    ])->save();
+                Log::error('Task reminder could not be sent; claim reverted', [
+                    'task_id' => $claim['id'],
+                    'stage' => $claim['stage'],
+                    'error' => $e->getMessage(),
+                ]);
 
-                    return true;
-                }
-
-                if ($task->reminder_received_at === null) {
-                    if ($task->reminder_sent_at->gt($retryBefore)) {
-                        return false;
-                    }
-
-                    $this->send($task, stage: 'retry');
-
-                    $task->forceFill([
-                        'reminder_sent_at' => $now,
-                        'reminder_attempts' => ($task->reminder_attempts ?? 0) + 1,
-                    ])->save();
-
-                    return true;
-                }
-
-                if ($task->reminder_second_sent_at === null
-                    && $task->reminder_received_at->lte($secondBefore)) {
-                    $this->send($task, stage: 'second');
-
-                    $task->forceFill([
-                        'reminder_second_sent_at' => $now,
-                    ])->save();
-
-                    return true;
-                }
-
-                return false;
-            });
-
-            if ($sent) {
-                $dispatched++;
+                continue;
             }
+
+            $dispatched++;
         }
 
         return $dispatched;
+    }
+
+    /**
+     * Reserve one reminder stage on a task, under the row lock.
+     *
+     * The transaction only re-reads the row, decides which stage is due and
+     * writes the claim. It performs no I/O, so a slow push cannot block another
+     * worker, and the unique "who sends this stage" decision is still serialised
+     * by the lock.
+     *
+     * @return array{id: int, stage: string, previous: array<string, mixed>, claimed_at: Carbon}|null
+     */
+    private function claim(int $id, Carbon $now, Carbon $retryBefore, Carbon $secondBefore): ?array
+    {
+        return DB::transaction(function () use ($id, $now, $retryBefore, $secondBefore): ?array {
+            // The row is re-read under a lock: the candidate list was built
+            // before the transaction, and two workers (or a notifier and a
+            // dismissal) can change the same task in between.
+            $task = OperationalTask::query()
+                ->whereKey($id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($task === null
+                || $task->status !== TaskStatus::Pending
+                || $task->completed_at !== null
+                || $task->cancelled_at !== null
+                || $task->reminder_dismissed_at !== null) {
+                return null;
+            }
+
+            $previous = [
+                'reminder_sent_at' => $task->reminder_sent_at,
+                'reminder_attempts' => $task->reminder_attempts,
+                'reminder_second_sent_at' => $task->reminder_second_sent_at,
+            ];
+
+            if ($task->reminder_sent_at === null) {
+                $task->forceFill([
+                    'reminder_sent_at' => $now,
+                    'reminder_attempts' => 0,
+                ])->save();
+
+                return ['id' => $task->id, 'stage' => 'initial', 'previous' => $previous, 'claimed_at' => $now];
+            }
+
+            if ($task->reminder_received_at === null) {
+                if ($task->reminder_sent_at->gt($retryBefore)) {
+                    return null;
+                }
+
+                $task->forceFill([
+                    'reminder_sent_at' => $now,
+                    'reminder_attempts' => ($task->reminder_attempts ?? 0) + 1,
+                ])->save();
+
+                return ['id' => $task->id, 'stage' => 'retry', 'previous' => $previous, 'claimed_at' => $now];
+            }
+
+            if ($task->reminder_second_sent_at === null
+                && $task->reminder_received_at->lte($secondBefore)) {
+                $task->forceFill([
+                    'reminder_second_sent_at' => $now,
+                ])->save();
+
+                return ['id' => $task->id, 'stage' => 'second', 'previous' => $previous, 'claimed_at' => $now];
+            }
+
+            return null;
+        });
+    }
+
+    /**
+     * Put the claim back after a failed or superseded send.
+     *
+     * The update is conditional on this run still owning the claim, so a
+     * concurrent acknowledgement is never overwritten by a stale compensation.
+     *
+     * @param  array{id: int, stage: string, previous: array<string, mixed>, claimed_at: Carbon}  $claim
+     */
+    private function revertClaim(array $claim): void
+    {
+        DB::transaction(function () use ($claim): void {
+            $task = OperationalTask::query()
+                ->whereKey($claim['id'])
+                ->lockForUpdate()
+                ->first();
+
+            if ($task === null) {
+                return;
+            }
+
+            $column = $claim['stage'] === 'second' ? 'reminder_second_sent_at' : 'reminder_sent_at';
+            $current = $task->{$column};
+
+            // Somebody else has moved the stage since this claim: leave it.
+            if ($current === null || ! $current->equalTo($claim['claimed_at'])) {
+                return;
+            }
+
+            $task->forceFill([
+                'reminder_sent_at' => $claim['previous']['reminder_sent_at'],
+                'reminder_attempts' => $claim['previous']['reminder_attempts'],
+                'reminder_second_sent_at' => $claim['previous']['reminder_second_sent_at'],
+            ])->save();
+        });
     }
 
     /**

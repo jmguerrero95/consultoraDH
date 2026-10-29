@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
@@ -45,7 +45,17 @@ const statuses = ref<VocabularyOption[]>([]);
 
 const settledSearch = useDebouncedRef(search, 300);
 
+/** Guards against a slow list overwriting a newer one after a second submit. */
+let requestId = 0;
+let inFlight: AbortController | null = null;
+
 async function cargar(): Promise<void> {
+    const current = ++requestId;
+
+    inFlight?.abort();
+    const controller = new AbortController();
+    inFlight = controller;
+
     loading.value = true;
     errorMessage.value = null;
 
@@ -56,19 +66,47 @@ async function cargar(): Promise<void> {
             company_id: companyId.value || undefined,
             operator: operator.value || undefined,
             status: status.value || undefined,
-        });
+        }, controller.signal);
+
+        if (current !== requestId) {
+            return;
+        }
 
         rows.value = respuesta.data;
     } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') {
+            return;
+        }
+
+        if (current !== requestId) {
+            return;
+        }
+
         // §60: un error no es una lista vacía. Se distingue, no se traga la excepción
         // y se muestra "no hay planillas" cuando lo que ocurrió fue otra cosa.
         errorMessage.value = e instanceof ApiError ? e.message : 'No se pudieron cargar las planillas.';
     } finally {
-        loading.value = false;
+        if (current === requestId) {
+            loading.value = false;
+            inFlight = null;
+        }
     }
 }
 
-onMounted(async () => {
+/**
+ * The filters and the list are independent requests.
+ *
+ * They used to be awaited one after the other, so the list could not start until
+ * the vocabulary had arrived even though it does not use it. Both are sent now,
+ * and neither failure hides the other: an empty operator select does not mean
+ * there are no planillas.
+ */
+onMounted(() => {
+    void cargarVocabulario();
+    void cargar();
+});
+
+async function cargarVocabulario(): Promise<void> {
     try {
         const [vocabulario, listaPeriodos, listaEmpresas] = await Promise.all([
             a05.planillas.vocabulary(),
@@ -83,8 +121,10 @@ onMounted(async () => {
     } catch {
         errorMessage.value = 'No se pudo cargar el vocabulario de planillas.';
     }
+}
 
-    await cargar();
+onBeforeUnmount(() => {
+    inFlight?.abort();
 });
 
 const hayFiltros = computed(

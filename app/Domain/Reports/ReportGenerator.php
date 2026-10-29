@@ -185,6 +185,27 @@ final class ReportGenerator
         return $this->disk()->get($report->stored_path);
     }
 
+    /**
+     * Open the stored file as a stream.
+     *
+     * `contents()` returns the whole file as a string, which means the entire
+     * report is held in memory before the first byte reaches the browser. A
+     * stream lets the download start immediately and keeps memory flat
+     * regardless of the file size. The caller owns the handle and must close it.
+     *
+     * @return resource|null
+     */
+    public function readStream(GeneratedReport $report)
+    {
+        if (! $this->disk()->exists($report->stored_path)) {
+            return null;
+        }
+
+        $stream = $this->disk()->readStream($report->stored_path);
+
+        return $stream === false ? null : $stream;
+    }
+
     public function delete(GeneratedReport $report): void
     {
         $this->disk()->delete($report->stored_path);

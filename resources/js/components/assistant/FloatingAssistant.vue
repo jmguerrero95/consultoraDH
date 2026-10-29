@@ -43,7 +43,28 @@ import type { AiArtifact, AiProposal, AiStatusPayload, AiToolResult } from '@/se
  *
  * It is mounted once in the admin shell and shown only to someone who may use the
  * assistant, so its `status` call happens for those users only.
+ *
+ * ## Why this is a separate chunk (PERF-01 B01/B02)
+ *
+ * The panel carries the conversation, the attachment polling, the proposal flow
+ * and its own styles. None of that is needed to draw the launcher, so the
+ * launcher imports this file with `defineAsyncComponent` and the browser only
+ * downloads it when the panel is opened (or was left open). The conversation is
+ * still the server's: opening the panel re-reads the thread, and closing it only
+ * hides the DOM.
  */
+
+const emit = defineEmits<{ close: [] }>();
+
+/**
+ * Whether the launcher currently shows this panel.
+ *
+ * The launcher hides rather than unmounts the panel so an in-flight answer and
+ * an unsent draft survive closing it. That means the panel's own `open` flag has
+ * to follow the prop: closing sets both to false, and reopening has to set both
+ * back to true or the section would stay collapsed inside a visible wrapper.
+ */
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true });
 
 const auth = useAuthStore();
 
@@ -56,9 +77,11 @@ const canUse = computed(() => auth.can('ai.use'));
 
 /** The browser's own storage, and the only thing it is trusted with: a pointer. */
 const STORAGE_CONVERSATION = 'cdh.assistant.conversation';
-const STORAGE_OPEN = 'cdh.assistant.open';
 
-const open = ref(false);
+// While this component is mounted the panel is open; the launcher owns the
+// visibility and hides it with `v-show`. `open` remains because a failed close
+// (an Escape, the X button) must first collapse the panel itself.
+const open = ref(props.active);
 const fullscreen = ref(false);
 const status = ref<AiStatusPayload | null>(null);
 const statusLoaded = ref(false);
@@ -369,17 +392,10 @@ async function loadStatus(): Promise<void> {    try {
     }
 }
 
-function toggle(): void {
-    open.value = !open.value;
-
-    if (open.value) {
-        void nextTick(() => input.value?.focus());
-    }
-}
-
 function close(): void {
     open.value = false;
     fullscreen.value = false;
+    emit('close');
 }
 
 function toggleFullscreen(): void {
@@ -880,9 +896,10 @@ function persistConversation(): void {
 
 function persistOpen(): void {
     try {
-        window.localStorage.setItem(STORAGE_OPEN, open.value ? '1' : '0');
+        window.localStorage.setItem('cdh.assistant.open', '1');
     } catch {
-        // See above.
+        // Storage can be unavailable (private mode, policy). The panel still
+        // works for this session; it just will not reopen the thread.
     }
 }
 
@@ -897,20 +914,14 @@ function storedConversation(): number | null {
     }
 }
 
-function storedOpen(): boolean {
-    try {
-        return window.localStorage.getItem(STORAGE_OPEN) === '1';
-    } catch {
-        return false;
-    }
-}
-
 onMounted(() => {
     // The keydown listener is cheap and does not depend on permissions.
     document.addEventListener('keydown', onKeydown);
 
     if (canUse.value) {
-        open.value = storedOpen();
+        // The launcher only mounts this chunk when the panel opens, so opening
+        // is what makes these two calls happen at all.
+        persistOpen();
         void loadStatus();
         void restoreConversation();
     }
@@ -948,8 +959,6 @@ watch(canUse, (value) => {
 });
 
 watch(open, (value) => {
-    persistOpen();
-
     if (!value) {
         return;
     }
@@ -958,26 +967,23 @@ watch(open, (value) => {
     // moment ago may be back, and the badge should say so.
     void loadStatus();
 });
+
+watch(
+    () => props.active,
+    (active) => {
+        open.value = active;
+
+        if (active) {
+            void nextTick(() => input.value?.focus());
+        }
+    },
+);
 </script>
 
 <template>
     <div v-if="canUse" class="cdh-assistant">
-        <!-- The launcher. Shown to anyone who may use the assistant, whatever
-             the status call answered: a status failure or a provider that is
-             momentarily down must not silently remove the entry point. The real
-             state is explained inside the panel. -->
-        <button
-            v-if="!open"
-            type="button"
-            class="cdh-assistant__fab"
-            :aria-expanded="open"
-            aria-controls="cdh-assistant-panel"
-            aria-label="Abrir el asistente de IA"
-            @click="toggle"
-        >
-            <i class="bi bi-robot" aria-hidden="true" />
-        </button>
-
+        <!-- The panel itself. The launcher owns the button and the visibility;
+             this chunk is only fetched when the panel is first opened. -->
         <section
             v-if="open"
             id="cdh-assistant-panel"
@@ -1210,22 +1216,6 @@ watch(open, (value) => {
     right: 1.25rem;
     bottom: 1.25rem;
     z-index: 1080;
-}
-
-.cdh-assistant__fab {
-    width: 3.25rem;
-    height: 3.25rem;
-    border: 0;
-    border-radius: 50%;
-    background-color: var(--cdh-brand, #123a5e);
-    color: #fff;
-    font-size: 1.4rem;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
-    cursor: pointer;
-}
-
-.cdh-assistant__fab:hover {
-    filter: brightness(1.1);
 }
 
 .cdh-assistant__panel {

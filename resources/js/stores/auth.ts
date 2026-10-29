@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 
 import { api } from '@/services/api';
-import { ApiError, onUnauthorized, resetCsrfState } from '@/services/http';
+import { ApiError, clearHttpCache, onUnauthorized, resetCsrfState } from '@/services/http';
 import { clearDrafts } from '@/utils/drafts';
 
 import type { AuthUser } from '@/types/api';
@@ -53,6 +53,9 @@ export const useAuthStore = defineStore('auth', () => {
     function clear(): void {
         user.value = null;
         resetCsrfState();
+        // Every cached catalogue belonged to the session that just ended.
+        // Nothing read under one account may be reused under another.
+        clearHttpCache();
         // Drafts are scoped to the person, so ending the session removes them:
         // nothing typed by the previous account survives the logout.
         clearDrafts();

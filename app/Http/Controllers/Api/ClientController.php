@@ -136,13 +136,16 @@ final class ClientController extends Controller
             });
         }
 
-        $total = (clone $query)->toBase()->getCountForPagination();
-
         $clients = $query
             ->orderBy('last_names')
             ->orderBy('first_names')
             ->orderBy('id')
             ->paginate($perPage);
+
+        // The paginator already ran its own count. Calling
+        // `getCountForPagination()` on a clone as well sent the same COUNT twice
+        // for every page of the portfolio.
+        $total = $clients->total();
 
         return response()->json([
             'clients' => ClientListResource::collection($clients->items())->resolve(),

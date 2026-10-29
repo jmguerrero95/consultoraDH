@@ -39,12 +39,12 @@ export const a05 = {
     /* --- planillas (§15–§27) ------------------------------------------- */
 
     planillas: {
-        list(filters: Record<string, string | number | undefined> = {}): Promise<{ data: PlanillaSummary[]; pagination: Paginated<PlanillaSummary>['pagination'] }> {
-            return request('GET', '/api/planillas', { query: filters });
+        list(filters: Record<string, string | number | undefined> = {}, signal?: AbortSignal): Promise<{ data: PlanillaSummary[]; pagination: Paginated<PlanillaSummary>['pagination'] }> {
+            return request('GET', '/api/planillas', { query: filters, signal });
         },
 
         vocabulary(): Promise<{ operators: VocabularyOption[]; statuses: VocabularyOption[] }> {
-            return request('GET', '/api/planillas/vocabulary');
+            return request('GET', '/api/planillas/vocabulary', { cacheTtl: 5 * 60_000 });
         },
 
         show(id: number): Promise<PlanillaDetail> {
@@ -126,7 +126,7 @@ export const a05 = {
         },
 
         vocabulary(): Promise<{ categories: VocabularyOption[]; statuses: VocabularyOption[] }> {
-            return request('GET', '/api/novelties/vocabulary');
+            return request('GET', '/api/novelties/vocabulary', { cacheTtl: 5 * 60_000 });
         },
 
         store(input: {
@@ -163,7 +163,7 @@ export const a05 = {
             assignees: { id: number; name: string }[];
             current_user_id: number | null;
         }> {
-            return request('GET', '/api/tasks/vocabulary');
+            return request('GET', '/api/tasks/vocabulary', { cacheTtl: 5 * 60_000 });
         },
 
         store(input: {
@@ -205,7 +205,7 @@ export const a05 = {
 
     documents: {
         types(): Promise<{ data: ClientDocumentType[] }> {
-            return request('GET', '/api/document-types');
+            return request('GET', '/api/document-types', { cacheTtl: 5 * 60_000 });
         },
 
         storeType(input: {
@@ -340,7 +340,7 @@ export const a05 = {
 
     reports: {
         vocabulary(): Promise<{ types: VocabularyOption[]; formats: VocabularyOption[] }> {
-            return request('GET', '/api/reports/vocabulary');
+            return request('GET', '/api/reports/vocabulary', { cacheTtl: 5 * 60_000 });
         },
 
         /**
@@ -371,6 +371,16 @@ export const a05 = {
     /* --- notifications (§59) ------------------------------------------- */
 
     notifications: {
+        /**
+         * The bell's lightweight first request.
+         *
+         * It answers only the count, so a normal page load never downloads the
+         * notification bodies. The list is fetched when the panel opens.
+         */
+        unreadCount(): Promise<{ unread: number }> {
+            return request('GET', '/api/notifications/unread-count');
+        },
+
         recent(): Promise<{ data: AppNotification[]; unread: number }> {
             return request('GET', '/api/notifications');
         },

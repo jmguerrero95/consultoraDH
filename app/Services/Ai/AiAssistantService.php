@@ -1202,11 +1202,19 @@ final class AiAssistantService
         // Only completed turns are history. A failed turn is kept so the person
         // still sees the question, but it is not a prior exchange the model gave
         // an answer to, so it must not be replayed as one.
+        //
+        // The limit is applied in SQL (PERF-01 A05). This used to read every
+        // completed message of the thread and then keep the last six in PHP, so
+        // a long conversation paid for its entire history on every new turn.
+        // Six is the number the loop below is allowed to keep anyway.
         $allMessages = AiMessageModel::query()
             ->where('ai_conversation_id', $conversation->id)
             ->where('status', AiMessageModel::STATUS_COMPLETED)
-            ->orderBy('id')
-            ->get();
+            ->orderByDesc('id')
+            ->limit(self::MAX_HISTORY_PAIRS)
+            ->get()
+            ->reverse()
+            ->values();
 
         // Build pairs (user then assistant), respecting the limit
         $pairs = [];

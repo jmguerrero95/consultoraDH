@@ -125,6 +125,19 @@ function readCookie(name: string): string | null {
 }
 
 /**
+ * The CSRF token, read from the cookie Laravel keeps in sync.
+ *
+ * The realtime channel used to read a `<meta name="csrf-token">` that Laravel
+ * rendered into every HTML shell. That meta tag duplicated a value the browser
+ * already holds in `XSRF-TOKEN`, forced the document to be dynamic (no shared
+ * cache could serve it), and gave the token a second place to go stale. The
+ * cookie is the single source now, which is what the HTTP client already uses.
+ */
+export function csrfToken(): string {
+    return readCookie(CSRF_COOKIE) ?? '';
+}
+
+/**
  * Ask Laravel for a fresh CSRF cookie. Concurrent callers share one request.
  */
 export async function ensureCsrfCookie(): Promise<void> {
@@ -157,6 +170,60 @@ interface RequestOptions {
     skipCsrf?: boolean;
     /** Query parameters, appended to the URL. */
     query?: Record<string, string | number | boolean | null | undefined>;
+    /**
+     * Keep a successful GET response in memory for this many milliseconds.
+     *
+     * Opt-in and deliberately narrow: it is for vocabularies, stable
+     * catalogues and reference lists, never for a screen's own data. A cached
+     * value is shared by the whole tab, so a caller that passes this must also
+     * invalidate it when the underlying catalogue changes.
+     */
+    cacheTtl?: number;
+}
+
+/**
+ * Responses that may be reused, keyed by method + final URL.
+ *
+ * Only GETs that explicitly asked for a TTL live here. There is no global
+ * response cache: a private portfolio or an account statement must always come
+ * from the server.
+ */
+const responseCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+/**
+ * Identical GET requests that are in flight right now.
+ *
+ * Two components asking for the same vocabulary at the same moment share one
+ * request instead of racing. Requests carrying an `AbortSignal` are never
+ * coalesced, because one caller cancelling must not cancel another's work.
+ */
+const inFlight = new Map<string, Promise<unknown>>();
+
+/**
+ * Drop cached responses.
+ *
+ * With a prefix, only keys whose URL starts with it are dropped (for example
+ * `/api/planillas`). Without one, everything is dropped, which is what a
+ * sign-out or an account change must do.
+ */
+export function invalidateHttpCache(prefix?: string): void {
+    if (prefix === undefined) {
+        responseCache.clear();
+
+        return;
+    }
+
+    for (const key of responseCache.keys()) {
+        if (key.includes(prefix)) {
+            responseCache.delete(key);
+        }
+    }
+}
+
+/** Drop every cached response and forget in-flight coalescing. */
+export function clearHttpCache(): void {
+    responseCache.clear();
+    inFlight.clear();
 }
 
 /**
@@ -291,7 +358,11 @@ function defaultMessage(status: number): string {
  *
  * @throws {ApiError} for every non 2xx response and for network failures.
  */
-export async function request<T>(method: Method, url: string, options: RequestOptions = {}): Promise<T> {
+async function execute<T>(
+    method: Method,
+    finalUrl: string,
+    options: RequestOptions,
+): Promise<T> {
     const hasBody = options.body !== undefined;
     const mutating = method !== 'GET';
 
@@ -302,7 +373,7 @@ export async function request<T>(method: Method, url: string, options: RequestOp
     let response: Response;
 
     try {
-        response = await fetch(withQuery(url, options.query), {
+        response = await fetch(finalUrl, {
             method,
             credentials: 'same-origin',
             headers: buildHeaders(mutating, hasBody, options.body),
@@ -341,6 +412,71 @@ export async function request<T>(method: Method, url: string, options: RequestOp
     }
 
     return (await response.json()) as T;
+}
+
+/**
+ * Perform an API request and return the decoded JSON body.
+ *
+ * GET requests without a signal are coalesced while identical ones are in
+ * flight. A request that opts into `cacheTtl` may additionally be answered from
+ * memory until that TTL expires.
+ *
+ * @throws {ApiError} for every non 2xx response and for network failures.
+ */
+export async function request<T>(method: Method, url: string, options: RequestOptions = {}): Promise<T> {
+    const finalUrl = withQuery(url, options.query);
+    const mutating = method !== 'GET';
+    const coalescable = !mutating && options.signal === undefined;
+    const key = `${method} ${finalUrl}`;
+
+    if (mutating) {
+        // A write can change anything a cached read described. Drop the cache
+        // rather than trying to guess which prefixes were affected: the next
+        // read is correct, which matters more than a cache hit.
+        invalidateHttpCache();
+
+        return execute<T>(method, finalUrl, options);
+    }
+
+    if (options.cacheTtl !== undefined && options.cacheTtl > 0) {
+        const cached = responseCache.get(key);
+
+        if (cached !== undefined && cached.expiresAt > Date.now()) {
+            return cached.value as T;
+        }
+
+        if (cached !== undefined) {
+            responseCache.delete(key);
+        }
+    }
+
+    if (coalescable) {
+        const pending = inFlight.get(key);
+
+        if (pending !== undefined) {
+            return pending as Promise<T>;
+        }
+    }
+
+    const pending = execute<T>(method, finalUrl, options)
+        .then((value) => {
+            if (options.cacheTtl !== undefined && options.cacheTtl > 0) {
+                responseCache.set(key, { expiresAt: Date.now() + options.cacheTtl, value });
+            }
+
+            return value;
+        })
+        .finally(() => {
+            if (inFlight.get(key) === pending) {
+                inFlight.delete(key);
+            }
+        });
+
+    if (coalescable) {
+        inFlight.set(key, pending);
+    }
+
+    return pending;
 }
 
 /** Reset the cached CSRF handshake, e.g. after a hard session change. */

@@ -52,6 +52,21 @@ final class NotificationController extends Controller
         ]);
     }
 
+    /**
+     * Only the unread count.
+     *
+     * The bell needs a badge on every screen, not the fifteen most recent
+     * bodies. Keeping the two apart means a normal page load costs one indexed
+     * count instead of a list query plus hydration, and the list is only read
+     * when somebody opens the panel.
+     */
+    public function unreadCount(Request $request): JsonResponse
+    {
+        return response()->json([
+            'unread' => $request->user()->unreadNotifications()->count(),
+        ]);
+    }
+
     public function markRead(Request $request, string $id): JsonResponse
     {
         $notification = $request->user()->notifications()->where('id', $id)->first();

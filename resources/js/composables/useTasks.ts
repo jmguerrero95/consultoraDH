@@ -215,7 +215,21 @@ export function useAiTasks() {
             return;
         }
 
+        // A hidden tab has nobody looking at it. The work continues on the
+        // server; polling it every two seconds only burns battery and quota.
+        // Coming back to the tab refreshes immediately instead.
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+            return;
+        }
+
         timer = setTimeout(() => void refresh(), 2000);
+    }
+
+    /** Revalidate once when the tab becomes visible, then resume the poll. */
+    function onVisibilityChange(): void {
+        if (document.visibilityState === 'visible' && pending().length > 0 && !stopped) {
+            void refresh();
+        }
     }
 
     async function cancel(id: number): Promise<void> {
@@ -223,11 +237,22 @@ export function useAiTasks() {
         await refresh();
     }
 
-    onMounted(() => void refresh());
+    onMounted(() => {
+        void refresh();
+
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', onVisibilityChange);
+        }
+    });
+
     onBeforeUnmount(() => {
         stopped = true;
         if (timer !== null) {
             clearTimeout(timer);
+        }
+
+        if (typeof document !== 'undefined') {
+            document.removeEventListener('visibilitychange', onVisibilityChange);
         }
     });
 

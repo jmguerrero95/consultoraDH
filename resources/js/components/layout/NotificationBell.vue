@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { a05 } from '@/services/a05';
@@ -18,6 +18,16 @@ import type { AppNotification } from '@/types/api';
  * the underlying record — a debtor's identifier does not belong in a table rendered on
  * every screen — and following the link still passes the same authorisation as any
  * other request.
+ *
+ * ## Two requests, not one (PERF-01 B03)
+ *
+ * The bell is mounted on every authenticated screen and is usually not opened.
+ * Loading the fifteen most recent notification bodies on every mount made every
+ * page pay for a list almost nobody read. Now the first request is
+ * `GET /api/notifications/unread-count` — one indexed count — and the list is
+ * only fetched when the dropdown is opened. The count is revalidated when the
+ * tab becomes visible again instead of polling on a timer, so a hidden tab
+ * costs nothing.
  */
 
 const router = useRouter();
@@ -26,6 +36,17 @@ const abierto = ref(false);
 const cargando = ref(false);
 const notifications = ref<AppNotification[]>([]);
 const unread = ref(0);
+
+/** Badge only: cheap, and safe to run on every page and on focus. */
+async function cargarContador(): Promise<void> {
+    try {
+        const respuesta = await a05.notifications.unreadCount();
+
+        unread.value = respuesta.unread;
+    } catch {
+        // A failed count is not an inbox with zero unread; the badge stays as it was.
+    }
+}
 
 async function cargar(): Promise<void> {
     cargando.value = true;
@@ -56,9 +77,13 @@ async function marcarLeida(notification: AppNotification): Promise<void> {
         const respuesta = await a05.notifications.markRead(notification.id);
 
         unread.value = respuesta.unread;
-        await cargar();
+        // The server returned the new count; the item on screen is the one that
+        // changed, so there is no reason to re-download the whole list.
+        notifications.value = notifications.value.map((item) =>
+            item.id === notification.id ? { ...item, read_at: new Date().toISOString() } : item,
+        );
     } catch {
-        // The count is refreshed on the next poll; a failed mark does not break the menu.
+        // The count is revalidated on the next focus or open; a failed mark does not break the menu.
     }
 
     await abrir(notification);
@@ -69,9 +94,12 @@ async function marcarTodas(): Promise<void> {
         const respuesta = await a05.notifications.markAllRead();
 
         unread.value = respuesta.unread;
-        await cargar();
+        const now = new Date().toISOString();
+        notifications.value = notifications.value.map((item) =>
+            item.read_at === null ? { ...item, read_at: now } : item,
+        );
     } catch {
-        await cargar();
+        // Keep the visible state; the badge is revalidated when the panel reopens.
     }
 }
 
@@ -89,11 +117,28 @@ function alternar(): void {
     abierto.value = !abierto.value;
 
     if (abierto.value) {
+        // Bodies are only needed when somebody looks at them.
         void cargar();
     }
 }
 
-onMounted(cargar);
+/** Revalidate the badge when the tab returns, without a timer running. */
+function onVisible(): void {
+    if (document.visibilityState === 'visible') {
+        void cargarContador();
+    }
+}
+
+onMounted(() => {
+    void cargarContador();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', cargarContador);
+});
+
+onBeforeUnmount(() => {
+    document.removeEventListener('visibilitychange', onVisible);
+    window.removeEventListener('focus', cargarContador);
+});
 </script>
 
 <template>

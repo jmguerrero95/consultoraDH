@@ -121,16 +121,21 @@ final class ReportController extends Controller
             ], 422);
         }
 
-        $contents = $this->generator->contents($stored);
+        $stream = $this->generator->readStream($stored);
 
-        abort_if($contents === null, 404);
+        abort_if($stream === null, 404);
 
         // FIX-EXPORT-IMPORT-03: the stored file is a UUID, so the name the user downloads is the
         // only place the scope is ever stated: `CONSULTORA_DH_2026_ENERO-OCTUBRE.xlsx`.
         $filename = $selection?->filename() ?? $type->value.'.'.$format->value;
 
-        return response()->streamDownload(function () use ($contents): void {
-            echo $contents;
+        // Streamed from disk (PERF-01 A03): the previous version read the whole
+        // report into a string and echoed it, so peak memory was the file size.
+        return response()->streamDownload(function () use ($stream): void {
+            if (is_resource($stream)) {
+                fpassthru($stream);
+                fclose($stream);
+            }
         }, $filename, [
             'Content-Type' => $format === ReportFormat::Pdf
                 ? 'application/pdf'
@@ -181,16 +186,19 @@ final class ReportController extends Controller
 
         abort_unless($request->user()?->can($type->permission()), 403);
 
-        $contents = $this->generator->contents($generatedReport);
+        $stream = $this->generator->readStream($generatedReport);
 
-        abort_if($contents === null, 404);
+        abort_if($stream === null, 404);
 
         $this->audit->record(AuditAction::GeneratedReportDownloaded, $request->user(), [
             'generated_report_id' => (int) $generatedReport->id,
         ], null, $generatedReport);
 
-        return response()->streamDownload(function () use ($contents): void {
-            echo $contents;
+        return response()->streamDownload(function () use ($stream): void {
+            if (is_resource($stream)) {
+                fpassthru($stream);
+                fclose($stream);
+            }
         }, $type->value.'.'.$generatedReport->format->value, [
             'Content-Type' => $generatedReport->format === ReportFormat::Pdf
                 ? 'application/pdf'

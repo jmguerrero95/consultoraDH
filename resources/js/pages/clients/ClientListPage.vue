@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
@@ -57,9 +57,15 @@ const error = ref<string | null>(null);
 
 /** Bumped on every load so a slow response cannot overwrite a newer one. */
 let requestId = 0;
+/** The request in flight, cancelled when a newer filter makes it useless. */
+let inFlight: AbortController | null = null;
 
 async function load(): Promise<void> {
     const current = ++requestId;
+
+    inFlight?.abort();
+    const controller = new AbortController();
+    inFlight = controller;
 
     loading.value = true;
     error.value = null;
@@ -72,7 +78,7 @@ async function load(): Promise<void> {
             company_id: companyId.value === '' ? null : Number(companyId.value),
             per_page: perPage.value,
             page: page.value,
-        });
+        }, controller.signal);
 
         // A response that arrived after a newer request started is stale.
         if (current !== requestId) {
@@ -82,6 +88,11 @@ async function load(): Promise<void> {
         clients.value = payload.clients;
         pagination.value = payload.pagination;
     } catch (cause) {
+        // A cancelled request is not an error: a newer filter replaced it.
+        if (cause instanceof DOMException && cause.name === 'AbortError') {
+            return;
+        }
+
         if (current !== requestId) {
             return;
         }
@@ -94,13 +105,24 @@ async function load(): Promise<void> {
     } finally {
         if (current === requestId) {
             loading.value = false;
+            inFlight = null;
         }
     }
 }
 
-/** Any filter change starts again from the first page. */
+/** Any filter change starts again from the first page.
+ *
+ * When the page was not the first one, the reset itself triggers the `page`
+ * watcher; loading here too would send the same request twice with the same
+ * filters, one for the old page and one for the new one.
+ */
 watch([settledSearch, status, companyId, perPage], () => {
-    page.value = 1;
+    if (page.value !== 1) {
+        page.value = 1;
+
+        return;
+    }
+
     void load();
 });
 
@@ -122,6 +144,10 @@ async function loadCompanies(): Promise<void> {
 onMounted(() => {
     void load();
     void loadCompanies();
+});
+
+onBeforeUnmount(() => {
+    inFlight?.abort();
 });
 
 function clearFilters(): void {
