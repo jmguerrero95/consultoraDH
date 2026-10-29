@@ -207,8 +207,9 @@ Resultados:
 La implementación anterior se auditó en el tip remoto
 `51c96fea07e4448417f7a136287f6a9f1103aca1`. Las correcciones de esta sección
 están en el commit de implementación
-`2a577011adb6c5a167eb2cd84dce03a28fb363a2`; este informe se publica en el
-commit inmediatamente posterior. La auditoría encontró cuatro
+`2a577011adb6c5a167eb2cd84dce03a28fb363a2`. El informe se publicó en
+`232ba89cb8ddc2e51246ab945253193d7ff70007`; esta corrección de exactitud se
+publica en el commit de documentación inmediatamente posterior. La auditoría encontró cuatro
 defectos y un ajuste menor. No se rehizo el hito ni se tocaron otros módulos:
 cada corrección es local al archivo que la causaba.
 
@@ -423,7 +424,7 @@ BUILD=PASS
 TYPECHECK=PASS
 LINT=PASS
 TESTS_R1=PASS (74 Pest + 22 Vitest)
-TESTS_PERF01=PASS (mediciones y suites originales conservadas)
+TESTS_PERF01=NOT_RERUN (sin cambios en las áreas no afectadas; ver TESTS_R1 y las mediciones conservadas)
 INTEGRITY_AUTH=PASS
 PWA=PASS (política de caché; push/outbox sin cambios)
 TELEGRAM_R05=PASS (32/32 notif-tg-02 + A06; poda restringida)
