@@ -200,15 +200,33 @@ const responseCache = new Map<string, { expiresAt: number; value: unknown }>();
 const inFlight = new Map<string, Promise<unknown>>();
 
 /**
- * Drop cached responses.
+ * The cache epoch.
  *
- * With a prefix, only keys whose URL starts with it are dropped (for example
- * `/api/planillas`). Without one, everything is dropped, which is what a
- * sign-out or an account change must do.
+ * Every invalidation advances it. A request remembers the epoch it started in
+ * and may only write its result back if the epoch has not moved since. Without
+ * this, a slow GET started before a write could finish afterwards and put the
+ * pre-write answer back into a cache that was just emptied — the next caller
+ * would then read stale data even though the write was correctly performed.
+ *
+ * A full invalidation also abandons every in-flight promise: reusing one after
+ * the write is exactly the stale read this epoch exists to prevent.
+ */
+let cacheGeneration = 0;
+
+/**
+ * Drop cached responses and every promise that could repopulate them.
+ *
+ * With a prefix, only keys whose URL contains it are dropped and abandoned (for
+ * example `/api/planillas`). Without one, everything is dropped, which is what a
+ * sign-out or an account change must do. The epoch always advances, so a
+ * request from before this call cannot save its answer afterwards.
  */
 export function invalidateHttpCache(prefix?: string): void {
+    cacheGeneration += 1;
+
     if (prefix === undefined) {
         responseCache.clear();
+        inFlight.clear();
 
         return;
     }
@@ -218,12 +236,24 @@ export function invalidateHttpCache(prefix?: string): void {
             responseCache.delete(key);
         }
     }
+
+    for (const key of inFlight.keys()) {
+        if (key.includes(prefix)) {
+            inFlight.delete(key);
+        }
+    }
 }
 
-/** Drop every cached response and forget in-flight coalescing. */
+/**
+ * Drop every cached response, forget in-flight coalescing and force the next
+ * mutation to fetch a fresh CSRF cookie.
+ *
+ * This is the sign-out and account-change path: nothing read or requested by
+ * the previous session may survive into the next one.
+ */
 export function clearHttpCache(): void {
-    responseCache.clear();
-    inFlight.clear();
+    invalidateHttpCache();
+    csrfReady = null;
 }
 
 /**
@@ -428,6 +458,9 @@ export async function request<T>(method: Method, url: string, options: RequestOp
     const mutating = method !== 'GET';
     const coalescable = !mutating && options.signal === undefined;
     const key = `${method} ${finalUrl}`;
+    // Captured before the request starts: a response may only be cached if no
+    // invalidation happened while it was on the wire.
+    const generation = cacheGeneration;
 
     if (mutating) {
         // A write can change anything a cached read described. Drop the cache
@@ -460,7 +493,9 @@ export async function request<T>(method: Method, url: string, options: RequestOp
 
     const pending = execute<T>(method, finalUrl, options)
         .then((value) => {
-            if (options.cacheTtl !== undefined && options.cacheTtl > 0) {
+            if (options.cacheTtl !== undefined
+                && options.cacheTtl > 0
+                && generation === cacheGeneration) {
                 responseCache.set(key, { expiresAt: Date.now() + options.cacheTtl, value });
             }
 

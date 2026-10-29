@@ -58,6 +58,8 @@ class OperationalTask extends Model
             'reminder_dismissed_at' => 'datetime',
             'reminder_second_sent_at' => 'datetime',
             'reminder_attempts' => 'integer',
+            'reminder_delivery_started_at' => 'datetime',
+            'reminder_delivery_internal_at' => 'datetime',
             'completed_at' => 'datetime',
             'cancelled_at' => 'datetime',
         ];

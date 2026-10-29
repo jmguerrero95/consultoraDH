@@ -104,28 +104,34 @@ final class TelegramDocumentDeliveryService
 
         $filename = $this->filename($document);
 
-        // Durable marker before the call: the caller writes it to PostgreSQL in
-        // its own statement, so a crash during upload cannot be replayed.
-        if ($beforeExternalEffect !== null) {
-            $beforeExternalEffect();
-        }
-
+        // The stream is closed no matter where this block stops. That includes
+        // the durable marker callback: it is not an HTTP call, so its failure
+        // propagates as-is (the external effect never started and the update
+        // stays recoverable), but the handle must not leak because of it.
         try {
-            $response = Http::timeout(60)
-                ->attach('document', $bytes, $filename, [
-                    'Content-Type' => $document->mime_type ?: 'application/octet-stream',
-                ])
-                ->post("https://api.telegram.org/bot{$token}/sendDocument", [
-                    'chat_id' => $chatId,
-                    'caption' => mb_substr($document->title, 0, 200),
-                ]);
-        } catch (\Throwable $e) {
-            Log::error('Telegram sendDocument failed', [
-                'document_id' => $document->id,
-                'error_class' => $e::class,
-            ]);
+            // Durable marker before the call: the caller writes it to PostgreSQL
+            // in its own statement, so a crash during upload cannot be replayed.
+            if ($beforeExternalEffect !== null) {
+                $beforeExternalEffect();
+            }
 
-            throw new TelegramExternalEffectFailed('Telegram sendDocument transport failed', 0, $e);
+            try {
+                $response = Http::timeout(60)
+                    ->attach('document', $bytes, $filename, [
+                        'Content-Type' => $document->mime_type ?: 'application/octet-stream',
+                    ])
+                    ->post("https://api.telegram.org/bot{$token}/sendDocument", [
+                        'chat_id' => $chatId,
+                        'caption' => mb_substr($document->title, 0, 200),
+                    ]);
+            } catch (\Throwable $e) {
+                Log::error('Telegram sendDocument failed', [
+                    'document_id' => $document->id,
+                    'error_class' => $e::class,
+                ]);
+
+                throw new TelegramExternalEffectFailed('Telegram sendDocument transport failed', 0, $e);
+            }
         } finally {
             // Http has already read the stream into the request body by now.
             if (is_resource($bytes)) {

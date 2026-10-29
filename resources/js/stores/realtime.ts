@@ -114,7 +114,14 @@ export const useRealtimeStore = defineStore('realtime', () => {
               authEndpoint: '/broadcasting/auth',
               auth: {
                 headers: {
-                  'X-CSRF-TOKEN': csrfToken(),
+                  // `csrfToken()` returns the *decoded* `XSRF-TOKEN` cookie. That
+                  // is precisely what `X-XSRF-TOKEN` expects: Laravel decrypts
+                  // the header value the same way it decrypts the cookie.
+                  // `X-CSRF-TOKEN` is a different contract — it wants the raw
+                  // `csrf_token()` value, which this application never renders
+                  // into the document. Sending the cookie under that header was
+                  // rejected (419) as soon as CSRF was enforced on the endpoint.
+                  'X-XSRF-TOKEN': csrfToken(),
                 },
               },
             })

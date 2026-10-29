@@ -40,6 +40,17 @@ final class ReminderDispatcher
 
     public const SECOND_AFTER_MINUTES = 10;
 
+    /**
+     * How long a reservation is considered owned by a live worker.
+     *
+     * After this, a reservation without an in-app notification is treated as
+     * "the worker never sent anything" and can be claimed again. With one, the
+     * stage is settled: the user-visible reminder exists, and the Push outcome
+     * is unknown rather than retried — which is the only way to keep the second
+     * notice unique.
+     */
+    public const DELIVERY_LEASE_MINUTES = 5;
+
     public function __construct(private readonly WebPushService $push) {}
 
     /**
@@ -77,37 +88,51 @@ final class ReminderDispatcher
                 continue;
             }
 
-            // The push is a network call, possibly to several endpoints. It runs
-            // *after* the transaction commits so the row lock is not held for the
-            // duration of somebody else's HTTP timeout.
+            $task = OperationalTask::query()->find($claim['id']);
+
+            // A dismissal or completion may have arrived between the claim and
+            // this line. It wins: nothing is sent and the reservation is released.
+            if ($task === null
+                || $task->status !== TaskStatus::Pending
+                || $task->completed_at !== null
+                || $task->cancelled_at !== null
+                || $task->reminder_dismissed_at !== null) {
+                $this->clearDelivery($claim['token']);
+
+                continue;
+            }
+
+            $assignee = $task->assignee;
+
+            if (! $assignee instanceof User || $assignee->status !== UserStatus::Active) {
+                // Preserved behaviour: a task whose assignee is inactive still
+                // settles its stage, so it is not retried forever.
+                Log::info('Task reminder skipped: no active assignee', [
+                    'task_id' => $task->id,
+                    'stage' => $claim['stage'],
+                ]);
+
+                $this->finalize($claim, $task, $now);
+
+                continue;
+            }
+
+            // The in-app row and the "internal reminder written" marker are one
+            // unit. Both are local database writes, so a transaction is cheap and
+            // it removes the only way this stage could be retried after the
+            // notification already existed: if the marker cannot be written, the
+            // notification is rolled back with it and the next run writes both
+            // again. No duplicate reaches the person.
             try {
-                $task = OperationalTask::query()->find($claim['id']);
-
-                if ($task === null) {
-                    $this->revertClaim($claim);
-
-                    continue;
-                }
-
-                // A dismissal or completion may have arrived between the commit
-                // and this line. It wins: the reminder is put back, not sent.
-                if ($task->status !== TaskStatus::Pending
-                    || $task->completed_at !== null
-                    || $task->cancelled_at !== null
-                    || $task->reminder_dismissed_at !== null) {
-                    $this->revertClaim($claim);
-
-                    continue;
-                }
-
-                $this->send($task, $claim['stage']);
+                DB::transaction(function () use ($assignee, $task, $claim, $now): void {
+                    $assignee->notify(new TaskReminderNotification($task));
+                    $this->markInternal($claim['token'], $now);
+                });
             } catch (\Throwable $e) {
-                // The claim is compensated so the next run retries this stage
-                // instead of recording a push that never left.
-                $this->revertClaim($claim);
+                $this->clearDelivery($claim['token']);
 
-                Log::error('Task reminder could not be sent; claim reverted', [
-                    'task_id' => $claim['id'],
+                Log::error('Task reminder notification could not be written; delivery released', [
+                    'task_id' => $task->id,
                     'stage' => $claim['stage'],
                     'error' => $e->getMessage(),
                 ]);
@@ -115,6 +140,23 @@ final class ReminderDispatcher
                 continue;
             }
 
+            // The Push call is network I/O and stays outside every transaction.
+            try {
+                $this->sendPush($task, $claim['stage']);
+            } catch (\Throwable $e) {
+                // The internal reminder is already durable. The external outcome
+                // is now unknown: it is not retried here, and the reservation is
+                // settled by the lease instead of pretending the push never left.
+                Log::error('Task reminder push outcome unknown; internal reminder kept', [
+                    'task_id' => $task->id,
+                    'stage' => $claim['stage'],
+                    'error' => $e->getMessage(),
+                ]);
+
+                continue;
+            }
+
+            $this->finalize($claim, $task, $now);
             $dispatched++;
         }
 
@@ -124,16 +166,17 @@ final class ReminderDispatcher
     /**
      * Reserve one reminder stage on a task, under the row lock.
      *
-     * The transaction only re-reads the row, decides which stage is due and
-     * writes the claim. It performs no I/O, so a slow push cannot block another
-     * worker, and the unique "who sends this stage" decision is still serialised
-     * by the lock.
+     * The transaction only re-reads the row, settles an abandoned reservation
+     * and writes the new one. It performs no I/O, so a slow push cannot block
+     * another worker, and "who sends this stage" is still serialised by the lock.
      *
-     * @return array{id: int, stage: string, previous: array<string, mixed>, claimed_at: Carbon}|null
+     * @return array{id: int, stage: string, token: string}|null
      */
     private function claim(int $id, Carbon $now, Carbon $retryBefore, Carbon $secondBefore): ?array
     {
-        return DB::transaction(function () use ($id, $now, $retryBefore, $secondBefore): ?array {
+        $token = bin2hex(random_bytes(16));
+
+        return DB::transaction(function () use ($id, $token, $now, $retryBefore, $secondBefore): ?array {
             // The row is re-read under a lock: the candidate list was built
             // before the transaction, and two workers (or a notifier and a
             // dismissal) can change the same task in between.
@@ -150,105 +193,168 @@ final class ReminderDispatcher
                 return null;
             }
 
-            $previous = [
-                'reminder_sent_at' => $task->reminder_sent_at,
-                'reminder_attempts' => $task->reminder_attempts,
-                'reminder_second_sent_at' => $task->reminder_second_sent_at,
-            ];
-
-            if ($task->reminder_sent_at === null) {
-                $task->forceFill([
-                    'reminder_sent_at' => $now,
-                    'reminder_attempts' => 0,
-                ])->save();
-
-                return ['id' => $task->id, 'stage' => 'initial', 'previous' => $previous, 'claimed_at' => $now];
+            if ($this->settleAbandonedDelivery($task, $now)) {
+                return null;
             }
 
-            if ($task->reminder_received_at === null) {
+            // Another worker's reservation is still inside its lease.
+            if ($task->reminder_delivery_token !== null) {
+                return null;
+            }
+
+            if ($task->reminder_sent_at === null) {
+                $stage = 'initial';
+            } elseif ($task->reminder_received_at === null) {
                 if ($task->reminder_sent_at->gt($retryBefore)) {
                     return null;
                 }
 
-                $task->forceFill([
-                    'reminder_sent_at' => $now,
-                    'reminder_attempts' => ($task->reminder_attempts ?? 0) + 1,
-                ])->save();
-
-                return ['id' => $task->id, 'stage' => 'retry', 'previous' => $previous, 'claimed_at' => $now];
-            }
-
-            if ($task->reminder_second_sent_at === null
+                $stage = 'retry';
+            } elseif ($task->reminder_second_sent_at === null
                 && $task->reminder_received_at->lte($secondBefore)) {
-                $task->forceFill([
-                    'reminder_second_sent_at' => $now,
-                ])->save();
-
-                return ['id' => $task->id, 'stage' => 'second', 'previous' => $previous, 'claimed_at' => $now];
-            }
-
-            return null;
-        });
-    }
-
-    /**
-     * Put the claim back after a failed or superseded send.
-     *
-     * The update is conditional on this run still owning the claim, so a
-     * concurrent acknowledgement is never overwritten by a stale compensation.
-     *
-     * @param  array{id: int, stage: string, previous: array<string, mixed>, claimed_at: Carbon}  $claim
-     */
-    private function revertClaim(array $claim): void
-    {
-        DB::transaction(function () use ($claim): void {
-            $task = OperationalTask::query()
-                ->whereKey($claim['id'])
-                ->lockForUpdate()
-                ->first();
-
-            if ($task === null) {
-                return;
-            }
-
-            $column = $claim['stage'] === 'second' ? 'reminder_second_sent_at' : 'reminder_sent_at';
-            $current = $task->{$column};
-
-            // Somebody else has moved the stage since this claim: leave it.
-            if ($current === null || ! $current->equalTo($claim['claimed_at'])) {
-                return;
+                $stage = 'second';
+            } else {
+                return null;
             }
 
             $task->forceFill([
-                'reminder_sent_at' => $claim['previous']['reminder_sent_at'],
-                'reminder_attempts' => $claim['previous']['reminder_attempts'],
-                'reminder_second_sent_at' => $claim['previous']['reminder_second_sent_at'],
+                'reminder_delivery_stage' => $stage,
+                'reminder_delivery_token' => $token,
+                'reminder_delivery_started_at' => $now,
+                'reminder_delivery_internal_at' => null,
             ])->save();
+
+            return ['id' => $task->id, 'stage' => $stage, 'token' => $token];
         });
     }
 
     /**
-     * Write the in-app notification and the Push message for one stage.
+     * Resolve a reservation left behind by a worker that stopped mid-delivery.
+     *
+     * Returns true when the stage was settled here and must not be claimed again
+     * in this run.
      */
-    private function send(OperationalTask $task, string $stage): void
+    private function settleAbandonedDelivery(OperationalTask $task, Carbon $now): bool
     {
-        $assignee = $task->assignee;
+        if ($task->reminder_delivery_token === null) {
+            return false;
+        }
 
-        if (! $assignee instanceof User || $assignee->status !== UserStatus::Active) {
-            Log::info('Task reminder skipped: no active assignee', [
+        // The owner is still inside its lease.
+        if ($task->reminder_delivery_started_at !== null
+            && $task->reminder_delivery_started_at->gt($now->copy()->subMinutes(self::DELIVERY_LEASE_MINUTES))) {
+            return true;
+        }
+
+        $stage = $task->reminder_delivery_stage;
+
+        if ($task->reminder_delivery_internal_at !== null && $stage !== null) {
+            // The user-visible reminder was written. The Push may or may not
+            // have left; settling the stage is what keeps the second notice
+            // unique and the retry cadence honest.
+            $this->writeMarker($task, $stage, $task->reminder_delivery_internal_at);
+
+            Log::warning('Task reminder abandoned after internal delivery; external outcome unknown', [
                 'task_id' => $task->id,
                 'stage' => $stage,
             ]);
 
+            $task->forceFill($this->emptyDelivery())->save();
+
+            return true;
+        }
+
+        // Nothing was delivered: the reservation can be claimed again.
+        $task->forceFill($this->emptyDelivery())->save();
+
+        return false;
+    }
+
+    private function markInternal(string $token, Carbon $at): void
+    {
+        DB::table('operational_tasks')
+            ->where('reminder_delivery_token', $token)
+            ->update(['reminder_delivery_internal_at' => $at]);
+    }
+
+    private function clearDelivery(string $token): void
+    {
+        DB::table('operational_tasks')
+            ->where('reminder_delivery_token', $token)
+            ->update($this->emptyDelivery());
+    }
+
+    /**
+     * @param  array{id: int, stage: string, token: string}  $claim
+     */
+    private function finalize(array $claim, OperationalTask $task, Carbon $at): void
+    {
+        DB::transaction(function () use ($claim, $task, $at): void {
+            $fresh = OperationalTask::query()
+                ->whereKey($task->id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($fresh === null
+                || $fresh->reminder_delivery_token !== $claim['token']) {
+                return;
+            }
+
+            $this->writeMarker($fresh, $claim['stage'], $at);
+            $fresh->forceFill($this->emptyDelivery())->save();
+        });
+    }
+
+    /**
+     * Write the durable "this stage happened" marker.
+     *
+     * `reminder_sent_at` is the moment the attempt started, not the moment the
+     * process happened to finish: the five-minute retry interval is measured
+     * from it.
+     */
+    private function writeMarker(OperationalTask $task, string $stage, Carbon $at): void
+    {
+        if ($stage === 'second') {
+            $task->forceFill([
+                'reminder_second_sent_at' => $task->reminder_second_sent_at ?? $at,
+            ])->save();
+
             return;
         }
 
-        // The in-app inbox row. This is what the bell reads.
-        $assignee->notify(new TaskReminderNotification($task));
+        $task->forceFill([
+            'reminder_sent_at' => $at,
+            'reminder_attempts' => $stage === 'initial' ? 0 : (($task->reminder_attempts ?? 0) + 1),
+        ])->save();
+    }
 
-        // The Web Push message. Its payload carries the signed acknowledgement
-        // and dismissal URLs; the service worker calls them, so reception and
-        // dismissal are stated by the device rather than inferred here.
+    /**
+     * @return array<string, null>
+     */
+    private function emptyDelivery(): array
+    {
+        return [
+            'reminder_delivery_stage' => null,
+            'reminder_delivery_token' => null,
+            'reminder_delivery_started_at' => null,
+            'reminder_delivery_internal_at' => null,
+        ];
+    }
+
+    /**
+     * The Web Push message for one stage.
+     */
+    private function sendPush(OperationalTask $task, string $stage): void
+    {
+        $assignee = $task->assignee;
+
+        if (! $assignee instanceof User) {
+            return;
+        }
+
+        // Its payload carries the signed acknowledgement and dismissal URLs; the
+        // service worker calls them, so reception and dismissal are stated by the
+        // device rather than inferred here.
         $this->push->sendNotification(
             $assignee,
             match ($stage) {

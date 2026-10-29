@@ -380,22 +380,28 @@ it('R03 sends an authorized private document with sendDocument and never its pat
         'archived_at' => null,
     ]);
 
+    // The document is streamed, so the handle is closed as soon as the request
+    // is sent (PERF-01 A04/R1). Read the multipart body at send time, while the
+    // resource is still open, instead of from the fake after the close.
+    $uploadedBody = null;
+
+    Http::fake(function (Request $request) use (&$uploadedBody) {
+        if (str_contains($request->url(), '/sendDocument')) {
+            $uploadedBody = $request->body();
+        }
+
+        return Http::response(['ok' => true], 200);
+    });
+
     ntg2Send(ntg2Message('7301', 'Busca a Cliente Documento QA.'));
     ntg2Send(ntg2Message('7301', 'Envíame el documento de ese cliente.'));
 
-    $sentDocument = collect(Http::recorded())->first(
-        fn (array $pair): bool => str_contains($pair[0]->url(), '/sendDocument'),
+    Http::assertSent(
+        fn (Request $request): bool => str_contains($request->url(), '/sendDocument'),
     );
 
-    expect($sentDocument)->not->toBeNull();
-
-    /** @var Request $request */
-    $request = $sentDocument[0];
-    $body = $request->body();
-
-    expect($request->url())->toContain('/sendDocument')
-        ->and($body)->toContain('cedula-qa.pdf')
-        ->and($body)->toContain('PDF-CONTENT-QA')
+    expect($uploadedBody)->toContain('cedula-qa.pdf')
+        ->and($uploadedBody)->toContain('PDF-CONTENT-QA')
         ->and(implode("\n", ntg2SentTexts()))->toContain('Documento entregado')
         ->and(implode("\n", ntg2SentTexts()))->not->toContain('stored_path')
         ->and(implode("\n", ntg2SentTexts()))->not->toContain('clients/'.$client->id);
@@ -648,21 +654,26 @@ it('R03 entrega propio documento con documentos.view', function (): void {
         'archived_at' => null,
     ]);
 
+    // Same reason as the first R03 test: read the streamed body when the
+    // request is sent, before `deliver()` closes the handle.
+    $uploadedBody = null;
+
+    Http::fake(function (Request $request) use (&$uploadedBody) {
+        if (str_contains($request->url(), '/sendDocument')) {
+            $uploadedBody = $request->body();
+        }
+
+        return Http::response(['ok' => true], 200);
+    });
+
     ntg2Send(ntg2Message('7A02', 'Busca a Cliente Propio QA.'));
     ntg2Send(ntg2Message('7A02', 'Envíame el documento de ese cliente.'));
 
-    $sentDocument = collect(Http::recorded())->first(
-        fn (array $pair): bool => str_contains($pair[0]->url(), '/sendDocument'),
+    Http::assertSent(
+        fn (Request $request): bool => str_contains($request->url(), '/sendDocument'),
     );
 
-    expect($sentDocument)->not->toBeNull();
-
-    /** @var Request $request */
-    $request = $sentDocument[0];
-    $body = $request->body();
-
-    expect($request->url())->toContain('/sendDocument')
-        ->and($body)->toContain('mi-doc.pdf')
+    expect($uploadedBody)->toContain('mi-doc.pdf')
         ->and(implode("\n", ntg2SentTexts()))->toContain('Documento entregado')
         ->and(implode("\n", ntg2SentTexts()))->not->toContain('stored_path')
         ->and(implode("\n", ntg2SentTexts()))->not->toContain('clients/');
