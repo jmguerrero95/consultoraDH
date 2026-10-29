@@ -260,6 +260,51 @@ Pruebas (`tests/Feature/Notifications/ReminderDeliveryRecoveryTest.php`, 4/4):
 4. entrega inicial abandonada → la marca se repone a la hora de la notificación
    y el reintento técnico de cinco minutos sigue ocurriendo.
 
+### 7.1-bis Concurrencia de la reserva — `markInternal()` (cierre R1)
+
+Riesgo residual detectado en la auditoría de `cc20068`: el `UPDATE` de
+`markInternal()` filtraba por `reminder_delivery_token` pero no comprobaba las
+filas afectadas. Un trabajador que hubiera perdido su reserva durante una pausa
+podía escribir la notificación interna, continuar hacia el Push y duplicar el
+envío.
+
+Corrección (`app/Domain/Operations/ReminderDispatcher.php`,
+`app/Domain/Operations/ReminderDeliveryLost.php`):
+
+- `markInternal()` exige `$updated === 1`. Si la reserva cambió de manos, lanza
+  `ReminderDeliveryLost` dentro de la misma transacción que escribe la
+  notificación: PostgreSQL revierte la notificación y el Push no se ejecuta.
+- El `catch` específico registra la pérdida y **no** llama a `clearDelivery()`.
+  El `UPDATE` ya era condicional por token, y ahora tampoco hay compensación que
+  pueda tocar la reserva del otro trabajador.
+- El `catch` general conserva el comportamiento anterior para fallos locales:
+  libera la reserva propia y el siguiente ciclo reintenta.
+- Sin cambios en recuperación por lease, segundo aviso único, reintentos de
+  cinco minutos, dismiss, cancelación ni finalización.
+
+Pruebas (`tests/Feature/Notifications/ReminderDeliveryAtomicityTest.php`, 3/3,
+sin `Notification::fake()`):
+
+1. entrega normal: una fila real en `notifications` y la marca durable se
+   confirman juntas;
+2. token tomado por otro trabajador durante el `INSERT` de la notificación: la
+   notificación se revierte, la tabla `notifications` queda en 0 y el mock de
+   Push no recibe ninguna llamada;
+3. `markInternal()` con token obsoleto lanza `ReminderDeliveryLost` y no
+   modifica el token, la marca interna ni el segundo aviso del trabajador que sí
+   posee la reserva.
+
+Resultado exacto del área de recordatorios:
+
+- `ReminderDeliveryAtomicityTest` + `ReminderDeliveryRecoveryTest`: `7 passed
+  (50 assertions)`.
+- `ReminderLifecycleTest` + `ReminderSchedulerClockTest`: `9 passed
+  (43 assertions)`.
+- `php -l` sin errores en los 3 archivos; Pint `PASS 3 files`;
+  `git diff --check` sin errores.
+
+No se tocaron los otros cuatro ajustes de R1 ni se repitieron los 48 hallazgos.
+
 ### 7.2 Telegram — poda de estados irrecuperables
 
 `telegram:prune-updates` borraba todo lo anterior a siete días, incluido
@@ -408,10 +453,11 @@ presentes; R1 no las revierte.
 PERF_01_R1_RESULT=PASS
 BASE_SHA=51c96fea07e4448417f7a136287f6a9f1103aca1
 FINAL_SHA=2a577011adb6c5a167eb2cd84dce03a28fb363a2
-REMOTE_SHA=2a577011adb6c5a167eb2cd84dce03a28fb363a2 (tip publicado con la implementación; el commit de este informe es posterior)
+REMOTE_SHA=2a577011adb6c5a167eb2cd84dce03a28fb363a2 (implementación R1; el cierre de concurrencia y este informe van en el commit posterior)
+R1_CONCURRENCY_COMMIT=el commit que contiene este informe (SHA en la entrega)
 MAIN_UNCHANGED=YES (2df9c9ec3b6af5fee00142117502ec815d1b2f3d)
 PUSH=fast-forward (sin --force)
-FILES_CHANGED=15
+FILES_CHANGED=17
 A_FINDINGS=18/18
 B_FINDINGS=22/22
 C_FINDINGS=8/8
@@ -424,6 +470,7 @@ BUILD=PASS
 TYPECHECK=PASS
 LINT=PASS
 TESTS_R1=PASS (74 Pest + 22 Vitest)
+TESTS_R1_CONCURRENCY=PASS (16/16 recordatorios afectados; 3 pruebas nuevas)
 TESTS_PERF01=NOT_RERUN (sin cambios en las áreas no afectadas; ver TESTS_R1 y las mediciones conservadas)
 INTEGRITY_AUTH=PASS
 PWA=PASS (política de caché; push/outbox sin cambios)

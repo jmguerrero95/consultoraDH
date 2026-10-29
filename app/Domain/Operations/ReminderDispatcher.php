@@ -128,6 +128,17 @@ final class ReminderDispatcher
                     $assignee->notify(new TaskReminderNotification($task));
                     $this->markInternal($claim['token'], $now);
                 });
+            } catch (ReminderDeliveryLost $e) {
+                // Another worker owns the reservation now. This worker's
+                // transaction rolled the notification back, and it must not
+                // touch (clear or update) the reservation that is no longer its
+                // own. No Push follows this branch.
+                Log::warning('Task reminder reservation lost before the internal marker; nothing sent', [
+                    'task_id' => $task->id,
+                    'stage' => $claim['stage'],
+                ]);
+
+                continue;
             } catch (\Throwable $e) {
                 $this->clearDelivery($claim['token']);
 
@@ -272,9 +283,18 @@ final class ReminderDispatcher
 
     private function markInternal(string $token, Carbon $at): void
     {
-        DB::table('operational_tasks')
+        $updated = DB::table('operational_tasks')
             ->where('reminder_delivery_token', $token)
             ->update(['reminder_delivery_internal_at' => $at]);
+
+        // Exactly the live reservation, or nothing at all. A token mismatch
+        // means this worker paused long enough for the lease to expire and for
+        // another worker to take the stage: writing the marker anyway would let
+        // this worker continue to Push a reminder somebody else is already
+        // delivering, and the second notice would stop being unique.
+        if ($updated !== 1) {
+            throw ReminderDeliveryLost::claimChanged();
+        }
     }
 
     private function clearDelivery(string $token): void
