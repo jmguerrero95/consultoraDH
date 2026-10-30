@@ -10,6 +10,7 @@ use App\Models\GeneratedReport;
 use App\Models\ReportSchedule;
 use App\Models\ReportScheduleRun;
 use App\Notifications\ReportReadyNotification;
+use App\Services\Telegram\TelegramNotifier;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
@@ -86,6 +87,7 @@ final class ReportScheduleRunner
     public function __construct(
         private readonly ReportGenerator $generator,
         private readonly AuditRecorder $audit,
+        private readonly TelegramNotifier $telegram,
     ) {}
 
     public function runDue(): int
@@ -327,6 +329,25 @@ final class ReportScheduleRunner
             Log::warning('Report ready notification failed', [
                 'report_id' => $report->id,
                 'error' => $e->getMessage(),
+            ]);
+        }
+
+        // The same event on the employee's opt-in Telegram chat. It is queued
+        // with the report's own occurrence key, so a retried runner cannot
+        // announce one report twice, and a failure here never touches the
+        // artifact or the inbox row.
+        try {
+            $this->telegram->notifyPersonalIfEnabled(
+                $owner,
+                'telegram_report_ready',
+                'report_available',
+                "📄 Reporte disponible\n\nSu reporte programado está listo.",
+                'report:'.$report->id.':'.$owner->id,
+            );
+        } catch (\Throwable $e) {
+            Log::warning('Report ready Telegram notice could not be queued', [
+                'report_id' => $report->id,
+                'error_class' => $e::class,
             ]);
         }
 

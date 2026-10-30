@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers\Api;
 
+use App\Events\NotificationStateChanged;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 /**
  * §59: the internal notification inbox.
@@ -77,13 +79,35 @@ final class NotificationController extends Controller
 
         $notification->markAsRead();
 
-        return response()->json(['unread' => $request->user()->unreadNotifications()->count()]);
+        $unread = $request->user()->unreadNotifications()->count();
+
+        $this->announce($request, 'read', (string) $notification->id, $unread);
+
+        return response()->json(['unread' => $unread]);
     }
 
     public function markAllRead(Request $request): JsonResponse
     {
         $request->user()->unreadNotifications->markAsRead();
 
+        $this->announce($request, 'read_all', null, 0);
+
         return response()->json(['unread' => 0]);
+    }
+
+    /**
+     * Tell the other tabs that the badge changed, after the write is committed.
+     *
+     * The tab that made the request updates from the HTTP response; this is for
+     * the second tab, which otherwise kept a stale number until it regained
+     * focus. The payload is a signal and the resulting count, not the notification.
+     */
+    private function announce(Request $request, string $change, ?string $notificationId, int $unread): void
+    {
+        $userId = (int) $request->user()->id;
+
+        DB::afterCommit(function () use ($userId, $change, $notificationId, $unread): void {
+            broadcast(new NotificationStateChanged($userId, $change, $notificationId, $unread));
+        });
     }
 }

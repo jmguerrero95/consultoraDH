@@ -8,6 +8,7 @@ use App\Domain\Users\UserStatus;
 use App\Models\OperationalTask;
 use App\Models\User;
 use App\Notifications\TaskReminderNotification;
+use App\Services\Telegram\TelegramNotifier;
 use App\Services\WebPushService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -51,7 +52,10 @@ final class ReminderDispatcher
      */
     public const DELIVERY_LEASE_MINUTES = 5;
 
-    public function __construct(private readonly WebPushService $push) {}
+    public function __construct(
+        private readonly WebPushService $push,
+        private readonly TelegramNotifier $telegram,
+    ) {}
 
     /**
      * @return int Number of reminders sent in this run.
@@ -152,6 +156,12 @@ final class ReminderDispatcher
             }
 
             // The Push call is network I/O and stays outside every transaction.
+            //
+            // Telegram is attempted after the Push outcome, independently. A
+            // Push failure must not silence the opt-in Telegram notice, and a
+            // Telegram failure must not turn a delivered Push into a retry.
+            $pushFailed = false;
+
             try {
                 $this->sendPush($task, $claim['stage']);
             } catch (\Throwable $e) {
@@ -164,6 +174,12 @@ final class ReminderDispatcher
                     'error' => $e->getMessage(),
                 ]);
 
+                $pushFailed = true;
+            }
+
+            $this->sendTelegramReminder($task, $claim['stage']);
+
+            if ($pushFailed) {
                 continue;
             }
 
@@ -359,6 +375,45 @@ final class ReminderDispatcher
             'reminder_delivery_started_at' => null,
             'reminder_delivery_internal_at' => null,
         ];
+    }
+
+    /**
+     * The opt-in Telegram copy of the initial reminder.
+     *
+     * Only the `initial` stage is mirrored: the five-minute Push retry and the
+     * unique second notice remain Push behaviour, and duplicating them in
+     * Telegram would page somebody twice for one event. The delivery ledger is
+     * keyed by task and stage, so a worker that repeats this line cannot send a
+     * second message.
+     */
+    private function sendTelegramReminder(OperationalTask $task, string $stage): void
+    {
+        if ($stage !== 'initial') {
+            return;
+        }
+
+        $assignee = $task->assignee;
+
+        if (! $assignee instanceof User) {
+            return;
+        }
+
+        try {
+            $this->telegram->notifyPersonalIfEnabled(
+                $assignee,
+                'telegram_task_reminders',
+                'task_reminder',
+                "🔔 Recordatorio de tarea\n\n{$task->title}",
+                'task:'.$task->id.':initial',
+            );
+        } catch (\Throwable $e) {
+            // Telegram is an additional channel. The internal notification and
+            // the Push already happened, so this cannot undo them.
+            Log::warning('Task reminder could not be queued for Telegram', [
+                'task_id' => $task->id,
+                'error_class' => $e::class,
+            ]);
+        }
     }
 
     /**

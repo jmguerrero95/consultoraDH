@@ -121,6 +121,119 @@ export interface DashboardPayload {
     portfolio: PortfolioPayload;
 }
 
+export type SystemCheckState =
+    | 'verified'
+    | 'connected'
+    | 'configured'
+    | 'degraded'
+    | 'unknown';
+
+export interface SystemCheck {
+    state: SystemCheckState;
+    label: string;
+    detail: string;
+    latency_ms?: number | null;
+    queues?: Record<string, unknown>[];
+    configured?: boolean;
+    source?: string;
+    [key: string]: unknown;
+}
+
+export interface SystemStatusPayload {
+    application: {
+        name: string;
+        version: string;
+        environment: string;
+        debug: boolean;
+        url: string;
+    };
+    locale: {
+        locale: string;
+        fallback: string;
+        timezone: string;
+    };
+    infrastructure: {
+        database: string;
+        cache: string;
+        queue: string;
+        sessions: string;
+    };
+    security: {
+        session_cookie_secure: boolean;
+        content_security_policy: boolean;
+        debug_enabled: boolean;
+    };
+    access: {
+        primary_role: string | null;
+        roles: string[];
+        permissions: string[];
+    };
+    services: Record<string, SystemCheck>;
+    telegram_check: Record<string, unknown> | null;
+    checked_at: string;
+}
+
+export interface NotificationPreferencesPayload {
+    preferences: {
+        in_app: boolean;
+        push: boolean;
+        telegram_task_reminders: boolean;
+        telegram_report_ready: boolean;
+    };
+    available: Record<
+        keyof NotificationPreferencesPayload['preferences'],
+        { label: string; description: string; default: boolean }
+    >;
+    telegram_linked: boolean;
+    push_devices: number;
+}
+
+export interface PushDevice {
+    id: number;
+    label: string;
+    host: string;
+    created_at: string | null;
+    last_success_at: string | null;
+    failed_at: string | null;
+    active: boolean;
+    user?: { id: number; name: string } | null;
+}
+
+export interface PushDevicesPayload {
+    data: PushDevice[];
+    configured: boolean;
+    permission_hint: string;
+}
+
+export interface PushOverviewPayload {
+    vapid: {
+        configured: boolean;
+        public_key: string | null;
+        source: string;
+        service_worker: boolean;
+        rotation_warning: string;
+    };
+    counts: {
+        devices: number;
+        active: number;
+        failed: number;
+        people: number;
+    };
+    devices: PushDevice[];
+    acknowledgements: {
+        received_tasks: number;
+        dismissed_tasks: number;
+        note: string;
+    };
+}
+
+export interface PushTestResult {
+    outcome: 'accepted' | 'rejected' | 'temporary' | 'unknown' | 'not_configured' | 'no_subscriptions';
+    http_status: number | null;
+    detail: string;
+    subscription_id: number;
+}
+
 export interface SettingsPayload {
     application: {
         name: string;
@@ -1917,5 +2030,93 @@ export interface TelegramEndpoint {
     created_by: number | null;
     created_at: string | null;
     updated_at: string | null;
+    kind?: 'admin' | 'personal';
+    owner?: { id: number; name: string } | null;
+    linked_at?: string | null;
     conversation?: { id: number; subject: string } | null;
+}
+
+export interface TelegramEventDefinition {
+    label: string;
+    description: string;
+    available: boolean;
+    unavailable_reason: string | null;
+    producer: string;
+    trigger: string;
+    recipients: string;
+    channels: string[];
+    default_enabled: boolean;
+    deduplication: string;
+    route: string;
+}
+
+export interface TelegramStatusPayload {
+    bot: {
+        configured: boolean;
+        source: string;
+        username: string | null;
+        webhook_secret_source: string;
+    };
+    webhook: {
+        expected_url: string | null;
+        last_check: Record<string, unknown> | null;
+    };
+    counts: {
+        admin: number;
+        personal: number;
+        enabled: number;
+        pending_reconciliations: number;
+    };
+    events: Record<string, TelegramEventDefinition>;
+    last_error: { status: string; code: string | null; at: string | null } | null;
+}
+
+export interface TelegramPersonalPayload {
+    linked: boolean;
+    endpoint: {
+        id: number;
+        label: string;
+        chat_id: string;
+        linked_at: string | null;
+        enabled: boolean;
+    } | null;
+    bot: { configured: boolean; username: string | null; deep_link: string | null };
+    pending_token: { expires_at: string } | null;
+    last_token_consumed_at: string | null;
+    preferences: Record<string, boolean>;
+}
+
+export interface TelegramBindingCodePayload {
+    token: string;
+    expires_at: string;
+    start_command: string;
+    deep_link: string | null;
+}
+
+export interface TelegramDelivery {
+    id: number;
+    status: string;
+    attempts: number;
+    dedupe_key: string | null;
+    error_code: string | null;
+    conversation_id: number | null;
+    recipient_user_id: number | null;
+    sent_at: string | null;
+    suppressed_at: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+}
+
+export interface TelegramReconciliation {
+    id: number;
+    update_id: number;
+    chat_id: string | null;
+    failure_code: string | null;
+    attempt_count: number;
+    external_started_at: string | null;
+    created_at: string | null;
+    reconciled_at: string | null;
+    reconciled_by: string | null;
+    outcome: string | null;
+    note: string | null;
 }

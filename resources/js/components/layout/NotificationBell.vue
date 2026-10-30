@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { a05 } from '@/services/a05';
 import { ApiError } from '@/services/http';
+import { useAuthStore } from '@/stores/auth';
+import { useRealtimeStore } from '@/stores/realtime';
 
 import type { AppNotification } from '@/types/api';
 
@@ -31,6 +33,8 @@ import type { AppNotification } from '@/types/api';
  */
 
 const router = useRouter();
+const auth = useAuthStore();
+const realtime = useRealtimeStore();
 
 const abierto = ref(false);
 const cargando = ref(false);
@@ -129,8 +133,82 @@ function onVisible(): void {
     }
 }
 
+/**
+ * Realtime: one logical subscription per tab.
+ *
+ * The server emits after the database commit and only carries the change and
+ * the resulting count. Bursts are coalesced into one count request, because a
+ * scheduler run that stores five reminders is one badge update, not five.
+ */
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleRefresh(): void {
+    if (refreshTimer !== null) {
+        clearTimeout(refreshTimer);
+    }
+
+    refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void cargarContador();
+
+        if (abierto.value) {
+            void cargar();
+        }
+    }, 250);
+}
+
+function onNotificationState(payload: unknown): void {
+    if (typeof payload === 'object' && payload !== null && 'unread' in payload) {
+        const unreadValue = (payload as { unread?: unknown }).unread;
+
+        if (typeof unreadValue === 'number') {
+            unread.value = unreadValue;
+        }
+    }
+
+    // If this panel is open, its list is stale even when the count agrees.
+    if (abierto.value) {
+        scheduleRefresh();
+    }
+}
+
+let realtimeSubscribed = false;
+
+async function subscribeRealtime(): Promise<void> {
+    const userId = auth.user?.id;
+
+    if (userId === undefined || realtimeSubscribed) {
+        return;
+    }
+
+    try {
+        await realtime.initialize();
+
+        realtime.joinPrivateChannel(`App.Models.User.${userId}`, {
+            'notification.state': onNotificationState,
+        });
+
+        realtimeSubscribed = true;
+    } catch {
+        // Realtime is an enhancement. The count is still correct on mount and
+        // on focus, and the screen must not fail because a socket did not open.
+    }
+}
+
+// A reconnect can have missed broadcasts. The badge is re-read once when the
+// connection comes back; there is no polling interval behind this.
+watch(
+    () => realtime.isConnected,
+    (connected) => {
+        if (connected) {
+            void cargarContador();
+        }
+    },
+);
+
 onMounted(() => {
     void cargarContador();
+    void subscribeRealtime();
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', cargarContador);
 });
@@ -138,6 +216,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
     document.removeEventListener('visibilitychange', onVisible);
     window.removeEventListener('focus', cargarContador);
+
+    if (refreshTimer !== null) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+    }
 });
 </script>
 

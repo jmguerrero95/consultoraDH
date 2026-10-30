@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Jobs;
 
+use App\Domain\Automations\AutomationAlertNotifier;
 use App\Domain\Support\Actions\AssignConversation;
 use App\Domain\Support\Actions\ChangeConversationPriority;
 use App\Domain\Support\Actions\ChangeConversationQueue;
@@ -88,6 +89,15 @@ class ExecuteAutomationRun implements ShouldQueue
         if (! $this->checkOwnerPermissions($run)) {
             $run->update(['status' => 'blocked', 'finished_at' => now(), 'error_code' => 'owner_permissions_lost']);
             $this->notifyAdmins('Automation blocked: owner permissions lost', $run);
+
+            try {
+                app(AutomationAlertNotifier::class)->runFinished($run->fresh(), 'blocked');
+            } catch (\Throwable $e) {
+                Log::warning('Automation alert could not be queued', [
+                    'run_id' => $run->id,
+                    'error_class' => $e::class,
+                ]);
+            }
 
             return;
         }
@@ -286,11 +296,27 @@ class ExecuteAutomationRun implements ShouldQueue
      */
     private function recordRunStatus(AutomationRun $run, array $attributes): void
     {
+        $previous = $run->status;
+
         AutomationRun::query()
             ->whereKey($run->id)
             ->update($attributes);
 
         $run->refresh();
+
+        // Idempotence is the delivery ledger's job, not a check-then-act here:
+        // the notifier keys the alert by run and state, so two workers that both
+        // reach this line still produce one Telegram message.
+        if ($previous !== $run->status && in_array($run->status, ['partial', 'blocked'], true)) {
+            try {
+                app(AutomationAlertNotifier::class)->runFinished($run, $run->status);
+            } catch (\Throwable $e) {
+                Log::warning('Automation alert could not be queued', [
+                    'run_id' => $run->id,
+                    'error_class' => $e::class,
+                ]);
+            }
+        }
     }
 
     private function checkOwnerPermissions(AutomationRun $run): bool

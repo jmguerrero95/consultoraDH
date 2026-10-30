@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Carbon;
 
 /**
@@ -49,6 +50,10 @@ class TelegramUpdate extends Model
         'external_started_at',
         'attempt_count',
         'failure_code',
+        'reconciled_at',
+        'reconciled_by',
+        'reconciliation_outcome',
+        'reconciliation_note',
     ];
 
     protected function casts(): array
@@ -60,11 +65,17 @@ class TelegramUpdate extends Model
             'claimed_at' => 'datetime',
             'external_started_at' => 'datetime',
             'attempt_count' => 'integer',
+            'reconciled_at' => 'datetime',
         ];
     }
 
     public function markProcessed(): void
     {
         $this->forceFill(['processed_at' => now()])->save();
+    }
+
+    public function reconciledBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'reconciled_by');
     }
 }

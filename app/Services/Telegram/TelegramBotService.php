@@ -20,6 +20,7 @@ use App\Models\User;
 use App\Services\Ai\AiAssistantService;
 use App\Services\Ai\AiProviderException;
 use App\Services\Ai\AiTurnFailed;
+use App\Services\Integrations\IntegrationConfig;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -74,6 +75,7 @@ final class TelegramBotService
         private readonly TelegramDocumentDeliveryService $documents,
         private readonly AiAssistantService $assistant,
         private readonly AuditRecorder $audit,
+        private readonly IntegrationConfig $integrations,
     ) {}
 
     /**
@@ -102,7 +104,7 @@ final class TelegramBotService
             ]);
         });
 
-        $username = config('services.telegram.bot_username');
+        $username = $this->integrations->telegramBotUsername();
 
         return [
             'token' => $plaintext,
@@ -1195,9 +1197,9 @@ final class TelegramBotService
      */
     private function sendMessage(string $chatId, string $text, ?array $replyMarkup = null): void
     {
-        $token = config('services.telegram.bot_token');
+        $token = $this->integrations->telegramBotToken();
 
-        if (! is_string($token) || $token === '') {
+        if ($token === null) {
             Log::warning('Telegram message not sent: no bot token configured', ['chat_id' => $chatId]);
 
             return;
@@ -1242,9 +1244,9 @@ final class TelegramBotService
 
     private function answerCallback(string $callbackId): void
     {
-        $token = config('services.telegram.bot_token');
+        $token = $this->integrations->telegramBotToken();
 
-        if (! is_string($token) || $token === '') {
+        if ($token === null) {
             return;
         }
 

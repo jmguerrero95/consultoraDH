@@ -4,6 +4,7 @@ import { computed, ref } from 'vue';
 import { api } from '@/services/api';
 import { ApiError, clearHttpCache, onUnauthorized, resetCsrfState } from '@/services/http';
 import { clearDrafts } from '@/utils/drafts';
+import { useRealtimeStore } from '@/stores/realtime';
 
 import type { AuthUser } from '@/types/api';
 
@@ -59,6 +60,15 @@ export const useAuthStore = defineStore('auth', () => {
         // Drafts are scoped to the person, so ending the session removes them:
         // nothing typed by the previous account survives the logout.
         clearDrafts();
+        // The realtime socket was authorised as the session that is ending.
+        // Leaving it open would let the next account inherit a live channel
+        // bound to the previous one, so it is closed with the rest of the state.
+        try {
+            useRealtimeStore().disconnect();
+        } catch {
+            // Pinia may not be installed yet during the first session
+            // resolution; there is nothing to disconnect in that case.
+        }
     }
 
     /**

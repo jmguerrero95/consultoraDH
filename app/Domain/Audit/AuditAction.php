@@ -183,6 +183,27 @@ enum AuditAction: string
     case SupportSlaRecovered = 'support.sla.recovered';
 
     /*
+     * NOTIF-03: administration of the notification channels.
+     *
+     * Credential changes are recorded by key and source, never by value; the
+     * audit trail is read by people and exported to files, and a bot token in
+     * it would be a second copy of the secret.
+     */
+    case TelegramEndpointCreated = 'telegram.endpoint.created';
+    case TelegramEndpointUpdated = 'telegram.endpoint.updated';
+    case TelegramEndpointRevoked = 'telegram.endpoint.revoked';
+    case TelegramBindingReleased = 'telegram.binding.released';
+    case TelegramCredentialsUpdated = 'telegram.credentials.updated';
+    case TelegramWebhookRegistered = 'telegram.webhook.registered';
+    case TelegramWebhookSecretRotated = 'telegram.webhook.secret_rotated';
+    case TelegramWebhookDisabled = 'telegram.webhook.disabled';
+    case TelegramReconciliationResolved = 'telegram.reconciliation.resolved';
+    case PushSettingsUpdated = 'push.settings.updated';
+    case PushSubscriptionRevoked = 'push.subscription.revoked';
+    case PushTestSent = 'push.test.sent';
+    case NotificationPreferencesUpdated = 'notification.preferences.updated';
+
+    /*
      * A07: the cloud assistant.
      *
      * What is recorded is the shape of the request and its outcome: which tool,

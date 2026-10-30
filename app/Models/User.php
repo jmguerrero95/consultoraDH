@@ -23,7 +23,7 @@ use Spatie\Permission\Traits\HasRoles;
  * Authentication is session based. The browser only ever receives an HttpOnly
  * session cookie, never a bearer token; see docs/SECURITY.md.
  */
-#[Fillable(['name', 'email', 'password', 'status', 'email_verified_at', 'account_type', 'client_id'])]
+#[Fillable(['name', 'email', 'password', 'status', 'email_verified_at', 'account_type', 'client_id', 'notification_preferences'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
@@ -41,7 +41,63 @@ class User extends Authenticatable
             'password_changed_at' => 'datetime',
             'password' => 'hashed',
             'status' => UserStatus::class,
+            'notification_preferences' => 'array',
         ];
+    }
+
+    /**
+     * The effective value of one personal notification preference.
+     *
+     * Internal and Push notifications keep the behaviour the application had
+     * before this setting existed. Telegram task reminders are opt-in: an
+     * employee who never opened the screen is not enrolled in a new external
+     * channel by a deployment.
+     */
+    public function notificationPreference(string $channel): bool
+    {
+        $defaults = [
+            'in_app' => true,
+            'push' => true,
+            'telegram_task_reminders' => false,
+            'telegram_report_ready' => false,
+        ];
+
+        $preferences = $this->notification_preferences;
+
+        if (is_array($preferences) && array_key_exists($channel, $preferences)) {
+            return (bool) $preferences[$channel];
+        }
+
+        return $defaults[$channel] ?? false;
+    }
+
+    /**
+     * @return array<string, bool>
+     */
+    public function notificationPreferenceMap(): array
+    {
+        return [
+            'in_app' => $this->notificationPreference('in_app'),
+            'push' => $this->notificationPreference('push'),
+            'telegram_task_reminders' => $this->notificationPreference('telegram_task_reminders'),
+            'telegram_report_ready' => $this->notificationPreference('telegram_report_ready'),
+        ];
+    }
+
+    /**
+     * The private Telegram chats bound to this employee.
+     *
+     * A personal destination is one this employee established with a one-time
+     * code, not an administrative channel somebody else created.
+     */
+    public function telegramEndpoints(): HasMany
+    {
+        return $this->hasMany(TelegramEndpoint::class, 'user_id');
+    }
+
+    public function pushSubscriptions(): HasMany
+    {
+        return $this->hasMany(PushSubscription::class, 'user_id');
     }
 
     /**

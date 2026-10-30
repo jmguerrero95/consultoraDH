@@ -8,6 +8,7 @@ use App\Domain\Automations\AutomationRunStatus;
 use App\Models\AutomationActionRun;
 use App\Models\SupportDelivery;
 use App\Models\TelegramEndpoint;
+use App\Services\Integrations\IntegrationConfig;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -49,7 +50,7 @@ class SendTelegramMessage implements ShouldQueue
         public ?int $automationActionRunId = null,
     ) {}
 
-    public function handle(): void
+    public function handle(IntegrationConfig $integrations): void
     {
         $endpoint = TelegramEndpoint::find($this->endpointId);
 
@@ -67,7 +68,11 @@ class SendTelegramMessage implements ShouldQueue
         // `failed`, and the unique index refused a second row with the same
         // key. The delivery stayed `pending` for ever and every future send
         // with that key was declined as "already in flight".
-        $token = config('services.telegram.bot_token') ?? env('TELEGRAM_BOT_TOKEN');
+        //
+        // The resolver reads the stored credential first and the environment
+        // second, so a token changed from the panel is the one this worker uses
+        // without a restart.
+        $token = $integrations->telegramBotToken();
 
         if (! $token) {
             Log::error('Telegram bot token not configured');
@@ -89,9 +94,13 @@ class SendTelegramMessage implements ShouldQueue
             Log::info('Telegram message already delivered or in flight', ['dedupe_key' => $dedupeKey]);
 
             // Already sent: idempotently a success. Still in flight: not ours to
-            // declare, so the action stays queued until that worker reports.
+            // declare, so the action stays queued until that worker reports. An
+            // uncertain outcome is neither: it stays for a human to reconcile.
             $existing = SupportDelivery::query()->where('dedupe_key', $dedupeKey)->value('status');
-            $this->recordOutcome($existing === 'sent' ? 'succeeded' : 'queued', $existing === 'sent' ? null : 'delivery_in_flight');
+            $this->recordOutcome(
+                $existing === 'sent' ? 'succeeded' : ($existing === 'unknown' ? 'failed' : 'queued'),
+                $existing === 'sent' ? null : ($existing === 'unknown' ? 'telegram_outcome_unknown' : 'delivery_in_flight'),
+            );
 
             return;
         }
@@ -104,31 +113,104 @@ class SendTelegramMessage implements ShouldQueue
                     'parse_mode' => 'HTML',
                     'disable_web_page_preview' => true,
                 ]);
-
-            if ($response->successful()) {
-                // Update the row this worker claimed rather than inserting a
-                // second one: the unique index would refuse it anyway, and the
-                // failure would be reported as a broken send.
-                $delivery->update(['status' => 'sent', 'sent_at' => now()]);
-                Log::info('Telegram message sent', ['endpoint_id' => $endpoint->id]);
-                $this->recordOutcome('succeeded');
-            } else {
-                throw new \Exception('Telegram API error: '.$response->body());
-            }
         } catch (\Throwable $e) {
-            Log::error('Telegram message failed', [
+            // The request may have reached Telegram before the connection
+            // broke. Repeating it could post the message twice, so the row is
+            // recorded as unknown and the job does not retry.
+            $this->settle($delivery, 'unknown', 'telegram_outcome_unknown');
+            $this->recordOutcome('failed', 'telegram_outcome_unknown');
+
+            Log::error('Telegram message outcome unknown after a transport failure', [
                 'endpoint_id' => $endpoint->id,
-                'error' => $e->getMessage(),
+                'error_class' => $e::class,
             ]);
 
-            $delivery->update([
-                'status' => 'failed',
-                'last_error_code' => $e->getCode() ?: 'unknown',
-            ]);
-            $this->recordOutcome('failed', (string) ($e->getCode() ?: 'telegram_failed'));
+            $this->fail($e);
 
-            throw $e;
+            return;
         }
+
+        if ($response->successful()) {
+            // Update the row this worker claimed rather than inserting a second
+            // one: the unique index would refuse it anyway, and the failure
+            // would be reported as a broken send.
+            $this->settle($delivery, 'sent', null, sent: true);
+            Log::info('Telegram message sent', ['endpoint_id' => $endpoint->id]);
+            $this->recordOutcome('succeeded');
+
+            return;
+        }
+
+        $status = $response->status();
+        $errorCode = $this->errorCode($response->json());
+
+        // A 4xx other than 429 is a definite refusal: the same message will be
+        // refused again, so it is recorded as suppressed instead of retried.
+        if ($status >= 400 && $status < 500 && $status !== 429) {
+            $this->settle($delivery, 'suppressed', 'telegram_rejected_'.$status);
+            $this->recordOutcome('failed', 'telegram_rejected');
+
+            Log::warning('Telegram message rejected by the provider', [
+                'endpoint_id' => $endpoint->id,
+                'http_status' => $status,
+                'telegram_error_code' => $errorCode,
+            ]);
+
+            $this->fail(new \RuntimeException('Telegram rejected the message ('.$status.').'));
+
+            return;
+        }
+
+        if ($status === 429) {
+            // "Too many requests" says the message was not accepted; waiting and
+            // trying the same delivery again is safe and is what the provider
+            // asks for.
+            $this->settle($delivery, 'failed', 'telegram_rate_limited');
+            $this->recordOutcome('failed', 'telegram_rate_limited');
+
+            Log::warning('Telegram rate limited the message', ['endpoint_id' => $endpoint->id]);
+
+            throw new \RuntimeException('Telegram rate limited the message.');
+        }
+
+        // A 5xx does not say whether the effect happened. Retrying blindly can
+        // duplicate it, so the row becomes `unknown` and no automatic retry runs.
+        $this->settle($delivery, 'unknown', 'telegram_http_'.$status);
+        $this->recordOutcome('failed', 'telegram_outcome_unknown');
+
+        Log::error('Telegram message outcome unknown after a provider error', [
+            'endpoint_id' => $endpoint->id,
+            'http_status' => $status,
+            'telegram_error_code' => $errorCode,
+        ]);
+
+        $this->fail(new \RuntimeException('Telegram outcome unknown ('.$status.').'));
+    }
+
+    private function errorCode(mixed $json): ?int
+    {
+        if (! is_array($json)) {
+            return null;
+        }
+
+        return isset($json['error_code']) && is_int($json['error_code']) ? $json['error_code'] : null;
+    }
+
+    /**
+     * Move the claimed row to its real outcome.
+     */
+    private function settle(
+        SupportDelivery $delivery,
+        string $status,
+        ?string $errorCode = null,
+        bool $sent = false,
+    ): void {
+        $delivery->update([
+            'status' => $status,
+            'last_error_code' => $errorCode,
+            'sent_at' => $sent ? now() : $delivery->sent_at,
+            'suppressed_at' => $status === 'suppressed' ? now() : $delivery->suppressed_at,
+        ]);
     }
 
     /**
@@ -154,9 +236,11 @@ class SendTelegramMessage implements ShouldQueue
     /**
      * Take exclusive ownership of a dedupe key, or report that someone else has it.
      *
-     * A previous failure is handed back to the next attempt: inserting a fresh
-     * row would collide on the unique index and turn every retry into a
-     * permanent error.
+     * A previous *retryable* failure is handed back to the next attempt:
+     * inserting a fresh row would collide on the unique index and turn every
+     * retry into a permanent error. A `suppressed` row is a definite refusal
+     * and an `unknown` row is an outcome nobody has established, so neither is
+     * reclaimed automatically.
      *
      * The claim is `ON CONFLICT DO NOTHING` rather than a try/catch around a
      * plain insert. Letting the insert raise and catching it works on its own,
@@ -196,7 +280,7 @@ class SendTelegramMessage implements ShouldQueue
 
         $retried = SupportDelivery::query()
             ->where('dedupe_key', $dedupeKey)
-            ->where('status', 'failed')
+            ->whereIn('status', ['failed', 'unknown'])
             ->update([
                 'status' => 'pending',
                 'attempts' => DB::raw('support_deliveries.attempts + 1'),

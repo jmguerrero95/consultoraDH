@@ -83,7 +83,7 @@ test('own subscription can be deleted', function (): void {
         ->deleteJson("/api/push/subscriptions/{$subscriptionId}");
 
     $response->assertOk();
-    $response->assertJsonPath('message', 'Suscripción eliminada');
+    $response->assertJsonPath('message', 'Dispositivo eliminado');
 });
 
 test('another user cannot delete subscription', function (): void {

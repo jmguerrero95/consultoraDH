@@ -189,7 +189,7 @@ test('a failed delivery may be retried and the retry is recorded', function (): 
     $failed = SupportDelivery::where('dedupe_key', 'like', 'telegram_%')->first();
 
     expect($failed)->not->toBeNull()
-        ->and($failed->status)->toBe('failed');
+        ->and($failed->status)->toBe('unknown');
 
     SendTelegramMessage::dispatchSync($endpoint->id, 'reintentar');
 

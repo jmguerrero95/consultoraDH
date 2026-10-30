@@ -68,6 +68,17 @@ import type {
     AutomationRunListPayload,
     AutomationVocabulary,
     TelegramEndpoint,
+    TelegramBindingCodePayload,
+    TelegramDelivery,
+    TelegramEventDefinition,
+    TelegramPersonalPayload,
+    TelegramReconciliation,
+    TelegramStatusPayload,
+    NotificationPreferencesPayload,
+    PushDevicesPayload,
+    PushOverviewPayload,
+    PushTestResult,
+    SystemStatusPayload,
     AllocatableResponse,
     PaymentVocabularyPayload,
 } from '@/types/api';
@@ -102,6 +113,30 @@ interface ApiClient {
     };
 
     settings(): Promise<SettingsPayload>;
+
+    systemStatus: {
+        show(): Promise<SystemStatusPayload>;
+        check(target: 'telegram'): Promise<{ telegram: Record<string, unknown> }>;
+    };
+
+    notificationPreferences: {
+        show(): Promise<NotificationPreferencesPayload>;
+        update(
+            payload: Partial<NotificationPreferencesPayload['preferences']>,
+        ): Promise<{ message: string; preferences: NotificationPreferencesPayload['preferences']; telegram_linked: boolean; push_devices: number }>;
+    };
+
+    telegramPersonal: {
+        show(): Promise<TelegramPersonalPayload>;
+        issueCode(): Promise<TelegramBindingCodePayload>;
+        unlink(): Promise<{ message: string; removed: number }>;
+    };
+
+    pushDevices: {
+        list(): Promise<PushDevicesPayload>;
+        test(id: number, payload?: { title?: string; body?: string }): Promise<PushTestResult>;
+        revoke(id: number): Promise<{ message: string }>;
+    };
 
     businessApi: {
         clients: {
@@ -250,13 +285,43 @@ interface ApiClient {
                 id: number,
                 payload: {
                     label?: string;
-                    chat_id?: string;
                     conversation_id?: number | null;
                     enabled?: boolean;
                     event_preferences?: string[];
                 },
             ): Promise<TelegramEndpoint>;
+            revoke(id: number): Promise<{ message: string }>;
             test(id: number, message?: string): Promise<{ message: string }>;
+            status(): Promise<TelegramStatusPayload>;
+            events(): Promise<{ events: Record<string, TelegramEventDefinition>; available: string[] }>;
+            deliveries(params?: { status?: string; dedupe_key?: string; page?: number; per_page?: number }): Promise<{
+                data: TelegramDelivery[];
+                pagination: Pagination;
+            }>;
+            reconciliations(params?: { state?: 'pending' | 'resolved' | 'all'; per_page?: number }): Promise<{
+                data: TelegramReconciliation[];
+                pagination: Pagination;
+            }>;
+            resolveReconciliation(
+                id: number,
+                payload: { outcome: 'effect_confirmed' | 'effect_not_performed' | 'inconclusive'; note: string },
+            ): Promise<{ message: string; reconciled_at: string | null; outcome: string | null }>;
+            webhookStatus(): Promise<Record<string, unknown>>;
+            registerWebhook(): Promise<{ message: string; expected_url: string }>;
+            rotateWebhookSecret(): Promise<{ message: string; grace_hours?: number }>;
+            disableWebhook(): Promise<{ message: string }>;
+            saveCredentials(payload: {
+                bot_token?: string;
+                webhook_secret?: string;
+                bot_username?: string;
+                verify?: boolean;
+            }): Promise<{
+                message: string;
+                configured: boolean;
+                source: string;
+                bot_username: string | null;
+                verified: { id: number; username: string | null; first_name: string | null } | null;
+            }>;
         };
     };
 
@@ -328,6 +393,18 @@ interface ApiClient {
             keys: { p256dh: string; auth: string };
         }): Promise<{ id: number }>;
         destroySubscription(id: number): Promise<{ message: string }>;
+        overview(): Promise<PushOverviewPayload>;
+        saveVapidKeys(payload: {
+            public_key?: string;
+            private_key?: string;
+            confirm?: boolean;
+        }): Promise<{
+            message: string;
+            configured: boolean;
+            source: string;
+            public_key: string | null;
+            requires_confirmation?: boolean;
+        }>;
     };
 }
 
@@ -404,6 +481,58 @@ export const api: ApiClient = {
 
     settings(): Promise<SettingsPayload> {
         return request<SettingsPayload>('GET', '/api/settings');
+    },
+
+    systemStatus: {
+        show(): Promise<SystemStatusPayload> {
+            return request<SystemStatusPayload>('GET', '/api/settings/status');
+        },
+
+        check(target: 'telegram'): Promise<{ telegram: Record<string, unknown> }> {
+            return request<{ telegram: Record<string, unknown> }>('POST', '/api/settings/status/check', {
+                body: { target },
+            });
+        },
+    },
+
+    notificationPreferences: {
+        show(): Promise<NotificationPreferencesPayload> {
+            return request<NotificationPreferencesPayload>('GET', '/api/notifications/preferences');
+        },
+
+        update(
+            payload: Partial<NotificationPreferencesPayload['preferences']>,
+        ): Promise<{ message: string; preferences: NotificationPreferencesPayload['preferences']; telegram_linked: boolean; push_devices: number }> {
+            return request('PATCH', '/api/notifications/preferences', { body: payload });
+        },
+    },
+
+    telegramPersonal: {
+        show(): Promise<TelegramPersonalPayload> {
+            return request<TelegramPersonalPayload>('GET', '/api/telegram/personal');
+        },
+
+        issueCode(): Promise<TelegramBindingCodePayload> {
+            return request<TelegramBindingCodePayload>('POST', '/api/telegram/binding-token', { body: {} });
+        },
+
+        unlink(): Promise<{ message: string; removed: number }> {
+            return request<{ message: string; removed: number }>('DELETE', '/api/telegram/personal');
+        },
+    },
+
+    pushDevices: {
+        list(): Promise<PushDevicesPayload> {
+            return request<PushDevicesPayload>('GET', '/api/push/devices');
+        },
+
+        test(id: number, payload: { title?: string; body?: string } = {}): Promise<PushTestResult> {
+            return request<PushTestResult>('POST', `/api/push/devices/${id}/test`, { body: payload });
+        },
+
+        revoke(id: number): Promise<{ message: string }> {
+            return request<{ message: string }>('DELETE', `/api/push/subscriptions/${id}`);
+        },
     },
 
     businessApi: {
@@ -886,7 +1015,6 @@ export const api: ApiClient = {
                 id: number,
                 payload: {
                     label?: string;
-                    chat_id?: string;
                     conversation_id?: number | null;
                     enabled?: boolean;
                     event_preferences?: string[];
@@ -895,10 +1023,74 @@ export const api: ApiClient = {
                 return request('PATCH', `/api/telegram/endpoints/${id}`, { body: payload });
             },
 
+            revoke(id: number): Promise<{ message: string }> {
+                return request<{ message: string }>('DELETE', `/api/telegram/endpoints/${id}`);
+            },
+
             test(id: number, message?: string): Promise<{ message: string }> {
                 return request('POST', `/api/telegram/endpoints/${id}/test`, {
                     body: message === undefined ? {} : { message },
                 });
+            },
+
+            status(): Promise<TelegramStatusPayload> {
+                return request<TelegramStatusPayload>('GET', '/api/telegram/status');
+            },
+
+            events(): Promise<{ events: Record<string, TelegramEventDefinition>; available: string[] }> {
+                return request('GET', '/api/telegram/events');
+            },
+
+            deliveries(params: { status?: string; dedupe_key?: string; page?: number; per_page?: number } = {}): Promise<{
+                data: TelegramDelivery[];
+                pagination: Pagination;
+            }> {
+                return request('GET', '/api/telegram/deliveries', { query: params });
+            },
+
+            reconciliations(params: { state?: 'pending' | 'resolved' | 'all'; per_page?: number } = {}): Promise<{
+                data: TelegramReconciliation[];
+                pagination: Pagination;
+            }> {
+                return request('GET', '/api/telegram/reconciliations', { query: params });
+            },
+
+            resolveReconciliation(
+                id: number,
+                payload: { outcome: 'effect_confirmed' | 'effect_not_performed' | 'inconclusive'; note: string },
+            ): Promise<{ message: string; reconciled_at: string | null; outcome: string | null }> {
+                return request('POST', `/api/telegram/reconciliations/${id}/resolve`, { body: payload });
+            },
+
+            webhookStatus(): Promise<Record<string, unknown>> {
+                return request<Record<string, unknown>>('GET', '/api/telegram/webhook');
+            },
+
+            registerWebhook(): Promise<{ message: string; expected_url: string }> {
+                return request('POST', '/api/telegram/webhook', { body: {} });
+            },
+
+            rotateWebhookSecret(): Promise<{ message: string; grace_hours?: number }> {
+                return request('POST', '/api/telegram/webhook/rotate', { body: {} });
+            },
+
+            disableWebhook(): Promise<{ message: string }> {
+                return request('DELETE', '/api/telegram/webhook', { body: { confirm: true } });
+            },
+
+            saveCredentials(payload: {
+                bot_token?: string;
+                webhook_secret?: string;
+                bot_username?: string;
+                verify?: boolean;
+            }): Promise<{
+                message: string;
+                configured: boolean;
+                source: string;
+                bot_username: string | null;
+                verified: { id: number; username: string | null; first_name: string | null } | null;
+            }> {
+                return request('PUT', '/api/telegram/credentials', { body: payload });
             },
         },
 
@@ -1171,6 +1363,24 @@ export const api: ApiClient = {
 
         destroySubscription(id: number): Promise<{ message: string }> {
             return request<{ message: string }>('DELETE', `/api/push/subscriptions/${id}`);
+        },
+
+        overview(): Promise<PushOverviewPayload> {
+            return request<PushOverviewPayload>('GET', '/api/push/overview');
+        },
+
+        saveVapidKeys(payload: {
+            public_key?: string;
+            private_key?: string;
+            confirm?: boolean;
+        }): Promise<{
+            message: string;
+            configured: boolean;
+            source: string;
+            public_key: string | null;
+            requires_confirmation?: boolean;
+        }> {
+            return request('PUT', '/api/push/vapid-keys', { body: payload });
         },
     },
 } as const satisfies ApiClient;

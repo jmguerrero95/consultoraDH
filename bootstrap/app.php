@@ -125,6 +125,21 @@ return Application::configure(dirname(__DIR__))
             ->everyFiveMinutes()
             ->withoutOverlapping()
             ->onOneServer();
+
+        // NOTIF-03: the only evidence the application has that the scheduler is
+        // alive. The status screen reads the age of this key instead of treating
+        // a configured cron entry as proof.
+        $schedule->command('system:heartbeat')
+            ->everyMinute()
+            ->withoutOverlapping()
+            ->onOneServer();
+
+        // NOTIF-03: one daily count of document requests past their due date.
+        // The command itself deduplicates by day, so a retried run is silent.
+        $schedule->command('documents:scan-overdue')
+            ->dailyAt('08:00')
+            ->withoutOverlapping()
+            ->onOneServer();
     })
     ->withMiddleware(function (Middleware $middleware): void {
         // Baseline security headers on every dynamic response.

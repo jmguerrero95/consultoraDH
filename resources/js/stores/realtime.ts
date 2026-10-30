@@ -35,6 +35,8 @@ type PresenceChannel = ReturnType<ReverbEcho['join']>
 interface RealtimeChannelState {
   channel: PrivateChannel | PresenceChannel | null
   callbacks: ChannelCallbacks
+  /** Events already bound to the underlying Echo channel. */
+  boundEvents: Set<string>
 }
 
 /** A member of a presence channel. */
@@ -93,12 +95,10 @@ export const useRealtimeStore = defineStore('realtime', () => {
 
     return new Promise((resolve, reject) => {
       try {
-        // Get the VAPID public key from the server (not used in Echo config but needed for auth)
-        fetch('/api/push/vapid-public-key')
-          .then(response => response.json())
-          .then(_data => {
-            // Initialize Laravel Echo
-            echo = new Echo({
+        // Reverb does not need the Push key. Fetching it here made realtime
+        // depend on VAPID: a deployment without Push left the bell and the
+        // conversation screens without a socket even though Reverb was fine.
+        echo = new Echo({
               broadcaster: 'reverb',
               key: import.meta.env.VITE_REVERB_APP_KEY || '',
               wsHost: import.meta.env.VITE_REVERB_HOST || 'localhost',
@@ -153,12 +153,6 @@ export const useRealtimeStore = defineStore('realtime', () => {
                 reject(new Error('Connection timeout'))
               }
             }, 10000)
-          })
-          .catch(err => {
-            state.value.connecting = false
-            state.value.error = err.message
-            reject(err)
-          })
       } catch (err) {
         state.value.connecting = false
         state.value.error = err instanceof Error ? err.message : 'Unknown error'
@@ -168,20 +162,42 @@ export const useRealtimeStore = defineStore('realtime', () => {
   }
 
   /**
-   * Resubscribe to all channels after reconnection
+   * Resubscribe to all channels after reconnection.
+   *
+   * Pusher re-subscribes the channels it already knows about as part of the
+   * connection handshake, and the bindings stay attached. Joining them again
+   * here registered a second listener for every event, so one broadcast was
+   * handled twice. The channels are therefore left to the connector, and this
+   * method only re-attaches handlers that were added after the channel existed.
    */
   function resubscribeChannels(): void {
     if (!echo) return
 
-    state.value.channels.forEach((channel, name) => {
+    state.value.channels.forEach((channelState, name) => {
       if (name.startsWith('private-')) {
         const channelName = name.replace('private-', '')
-        joinPrivateChannel(channelName, channel.callbacks)
+        rebindMissing(channelState, channelName)
       } else if (name.startsWith('presence-')) {
         const channelName = name.replace('presence-', '')
-        joinPresenceChannel(channelName, channel.callbacks)
+        rebindMissing(channelState, channelName)
       }
     })
+  }
+
+  /** Attach only callbacks that never reached a bound event. */
+  function rebindMissing(channelState: RealtimeChannelState, channelName: string): void {
+    if (!channelState.channel || !echo) return
+
+    Object.entries(channelState.callbacks).forEach(([event, callback]) => {
+      if (channelState.boundEvents.has(event)) return
+
+      channelState.channel?.listen(event, callback)
+      channelState.boundEvents.add(event)
+    })
+
+    // Keeps the parameter meaningful for readers: the channel is identified by
+    // the map key, and the name is what an operator sees in the console.
+    void channelName
   }
 
   /**
@@ -202,12 +218,32 @@ export const useRealtimeStore = defineStore('realtime', () => {
     }
 
     const channelNameWithPrefix = `private-${channelName}`
+    const existing = state.value.channels.get(channelNameWithPrefix)
+
+    // One logical subscription per tab. A second caller that asks for the same
+    // channel merges its handlers instead of joining again, which is what used
+    // to leave two listeners for the same broadcast.
+    if (existing) {
+      Object.entries(callbacks).forEach(([event, callback]) => {
+        const alreadyBound = existing.boundEvents.has(event)
+        existing.callbacks[event] = callback
+
+        if (!alreadyBound) {
+          existing.channel?.listen(event, callback)
+          existing.boundEvents.add(event)
+        }
+      })
+
+      return existing.channel as PrivateChannel
+    }
+
     const channel = echo.private(channelName)
 
     // Store callbacks
     state.value.channels.set(channelNameWithPrefix, {
       channel,
       callbacks,
+      boundEvents: new Set(Object.keys(callbacks)),
     })
 
     // Register callbacks
@@ -230,12 +266,29 @@ export const useRealtimeStore = defineStore('realtime', () => {
     }
 
     const channelNameWithPrefix = `presence-${channelName}`
+    const existing = state.value.channels.get(channelNameWithPrefix)
+
+    if (existing) {
+      Object.entries(callbacks).forEach(([event, callback]) => {
+        const alreadyBound = existing.boundEvents.has(event)
+        existing.callbacks[event] = callback
+
+        if (!alreadyBound) {
+          existing.channel?.listen(event, callback)
+          existing.boundEvents.add(event)
+        }
+      })
+
+      return existing.channel as PresenceChannel
+    }
+
     const channel = echo.join(channelName)
 
     // Store callbacks
     state.value.channels.set(channelNameWithPrefix, {
       channel,
       callbacks,
+      boundEvents: new Set(Object.keys(callbacks)),
     })
 
     // Register callbacks
@@ -291,8 +344,13 @@ export const useRealtimeStore = defineStore('realtime', () => {
     const channelData = state.value.channels.get(privateName)
 
     if (channelData?.channel) {
-      channelData.channel.listen(event, callback)
+      const alreadyBound = channelData.boundEvents.has(event)
       channelData.callbacks[event] = callback
+
+      if (!alreadyBound) {
+        channelData.channel.listen(event, callback)
+        channelData.boundEvents.add(event)
+      }
     } else {
       // Channel not joined yet, store callback for when it's joined
       const channel = echo.private(channelName)
@@ -301,6 +359,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
       state.value.channels.set(`private-${channelName}`, {
         channel,
         callbacks: { [event]: callback },
+        boundEvents: new Set([event]),
       })
     }
   }
@@ -317,6 +376,7 @@ export const useRealtimeStore = defineStore('realtime', () => {
     if (channelData?.channel) {
       channelData.channel.stopListening(event)
       delete channelData.callbacks[event]
+      channelData.boundEvents.delete(event)
     }
   }
 

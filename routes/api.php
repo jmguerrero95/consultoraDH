@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\Internal\SupportEmailIngressController;
 use App\Http\Controllers\Api\Mcp\McpController;
 use App\Http\Controllers\Api\Mcp\McpTokenController;
 use App\Http\Controllers\Api\NotificationController;
+use App\Http\Controllers\Api\NotificationPreferencesController;
 use App\Http\Controllers\Api\NoveltyController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\PeriodController;
@@ -39,6 +40,7 @@ use App\Http\Controllers\Api\SupportInboundEmailController;
 use App\Http\Controllers\Api\SupportInboxController;
 use App\Http\Controllers\Api\SupportPresenceController;
 use App\Http\Controllers\Api\SupportQueueController;
+use App\Http\Controllers\Api\SystemStatusController;
 use App\Http\Controllers\Api\TaskController;
 use App\Http\Controllers\Api\TelegramController;
 use App\Http\Controllers\HealthController;
@@ -91,6 +93,7 @@ foreach ([
     'supportConversation',
     'automationRule',
     'telegramEndpoint',
+    'telegramUpdate',
     'conversation',
     'queue',
     'endpoint',
@@ -224,6 +227,15 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:'.SettingsController::PERMISSION)
         ->get('/settings/readiness', [HealthController::class, 'operations'])
         ->name('api.settings.readiness');
+
+    // NOTIF-03: the verifiable state of the deployment. Read-only checks run on
+    // render; the external Telegram probe is a separate, explicit action.
+    Route::middleware('can:'.SettingsController::PERMISSION)->group(function (): void {
+        Route::get('/settings/status', SystemStatusController::class)
+            ->name('api.settings.status');
+        Route::post('/settings/status/check', [SystemStatusController::class, 'check'])
+            ->name('api.settings.status.check');
+    });
 
     // --- A02: clients -------------------------------------------------------
     //
@@ -894,31 +906,85 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
         Route::get('/push/vapid-public-key', [PushController::class, 'vapidPublicKey'])
             ->name('api.push.vapid-public-key');
+        Route::get('/push/devices', [PushController::class, 'devices'])
+            ->name('api.push.devices.index');
         Route::post('/push/subscriptions', [PushController::class, 'store'])
             ->name('api.push.subscriptions.store');
+        Route::post('/push/devices/{subscription}/test', [PushController::class, 'test'])
+            ->name('api.push.devices.test');
         Route::delete('/push/subscriptions/{subscription}', [PushController::class, 'destroy'])
             ->name('api.push.subscriptions.destroy');
     });
 
+    // Push configuration is administrative: rotating VAPID invalidates every
+    // subscription in the deployment, not only the administrator's own.
+    Route::middleware(['auth', 'auth.session', 'user.active', 'can:notification_channels.manage'])->group(function (): void {
+        Route::get('/push/overview', [PushController::class, 'overview'])
+            ->name('api.push.overview');
+        Route::put('/push/vapid-keys', [PushController::class, 'saveSettings'])
+            ->name('api.push.vapid-keys.update');
+    });
+
     // =================================================================
-    // A06: Telegram Admin
+    // A06 / NOTIF-03: Telegram
     // =================================================================
 
-    // Any active member of staff may ask for a private binding token for their
-    // own account. The token is what proves, to the bot, that the chat belongs
-    // to that employee; nobody can bind a chat to somebody else.
-    Route::post('/telegram/binding-token', [TelegramController::class, 'issueBindingToken'])
-        ->name('api.telegram.binding-token');
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+        // Personal binding. Any active member of staff may ask for a code for
+        // their own account; the server decides whose chat it is.
+        Route::get('/telegram/personal', [TelegramController::class, 'personalStatus'])
+            ->name('api.telegram.personal.show');
+        Route::post('/telegram/binding-token', [TelegramController::class, 'issueBindingToken'])
+            ->name('api.telegram.binding-token');
+        Route::delete('/telegram/personal', [TelegramController::class, 'unlinkSelf'])
+            ->name('api.telegram.personal.destroy');
+    });
 
-    Route::middleware('can:notification_channels.manage')->group(function (): void {
+    Route::middleware(['auth', 'auth.session', 'user.active', 'can:notification_channels.manage'])->group(function (): void {
         Route::get('/telegram/endpoints', [TelegramController::class, 'index'])
             ->name('api.telegram.endpoints.index');
         Route::post('/telegram/endpoints', [TelegramController::class, 'store'])
             ->name('api.telegram.endpoints.store');
         Route::patch('/telegram/endpoints/{endpoint}', [TelegramController::class, 'update'])
             ->name('api.telegram.endpoints.update');
+        Route::delete('/telegram/endpoints/{endpoint}', [TelegramController::class, 'revoke'])
+            ->name('api.telegram.endpoints.destroy');
         Route::post('/telegram/endpoints/{endpoint}/test', [TelegramController::class, 'test'])
             ->name('api.telegram.endpoints.test');
+
+        Route::get('/telegram/status', [TelegramController::class, 'status'])
+            ->name('api.telegram.status');
+        Route::get('/telegram/events', [TelegramController::class, 'events'])
+            ->name('api.telegram.events');
+        Route::get('/telegram/deliveries', [TelegramController::class, 'deliveries'])
+            ->name('api.telegram.deliveries');
+        Route::get('/telegram/reconciliations', [TelegramController::class, 'reconciliations'])
+            ->name('api.telegram.reconciliations.index');
+        Route::post('/telegram/reconciliations/{telegramUpdate}/resolve', [TelegramController::class, 'resolveReconciliation'])
+            ->name('api.telegram.reconciliations.resolve');
+
+        Route::get('/telegram/webhook', [TelegramController::class, 'webhookStatus'])
+            ->name('api.telegram.webhook.status');
+        Route::post('/telegram/webhook', [TelegramController::class, 'registerWebhook'])
+            ->name('api.telegram.webhook.register');
+        Route::post('/telegram/webhook/rotate', [TelegramController::class, 'rotateWebhookSecret'])
+            ->name('api.telegram.webhook.rotate');
+        Route::delete('/telegram/webhook', [TelegramController::class, 'disableWebhook'])
+            ->name('api.telegram.webhook.destroy');
+
+        Route::put('/telegram/credentials', [TelegramController::class, 'saveCredentials'])
+            ->name('api.telegram.credentials.update');
+    });
+
+    // =================================================================
+    // NOTIF-03: personal notification preferences
+    // =================================================================
+
+    Route::middleware(['auth', 'auth.session', 'user.active'])->group(function (): void {
+        Route::get('/notifications/preferences', [NotificationPreferencesController::class, 'show'])
+            ->name('api.notifications.preferences.show');
+        Route::patch('/notifications/preferences', [NotificationPreferencesController::class, 'update'])
+            ->name('api.notifications.preferences.update');
     });
 
     // =================================================================

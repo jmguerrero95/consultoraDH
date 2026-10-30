@@ -8,6 +8,7 @@ use App\Domain\Audit\AuditableEvent;
 use App\Domain\Audit\Listeners\RecordAuditEvent;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\Listeners\EscalateSupportSla;
+use App\Listeners\BroadcastNotificationState;
 use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiToolDeadline;
@@ -40,6 +41,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use Illuminate\Notifications\Events\NotificationSent;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
@@ -307,6 +309,8 @@ final class AppServiceProvider extends ServiceProvider
     {
         Event::listen(AuditableEvent::class, RecordAuditEvent::class);
         Event::listen(SupportSlaEventEmitted::class, EscalateSupportSla::class);
+        // NOTIF-03: one signal per stored inbox row, whatever produced it.
+        Event::listen(NotificationSent::class, BroadcastNotificationState::class);
     }
 
     /**
