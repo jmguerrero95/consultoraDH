@@ -11,17 +11,22 @@ import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
 import { useToastStore } from '@/stores/toast';
 
-import type { TelegramEndpoint, TelegramEventPreference } from '@/types/api';
+import type { TelegramEndpoint, TelegramEventDefinition, TelegramEventPreference } from '@/types/api';
 
 /**
  * The Telegram destinations an administrator can notify.
  *
- * ## Why the event list is spelled out here
+ * ## The event list comes from the server catalogue
  *
- * Which events a destination subscribes to is a small, closed set that the server
- * also validates (`Rule::in` on `event_preferences.*`). Rendering it from one
- * place means the page cannot offer a subscription the server would refuse, and a
- * subscription it does accept cannot be spelled differently on the two sides.
+ * Creating a subscription the server would refuse is a control that lies. The
+ * page therefore renders `admin_available` from `GET /api/telegram/events`:
+ * the events an administrative destination may actually choose, with the
+ * server's own labels. Personal-only events (`task_reminder`,
+ * `report_available`) are delivered to one employee's private chat and are not
+ * administrative subscriptions; `urgent_unassigned` has no producer at all.
+ *
+ * The hard-coded list below is only the fallback used when that request fails,
+ * and it contains exactly the administrable keys so the screen still works.
  *
  * ## Why a destination can be scoped to one conversation
  *
@@ -33,12 +38,16 @@ import type { TelegramEndpoint, TelegramEventPreference } from '@/types/api';
 
 const toast = useToastStore();
 
-const EVENT_PREFERENCES: { value: TelegramEventPreference; label: string }[] = [
+/** Delivered to the private chat of one person, never to a shared destination. */
+const PERSONAL_ONLY_EVENTS = ['task_reminder', 'report_available'];
+
+const EVENT_PREFERENCES = ref<{ value: TelegramEventPreference; label: string }[]>([
     { value: 'support_sla_breach', label: 'Incumplimiento de SLA' },
-    { value: 'urgent_unassigned', label: 'Urgente sin asignar' },
     { value: 'automation_alert', label: 'Alerta de automatización' },
     { value: 'document_overdue', label: 'Documento vencido' },
-];
+]);
+
+const eventDefinitions = ref<Record<string, TelegramEventDefinition>>({});
 
 const endpoints = ref<TelegramEndpoint[]>([]);
 const loading = ref(true);
@@ -74,10 +83,58 @@ async function load(): Promise<void> {
     }
 }
 
-onMounted(load);
+onMounted(() => {
+    void load();
+    void loadEvents();
+});
+
+async function loadEvents(): Promise<void> {
+    try {
+        const payload = await businessApi.telegram.events();
+        const definitions = payload.events ?? {};
+
+        eventDefinitions.value = definitions;
+
+        EVENT_PREFERENCES.value = (payload.admin_available ?? payload.available ?? [])
+            .filter((key) => {
+                const definition = definitions[key];
+
+                return definition !== undefined
+                    && definition.available
+                    && !PERSONAL_ONLY_EVENTS.includes(key);
+            })
+            .map((key) => ({
+                value: key as TelegramEventPreference,
+                label: definitions[key].label,
+            }));
+    } catch {
+        // Maintain the administrative defaults if the catalogue cannot be
+        // read: the screen must still let an operator rename or disable a
+        // destination without pretending the catalogue was empty.
+    }
+}
 
 function eventLabel(value: string): string {
-    return EVENT_PREFERENCES.find((event) => event.value === value)?.label ?? value;
+    return EVENT_PREFERENCES.value.find((event) => event.value === value)?.label
+        ?? eventDefinitions.value[value]?.label
+        ?? value;
+}
+
+/**
+ * Preferences stored on the row that the catalogue does not offer any more.
+ *
+ * They are shown, not dropped: an update sends them back unchanged unless the
+ * operator deliberately edits that destination's available events.
+ */
+function storedUnavailable(endpoint: TelegramEndpoint): string[] {
+    const offered = new Set(EVENT_PREFERENCES.value.map((event) => event.value));
+
+    return (endpoint.event_preferences ?? []).filter((preference) => !offered.has(preference));
+}
+
+function storedUnavailableReason(value: string): string {
+    return eventDefinitions.value[value]?.unavailable_reason
+        ?? 'Este evento no se ofrece como suscripción nueva; el valor guardado se conserva.';
 }
 
 function scopeLabel(endpoint: TelegramEndpoint): string {
@@ -116,9 +173,15 @@ function openCreate(): void {
 function openEdit(endpoint: TelegramEndpoint): void {
     editing.value = endpoint;
     form.label = endpoint.label;
+    // The chat id arrives masked from the API and is never sent back: the
+    // server refuses a PATCH that carries it, and the form shows it read-only.
     form.chat_id = endpoint.chat_id;
-    form.conversation_id = endpoint.conversation_id === null ? '' : String(endpoint.conversation_id);
+    form.conversation_id = endpoint.conversation_id === null || endpoint.conversation_id === undefined
+        ? ''
+        : String(endpoint.conversation_id);
     form.enabled = endpoint.enabled;
+    // Stored preferences are preserved as-is, including any historical value
+    // the catalogue no longer offers.
     form.event_preferences = [...(endpoint.event_preferences ?? [])];
     formError.value = null;
 
@@ -129,13 +192,26 @@ async function save(): Promise<void> {
     submitting.value = true;
     formError.value = null;
 
-    const payload = {
+    const payload: {
+        label: string;
+        conversation_id: number | null;
+        enabled: boolean;
+        event_preferences: TelegramEventPreference[];
+        chat_id?: string;
+    } = {
         label: form.label,
-        chat_id: form.chat_id,
         conversation_id: form.conversation_id === '' ? null : Number(form.conversation_id),
         enabled: form.enabled,
+        // Includes any stored value the catalogue no longer offers, so an
+        // unrelated edit does not silently drop it.
         event_preferences: form.event_preferences,
     };
+
+    // The chat id is the identity of the destination. It is sent only when the
+    // destination is created; the server refuses a PATCH that carries it.
+    if (editing.value === null) {
+        payload.chat_id = form.chat_id;
+    }
 
     try {
         if (editing.value === null) {
@@ -234,7 +310,13 @@ async function toggleEnabled(endpoint: TelegramEndpoint): Promise<void> {
                             <span
                                 v-for="preference in endpoint.event_preferences ?? []"
                                 :key="preference"
-                                class="cdh-badge cdh-badge--info"
+                                class="cdh-badge"
+                                :class="storedUnavailable(endpoint).includes(preference)
+                                    ? 'cdh-badge--warning'
+                                    : 'cdh-badge--info'"
+                                :title="storedUnavailable(endpoint).includes(preference)
+                                    ? storedUnavailableReason(preference)
+                                    : undefined"
                             >
                                 {{ eventLabel(preference) }}
                             </span>
@@ -295,12 +377,28 @@ async function toggleEnabled(endpoint: TelegramEndpoint): Promise<void> {
                 />
 
                 <AppFormField
+                    v-if="editing === null"
                     label="Chat ID"
                     name="telegram-chat-id"
                     v-model="form.chat_id"
                     required
                     hint="El chat al que el bot puede escribir."
                 />
+
+                <div v-else>
+                    <label class="cdh-form-label" for="telegram-chat-id-readonly">Chat ID</label>
+                    <input
+                        id="telegram-chat-id-readonly"
+                        class="form-control"
+                        type="text"
+                        :value="form.chat_id"
+                        readonly
+                    />
+                    <p class="cdh-form-hint">
+                        El chat de un destino no se cambia por edición. Para usar otro chat, cree un
+                        destino nuevo y desactive este.
+                    </p>
+                </div>
 
                 <div class="cdh-stack-4">
                     <label class="cdh-form-label" for="telegram-conversation">
@@ -335,6 +433,23 @@ async function toggleEnabled(endpoint: TelegramEndpoint): Promise<void> {
                         </label>
                     </div>
                 </fieldset>
+
+                <AppAlert
+                    v-if="editing !== null && storedUnavailable(editing).length > 0"
+                    variant="warning"
+                    title="Eventos guardados que ya no se ofrecen"
+                >
+                    <p class="mb-2">
+                        Estos valores se conservan tal como están y se guardan de nuevo al editar
+                        el destino; no se pueden volver a activar desde aquí.
+                    </p>
+                    <ul class="mb-0">
+                        <li v-for="preference in storedUnavailable(editing)" :key="preference">
+                            <strong>{{ eventLabel(preference) }}</strong>:
+                            {{ storedUnavailableReason(preference) }}
+                        </li>
+                    </ul>
+                </AppAlert>
             </form>
         </AppModal>
     </section>

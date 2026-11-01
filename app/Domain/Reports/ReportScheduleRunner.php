@@ -322,7 +322,12 @@ final class ReportScheduleRunner
         }
 
         try {
-            $owner->notify(new ReportReadyNotification($report, $schedule));
+            // `in_app` is the person's own choice for the optional inbox row.
+            // The report itself is already generated and downloadable; turning
+            // the notice off must not fail the occurrence or hide the artifact.
+            if ($owner->notificationPreference('in_app')) {
+                $owner->notify(new ReportReadyNotification($report, $schedule));
+            }
         } catch (\Throwable $e) {
             // The report exists and is downloadable; failing the occurrence over
             // a notification would claim the work was lost. Log and move on.

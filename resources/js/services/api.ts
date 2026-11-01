@@ -1037,7 +1037,12 @@ export const api: ApiClient = {
                 return request<TelegramStatusPayload>('GET', '/api/telegram/status');
             },
 
-            events(): Promise<{ events: Record<string, TelegramEventDefinition>; available: string[] }> {
+            events(): Promise<{
+                events: Record<string, TelegramEventDefinition>;
+                available: string[];
+                /** Keys an administrative destination may subscribe to. */
+                admin_available?: string[];
+            }> {
                 return request('GET', '/api/telegram/events');
             },
 

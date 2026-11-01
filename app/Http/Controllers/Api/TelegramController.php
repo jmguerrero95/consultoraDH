@@ -224,12 +224,22 @@ final class TelegramController extends Controller
             ], 422);
         }
 
+        // An existing row may already carry a key the catalogue no longer
+        // offers (`urgent_unassigned`) or a personal-only one. Those values are
+        // accepted on update so the rows are preserved instead of being
+        // silently rewritten or forcing an operator to drop them; a *new*
+        // subscription still has to be one of the administrable keys.
+        $stored = is_array($endpoint->event_preferences) ? $endpoint->event_preferences : [];
+
         $validated = $request->validate([
             'label' => 'sometimes|required|string|max:255',
             'conversation_id' => 'sometimes|nullable|integer|exists:support_conversations,id',
             'enabled' => 'sometimes|boolean',
             'event_preferences' => 'sometimes|array',
-            'event_preferences.*' => Rule::in(TelegramEventCatalog::adminKeys()),
+            'event_preferences.*' => [Rule::in(array_values(array_unique([
+                ...TelegramEventCatalog::adminKeys(),
+                ...$stored,
+            ])))],
         ]);
 
         if ($endpoint->user_id !== null
@@ -325,6 +335,8 @@ final class TelegramController extends Controller
             'webhook' => [
                 'expected_url' => $this->expectedWebhookUrl(),
                 'last_check' => is_array($cached) ? $cached : null,
+                // State only — never the secret values themselves.
+                'secret_rotation' => $this->integrations->telegramWebhookSecretRotation(),
             ],
             'counts' => [
                 'admin' => TelegramEndpoint::query()->whereNull('user_id')->count(),
@@ -399,6 +411,10 @@ final class TelegramController extends Controller
             return response()->json(['message' => 'Telegram rechazó el registro del webhook. '.$e->getMessage()], 502);
         }
 
+        // Telegram answered that it accepted this value: the new secret is the
+        // one the webhook will receive from now on.
+        $this->integrations->confirmTelegramWebhookSecret($request->user());
+
         $this->audit->record(AuditAction::TelegramWebhookRegistered, $request->user(), [
             'expected_url' => $url,
         ]);
@@ -435,14 +451,27 @@ final class TelegramController extends Controller
             Log::warning('Telegram webhook secret rotation not confirmed', [
                 'operation' => $e->operation,
                 'status' => $e->httpStatus,
+                'permanent' => $e->isPermanentRejection(),
             ]);
 
+            // The previous secret stays accepted without an expiry while the
+            // rotation is unconfirmed: a 4xx is a refusal we can describe, a
+            // timeout or 5xx is an outcome we cannot assume. Neither is a
+            // reason to drop the value Telegram may still be signing with.
             return response()->json([
-                'message' => 'El secreto nuevo quedó guardado, pero Telegram no confirmó el webhook. '
-                    .'El secreto anterior sigue aceptándose durante la ventana de gracia; reintente la rotación.',
+                'message' => ($e->isPermanentRejection()
+                        ? 'Telegram rechazó el secreto nuevo. '
+                        : 'Telegram no confirmó el webhook y el resultado externo es incierto. ')
+                    .'El secreto anterior sigue aceptándose sin fecha de caducidad mientras la rotación no se confirme; reintente la rotación.',
+                'confirmed' => false,
                 'grace_hours' => IntegrationConfig::WEBHOOK_SECRET_GRACE_HOURS,
+                'secret_rotation' => $this->integrations->telegramWebhookSecretRotation(),
             ], 502);
         }
+
+        // Only a successful `setWebhook` says Telegram adopted the new value.
+        // That acknowledgement is what starts the grace window for the old one.
+        $this->integrations->confirmTelegramWebhookSecret($request->user());
 
         $this->audit->record(AuditAction::TelegramWebhookSecretRotated, $request->user(), [
             'grace_hours' => IntegrationConfig::WEBHOOK_SECRET_GRACE_HOURS,
@@ -534,6 +563,11 @@ final class TelegramController extends Controller
         return response()->json([
             'events' => TelegramEventCatalog::all(),
             'available' => TelegramEventCatalog::availableKeys(),
+            // What a destination screen may actually offer. Personal-only
+            // events (`task_reminder`, `report_available`) are delivered to one
+            // employee's private chat and `urgent_unassigned` has no producer,
+            // so listing them here would offer a subscription the API refuses.
+            'admin_available' => TelegramEventCatalog::adminKeys(),
         ]);
     }
 
@@ -544,7 +578,7 @@ final class TelegramController extends Controller
     public function deliveries(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'status' => ['sometimes', 'string', Rule::in(['pending', 'sent', 'failed', 'unknown', 'suppressed'])],
+            'status' => ['sometimes', 'string', Rule::in(['pending', 'sending', 'sent', 'failed', 'unknown', 'suppressed'])],
             'dedupe_key' => 'sometimes|string|max:255',
             'per_page' => 'sometimes|integer|min:1|max:50',
             'page' => 'sometimes|integer|min:1',

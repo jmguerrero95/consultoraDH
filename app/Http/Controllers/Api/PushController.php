@@ -208,10 +208,19 @@ final class PushController extends Controller
         }
 
         try {
-            $this->integrations->saveVapidKeys([
-                'public_key' => $validated['public_key'] ?? null,
-                'private_key' => $validated['private_key'] ?? null,
-            ], $request->user());
+            // Only send the halves the operator supplied: the service refuses a
+            // partial pair instead of writing one half over the other.
+            $values = [];
+
+            if (array_key_exists('public_key', $validated)) {
+                $values['public_key'] = $validated['public_key'];
+            }
+
+            if (array_key_exists('private_key', $validated)) {
+                $values['private_key'] = $validated['private_key'];
+            }
+
+            $this->integrations->saveVapidKeys($values, $request->user());
         } catch (InvalidArgumentException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }

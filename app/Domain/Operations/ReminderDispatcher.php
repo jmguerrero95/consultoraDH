@@ -129,7 +129,15 @@ final class ReminderDispatcher
             // again. No duplicate reaches the person.
             try {
                 DB::transaction(function () use ($assignee, $task, $claim, $now): void {
-                    $assignee->notify(new TaskReminderNotification($task));
+                    // `in_app` gates the optional inbox row only. The stage
+                    // marker is written either way: it is what tells the next
+                    // run (and a worker that resumes after a crash) that this
+                    // stage already happened, so a disabled preference can
+                    // never leave the reminder retrying for ever.
+                    if ($assignee->notificationPreference('in_app')) {
+                        $assignee->notify(new TaskReminderNotification($task));
+                    }
+
                     $this->markInternal($claim['token'], $now);
                 });
             } catch (ReminderDeliveryLost $e) {
@@ -236,9 +244,26 @@ final class ReminderDispatcher
                     return null;
                 }
 
+                // Push desactivado: no hay nada que reintentar por Push y el
+                // aviso inicial ya quedó registrado. Se devuelve null para no
+                // reabrir una etapa `initial` (que reenviaría el aviso interno
+                // y reiniciaría el contador en cada ejecución).
+                if ($task->assignee instanceof User
+                    && ! $task->assignee->notificationPreference('push')) {
+                    return null;
+                }
+
                 $stage = 'retry';
             } elseif ($task->reminder_second_sent_at === null
                 && $task->reminder_received_at->lte($secondBefore)) {
+                // Igual que en el reintento: con Push desactivado no se crea
+                // una nueva etapa Push. Si la recepción venía de un Push previo,
+                // apagar el canal detiene el segundo recordatorio.
+                if ($task->assignee instanceof User
+                    && ! $task->assignee->notificationPreference('push')) {
+                    return null;
+                }
+
                 $stage = 'second';
             } else {
                 return null;
@@ -424,6 +449,13 @@ final class ReminderDispatcher
         $assignee = $task->assignee;
 
         if (! $assignee instanceof User) {
+            return;
+        }
+
+        // Push is optional and personal: the person may have turned it off.
+        // The stage still settles (the caller finalizes it), so switching the
+        // channel off does not turn the reminder into a retry loop.
+        if (! $assignee->notificationPreference('push')) {
             return;
         }
 

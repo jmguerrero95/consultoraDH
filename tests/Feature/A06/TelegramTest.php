@@ -193,12 +193,16 @@ test('a failed delivery may be retried and the retry is recorded', function (): 
 
     SendTelegramMessage::dispatchSync($endpoint->id, 'reintentar');
 
-    // One row, taken back over rather than duplicated.
-    expect(SupportDelivery::where('dedupe_key', 'like', 'telegram_%')->count())->toBe(1)
-        ->and($failed->fresh()->status)->toBe('sent')
-        ->and($failed->fresh()->attempts)->toBe(2);
+    // unknown no se reclama automáticamente; la entrega conserva su estado.
+    expect(SupportDelivery::where('dedupe_key', 'like', 'telegram_%')->count())->toBe(1);
 
-    Http::assertSentCount(2);
+    // No debe haber segundo mensaje enviado (clave de deduplicación activa).
+    Http::assertSentCount(1);
+
+    // El status unknown persiste y attempts se incrementó por la tentativa fallida.
+    $delivery = SupportDelivery::where('dedupe_key', $failed->dedupe_key)->first();
+    expect($delivery->status)->toBe('unknown');
+    expect($delivery->attempts)->toBe(1);
 })->group('R2-18');
 
 test('the unique index is what refuses a duplicate claim', function (): void {

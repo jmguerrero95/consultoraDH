@@ -316,6 +316,22 @@ const routes: RouteRecordRaw[] = [
                 },
             },
             {
+                // Estado del sistema: vista de solo lectura con verificable
+                // estado de servicios, scheduler, Reverb, Push y Telegram.
+                path: 'settings/system-status',
+                name: 'system-status',
+                component: () => import('@/pages/settings/SystemStatusPage.vue'),
+                meta: {
+                    title: 'Estado del sistema',
+                    nav: {
+                        label: 'Estado del sistema',
+                        icon: 'bi-kanban',
+                        order: 93,
+                    },
+                    permission: 'settings.view',
+                },
+            },
+            {
                 // Its own entry rather than a setting: a rule is executable
                 // configuration with its own lifecycle (activate, deactivate, run
                 // history), which does not belong under another module's settings.

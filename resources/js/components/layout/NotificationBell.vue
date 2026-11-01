@@ -185,7 +185,11 @@ async function subscribeRealtime(): Promise<void> {
         await realtime.initialize();
 
         realtime.joinPrivateChannel(`App.Models.User.${userId}`, {
-            'notification.state': onNotificationState,
+            // Laravel Echo prefixes a name without a leading dot with the
+            // configured namespace (`App.Events`), while `broadcastAs()` sends
+            // the bare name. Without the dot the bell listened to
+            // `App.Events.notification.state` and never saw the broadcast.
+            '.notification.state': onNotificationState,
         });
 
         realtimeSubscribed = true;
