@@ -71,7 +71,8 @@ it('resends the second reminder when the worker died before delivering anything'
         ->and($task->reminder_delivery_token)->toBeNull()
         ->and($task->reminder_delivery_stage)->toBeNull();
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+    // The second reminder is Push-only: no inbox row is created.
+    Notification::assertNothingSent();
 });
 
 it('settles the stage without a second notice when the internal reminder was already written', function (): void {
@@ -100,7 +101,7 @@ it('settles the stage without a second notice when the internal reminder was alr
     Notification::assertNothingSent();
 });
 
-it('does not duplicate the internal notification when the push fails after it was written', function (): void {
+it('does not resend a visible notice when the push fails after the stage marker was written', function (): void {
     test()->mock(WebPushService::class, function ($mock): void {
         $mock->shouldReceive('sendNotification')->once()->andThrow(new RuntimeException('push endpoint unreachable'));
     });
@@ -109,7 +110,7 @@ it('does not duplicate the internal notification when the push fails after it wa
 
     $dispatcher = app(ReminderDispatcher::class);
 
-    // The internal reminder is written; the push throws. The run reports no
+    // The stage marker is written; the push throws. The run reports no
     // successful delivery, but the user-visible part must not be repeated.
     expect($dispatcher->dispatchDue())->toBe(0);
 
@@ -119,7 +120,9 @@ it('does not duplicate the internal notification when the push fails after it wa
         ->and($task->reminder_delivery_internal_at)->not->toBeNull()
         ->and($task->reminder_delivery_token)->not->toBeNull();
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+    // The second stage is Push-only, so the marker being written does not mean
+    // an inbox row was created.
+    Notification::assertNothingSent();
 
     // The lease expires while the second reminder is still due. The next run
     // settles the stage instead of sending the visible notice again.
@@ -132,14 +135,14 @@ it('does not duplicate the internal notification when the push fails after it wa
     expect($task->reminder_second_sent_at)->not->toBeNull()
         ->and($task->reminder_delivery_token)->toBeNull();
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+    Notification::assertNothingSent();
 
     // And later runs do not resurrect it.
     $this->travelTo(Carbon::parse('2026-10-24 10:00:00', 'UTC'));
 
     expect($dispatcher->dispatchDue())->toBe(0);
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+    Notification::assertNothingSent();
 });
 
 it('keeps the five minute retry cadence after an abandoned initial delivery', function (): void {
@@ -178,10 +181,11 @@ it('keeps the five minute retry cadence after an abandoned initial delivery', fu
     Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
 
     // Five minutes after the settlement a technical retry is due, exactly as
-    // before this change.
+    // before this change. The retry is Push-only, so the inbox row count does
+    // not grow.
     $this->travelTo(Carbon::parse('2026-10-24 09:11:00', 'UTC'));
 
     expect($dispatcher->dispatchDue())->toBe(0);
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 2);
+    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
 });

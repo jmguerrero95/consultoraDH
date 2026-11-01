@@ -100,7 +100,8 @@ it('retries technically every five minutes while the device has not acknowledged
     expect($task->reminder_attempts)->toBe(1)
         ->and($task->reminder_received_at)->toBeNull();
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+    // A retry is Push-only: the visible reminder is not written again.
+    Notification::assertNothingSent();
 
     // A second run in the same minute is not a second retry.
     expect($dispatcher->dispatchDue())->toBe(0);
@@ -122,14 +123,15 @@ it('sends the second reminder once, ten minutes after the acknowledgement', func
 
     expect($task->reminder_second_sent_at)->not->toBeNull();
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+    // The second reminder is Push-only: no additional inbox row.
+    Notification::assertNothingSent();
 
     // Ten more minutes: the second reminder is not sent again.
     $this->travelTo(Carbon::parse('2026-10-24 09:20:00', 'UTC'));
 
     expect($dispatcher->dispatchDue())->toBe(0);
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+    Notification::assertNothingSent();
 });
 
 it('does not send the second reminder before ten minutes have passed', function (): void {
@@ -280,6 +282,9 @@ it('keeps the original retry and second cycle when push stays enabled', function
 
     expect($dispatcher->dispatchDue())->toBe(1);
 
+    // The initial stage is the only one that creates the inbox row.
+    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+
     // Five minutes without acknowledgement: one technical retry.
     $this->travelTo(Carbon::parse('2026-10-24 09:05:00', 'UTC'));
 
@@ -288,6 +293,9 @@ it('keeps the original retry and second cycle when push stays enabled', function
     $task->refresh();
 
     expect($task->reminder_attempts)->toBe(1);
+
+    // Push-only retry: the accumulated inbox count stays at one.
+    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
 
     // The device acknowledges the retry; ten minutes later the unique second
     // reminder is allowed.
@@ -302,10 +310,13 @@ it('keeps the original retry and second cycle when push stays enabled', function
     expect($task->reminder_second_sent_at)->not->toBeNull()
         ->and($task->reminder_attempts)->toBe(1);
 
+    // Push-only second reminder: still exactly one inbox row overall.
+    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
+
     // Nothing else follows.
     $this->travelTo(Carbon::parse('2026-10-24 10:00:00', 'UTC'));
 
     expect($dispatcher->dispatchDue())->toBe(0);
 
-    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 3);
+    Notification::assertSentToTimes($this->operator, TaskReminderNotification::class, 1);
 });

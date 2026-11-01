@@ -129,12 +129,17 @@ final class ReminderDispatcher
             // again. No duplicate reaches the person.
             try {
                 DB::transaction(function () use ($assignee, $task, $claim, $now): void {
-                    // `in_app` gates the optional inbox row only. The stage
-                    // marker is written either way: it is what tells the next
-                    // run (and a worker that resumes after a crash) that this
-                    // stage already happened, so a disabled preference can
-                    // never leave the reminder retrying for ever.
-                    if ($assignee->notificationPreference('in_app')) {
+                    // Only the `initial` stage creates an inbox row. A technical
+                    // retry and the second reminder are Push-only: the person
+                    // already has the visible reminder, and writing another row
+                    // for the same task would duplicate it.
+                    //
+                    // The stage marker is written for every stage either way:
+                    // it is what tells the next run (and a worker that resumes
+                    // after a crash) that this stage already happened. `in_app`
+                    // only gates the optional inbox row, never the marker.
+                    if ($claim['stage'] === 'initial'
+                        && $assignee->notificationPreference('in_app')) {
                         $assignee->notify(new TaskReminderNotification($task));
                     }
 
