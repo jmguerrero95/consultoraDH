@@ -61,9 +61,14 @@ incumpla una de ellas no puede declararse terminada.
     `migrate:fresh` sobre bases reales ni `FLUSHALL`. No se borran cambios,
     informes ni datos de otras sesiones. Las pruebas usan su propia base.
 
-12. **Publicación solo por fast-forward y solo con aceptación.** Se publica en
-    `main` únicamente si se cumplen todos los gates anteriores; el push es
-    fast-forward y sin `--force`. Si falta un gate, el trabajo permanece en una
+12. **Integración a `main` y certificación LIVE son gates distintos.** Un cambio
+    cuyo alcance haya superado sus comprobaciones (pruebas dirigidas, lint y
+    revisión del diff) puede integrarse en `main` por fast-forward, sin
+    `--force`. La certificación LIVE sigue siendo obligatoria para declarar una
+    integración `VERIFIED_LIVE` o verificada en producción; mientras no exista,
+    la integración se declara `LIVE_PENDING`. Integrar en `main` no autoriza un
+    despliegue: desplegar exige su propio gate y una decisión explícita del
+    operador. Si falta una comprobación del alcance, el trabajo permanece en una
     rama y el informe explica el bloqueo con honestidad.
 
 ## Flujo mínimo de una entrega
@@ -75,9 +80,14 @@ incumpla una de ellas no puede declararse terminada.
 5. Ejecutar Pint sobre el PHP modificado; typecheck/build si cambió el contrato
    del frontend.
 6. Ejecutar la certificación LIVE con datos sintéticos y guardar la evidencia.
+   Si el entorno no permite esa certificación, registrar el alcance como
+   `LIVE_PENDING`; no se declara verificado en producción.
 7. Limpiar los datos y archivos sintéticos.
 8. Escribir el informe con resultados exactos y residuales.
-9. Publicar por fast-forward si y solo si todos los gates pasan.
+9. Integrar en `main` por fast-forward cuando las comprobaciones del alcance
+   pasen. La certificación LIVE se exige para declarar `VERIFIED_LIVE`, no para
+   integrar código marcado como `LIVE_PENDING`; el despliegue es un gate
+   separado.
 
 ## Evidencia mínima por proveedor
 
