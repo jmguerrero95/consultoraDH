@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Ops\QueueAssessment;
 use App\Services\Ops\QueueInspector;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Queue;
@@ -41,7 +42,7 @@ final class QueueHealthCommand extends Command
         $maxFailed = (int) config('queue.monitoring.max_failed', 0);
 
         try {
-            $connection = Queue::connection($connectionName);
+            Queue::connection($connectionName);
         } catch (Throwable $exception) {
             return $this->failReport(
                 $connectionName,
@@ -53,68 +54,36 @@ final class QueueHealthCommand extends Command
             );
         }
 
+        // One interpretation, shared with the HTTP endpoints. A failed
+        // inspection is `degraded` here exactly as it is there.
+        $assessment = (new QueueAssessment(new QueueInspector($connectionName)))->inspect($queues);
+
         $report = [
-            'status' => 'ok',
+            'status' => $assessment['state'] === QueueAssessment::STATE_VERIFIED ? 'ok' : 'degraded',
             'connection' => $connectionName,
             'checked_at' => now()->toIso8601String(),
             'queues' => [],
-            'failed' => null,
-            'thresholds' => [
-                'max_backlog' => $maxBacklog,
-                'max_age_seconds' => $maxAge,
-                'max_failed' => $maxFailed,
-            ],
+            'failed' => $assessment['failed_jobs'],
+            'failed_state' => $assessment['failed_state'],
+            'capabilities' => $assessment['capabilities'],
+            'thresholds' => $assessment['thresholds'],
         ];
 
-        $degraded = false;
-        $inspector = new QueueInspector($connectionName);
-
-        foreach ($queues as $queue) {
-            $queue = (string) $queue;
-
-            try {
-                $pending = $inspector->pendingSize($queue);
-                $delayed = $inspector->delayedSize($queue);
-                $reserved = $inspector->reservedSize($queue);
-                $oldest = $inspector->oldestPendingSeconds($queue);
-            } catch (Throwable $exception) {
-                $report['status'] = 'degraded';
-                $report['queues'][$queue] = [
-                    'error' => $exception->getMessage(),
-                ];
-                $degraded = true;
-
-                continue;
-            }
-
-            $overBacklog = $pending > $maxBacklog;
-            $overAge = $oldest !== null && $oldest > $maxAge;
-
-            if ($overBacklog || $overAge) {
-                $degraded = true;
-            }
-
-            $report['queues'][$queue] = [
-                'pending' => $pending,
-                'delayed' => $delayed,
-                'reserved' => $reserved,
-                'oldest_pending_seconds' => $oldest,
-                'over_backlog' => $overBacklog,
-                'over_age' => $overAge,
+        foreach ($assessment['queues'] as $queue) {
+            $report['queues'][$queue['name']] = [
+                'state' => $queue['state'],
+                'pending' => $queue['pending'],
+                'delayed' => $queue['delayed'],
+                'reserved' => $queue['reserved'],
+                'oldest_pending_seconds' => $queue['oldest_pending_seconds'],
+                'oldest_status' => $queue['oldest_status'],
+                'over_backlog' => $queue['over_backlog'],
+                'over_age' => $queue['over_age'],
+                'error' => $queue['error'],
             ];
         }
 
-        // A database queue that has never been migrated has no failed_jobs
-        // table. That is not an outage of the inspected queue.
-        $report['failed'] = $inspector->failedCount();
-
-        if ($report['failed'] !== null && $report['failed'] > $maxFailed) {
-            $degraded = true;
-        }
-
-        if ($degraded) {
-            $report['status'] = 'degraded';
-        }
+        $degraded = $report['status'] !== 'ok';
 
         $this->render($report, (bool) $this->option('json'));
 
@@ -140,18 +109,21 @@ final class QueueHealthCommand extends Command
 
         $rows = [];
         foreach ($report['queues'] as $queue => $metrics) {
-            if (isset($metrics['error'])) {
+            if (($metrics['error'] ?? null) !== null) {
                 $rows[] = [$queue, 'error', '-', '-', '-', $metrics['error']];
 
                 continue;
             }
+
+            $oldest = $metrics['oldest_pending_seconds']
+                ?? (($metrics['oldest_status'] ?? null) === 'empty' ? 'empty' : 'unavailable');
 
             $rows[] = [
                 $queue,
                 $metrics['pending'],
                 $metrics['delayed'],
                 $metrics['reserved'],
-                $metrics['oldest_pending_seconds'] ?? '-',
+                $oldest,
                 ($metrics['over_backlog'] || $metrics['over_age']) ? 'over threshold' : 'ok',
             ];
         }

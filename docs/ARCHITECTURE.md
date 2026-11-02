@@ -686,6 +686,61 @@ reservados, edad del job más antiguo y `failed_jobs`. Es la señal que debe
 monitorizarse; `--strict` sale con código distinto de cero al superar
 `QUEUE_MAX_BACKLOG`, `QUEUE_MAX_AGE_SECONDS` o `QUEUE_MAX_FAILED`.
 
+### 9.1 Un worker vivo no se deduce de una cola vacía
+
+`reserved=0` solo dice que nadie retiene un trabajo. Una cola vacía es idéntica
+con un worker sano y con ningún worker. Por eso cada proceso `queue:work`
+escribe su propio latido en la caché:
+
+| Señal | Cuándo se escribe | Vence |
+| --- | --- | --- |
+| `idle` | Terminó una iteración de sondeo sin trabajo | `QUEUE_HEARTBEAT_IDLE_STALE_SECONDS` (90 s) |
+| `busy` | Empezó un trabajo (nombre de la clase, nunca sus argumentos) | `timeout` del grupo + `QUEUE_HEARTBEAT_BUSY_MARGIN_SECONDS` (60 s) |
+
+El grupo se declara explícitamente con `QUEUE_WORKER_GROUP` en cada servicio de
+`compose.yaml` (`interactive`, `imports`, `ai`, `automations`); nunca se deduce
+del comando del sistema operativo. En web y en el scheduler la variable está
+vacía, así que no pueden suplantar a un worker. El latido se renueva como mucho
+cada `QUEUE_HEARTBEAT_RENEW_SECONDS` (10 s) y caduca solo a los
+`QUEUE_HEARTBEAT_TTL_SECONDS` (900 s), de modo que un proceso muerto no deja
+una señal saludable para siempre.
+
+Estados por grupo, visibles en `/settings/system-status`:
+
+| Estado | Evidencia |
+| --- | --- |
+| `verified` | Latido `idle` reciente, o trabajo en ejecución dentro del timeout de su grupo |
+| `unavailable` | Hay latido pero superó su ventana (worker detenido o trabajo excedido) |
+| `unknown` | Nunca se registró un latido para ese grupo |
+
+Un trabajo largo **no** convierte al worker en muerto mientras esté dentro del
+timeout de su propio grupo; por eso importaciones (630 s) e IA (330 s) se
+juzgan con su ventana y no con la de un trabajo interactivo.
+
+### 9.2 Fallo parcial: capacidad frente a plataforma
+
+Las colas se agrupan en capacidades (`queue.monitoring.capabilities`). La
+capacidad `operations` (`default`, `support`) es central; `notifications`,
+`imports`, `ai` y `automations` son secundarias. `/api/ready` responde **503**
+solo cuando falla una dependencia central: PostgreSQL, Redis o una cola de
+`operations`. Una cola de IA atascada aparece como `degraded` en su capacidad y
+en `/settings/system-status`, pero no rechaza peticiones de clientes, cartera o
+pagos.
+
+Una inspección que falla nunca se presenta como `verified`: se marca `degraded`
+con `oldest_status: unavailable`. Una cola vacía, en cambio, es una medición
+válida (`oldest_status: empty`). `queue:health` y los dos endpoints comparten
+`App\Services\Ops\QueueAssessment`, para que no existan tres criterios
+contradictorios.
+
+### 9.3 Limitaciones
+
+El latido vive en la caché compartida: si Redis no responde, la observabilidad
+se pierde y el estado pasa a `unknown`, nunca a sano. Un worker que arranca y
+muere antes de su primera iteración tampoco deja señal. Estas señales detectan
+un worker detenido, no la lentitud de un proveedor externo ni la corrección de
+un trabajo: eso lo miden `queue:health` y los propios jobs.
+
 En A01 se verificó el circuito completo: un trabajo colocado en Redis fue
 recogido y ejecutado por el worker, sin ninguna clase de trabajo en el
 repositorio porque todavía no había una operación de negocio que lo justificara.

@@ -10,7 +10,15 @@ import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
 import { useToastStore } from '@/stores/toast';
 
-import type { SystemCheck, SystemStatusPayload } from '@/types/api';
+import type { SystemCheck, SystemStatusPayload, WorkerGroupStatus } from '@/types/api';
+
+interface QueueMetric {
+    name: string;
+    state: string;
+    pending: number | null;
+    oldest_pending_seconds: number | null;
+    oldest_status: string;
+}
 
 /**
  * The honest state of the deployment.
@@ -60,6 +68,7 @@ function badgeClass(state: string): string {
         connected: 'cdh-badge--info',
         configured: 'cdh-badge--neutral',
         degraded: 'cdh-badge--danger',
+        unavailable: 'cdh-badge--danger',
         unknown: 'cdh-badge--warning',
     }[state] ?? 'cdh-badge--neutral';
 }
@@ -70,8 +79,75 @@ function stateLabel(state: string): string {
         connected: 'Conectado',
         configured: 'Configurado',
         degraded: 'Degradado',
+        unavailable: 'No disponible',
         unknown: 'Sin evidencia',
     }[state] ?? state;
+}
+
+const workerGroups = computed<WorkerGroupStatus[]>(() => {
+    const groups = data.value?.services.workers?.groups;
+
+    return Array.isArray(groups) ? (groups as WorkerGroupStatus[]) : [];
+});
+
+const queueMetrics = computed<Record<string, QueueMetric>>(() => {
+    const queues = data.value?.services.queue?.queues;
+
+    if (!Array.isArray(queues)) {
+        return {};
+    }
+
+    return Object.fromEntries(
+        (queues as unknown as QueueMetric[]).map((queue) => [queue.name, queue]),
+    );
+});
+
+function groupPending(group: WorkerGroupStatus): number | null {
+    let total = 0;
+    let measured = false;
+
+    for (const name of group.queues) {
+        const queue = queueMetrics.value[name];
+
+        if (queue && typeof queue.pending === 'number') {
+            total += queue.pending;
+            measured = true;
+        }
+    }
+
+    return measured ? total : null;
+}
+
+function groupOldest(group: WorkerGroupStatus): number | null {
+    let oldest: number | null = null;
+
+    for (const name of group.queues) {
+        const value = queueMetrics.value[name]?.oldest_pending_seconds;
+
+        if (typeof value === 'number' && (oldest === null || value > oldest)) {
+            oldest = value;
+        }
+    }
+
+    return oldest;
+}
+
+function secondsLabel(seconds: number | null): string {
+    if (seconds === null) {
+        return 'sin medición';
+    }
+
+    if (seconds < 60) {
+        return `${seconds} s`;
+    }
+
+    const minutes = Math.floor(seconds / 60);
+
+    if (minutes < 60) {
+        return `${minutes} min`;
+    }
+
+    return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
 async function load(): Promise<void> {
@@ -164,6 +240,67 @@ onMounted(load);
                                 </span>
                             </span>
                         </div>
+                    </div>
+                </div>
+            </section>
+
+            <section v-if="workerGroups.length > 0" class="cdh-card" aria-labelledby="workers-heading">
+                <div class="cdh-card__header">
+                    <h2 id="workers-heading" class="cdh-card__title">Workers de cola</h2>
+                </div>
+                <div class="cdh-card__body">
+                    <p class="small text-body-secondary">
+                        La actividad la escribe el propio proceso <span class="cdh-mono">queue:work</span>.
+                        Una cola vacía no prueba que un worker esté vivo; un latido reciente sí.
+                    </p>
+
+                    <div class="cdh-table-wrap">
+                        <table class="cdh-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Grupo</th>
+                                    <th scope="col">Estado</th>
+                                    <th scope="col">Última actividad</th>
+                                    <th scope="col">Hace</th>
+                                    <th scope="col">Trabajo en ejecución</th>
+                                    <th scope="col">Pendientes</th>
+                                    <th scope="col">Antigüedad</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="group in workerGroups" :key="group.group">
+                                    <td>
+                                        <span class="d-block">{{ group.label }}</span>
+                                        <span class="small text-body-secondary cdh-mono">
+                                            {{ group.queues.join(', ') }}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="cdh-badge" :class="badgeClass(group.state)">
+                                            {{ stateLabel(group.state) }}
+                                        </span>
+                                        <span class="d-block small text-body-secondary mt-1">
+                                            {{ group.detail }}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        {{ group.activity === 'busy' ? 'Ejecutando' : group.activity === 'idle' ? 'En espera' : 'Sin datos' }}
+                                    </td>
+                                    <td>{{ secondsLabel(group.age_seconds) }}</td>
+                                    <td>
+                                        <template v-if="group.activity === 'busy'">
+                                            <span class="cdh-mono">{{ group.job ?? 'trabajo' }}</span>
+                                            <span class="d-block small text-body-secondary">
+                                                {{ secondsLabel(group.job_age_seconds) }} de {{ group.timeout_seconds }} s
+                                            </span>
+                                        </template>
+                                        <span v-else class="text-body-secondary">—</span>
+                                    </td>
+                                    <td>{{ groupPending(group) ?? 'sin medición' }}</td>
+                                    <td>{{ secondsLabel(groupOldest(group)) }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </section>

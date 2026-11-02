@@ -9,7 +9,8 @@ use App\Http\Controllers\Controller;
 use App\Models\SupportDelivery;
 use App\Models\TelegramEndpoint;
 use App\Services\Integrations\IntegrationConfig;
-use App\Services\Ops\QueueInspector;
+use App\Services\Ops\QueueAssessment;
+use App\Services\Ops\WorkerHealth;
 use App\Services\Telegram\TelegramApiClient;
 use App\Services\Telegram\TelegramApiException;
 use App\Services\Telegram\TelegramEventCatalog;
@@ -46,7 +47,7 @@ final class SystemStatusController extends Controller
 
     private const CHECK_CACHE_SECONDS = 300;
 
-    public function __invoke(Request $request, QueueInspector $inspector, IntegrationConfig $integrations): JsonResponse
+    public function __invoke(Request $request, QueueAssessment $queues, WorkerHealth $workers, IntegrationConfig $integrations): JsonResponse
     {
         $user = $request->user();
 
@@ -83,8 +84,8 @@ final class SystemStatusController extends Controller
                 'postgresql' => $this->databaseCheck(),
                 'redis' => $this->redisCheck(),
                 'sessions' => $this->configured('Sesiones', $this->sessionLabel(), true),
-                'queue' => $this->queueCheck($inspector),
-                'workers' => $this->workerCheck($inspector),
+                'queue' => $this->queueCheck($queues),
+                'workers' => $this->workerCheck($workers),
                 'scheduler' => $this->schedulerCheck(),
                 'reverb' => $this->reverbCheck(),
                 'webpush' => $this->webPushCheck($integrations),
@@ -220,75 +221,61 @@ final class SystemStatusController extends Controller
     /**
      * @return array<string, mixed>
      */
-    private function queueCheck(QueueInspector $inspector): array
+    private function queueCheck(QueueAssessment $assessment): array
     {
-        $maxBacklog = (int) config('queue.monitoring.max_backlog', 1000);
-        $maxAge = (int) config('queue.monitoring.max_age_seconds', 300);
+        $result = $assessment->inspect();
         $queues = [];
-        $degraded = false;
 
-        foreach ((array) config('queue.monitoring.queues', []) as $queue) {
-            $queue = (string) $queue;
-
-            try {
-                $pending = $inspector->pendingSize($queue);
-                $oldest = $inspector->oldestPendingSeconds($queue);
-            } catch (Throwable) {
-                $queues[] = ['name' => $queue, 'error' => 'No se pudo inspeccionar.'];
-
-                continue;
-            }
-
-            $over = $pending > $maxBacklog || ($oldest !== null && $oldest > $maxAge);
-
-            if ($over) {
-                $degraded = true;
-            }
-
+        foreach ($result['queues'] as $queue) {
             $queues[] = [
-                'name' => $queue,
-                'pending' => $pending,
-                'oldest_pending_seconds' => $oldest,
-                'over_threshold' => $over,
+                'name' => $queue['name'],
+                'state' => $queue['state'],
+                'pending' => $queue['pending'],
+                'oldest_pending_seconds' => $queue['oldest_pending_seconds'],
+                // `empty` is a measurement; `unavailable` is a failed read.
+                'oldest_status' => $queue['oldest_status'],
+                'over_threshold' => $queue['over_backlog'] || $queue['over_age'],
+                'error' => $queue['error'],
             ];
         }
 
         return [
-            'state' => $degraded ? 'degraded' : 'verified',
+            'state' => $result['state'],
             'label' => 'Colas',
-            'detail' => $degraded
-                ? 'Alguna cola supera el umbral de antigüedad o de pendientes.'
-                : 'Las colas monitoreadas se pudieron inspeccionar.',
+            'detail' => match ($result['state']) {
+                QueueAssessment::STATE_VERIFIED => 'Las colas monitoreadas respondieron dentro de sus umbrales.',
+                QueueAssessment::STATE_DEGRADED => 'Alguna cola supera un umbral, no pudo inspeccionarse o acumula fallos.',
+                default => 'No hay información suficiente para confirmar el estado de las colas.',
+            },
             'queues' => $queues,
-            'thresholds' => ['max_backlog' => $maxBacklog, 'max_age_seconds' => $maxAge],
+            'capabilities' => $result['capabilities'],
+            'failed_jobs' => $result['failed_jobs'],
+            'failed_state' => $result['failed_state'],
+            'thresholds' => $result['thresholds'],
         ];
     }
 
     /**
+     * Worker liveness comes from the heartbeat written by the real process,
+     * never from `reserved=0`: an empty queue is identical with a healthy
+     * worker and with no worker at all.
+     *
      * @return array<string, mixed>
      */
-    private function workerCheck(QueueInspector $inspector): array
+    private function workerCheck(WorkerHealth $health): array
     {
-        $workers = [];
-        $degraded = false;
-
-        foreach ((array) config('queue.monitoring.queues', []) as $queue) {
-            try {
-                $reserved = $inspector->reservedSize((string) $queue);
-                $workers[] = ['name' => (string) $queue, 'reserved' => $reserved];
-            } catch (Throwable) {
-                $degraded = true;
-                $workers[] = ['name' => (string) $queue, 'reserved' => null];
-            }
-        }
+        $groups = $health->inspect();
+        $state = $health->overallState($groups);
 
         return [
-            'state' => $degraded ? 'unknown' : 'connected',
+            'state' => $state,
             'label' => 'Workers',
-            'detail' => $degraded
-                ? 'No se pudo leer el estado reservado de todas las colas.'
-                : 'Reservados por cola. Un valor en cero no prueba que un worker esté vivo.',
-            'queues' => $workers,
+            'detail' => match ($state) {
+                QueueAssessment::STATE_VERIFIED => 'Todos los grupos de workers registran actividad reciente.',
+                QueueAssessment::STATE_DEGRADED => 'Algún grupo de workers está detenido o superó su ventana de actividad.',
+                default => 'No hay latidos suficientes para confirmar que los workers estén vivos.',
+            },
+            'groups' => array_values($groups),
         ];
     }
 

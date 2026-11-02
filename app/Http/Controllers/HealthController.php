@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Services\Ops\QueueInspector;
+use App\Services\Ops\QueueAssessment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
@@ -73,14 +73,18 @@ final class HealthController extends Controller
      * waiting longer than the configured age is not, even though its backlog
      * is short.
      */
-    public function readiness(QueueInspector $inspector): JsonResponse
+    public function readiness(QueueAssessment $assessment): JsonResponse
     {
-        $queues = $this->queues($inspector);
+        $result = $assessment->inspect();
+        $coreState = $assessment->coreState($result);
 
         $checks = [
             'database' => $this->check(static fn (): bool => DB::select('select 1') !== []),
             'redis' => $this->check(static fn (): bool => Redis::connection()->ping() !== null),
-            'queues' => $queues['ok'],
+            // Only the central administrative queues decide readiness. A
+            // backlog in AI, imports, notifications or automations is reported
+            // as a degraded capability, not as a platform-wide outage.
+            'queues' => $coreState === QueueAssessment::STATE_VERIFIED,
         ];
 
         $healthy = ! in_array(false, $checks, true);
@@ -88,6 +92,8 @@ final class HealthController extends Controller
         return response()->json([
             'status' => $healthy ? 'ready' : 'not_ready',
             'checks' => $checks,
+            // States only: no queue depth, age or job identifiers.
+            'capabilities' => $this->capabilityStates($result),
         ], $healthy ? 200 : 503);
     }
 
@@ -98,80 +104,41 @@ final class HealthController extends Controller
      * of each queue, the age of its oldest job, the failed jobs and the
      * thresholds they are judged against.
      */
-    public function operations(QueueInspector $inspector): JsonResponse
+    public function operations(QueueAssessment $assessment): JsonResponse
     {
-        $queues = $this->queues($inspector);
-
-        $healthy = $queues['ok'];
+        $result = $assessment->inspect();
+        $coreState = $assessment->coreState($result);
+        $healthy = $coreState === QueueAssessment::STATE_VERIFIED;
 
         return response()->json([
             'status' => $healthy ? 'ready' : 'not_ready',
-            'queues' => $queues['queues'],
-            'failed_jobs' => $queues['failed_jobs'],
-            'thresholds' => $queues['thresholds'],
+            // A secondary queue can be degraded while the central operations
+            // remain ready; `overall_state` says so without changing `status`.
+            'overall_state' => $result['state'],
+            'queues' => $result['queues'],
+            'capabilities' => $result['capabilities'],
+            'failed_jobs' => $result['failed_jobs'],
+            'failed_state' => $result['failed_state'],
+            'thresholds' => $result['thresholds'],
         ], $healthy ? 200 : 503);
     }
 
     /**
-     * @return array{ok: bool, queues: array<string, array<string, mixed>>, failed_jobs: int|null, thresholds: array<string, int>}
+     * @param  array<string, mixed>  $assessment
+     * @return array<string, array{state: string, critical: bool}>
      */
-    private function queues(QueueInspector $inspector): array
+    private function capabilityStates(array $assessment): array
     {
-        $maxBacklog = (int) config('queue.monitoring.max_backlog', 1000);
-        $maxAge = (int) config('queue.monitoring.max_age_seconds', 300);
-        $maxFailed = (int) config('queue.monitoring.max_failed', 0);
+        $states = [];
 
-        $queues = [];
-        $ok = true;
-
-        foreach ((array) config('queue.monitoring.queues', []) as $queue) {
-            $queue = (string) $queue;
-
-            try {
-                $pending = $inspector->pendingSize($queue);
-                $delayed = $inspector->delayedSize($queue);
-                $reserved = $inspector->reservedSize($queue);
-                $oldest = $inspector->oldestPendingSeconds($queue);
-            } catch (Throwable) {
-                $queues[$queue] = ['error' => 'The queue could not be inspected.'];
-                $ok = false;
-
-                continue;
-            }
-
-            $overBacklog = $pending > $maxBacklog;
-            $overAge = $oldest !== null && $oldest > $maxAge;
-
-            if ($overBacklog || $overAge) {
-                $ok = false;
-            }
-
-            $queues[$queue] = [
-                'pending' => $pending,
-                'delayed' => $delayed,
-                'reserved' => $reserved,
-                'oldest_pending_seconds' => $oldest,
-                'over_backlog' => $overBacklog,
-                'over_age' => $overAge,
+        foreach ((array) ($assessment['capabilities'] ?? []) as $key => $capability) {
+            $states[(string) $key] = [
+                'state' => (string) ($capability['state'] ?? QueueAssessment::STATE_UNKNOWN),
+                'critical' => (bool) ($capability['critical'] ?? false),
             ];
         }
 
-        $failed = $inspector->failedCount();
-
-        if ($failed !== null && $failed > $maxFailed) {
-            $ok = false;
-        }
-
-        return [
-            'ok' => $ok,
-            'queues' => $queues,
-            'failed_jobs' => $failed,
-            'thresholds' => [
-                'max_backlog' => $maxBacklog,
-                'max_age_seconds' => $maxAge,
-                'max_failed' => $maxFailed,
-            ],
-        ];
+        return $states;
     }
 
     /**

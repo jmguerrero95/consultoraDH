@@ -453,6 +453,14 @@ antiguo o `failed_jobs` superan los umbrales de `.env`
 (`QUEUE_MAX_BACKLOG`, `QUEUE_MAX_AGE_SECONDS`, `QUEUE_MAX_FAILED`). Es el
 comando que debe ejecutar la monitorización externa.
 
+Los workers no se deducen de una cola vacía: cada proceso `queue:work` escribe
+un latido (`idle`/`busy`) en la caché bajo su `QUEUE_WORKER_GROUP`. La pantalla
+`/settings/system-status` muestra, por grupo, estado (`verified`, `unavailable`,
+`unknown`), última actividad, trabajo en ejecución y pendientes. Un latido
+vencido significa que el proceso dejó de responder; un trabajo largo dentro del
+timeout de su grupo sigue siendo `verified`. Si Redis no responde, el estado es
+`unknown`, nunca sano. Ver `docs/ARCHITECTURE.md` §9.1–9.3.
+
 Para despachar un trabajo desde código:
 
 ```php

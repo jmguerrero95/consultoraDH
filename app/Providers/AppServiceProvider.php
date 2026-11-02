@@ -9,6 +9,7 @@ use App\Domain\Audit\Listeners\RecordAuditEvent;
 use App\Domain\Support\Events\SupportSlaEventEmitted;
 use App\Domain\Support\Listeners\EscalateSupportSla;
 use App\Listeners\BroadcastNotificationState;
+use App\Listeners\RecordWorkerHeartbeat;
 use App\Services\Ai\AiOutboundContext;
 use App\Services\Ai\AiPrivacyGate;
 use App\Services\Ai\AiToolDeadline;
@@ -42,6 +43,12 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Notifications\Events\NotificationSent;
+use Illuminate\Queue\Events\JobExceptionOccurred;
+use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\JobReleased;
+use Illuminate\Queue\Events\Looping;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
@@ -311,6 +318,16 @@ final class AppServiceProvider extends ServiceProvider
         Event::listen(SupportSlaEventEmitted::class, EscalateSupportSla::class);
         // NOTIF-03: one signal per stored inbox row, whatever produced it.
         Event::listen(NotificationSent::class, BroadcastNotificationState::class);
+
+        // OBS-01: worker liveness comes from the real queue process. The
+        // listener resolves its group from QUEUE_WORKER_GROUP; in the web
+        // process that value is empty and the recorder is a no-op.
+        Event::listen(Looping::class, [RecordWorkerHeartbeat::class, 'looping']);
+        Event::listen(JobProcessing::class, [RecordWorkerHeartbeat::class, 'processing']);
+        Event::listen(JobProcessed::class, [RecordWorkerHeartbeat::class, 'processed']);
+        Event::listen(JobFailed::class, [RecordWorkerHeartbeat::class, 'failed']);
+        Event::listen(JobReleased::class, [RecordWorkerHeartbeat::class, 'released']);
+        Event::listen(JobExceptionOccurred::class, [RecordWorkerHeartbeat::class, 'exceptionOccurred']);
     }
 
     /**

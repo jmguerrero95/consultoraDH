@@ -17,6 +17,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Worker Group
+    |--------------------------------------------------------------------------
+    |
+    | The group a real `queue:work` process belongs to. Each compose service
+    | sets this explicitly (`interactive`, `imports`, `ai`, `automations`), so
+    | the heartbeat never has to guess from the command line. It is empty in
+    | web and scheduler processes, where no worker heartbeat must be written.
+    |
+    */
+
+    'worker_group' => env('QUEUE_WORKER_GROUP'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Queue Connections
     |--------------------------------------------------------------------------
     |
@@ -123,6 +137,88 @@ return [
         'max_backlog' => (int) env('QUEUE_MAX_BACKLOG', 1000),
         'max_age_seconds' => (int) env('QUEUE_MAX_AGE_SECONDS', 300),
         'max_failed' => (int) env('QUEUE_MAX_FAILED', 0),
+
+        /*
+        | A queue is a capability, not the whole platform. `operations` is the
+        | central administrative work; the rest can degrade without rejecting
+        | HTTP requests for clients, portfolio or payments. A monitored queue
+        | that is not mapped here is treated as `operations`, conservatively.
+        */
+        'capabilities' => [
+            'operations' => [
+                'label' => 'Operaciones',
+                'critical' => true,
+                'queues' => ['default', 'support'],
+            ],
+            'notifications' => [
+                'label' => 'Notificaciones',
+                'critical' => false,
+                'queues' => ['notifications'],
+            ],
+            'imports' => [
+                'label' => 'Importaciones',
+                'critical' => false,
+                'queues' => ['imports'],
+            ],
+            'ai' => [
+                'label' => 'IA',
+                'critical' => false,
+                'queues' => ['ai-tasks'],
+            ],
+            'automations' => [
+                'label' => 'Automatizaciones',
+                'critical' => false,
+                'queues' => ['automations'],
+            ],
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Worker Groups and Heartbeats
+    |--------------------------------------------------------------------------
+    |
+    | The timeouts mirror each compose worker command. A busy heartbeat is
+    | judged against its group's own timeout plus a margin, so a legitimate
+    | long import is not reported as a dead worker. `retry_after` (900 s) stays
+    | above the largest timeout (imports, 630 s).
+    |
+    */
+
+    'worker_groups' => [
+        'interactive' => [
+            'label' => 'General',
+            'queues' => ['default', 'support', 'notifications'],
+            'timeout_seconds' => 180,
+        ],
+        'imports' => [
+            'label' => 'Importaciones',
+            'queues' => ['imports'],
+            'timeout_seconds' => 630,
+        ],
+        'ai' => [
+            'label' => 'IA',
+            'queues' => ['ai-tasks'],
+            'timeout_seconds' => 330,
+        ],
+        'automations' => [
+            'label' => 'Automatizaciones',
+            'queues' => ['automations'],
+            'timeout_seconds' => 180,
+        ],
+    ],
+
+    'heartbeat' => [
+        // Minimum interval between idle renewals, so polling does not write
+        // Redis on every loop iteration.
+        'renew_seconds' => (int) env('QUEUE_HEARTBEAT_RENEW_SECONDS', 10),
+        // An idle worker that has not looped for this long is not responding.
+        'idle_stale_seconds' => (int) env('QUEUE_HEARTBEAT_IDLE_STALE_SECONDS', 90),
+        // Extra allowance on top of the group timeout for a running job.
+        'busy_margin_seconds' => (int) env('QUEUE_HEARTBEAT_BUSY_MARGIN_SECONDS', 60),
+        // Signals expire by themselves, so a killed process cannot leave a
+        // healthy-looking heartbeat for ever. Covers the largest timeout.
+        'ttl_seconds' => (int) env('QUEUE_HEARTBEAT_TTL_SECONDS', 900),
     ],
 
     /*

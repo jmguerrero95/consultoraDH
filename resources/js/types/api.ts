@@ -126,7 +126,23 @@ export type SystemCheckState =
     | 'connected'
     | 'configured'
     | 'degraded'
+    | 'unavailable'
     | 'unknown';
+
+export interface WorkerGroupStatus {
+    group: string;
+    label: string;
+    queues: string[];
+    timeout_seconds: number;
+    state: SystemCheckState;
+    activity: 'idle' | 'busy' | 'unknown';
+    detail: string;
+    last_heartbeat: string | null;
+    age_seconds: number | null;
+    job: string | null;
+    job_started_at: string | null;
+    job_age_seconds: number | null;
+}
 
 export interface SystemCheck {
     state: SystemCheckState;
@@ -134,6 +150,7 @@ export interface SystemCheck {
     detail: string;
     latency_ms?: number | null;
     queues?: Record<string, unknown>[];
+    groups?: WorkerGroupStatus[];
     configured?: boolean;
     source?: string;
     [key: string]: unknown;

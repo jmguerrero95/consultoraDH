@@ -74,49 +74,59 @@ final class QueueInspector
     /**
      * The age in seconds of the oldest job still waiting to be picked up.
      *
-     * Null when the queue holds nothing, or when the connection cannot be
-     * inspected: the caller then has no age to compare, which is not the same
-     * as an age of zero.
+     * Null means exactly one thing: the queue holds no pending job. A read
+     * failure is not an empty queue, so it is reported as a
+     * {@see QueueInspectionException} instead of a healthy-looking `null`.
+     * Callers that need to distinguish the two must let the exception surface
+     * (or catch it explicitly), never treat both as "nothing to measure".
      */
     public function oldestPendingSeconds(string $queue): ?int
     {
-        $connection = Queue::connection($this->connectionName());
-
         try {
-            if ($connection instanceof RedisQueue) {
-                $payload = $connection->getConnection()->lindex($connection->getQueue($queue), 0);
-
-                if (! is_string($payload)) {
-                    return null;
-                }
-
-                $decoded = json_decode($payload, true);
-                $createdAt = is_array($decoded) ? ($decoded['createdAt'] ?? null) : null;
-
-                return is_numeric($createdAt)
-                    ? max(0, now()->getTimestamp() - (int) $createdAt)
-                    : null;
-            }
-
-            if ($connection instanceof DatabaseQueue) {
-                $database = config("queue.connections.{$this->connectionName()}.connection") ?: config('database.default');
-                $table = (string) config("queue.connections.{$this->connectionName()}.table", 'jobs');
-
-                $createdAt = DB::connection($database)
-                    ->table($table)
-                    ->where('queue', $queue)
-                    ->whereNull('reserved_at')
-                    ->min('created_at');
-
-                return is_numeric($createdAt)
-                    ? max(0, now()->getTimestamp() - (int) $createdAt)
-                    : null;
-            }
-        } catch (Throwable) {
-            return null;
+            $connection = Queue::connection($this->connectionName());
+        } catch (Throwable $e) {
+            throw new QueueInspectionException('The queue connection could not be resolved.', 0, $e);
         }
 
-        return null;
+        if ($connection instanceof RedisQueue) {
+            $payload = $connection->getConnection()->lindex($connection->getQueue($queue), 0);
+
+            if (! is_string($payload)) {
+                return null;
+            }
+
+            $decoded = json_decode($payload, true);
+            $createdAt = is_array($decoded) ? ($decoded['createdAt'] ?? null) : null;
+
+            if (! is_numeric($createdAt)) {
+                throw new QueueInspectionException('The oldest pending job has no readable creation time.');
+            }
+
+            return max(0, now()->getTimestamp() - (int) $createdAt);
+        }
+
+        if ($connection instanceof DatabaseQueue) {
+            $database = config("queue.connections.{$this->connectionName()}.connection") ?: config('database.default');
+            $table = (string) config("queue.connections.{$this->connectionName()}.table", 'jobs');
+
+            $createdAt = DB::connection($database)
+                ->table($table)
+                ->where('queue', $queue)
+                ->whereNull('reserved_at')
+                ->min('created_at');
+
+            if ($createdAt === null) {
+                return null;
+            }
+
+            if (! is_numeric($createdAt)) {
+                throw new QueueInspectionException('The oldest pending job has no readable creation time.');
+            }
+
+            return max(0, now()->getTimestamp() - (int) $createdAt);
+        }
+
+        throw new QueueInspectionException('The configured queue driver has no supported inspection.');
     }
 
     /**

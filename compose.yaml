@@ -139,6 +139,10 @@ services:
     container_name: consultora-dh-queue
     restart: unless-stopped
     working_dir: /var/www/html
+    # OBS-01: explicit worker group for the heartbeat. The processing command
+    # below is unchanged.
+    environment:
+      QUEUE_WORKER_GROUP: interactive
     # Interactive work that must not wait behind imports or AI generation.
     command: ["php", "artisan", "queue:work", "--queue=default,support,notifications", "--sleep=3", "--tries=3", "--timeout=180", "--max-time=3600", "--verbose"]
     stop_grace_period: 200s
@@ -164,6 +168,8 @@ services:
     container_name: consultora-dh-queue-imports
     restart: unless-stopped
     working_dir: /var/www/html
+    environment:
+      QUEUE_WORKER_GROUP: imports
     command: ["php", "artisan", "queue:work", "--queue=imports", "--sleep=3", "--tries=3", "--timeout=630", "--max-time=3600", "--verbose"]
     # Give the worker time to finish the current import on a restart instead
     # of killing it in the middle of the apply phase.
@@ -187,6 +193,8 @@ services:
     container_name: consultora-dh-queue-ai
     restart: unless-stopped
     working_dir: /var/www/html
+    environment:
+      QUEUE_WORKER_GROUP: ai
     command: ["php", "artisan", "queue:work", "--queue=ai-tasks", "--sleep=1", "--tries=3", "--timeout=330", "--max-time=3600", "--verbose"]
     stop_grace_period: 340s
     volumes:
@@ -209,6 +217,8 @@ services:
     container_name: consultora-dh-queue-automations
     restart: unless-stopped
     working_dir: /var/www/html
+    environment:
+      QUEUE_WORKER_GROUP: automations
     command: ["php", "artisan", "queue:work", "--queue=automations", "--sleep=3", "--tries=3", "--timeout=180", "--max-time=3600", "--verbose"]
     stop_grace_period: 200s
     volumes:
