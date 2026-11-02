@@ -42,14 +42,37 @@ final class WorkerHeartbeat
 {
     public const CACHE_PREFIX = 'ops:worker-heartbeat:';
 
+    /**
+     * The variable each compose worker service sets for itself.
+     *
+     * It is read from the real process environment at run time. Reading it
+     * from `config('queue.worker_group')` looks equivalent and is not: with
+     * `config:cache` the value is frozen at build time, and every container
+     * shares the same cached file. The workers then keep processing jobs while
+     * their heartbeats are written under a stale or empty group — or not
+     * written at all.
+     */
+    public const GROUP_ENV = 'QUEUE_WORKER_GROUP';
+
     public function __construct(private readonly ?string $group = null) {}
 
     public function group(): ?string
     {
-        $group = $this->group ?? config('queue.worker_group');
+        // An explicitly injected group wins (tests and controlled callers).
+        // Otherwise the process environment is the only per-container source.
+        $group = $this->group ?? getenv(self::GROUP_ENV);
         $group = is_string($group) ? trim($group) : '';
 
-        return $group !== '' ? $group : null;
+        if ($group === '') {
+            // The web process and the scheduler have no worker group and
+            // must not impersonate one.
+            return null;
+        }
+
+        // A group that is not declared in configuration is a typo or a stale
+        // variable, not evidence of a worker. Publishing under it would create
+        // a heartbeat nobody reads, so it is refused instead.
+        return $this->isDeclared($group) ? $group : null;
     }
 
     public function recordIdle(bool $force = false): void
@@ -75,6 +98,20 @@ final class WorkerHeartbeat
             // A cache failure is "no evidence", never a healthy signal.
             return null;
         }
+    }
+
+    /**
+     * Whether the group is one the application declared.
+     *
+     * `queue.worker_groups` is static configuration (its keys come from
+     * `config/queue.php`, not from the environment), so it survives
+     * `config:cache` intact. It is the list a group must belong to.
+     */
+    private function isDeclared(string $group): bool
+    {
+        $groups = config('queue.worker_groups', []);
+
+        return is_array($groups) && array_key_exists($group, $groups);
     }
 
     private function write(string $state, ?string $job, ?int $jobStartedAt, bool $force): void

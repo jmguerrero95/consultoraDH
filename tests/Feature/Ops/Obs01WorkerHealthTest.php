@@ -50,7 +50,13 @@ final class Obs01ProbeJob implements ShouldQueue
 
 beforeEach(function (): void {
     // The array cache is the test cache store; the heartbeat writes there.
-    config(['queue.worker_group' => 'interactive']);
+    // The worker group comes from the process environment, not from config,
+    // so no test may inherit one by accident.
+    putenv('QUEUE_WORKER_GROUP');
+});
+
+afterEach(function (): void {
+    putenv('QUEUE_WORKER_GROUP');
 });
 
 it('reports every healthy queue as verified and an empty queue as a measurement', function (): void {
@@ -260,17 +266,31 @@ it('runs the job exactly once when the heartbeat cannot be published', function 
     Cache::swap($throwing);
     config(['queue.default' => 'sync']);
 
-    Obs01ProbeJob::$runs = 0;
-    Obs01ProbeJob::dispatch();
+    // The listener resolves the group from the real process environment. The
+    // worker role is what makes it attempt (and fail) to publish, so the job
+    // is exercised with a heartbeat that cannot be written.
+    $previous = getenv('QUEUE_WORKER_GROUP');
+    putenv('QUEUE_WORKER_GROUP=interactive');
 
-    expect(Obs01ProbeJob::$runs)->toBe(1);
+    try {
+        Obs01ProbeJob::$runs = 0;
+        Obs01ProbeJob::dispatch();
 
-    // The listener itself never throws, whatever the cache does.
-    $listener = new RecordWorkerHeartbeat(new WorkerHeartbeat('interactive'));
-    $listener->looping(new Looping('sync', 'default'));
+        expect(Obs01ProbeJob::$runs)->toBe(1);
 
-    // And the job was not run a second time by the failed signal.
-    expect(Obs01ProbeJob::$runs)->toBe(1);
+        // The listener itself never throws, whatever the cache does.
+        $listener = new RecordWorkerHeartbeat(new WorkerHeartbeat);
+        $listener->looping(new Looping('sync', 'default'));
+
+        // And the job was not run a second time by the failed signal.
+        expect(Obs01ProbeJob::$runs)->toBe(1);
+    } finally {
+        if ($previous === false) {
+            putenv('QUEUE_WORKER_GROUP');
+        } else {
+            putenv('QUEUE_WORKER_GROUP='.$previous);
+        }
+    }
 });
 
 it('registers the heartbeat listener for the queue lifecycle events', function (): void {
