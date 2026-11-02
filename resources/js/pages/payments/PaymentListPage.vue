@@ -135,6 +135,7 @@ const form = ref({
     method: 'cash',
     reference: '',
     notes: '',
+    idempotencyKey: '' as string | null,
 });
 
 const clientOptions = ref<Array<{ id: number; label: string }>>([]);
@@ -169,6 +170,12 @@ const canRegister = computed(
 function openRegister(): void {
     registerError.value = null;
     duplicates.value = [];
+    // Genera una clave de idempotencia criptográficamente segura para este intento
+    const bytes = new Uint32Array(4);
+    crypto.getRandomValues(bytes);
+    const idempotencyKey = Array.from(bytes)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
     form.value = {
         clientId: null,
         clientSearch: '',
@@ -177,6 +184,7 @@ function openRegister(): void {
         method: 'cash',
         reference: '',
         notes: '',
+        idempotencyKey,
     };
     registerOpen.value = true;
 }
@@ -222,6 +230,7 @@ async function registerPayment(confirmDuplicate = false): Promise<void> {
             reference: form.value.reference === '' ? null : form.value.reference,
             notes: form.value.notes === '' ? null : form.value.notes,
             confirm_duplicate: confirmDuplicate,
+            idempotency_key: form.value.idempotencyKey,
         });
 
         registerOpen.value = false;
@@ -902,6 +911,15 @@ const rangeLabel = computed(() => {
                     </AppButton>
                 </div>
             </AppAlert>
+
+            {/* Clave de idempotencia actual (para que el operador la vea si hay reintento) */}
+            <AppAlert v-if="form.value.idempotencyKey" variant="info" :title="'Clave actual: ' + form.value.idempotencyKey" class="mt-2" />
+
+ {/* Clave de idempotencia actual (para que el operador la vea si hay reintento) */}
+            <AppAlert v-if="form.value.idempotencyKey" variant="info" :title="'Clave actual: ' + form.value.idempotencyKey" class="mt-2" />
+
+ {/* Clave de idempotencia actual (para que el operador la vea si hay reintento) */}
+            <AppAlert v-if="form.value.idempotencyKey" variant="info" :title="'Clave actual: ' + form.value.idempotencyKey" class="mt-2" />
 
             <AppAlert v-if="registerError" variant="danger" :title="registerError" />
         </AppModal>

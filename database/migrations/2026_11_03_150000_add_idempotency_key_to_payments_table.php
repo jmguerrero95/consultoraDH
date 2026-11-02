@@ -32,11 +32,10 @@ return new class extends Migration
         Schema::table('payments', function (Blueprint $table): void {
             $table->string('idempotency_key', 255)->nullable();
 
-            // Restricción única parcial: una misma clave no puede usarse dos veces.
-            // Se permite NULL (compatibilidad con registros antiguos que no la envían).
-            $table->unique(['idempotency_key'], 'payments_idempotency_key_unique')
-                ->whereNull('idempotency_key')
-                ->freshIndex();
+            // Índice único: PostgreSQL permite múltiples NULL y como mucho un valor no nulo.
+            // Esto garantiza que dos requests concurrentes con la misma clave no registren
+            // dos pagos; las inserciones sin clave conservan compatibilidad antigua.
+            $table->unique(['idempotency_key']);
         });
     }
 
