@@ -17,6 +17,10 @@ use Illuminate\Foundation\Http\FormRequest;
  * `confirm_duplicate` is the answer to the duplicate warning, not a bypass of it. The
  * server always reports a possible duplicate; this only records that a human looked
  * at it and said yes.
+ *
+ * `idempotency_key` is optional. When present and already used, the request returns
+ * the originally registered payment without creating a duplicate. When present with
+ * different data it returns 409. When absent the flow is unchanged.
  */
 final class StorePaymentRequest extends FormRequest
 {
@@ -38,6 +42,7 @@ final class StorePaymentRequest extends FormRequest
             'reference' => ['nullable', 'string', 'max:120'],
             'notes' => ['nullable', 'string', 'max:2000'],
             'confirm_duplicate' => ['sometimes', 'boolean'],
+            'idempotency_key' => ['nullable', 'string', 'max:255'],
         ];
     }
 
@@ -55,6 +60,11 @@ final class StorePaymentRequest extends FormRequest
             'received_on.required' => 'Debe indicar la fecha en que se recibió el pago.',
             'received_on.date_format' => 'La fecha de recepción debe escribirse como AAAA-MM-DD.',
             'method.required' => 'Debe indicar el método de pago.',
+            'reference.max' => 'La referencia no debe superar los 120 caracteres.',
+            'notes.max' => 'Las notas no deben superar los 2000 caracteres.',
+            'confirm_duplicate.boolean' => 'El campo confirm_duplicate debe ser verdadero o falso.',
+            'idempotency_key.string' => 'La clave de idempotencia debe ser un texto.',
+            'idempotency_key.max' => 'La clave de idempotencia no debe superar los 255 caracteres.',
         ];
     }
 
@@ -69,6 +79,9 @@ final class StorePaymentRequest extends FormRequest
             'received_on' => 'fecha de recepción',
             'method' => 'método de pago',
             'reference' => 'referencia',
+            'notes' => 'notas',
+            'confirm_duplicate' => 'confirmación de pago duplicado',
+            'idempotency_key' => 'clave de idempotencia',
         ];
     }
 }

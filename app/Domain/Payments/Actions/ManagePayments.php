@@ -74,10 +74,12 @@ final class ManagePayments
      * touches nothing else.
      *
      * @param  array<string, mixed>  $attributes
+     * @param  string|null  $idempotencyKey  clave opcional para idempotencia.
+     *                                       Si se proporciona y ya existe, no se crea otro pago.
      *
      * @throws PaymentRejected
      */
-    public function register(Client $client, array $attributes, User $actor): Payment
+    public function register(Client $client, array $attributes, User $actor, ?string $idempotencyKey = null): Payment
     {
         $amount = $this->requireAmount($attributes['amount_cop'] ?? null);
         $receivedOn = $this->requireDate($attributes['received_on'] ?? null);
@@ -89,8 +91,24 @@ final class ManagePayments
         $notes = $attributes['notes'] ?? null;
         $notes = is_string($notes) && trim($notes) !== '' ? trim($notes) : null;
 
-        return DB::transaction(function () use ($client, $amount, $receivedOn, $method, $reference, $notes, $actor): Payment {
+        return DB::transaction(function () use ($client, $amount, $receivedOn, $method, $reference, $notes, $actor, $idempotencyKey): Payment {
             $this->lockClient($client);
+
+            // Si viene una clave de idempotencia, verificar que no exista ya un pago
+            // registrado con esa clave. La restricción única en la base de datos
+            // garantiza atomicidad incluso con concurrencia.
+            if (is_string($idempotencyKey) && trim($idempotencyKey) !== '') {
+                $existing = Payment::query()
+                    ->where('idempotency_key', $idempotencyKey)
+                    ->whereNull('voided_at')
+                    ->first();
+
+                if ($existing !== null) {
+                    // El pago ya fue registrado con esta clave; devolverlo tal cual.
+                    // No se crea ni se modifica nada.
+                    return $existing->refresh();
+                }
+            }
 
             $payment = Payment::query()->create([
                 'client_id' => $client->id,
@@ -100,6 +118,7 @@ final class ManagePayments
                 'reference' => $reference,
                 'notes' => $notes,
                 'created_by' => $actor->id,
+                'idempotency_key' => is_string($idempotencyKey) && trim($idempotencyKey) !== '' ? $idempotencyKey : null,
             ]);
 
             event(new PaymentCreated($payment, $actor));

@@ -52,6 +52,7 @@ use Illuminate\Support\Carbon;
     'voided_at',
     'voided_by',
     'void_reason',
+    'idempotency_key',
 ])]
 class Payment extends Model
 {
