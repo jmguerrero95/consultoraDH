@@ -193,7 +193,7 @@ interface ApiClient {
         payments: {
             list(params: ListParams & { client_id?: number | null; state?: string | null; method?: string | null; date_from?: string | null; date_to?: string | null; requires_reconciliation?: boolean }): Promise<PaymentListPayload>;
             show(id: number): Promise<{ payment: PaymentSummary }>;
-            register(payload: { client_id: number; amount_cop: number; received_on: string; method: string; reference?: string | null; notes?: string | null; confirm_duplicate?: boolean; idempotency_key?: string }): Promise<{ message: string; payment: PaymentSummary }>;
+            register(payload: { client_id: number; amount_cop: number; received_on: string; method: string; reference?: string | null; notes?: string | null; confirm_duplicate?: boolean; idempotency_key: string }): Promise<{ message: string; payment: PaymentSummary }>;
             allocate(paymentId: number, payload: { obligation_id: number; amount_cop: number }): Promise<{ message: string; allocation: unknown; payment: PaymentSummary }>;
             allocatable(clientId: number): Promise<AllocatableResponse>;
             vocabulary(): Promise<PaymentVocabularyPayload>;

@@ -12,6 +12,7 @@ use App\Domain\Payments\Events\PaymentAutoAllocated;
 use App\Domain\Payments\Events\PaymentCreated;
 use App\Domain\Payments\Events\PaymentVoided;
 use App\Domain\Payments\PaymentMethod;
+use App\Domain\Payments\PaymentRegistration;
 use App\Domain\Payments\PaymentRejected;
 use App\Models\Client;
 use App\Models\MonthlyObligation;
@@ -19,6 +20,7 @@ use App\Models\ObligationAdjustment;
 use App\Models\Payment;
 use App\Models\PaymentAllocation;
 use App\Models\User;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -69,9 +71,8 @@ final class ManagePayments
     /**
      * Register money received.
      *
-     * The lock is the client row, and everything about this payment belongs to that
-     * client, so it is the natural serialisation point even though the insert itself
-     * touches nothing else.
+     * Kept for callers that only need the payment. Idempotency outcomes that the
+     * HTTP layer has to distinguish are available through `registerIdempotent()`.
      *
      * @param  array<string, mixed>  $attributes
      * @param  string|null  $idempotencyKey  clave opcional para idempotencia.
@@ -81,50 +82,115 @@ final class ManagePayments
      */
     public function register(Client $client, array $attributes, User $actor, ?string $idempotencyKey = null): Payment
     {
+        $outcome = $this->registerIdempotent($client, $attributes, $actor, $idempotencyKey);
+
+        if ($outcome->conflict) {
+            throw PaymentRejected::idempotencyKeyConflict();
+        }
+
+        if ($outcome->voided) {
+            throw PaymentRejected::idempotencyKeyVoided();
+        }
+
+        return $outcome->payment;
+    }
+
+    /**
+     * Register money received, telling a first registration from a recovery.
+     *
+     * ## The identity check happens after the lock, inside the transaction
+     *
+     * A key that is already in use must return the original payment only when
+     * the request describes the same payment. That comparison cannot be made
+     * before the transaction: the row it compares against can be committed by a
+     * concurrent request between the read and the insert. It is therefore made
+     * here, after `lockClient()`, against the row as it exists at that moment.
+     *
+     * `confirm_duplicate` is not part of the identity. It changes while a person
+     * answers the duplicate warning and says nothing about which payment this is.
+     * Reference and notes are compared after trimming and folding empty text to
+     * `null`, which is the same normalisation used when they are stored.
+     *
+     * ## A voided payment still owns its key
+     *
+     * A voided payment is not deleted: it remains the record that this key was
+     * used. Reusing the key would register the same money twice while the first
+     * row still exists, so the key is answered explicitly instead.
+     *
+     * ## The unique index is the last word
+     *
+     * Two requests for different clients do not contend on the client lock, so
+     * both can miss the lookup and reach the insert. PostgreSQL lets exactly one
+     * of them through and raises `23505` on the other. That violation is caught
+     * **outside** the failed transaction, only when it names this key's
+     * constraint, and the row is read again to produce the same controlled
+     * outcome. Any other database error is rethrown: turning every SQL error
+     * into a successful replay would hide real failures.
+     *
+     * @param  array<string, mixed>  $attributes
+     *
+     * @throws PaymentRejected
+     */
+    public function registerIdempotent(Client $client, array $attributes, User $actor, ?string $idempotencyKey = null): PaymentRegistration
+    {
         $amount = $this->requireAmount($attributes['amount_cop'] ?? null);
         $receivedOn = $this->requireDate($attributes['received_on'] ?? null);
         $method = $this->requireMethod($attributes['method'] ?? null);
 
-        $reference = $attributes['reference'] ?? null;
-        $reference = is_string($reference) && trim($reference) !== '' ? trim($reference) : null;
+        $reference = $this->normaliseText($attributes['reference'] ?? null);
+        $notes = $this->normaliseText($attributes['notes'] ?? null);
+        $key = $this->normaliseText($idempotencyKey);
 
-        $notes = $attributes['notes'] ?? null;
-        $notes = is_string($notes) && trim($notes) !== '' ? trim($notes) : null;
+        try {
+            return DB::transaction(function () use ($client, $amount, $receivedOn, $method, $reference, $notes, $actor, $key): PaymentRegistration {
+                $this->lockClient($client);
 
-        return DB::transaction(function () use ($client, $amount, $receivedOn, $method, $reference, $notes, $actor, $idempotencyKey): Payment {
-            $this->lockClient($client);
+                if ($key !== null) {
+                    $existing = Payment::query()
+                        ->where('idempotency_key', $key)
+                        ->lockForUpdate()
+                        ->first();
 
-            // Si viene una clave de idempotencia, verificar que no exista ya un pago
-            // registrado con esa clave. La restricción única en la base de datos
-            // garantiza atomicidad incluso con concurrencia.
-            if (is_string($idempotencyKey) && trim($idempotencyKey) !== '') {
-                $existing = Payment::query()
-                    ->where('idempotency_key', $idempotencyKey)
-                    ->whereNull('voided_at')
-                    ->first();
-
-                if ($existing !== null) {
-                    // El pago ya fue registrado con esta clave; devolverlo tal cual.
-                    // No se crea ni se modifica nada.
-                    return $existing->refresh();
+                    if ($existing !== null) {
+                        return $this->resolveExisting($existing, $client, $amount, $receivedOn, $method, $reference, $notes);
+                    }
                 }
+
+                $payment = Payment::query()->create([
+                    'client_id' => $client->id,
+                    'amount_cop' => $amount,
+                    'received_on' => $receivedOn->format('Y-m-d'),
+                    'method' => $method->value,
+                    'reference' => $reference,
+                    'notes' => $notes,
+                    'created_by' => $actor->id,
+                    'idempotency_key' => $key,
+                ]);
+
+                event(new PaymentCreated($payment, $actor));
+
+                return PaymentRegistration::created($payment->refresh());
+            });
+        } catch (QueryException $exception) {
+            if ($key === null || ! $this->isIdempotencyKeyViolation($exception)) {
+                throw $exception;
             }
 
-            $payment = Payment::query()->create([
-                'client_id' => $client->id,
-                'amount_cop' => $amount,
-                'received_on' => $receivedOn->format('Y-m-d'),
-                'method' => $method->value,
-                'reference' => $reference,
-                'notes' => $notes,
-                'created_by' => $actor->id,
-                'idempotency_key' => is_string($idempotencyKey) && trim($idempotencyKey) !== '' ? $idempotencyKey : null,
-            ]);
+            // The other transaction has committed: PostgreSQL waits for the
+            // conflicting insert before reporting the violation. The row is now
+            // visible, and reading it produces the outcome the caller can use.
+            $existing = Payment::query()
+                ->where('idempotency_key', $key)
+                ->first();
 
-            event(new PaymentCreated($payment, $actor));
+            if ($existing === null) {
+                // The violation did not leave a row this key can resolve against.
+                // Do not invent a success.
+                throw $exception;
+            }
 
-            return $payment->refresh();
-        });
+            return $this->resolveExisting($existing, $client, $amount, $receivedOn, $method, $reference, $notes);
+        }
     }
 
     /**
@@ -438,6 +504,83 @@ final class ManagePayments
             'possible_duplicate' => $matches !== [],
             'matches' => $matches,
         ];
+    }
+
+    /**
+     * Decide what an already-used key means for this request.
+     */
+    private function resolveExisting(
+        Payment $existing,
+        Client $client,
+        int $amount,
+        Carbon $receivedOn,
+        PaymentMethod $method,
+        ?string $reference,
+        ?string $notes,
+    ): PaymentRegistration {
+        if ($existing->isVoided()) {
+            return PaymentRegistration::voided($existing);
+        }
+
+        if ($this->sameIdentity($existing, $client, $amount, $receivedOn, $method, $reference, $notes)) {
+            return PaymentRegistration::replayed($existing);
+        }
+
+        return PaymentRegistration::conflict($existing);
+    }
+
+    /**
+     * Whether the stored payment describes the same money as this request.
+     *
+     * Method and notes are part of the identity because two requests that differ
+     * only in how the money arrived, or in what the operator wrote about it, are
+     * not the same attempt being retried. `confirm_duplicate` is not: it is an
+     * answer, not a fact about the payment.
+     */
+    private function sameIdentity(
+        Payment $existing,
+        Client $client,
+        int $amount,
+        Carbon $receivedOn,
+        PaymentMethod $method,
+        ?string $reference,
+        ?string $notes,
+    ): bool {
+        return $existing->client_id === $client->id
+            && $existing->amount_cop === $amount
+            && $existing->received_on?->format('Y-m-d') === $receivedOn->format('Y-m-d')
+            && $existing->method === $method
+            && $this->normaliseText($existing->reference) === $reference
+            && $this->normaliseText($existing->notes) === $notes;
+    }
+
+    /**
+     * Trim text and treat whitespace-only as absent, the same way it is stored.
+     */
+    private function normaliseText(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $value = trim($value);
+
+        return $value === '' ? null : $value;
+    }
+
+    /**
+     * Whether this is the unique violation of the payment idempotency key.
+     *
+     * The constraint is named by the migration. Matching it is what keeps every
+     * other integrity failure — a foreign key, a check, another unique index —
+     * from being mistaken for an idempotent replay.
+     */
+    private function isIdempotencyKeyViolation(QueryException $exception): bool
+    {
+        $sqlstate = (string) ($exception->errorInfo[0] ?? $exception->getCode());
+
+        return $sqlstate === '23505'
+            && str_contains($exception->getMessage(), 'payments_idempotency_key_unique');
     }
 
     // --- locking --------------------------------------------------------

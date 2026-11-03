@@ -181,67 +181,67 @@ final class PaymentController extends Controller
 
         // --- idempotencia (OBS-03A) ---
         $idempotencyKey = $request->validated('idempotency_key');
+        $idempotencyKey = is_string($idempotencyKey) && trim($idempotencyKey) !== ''
+            ? trim($idempotencyKey)
+            : null;
 
-        if (is_string($idempotencyKey) && trim($idempotencyKey) !== '') {
-            // Busca un pago previo con la misma clave de idempotencia.
-            // La restricción única en la base de datos garantiza atomicidad.
-            $existing = Payment::query()
-                ->where('idempotency_key', $idempotencyKey)
-                ->whereNull('voided_at')
-                ->first();
+        // A key already in use is resolved by the domain under its transaction and
+        // lock, including the case where the original payment was voided. The
+        // duplicate warning is only meaningful for a genuinely new attempt: a retry
+        // would otherwise be refused as a duplicate of the payment it is recovering.
+        $keyInUse = $idempotencyKey !== null
+            && Payment::query()->where('idempotency_key', $idempotencyKey)->exists();
 
-            if ($existing !== null) {
-                // Ya fue registrado con esta clave.
-                if (
-                    $existing->client_id === $client->id
-                    && $existing->amount_cop === $amount
-                    && $existing->received_on->format('Y-m-d') === $receivedOn->format('Y-m-d')
-                    && $existing->reference === $reference
-                ) {
-                    // Mismo datos exactos: devuelve el pago original.
-                    return response()->json([
-                        'message' => sprintf('Se registró un pago de %s pesos.', number_format($existing->amount_cop, 0, ',', '.')),
-                        'payment' => $this->describe($this->loadForDetail($existing), detailed: true),
-                        'unallocated_amount_cop' => $existing->unallocatedAmount(),
-                        'idempotency_key' => $existing->idempotency_key,
-                    ], 200);
-                }
+        if (! $keyInUse) {
+            $warning = $this->payments->duplicateWarning($client, $amount, $receivedOn, $reference);
 
-                // Misma clave pero datos distintos: 409, sin crear registro.
+            if ($warning['possible_duplicate'] && ! $request->boolean('confirm_duplicate')) {
                 return response()->json([
-                    'message' => 'Ya existe un pago registrado con esta clave de idempotencia, pero los datos (cliente, importe, fecha o referencia) son diferentes.',
-                    'code' => 'idempotency_key_conflict',
+                    'message' => 'Ya existe un pago con el mismo cliente, importe, fecha y referencia. '
+                        .'Revíselo y confirme si se trata de un pago distinto.',
+                    'code' => 'possible_duplicate',
+                    'possible_duplicates' => $warning['matches'],
                 ], 409);
             }
-
-            // Clave nueva: continuar con el registro normal.
-        }
-
-        // El warning de duplicado sigue aplicando cuando no hay clave o la clave
-        // es nueva y los datos coinciden con otro registro previo.
-        $warning = $this->payments->duplicateWarning($client, $amount, $receivedOn, $reference);
-
-        if ($warning['possible_duplicate'] && ! $request->boolean('confirm_duplicate')) {
-            return response()->json([
-                'message' => 'Ya existe un pago con el mismo cliente, importe, fecha y referencia. '
-                    .'Revíselo y confirme si se trata de un pago distinto.',
-                'code' => 'possible_duplicate',
-                'possible_duplicates' => $warning['matches'],
-            ], 409);
         }
 
         try {
-            $payment = $this->payments->register($client, $request->validated(), $request->user(), $idempotencyKey);
+            $outcome = $this->payments->registerIdempotent(
+                $client,
+                $request->validated(),
+                $request->user(),
+                $idempotencyKey,
+            );
         } catch (PaymentRejected $e) {
             return $this->rejected($e);
         }
 
+        if ($outcome->conflict) {
+            return response()->json([
+                'message' => 'Ya existe un pago registrado con esta clave de idempotencia, pero los datos '
+                    .'(cliente, importe, fecha, método, referencia o notas) son diferentes.',
+                'code' => 'idempotency_key_conflict',
+                'payment_id' => $outcome->payment->id,
+            ], 409);
+        }
+
+        if ($outcome->voided) {
+            return response()->json([
+                'message' => 'La clave de idempotencia pertenece a un pago anulado. '
+                    .'No se registró un pago nuevo con esa clave.',
+                'code' => 'idempotency_key_voided',
+                'payment_id' => $outcome->payment->id,
+            ], 409);
+        }
+
+        $payment = $outcome->payment;
+
         return response()->json([
             'message' => sprintf('Se registró un pago de %s pesos.', number_format($payment->amount_cop, 0, ',', '.')),
             'payment' => $this->describe($this->loadForDetail($payment), detailed: true),
-            'unallocated_amount_cop' => $payment->amount_cop,
-            'idempotency_key' => $payment->idempotency_key ?? $idempotencyKey,
-        ], 201);
+            'unallocated_amount_cop' => $payment->unallocatedAmount(),
+            'idempotency_key' => $payment->idempotency_key,
+        ], $outcome->created ? 201 : 200);
     }
 
     public function allocate(AllocatePaymentRequest $request, Payment $payment): JsonResponse

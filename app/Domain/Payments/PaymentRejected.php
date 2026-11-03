@@ -145,4 +145,20 @@ final class PaymentRejected extends \RuntimeException
     {
         return new self('El cliente ya no existe.', 'client_not_found');
     }
+
+    public static function idempotencyKeyConflict(): self
+    {
+        return new self(
+            'Ya existe un pago registrado con esta clave de idempotencia, pero los datos son diferentes.',
+            'idempotency_key_conflict',
+        );
+    }
+
+    public static function idempotencyKeyVoided(): self
+    {
+        return new self(
+            'La clave de idempotencia pertenece a un pago anulado. No se registró un pago nuevo.',
+            'idempotency_key_voided',
+        );
+    }
 }

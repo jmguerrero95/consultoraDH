@@ -10,6 +10,7 @@ import { useDebouncedRef } from '@/composables/useDebouncedRef';
 import { fecha, fechaHora, hoy, pesos, pesosDesdeTexto } from '@/composables/useFormatters';
 import { businessApi } from '@/services/api';
 import { ApiError } from '@/services/http';
+import { newIdempotencyKey } from '@/services/idempotency';
 import { useAuthStore } from '@/stores/auth';
 import { reasonIsLongEnough, REASON_MIN_LENGTH_HINT } from '@/validation/reasons';
 
@@ -135,7 +136,7 @@ const form = ref({
     method: 'cash',
     reference: '',
     notes: '',
-    idempotencyKey: '' as string | null,
+    idempotencyKey: '',
 });
 
 const clientOptions = ref<Array<{ id: number; label: string }>>([]);
@@ -170,12 +171,6 @@ const canRegister = computed(
 function openRegister(): void {
     registerError.value = null;
     duplicates.value = [];
-    // Genera una clave de idempotencia criptográficamente segura para este intento
-    const bytes = new Uint32Array(4);
-    crypto.getRandomValues(bytes);
-    const idempotencyKey = Array.from(bytes)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
     form.value = {
         clientId: null,
         clientSearch: '',
@@ -184,10 +179,35 @@ function openRegister(): void {
         method: 'cash',
         reference: '',
         notes: '',
-        idempotencyKey,
+        idempotencyKey: newIdempotencyKey(),
     };
     registerOpen.value = true;
 }
+
+/*
+ * A new key belongs to a new attempt.
+ *
+ * Changing the client, the amount, the date, the method, the reference or the
+ * notes changes which payment is being described, so reusing the previous key
+ * would turn a genuinely different payment into a conflict. The key is not
+ * renewed while a request is in flight: a retry after a timeout must carry the
+ * key the server may already have received.
+ */
+watch(
+    () => [
+        form.value.clientId,
+        form.value.amount,
+        form.value.receivedOn,
+        form.value.method,
+        form.value.reference,
+        form.value.notes,
+    ],
+    () => {
+        if (registerOpen.value && !registerBusy.value) {
+            form.value.idempotencyKey = newIdempotencyKey();
+        }
+    },
+);
 
 /**
  * Fill the client picker.
@@ -213,6 +233,13 @@ watch(() => form.value.clientSearch, () => void searchClients());
 const duplicates = ref<PossibleDuplicate[]>([]);
 
 async function registerPayment(confirmDuplicate = false): Promise<void> {
+    // A second click while the first request is still open would be a second
+    // attempt with the same key. The button is disabled while busy, but the guard
+    // belongs here as well: a keyboard or a duplicate event must not slip through.
+    if (registerBusy.value) {
+        return;
+    }
+
     if (!canRegister.value) {
         registerError.value = 'Complete el cliente, el valor y la fecha.';
         return;
@@ -244,6 +271,16 @@ async function registerPayment(confirmDuplicate = false): Promise<void> {
             const body = cause.payload as { possible_duplicates?: PossibleDuplicate[] } | null;
 
             duplicates.value = body?.possible_duplicates ?? [];
+            return;
+        }
+
+        if (cause instanceof ApiError && cause.isNetworkError) {
+            // The server may have committed the payment even though the response
+            // never arrived. The key stays in the form, so pressing the button
+            // again recovers that payment instead of creating a second one.
+            registerError.value =
+                'No se pudo confirmar la respuesta del servidor. El intento se conserva: '
+                + 'puede reintentar sin registrar el pago dos veces.';
             return;
         }
 
@@ -911,15 +948,6 @@ const rangeLabel = computed(() => {
                     </AppButton>
                 </div>
             </AppAlert>
-
-            {/* Clave de idempotencia actual (para que el operador la vea si hay reintento) */}
-            <AppAlert v-if="form.value.idempotencyKey" variant="info" :title="'Clave actual: ' + form.value.idempotencyKey" class="mt-2" />
-
- {/* Clave de idempotencia actual (para que el operador la vea si hay reintento) */}
-            <AppAlert v-if="form.value.idempotencyKey" variant="info" :title="'Clave actual: ' + form.value.idempotencyKey" class="mt-2" />
-
- {/* Clave de idempotencia actual (para que el operador la vea si hay reintento) */}
-            <AppAlert v-if="form.value.idempotencyKey" variant="info" :title="'Clave actual: ' + form.value.idempotencyKey" class="mt-2" />
 
             <AppAlert v-if="registerError" variant="danger" :title="registerError" />
         </AppModal>
