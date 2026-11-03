@@ -13,6 +13,11 @@ use Illuminate\Foundation\Http\FormRequest;
  * single call would need its own ordering, its own partial-failure behaviour and its
  * own rollback story; three separate calls, each transactional, are easier to reason
  * about and to undo. The explicit oldest-first action exists for the bulk case.
+ *
+ * `idempotency_key` is optional. When present and already used by an application of
+ * the same payment, obligation and amount, the request returns the original
+ * application without creating a duplicate. When present with different data it
+ * returns 409. When absent the flow is unchanged.
  */
 final class AllocatePaymentRequest extends FormRequest
 {
@@ -29,6 +34,7 @@ final class AllocatePaymentRequest extends FormRequest
         return [
             'obligation_id' => ['required', 'integer', 'exists:monthly_obligations,id'],
             'amount_cop' => ['required', 'integer', 'min:1'],
+            'idempotency_key' => ['nullable', 'string', 'max:255'],
         ];
     }
 
@@ -43,6 +49,20 @@ final class AllocatePaymentRequest extends FormRequest
             'amount_cop.required' => 'Debe indicar el importe a aplicar.',
             'amount_cop.integer' => 'El importe debe ser un número entero de pesos.',
             'amount_cop.min' => 'El importe debe ser mayor que cero.',
+            'idempotency_key.string' => 'La clave de idempotencia debe ser un texto.',
+            'idempotency_key.max' => 'La clave de idempotencia no debe superar los 255 caracteres.',
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function attributes(): array
+    {
+        return [
+            'obligation_id' => 'obligación',
+            'amount_cop' => 'importe',
+            'idempotency_key' => 'clave de idempotencia',
         ];
     }
 }

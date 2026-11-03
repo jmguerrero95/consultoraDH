@@ -408,6 +408,7 @@ const applyBusy = ref(false);
 const applyError = ref<string | null>(null);
 const applyPlan = ref<AutoAllocationPlan | null>(null);
 const planBusy = ref(false);
+const applyIdempotencyKey = ref('');
 
 const applyObligations = ref<AllocatableDebt[]>([]);
 
@@ -485,6 +486,7 @@ async function openApply(payment: PaymentSummary): Promise<void> {
     applyAmount.value = '';
     applyError.value = null;
     applyPlan.value = null;
+    applyIdempotencyKey.value = newIdempotencyKey();
 
     await loadOpenDebts(payment.client_id);
 
@@ -537,7 +539,32 @@ watch(applyObligationId, () => {
     applyAmount.value = String(suggestedApplyAmount.value);
 });
 
+/*
+ * A new key belongs to a new attempt.
+ *
+ * Changing the payment, the obligation or the amount changes which application is
+ * being described, so reusing the previous key would turn a genuinely different
+ * application into a conflict. The key is not renewed while a request is in
+ * flight: a retry after a timeout must carry the key the server may already have
+ * received.
+ */
+watch(
+    () => [applyTarget.value?.id ?? null, applyObligationId.value, applyAmount.value],
+    () => {
+        if (applyTarget.value !== null && !applyBusy.value) {
+            applyIdempotencyKey.value = newIdempotencyKey();
+        }
+    },
+);
+
 async function submitAllocation(): Promise<void> {
+    // A second click while the first request is still open would be a second
+    // attempt with the same key. The button is disabled while busy, but the guard
+    // belongs here as well: a keyboard or a duplicate event must not slip through.
+    if (applyBusy.value) {
+        return;
+    }
+
     if (applyTarget.value === null || applyObligationId.value === null || parsedApplyAmount.value === null) {
         applyError.value = 'Elija la obligación y el valor a aplicar.';
         return;
@@ -550,12 +577,23 @@ async function submitAllocation(): Promise<void> {
         const result = await businessApi.payments.allocate(applyTarget.value.id, {
             obligation_id: applyObligationId.value,
             amount_cop: parsedApplyAmount.value,
+            idempotency_key: applyIdempotencyKey.value,
         });
 
         applyTarget.value = null;
         notice.value = result.message;
         await load();
     } catch (cause) {
+        if (cause instanceof ApiError && cause.isNetworkError) {
+            // The server may have committed the application even though the
+            // response never arrived. The key stays, so pressing the button again
+            // recovers that application instead of creating a second one.
+            applyError.value =
+                'No se pudo confirmar la respuesta del servidor. El intento se conserva: '
+                + 'puede reintentar sin aplicar el pago dos veces.';
+            return;
+        }
+
         applyError.value =
             cause instanceof ApiError ? cause.message : 'No fue posible aplicar el pago.';
     } finally {
@@ -581,7 +619,7 @@ async function previewPlan(): Promise<void> {
 }
 
 async function applyOldestFirst(): Promise<void> {
-    if (applyTarget.value === null) {
+    if (applyTarget.value === null || applyBusy.value) {
         return;
     }
 

@@ -59,6 +59,7 @@ use Illuminate\Support\Carbon;
  * @property int $obligation_id
  * @property int $amount_cop
  * @property Carbon|null $reversed_at
+ * @property string|null $idempotency_key
  */
 #[Fillable([
     'payment_id',
@@ -68,6 +69,7 @@ use Illuminate\Support\Carbon;
     'reversed_at',
     'reversed_by',
     'reversal_reason',
+    'idempotency_key',
 ])]
 class PaymentAllocation extends Model
 {

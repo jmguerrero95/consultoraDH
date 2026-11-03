@@ -248,19 +248,50 @@ final class PaymentController extends Controller
     {
         $obligation = MonthlyObligation::query()->findOrFail($request->validated('obligation_id'));
 
+        // --- idempotencia (OBS-03B) ---
+        $idempotencyKey = $request->validated('idempotency_key');
+        $idempotencyKey = is_string($idempotencyKey) && trim($idempotencyKey) !== ''
+            ? trim($idempotencyKey)
+            : null;
+
         try {
-            $allocation = $this->payments->allocate(
+            $outcome = $this->payments->allocateIdempotent(
                 $payment,
                 $obligation,
                 (int) $request->validated('amount_cop'),
                 $request->user(),
+                $idempotencyKey,
             );
         } catch (PaymentRejected $e) {
             return $this->rejected($e);
         }
 
+        if ($outcome->conflict) {
+            return response()->json([
+                'message' => 'Ya existe una aplicación registrada con esta clave de idempotencia, '
+                    .'pero el pago, la obligación o el importe son diferentes.',
+                'code' => 'allocation_idempotency_key_conflict',
+                'allocation_id' => $outcome->allocation->id,
+                'payment_id' => $outcome->allocation->payment_id,
+                'obligation_id' => $outcome->allocation->obligation_id,
+            ], 409);
+        }
+
+        if ($outcome->reversed) {
+            return response()->json([
+                'message' => 'La clave de idempotencia pertenece a una aplicación revertida. '
+                    .'No se creó una aplicación nueva con esa clave.',
+                'code' => 'allocation_idempotency_key_reversed',
+                'allocation_id' => $outcome->allocation->id,
+            ], 409);
+        }
+
+        $allocation = $outcome->allocation;
+
         return response()->json([
-            'message' => 'Se aplicó el pago a la obligación.',
+            'message' => $outcome->created
+                ? 'Se aplicó el pago a la obligación.'
+                : 'Esta aplicación ya se había registrado; se devolvió la original.',
             'allocation' => [
                 'id' => $allocation->id,
                 'amount_cop' => $allocation->amount_cop,
@@ -268,7 +299,8 @@ final class PaymentController extends Controller
             ],
             'payment' => $this->describe($this->loadForDetail($payment->refresh()), detailed: true),
             'obligation' => $this->presenter->describe($obligation->refresh()),
-        ], 201);
+            'idempotency_key' => $allocation->idempotency_key,
+        ], $outcome->created ? 201 : 200);
     }
 
     /**

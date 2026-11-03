@@ -6,6 +6,7 @@ namespace App\Domain\Payments\Actions;
 
 use App\Domain\Payments\AllocationOutcome;
 use App\Domain\Payments\AllocationPlanner;
+use App\Domain\Payments\AllocationRegistration;
 use App\Domain\Payments\Events\PaymentAllocated;
 use App\Domain\Payments\Events\PaymentAllocationReversed;
 use App\Domain\Payments\Events\PaymentAutoAllocated;
@@ -224,57 +225,164 @@ final class ManagePayments
      */
     public function allocate(Payment $payment, MonthlyObligation $obligation, int $amount, User $actor): PaymentAllocation
     {
+        $outcome = $this->allocateIdempotent($payment, $obligation, $amount, $actor);
+
+        if ($outcome->conflict) {
+            throw PaymentRejected::allocationIdempotencyKeyConflict();
+        }
+
+        if ($outcome->reversed) {
+            throw PaymentRejected::allocationIdempotencyKeyReversed();
+        }
+
+        return $outcome->allocation;
+    }
+
+    /**
+     * Apply part of a payment to one obligation, telling a first application from
+     * a recovery.
+     *
+     * ## The key is resolved after the locks
+     *
+     * An idempotency key that is already in use must return the original
+     * application only when the request describes the same payment, obligation and
+     * amount. The lookup therefore happens inside the transaction, after the
+     * client, the payment and the obligation are locked, so a concurrent request
+     * cannot commit the first application between the read and the insert.
+     *
+     * The lookup precedes the balance checks on purpose: a retry of an application
+     * that was accepted must return that application even if another operator has
+     * since spent the remaining balance. Rejecting the retry as "exceeds balance"
+     * would tell the operator the first attempt never happened.
+     *
+     * ## A reversed application still owns its key
+     *
+     * Reversal is a marker, not a deletion. Reusing the key would record the same
+     * attempt twice, so it is answered explicitly instead.
+     *
+     * ## The unique index is the last word
+     *
+     * Two requests for different payments do not contend on the same client lock,
+     * so both can miss the lookup and reach the insert. PostgreSQL lets exactly one
+     * through and raises `23505` on the other. That violation is caught **outside**
+     * the failed transaction, only when it names this key's constraint, and the row
+     * is read again to produce the same controlled outcome. Any other database
+     * error is rethrown.
+     *
+     * @throws PaymentRejected
+     */
+    public function allocateIdempotent(
+        Payment $payment,
+        MonthlyObligation $obligation,
+        int $amount,
+        User $actor,
+        ?string $idempotencyKey = null,
+    ): AllocationRegistration {
         if ($amount <= 0) {
             throw PaymentRejected::allocationMustBePositive($amount);
         }
 
-        return DB::transaction(function () use ($payment, $obligation, $amount, $actor): PaymentAllocation {
-            $client = $this->lockClient($payment->client);
+        $key = $this->normaliseText($idempotencyKey);
 
-            $lockedPayment = $this->lockPayment($payment);
+        try {
+            return DB::transaction(function () use ($payment, $obligation, $amount, $actor, $key): AllocationRegistration {
+                $client = $this->lockClient($payment->client);
 
-            if ($lockedPayment->isVoided()) {
-                throw PaymentRejected::paymentIsVoided();
+                $lockedPayment = $this->lockPayment($payment);
+
+                if ($lockedPayment->isVoided()) {
+                    throw PaymentRejected::paymentIsVoided();
+                }
+
+                $lockedObligation = $this->lockObligations([$obligation])[0];
+
+                // Same client, enforced in the domain and not merely assumed from the form.
+                // Money for one person cannot pay another person's debt.
+                if ($lockedObligation->client_id !== $client->id) {
+                    throw PaymentRejected::differentClient(
+                        $lockedObligation->client_id,
+                        $client->id,
+                    );
+                }
+
+                if ($key !== null) {
+                    $existing = PaymentAllocation::query()
+                        ->where('idempotency_key', $key)
+                        ->first();
+
+                    if ($existing !== null) {
+                        // Lock the row only when it belongs to this payment. A key owned
+                        // by another payment is a conflict, and locking that client's
+                        // allocation would take a lock this transaction does not need.
+                        if ($existing->payment_id === $lockedPayment->id) {
+                            $existing = PaymentAllocation::query()
+                                ->lockForUpdate()
+                                ->find($existing->getKey()) ?? $existing;
+                        }
+
+                        return $this->resolveExistingAllocation(
+                            $existing,
+                            $lockedPayment->id,
+                            $lockedObligation->id,
+                            $amount,
+                        );
+                    }
+                }
+
+                // Both figures read after the locks, which is the only point at which they
+                // cannot move underneath the decision.
+                $available = $this->availableOnPayment($lockedPayment);
+
+                if ($amount > $available) {
+                    throw PaymentRejected::exceedsPaymentBalance($amount, $available);
+                }
+
+                $remaining = $this->remainingOnObligation($lockedObligation);
+
+                if ($amount > $remaining) {
+                    throw PaymentRejected::exceedsObligationBalance($amount, $remaining);
+                }
+
+                // No try/catch around the insert itself: the only constraint that may
+                // race is the idempotency key, and it is handled outside this
+                // transaction where a failed transaction can no longer be reused.
+                $allocation = PaymentAllocation::query()->create([
+                    'payment_id' => $lockedPayment->id,
+                    'obligation_id' => $lockedObligation->id,
+                    'amount_cop' => $amount,
+                    'created_by' => $actor->id,
+                    'idempotency_key' => $key,
+                ]);
+
+                event(new PaymentAllocated($allocation, $actor));
+
+                return AllocationRegistration::created($allocation);
+            });
+        } catch (QueryException $exception) {
+            if ($key === null || ! $this->isAllocationIdempotencyKeyViolation($exception)) {
+                throw $exception;
             }
 
-            $lockedObligation = $this->lockObligations([$obligation])[0];
+            // The other transaction has committed: PostgreSQL waits for the
+            // conflicting insert before reporting the violation. The row is now
+            // visible, and reading it produces the outcome the caller can use.
+            $existing = PaymentAllocation::query()
+                ->where('idempotency_key', $key)
+                ->first();
 
-            // Same client, enforced in the domain and not merely assumed from the form.
-            // Money for one person cannot pay another person's debt.
-            if ($lockedObligation->client_id !== $client->id) {
-                throw PaymentRejected::differentClient(
-                    $lockedObligation->client_id,
-                    $client->id,
-                );
+            if ($existing === null) {
+                // The violation did not leave a row this key can resolve against.
+                // Do not invent a success.
+                throw $exception;
             }
 
-            // Both figures read after the locks, which is the only point at which they
-            // cannot move underneath the decision.
-            $available = $this->availableOnPayment($lockedPayment);
-
-            if ($amount > $available) {
-                throw PaymentRejected::exceedsPaymentBalance($amount, $available);
-            }
-
-            $remaining = $this->remainingOnObligation($lockedObligation);
-
-            if ($amount > $remaining) {
-                throw PaymentRejected::exceedsObligationBalance($amount, $remaining);
-            }
-
-            // No try/catch: there is no longer a constraint to race, and a swallowed
-            // violation is exactly how the oldest-first ordering used to be broken.
-            $allocation = PaymentAllocation::query()->create([
-                'payment_id' => $lockedPayment->id,
-                'obligation_id' => $lockedObligation->id,
-                'amount_cop' => $amount,
-                'created_by' => $actor->id,
-            ]);
-
-            event(new PaymentAllocated($allocation, $actor));
-
-            return $allocation;
-        });
+            return $this->resolveExistingAllocation(
+                $existing,
+                $payment->id,
+                $obligation->id,
+                $amount,
+            );
+        }
     }
 
     /**
@@ -530,6 +638,32 @@ final class ManagePayments
     }
 
     /**
+     * Decide what an already-used key means for this application.
+     *
+     * A reversal is checked first, like a voided payment: the key was consumed by
+     * an application that is no longer live, and reusing it must not silently
+     * record the same attempt again.
+     */
+    private function resolveExistingAllocation(
+        PaymentAllocation $existing,
+        int $paymentId,
+        int $obligationId,
+        int $amount,
+    ): AllocationRegistration {
+        if ($existing->isReversed()) {
+            return AllocationRegistration::reversed($existing);
+        }
+
+        if ($existing->payment_id === $paymentId
+            && $existing->obligation_id === $obligationId
+            && $existing->amount_cop === $amount) {
+            return AllocationRegistration::replayed($existing);
+        }
+
+        return AllocationRegistration::conflict($existing);
+    }
+
+    /**
      * Whether the stored payment describes the same money as this request.
      *
      * Method and notes are part of the identity because two requests that differ
@@ -581,6 +715,21 @@ final class ManagePayments
 
         return $sqlstate === '23505'
             && str_contains($exception->getMessage(), 'payments_idempotency_key_unique');
+    }
+
+    /**
+     * Whether this is the unique violation of the allocation idempotency key.
+     *
+     * Matching the constraint by name keeps every other integrity failure — a
+     * foreign key, a check, another unique index — from being mistaken for an
+     * idempotent replay.
+     */
+    private function isAllocationIdempotencyKeyViolation(QueryException $exception): bool
+    {
+        $sqlstate = (string) ($exception->errorInfo[0] ?? $exception->getCode());
+
+        return $sqlstate === '23505'
+            && str_contains($exception->getMessage(), 'payment_allocations_idempotency_key_unique');
     }
 
     // --- locking --------------------------------------------------------

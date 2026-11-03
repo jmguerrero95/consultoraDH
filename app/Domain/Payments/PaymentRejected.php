@@ -161,4 +161,22 @@ final class PaymentRejected extends \RuntimeException
             'idempotency_key_voided',
         );
     }
+
+    public static function allocationIdempotencyKeyConflict(): self
+    {
+        return new self(
+            'Ya existe una aplicación registrada con esta clave de idempotencia, pero el pago, '
+            .'la obligación o el importe son diferentes.',
+            'allocation_idempotency_key_conflict',
+        );
+    }
+
+    public static function allocationIdempotencyKeyReversed(): self
+    {
+        return new self(
+            'La clave de idempotencia pertenece a una aplicación revertida. '
+            .'No se creó una aplicación nueva con esa clave.',
+            'allocation_idempotency_key_reversed',
+        );
+    }
 }
