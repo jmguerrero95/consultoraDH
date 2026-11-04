@@ -110,7 +110,13 @@ function obs03bCommittedFixtures(SecondConnection $second, string $document): ar
         [$clientId],
     )[0]['id'];
 
-    return compact('client_id', 'company_id', 'period_id', 'obligation_id', 'payment_id');
+    return [
+        'client_id' => $clientId,
+        'company_id' => $companyId,
+        'period_id' => $periodId,
+        'obligation_id' => $obligationId,
+        'payment_id' => $paymentId,
+    ];
 }
 
 function obs03bCleanup(SecondConnection $second, array $fixtures, string $key): void
