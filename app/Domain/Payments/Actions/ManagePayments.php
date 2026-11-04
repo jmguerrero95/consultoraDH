@@ -506,34 +506,40 @@ final class ManagePayments
         User $actor,
         ?string $idempotencyKey = null,
     ): AutoAllocationRegistration {
-        // Si no hay clave, comportamiento idéntico al original.
+        // Si no hay clave, comportamiento idéntico al original (applyOldestFirst).
         if ($idempotencyKey === null) {
-            return $this->applyOldestFirstInternal($payment, $actor, null);
+            $outcome = $this->applyOldestFirstInternal($payment, $actor, null);
+
+            // Envolver el resultado en AutoAllocationRegistration para preservar el contrato.
+            return AutoAllocationRegistration::created($outcome);
         }
 
-        // Con clave: resolución antes de la transacción.
+        // Con clave: resolución fuera de la transacción para detectar conflictos globales.
+        // Con clave global única, misma clave y otro pago → conflicto 409.
         $existing = DB::table('auto_allocations')
-            ->where('payment_id', $payment->id)
             ->where('idempotency_key', $idempotencyKey)
+            ->where('payment_id', '!=', $payment->id)
             ->whereIn('status', ['completed', 'failed', 'voided', 'reversed'])
             ->first();
 
         if ($existing !== null) {
+            // Conflicto: misma clave usada con otro pago.
             if (in_array($existing->status, ['voided', 'reversed'], true)) {
-                throw PaymentRejected::paymentIsVoided();
+                throw PaymentRejected::idempotencyKeyConflict();
             }
 
             $storedOutcome = json_decode($existing->outcome, true);
 
-            return AutoAllocationRegistration::replayed(
-                new AllocationOutcome(
-                    [],
-                    $storedOutcome['remainingAvailable'] ?? 0,
-                    $storedOutcome['appliedCount'] ?? 0,
-                ),
+            return AutoAllocationRegistration::conflict(
+                json_encode($storedOutcome),
+                $existing->status,
+                $storedOutcome['appliedCount'] ?? $existing->applied_count ?? 0,
+                $storedOutcome['remainingAvailable'] ?? $existing->remaining_available ?? 0,
             );
         }
 
+        // Nueva clave: ejecutar el método original dentro de una transacción
+        // y persistir el resultado antes del commit.
         return $this->applyOldestFirstInternal($payment, $actor, $idempotencyKey);
     }
 
@@ -560,7 +566,7 @@ final class ManagePayments
 
             if ($available <= 0) {
                 if ($idempotencyKey !== null) {
-                    $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', []);
+                    $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', [], $available);
                 }
 
                 return new AllocationOutcome([], $available, 0);
@@ -626,7 +632,7 @@ final class ManagePayments
                         'amount_cop' => $a->amount_cop,
                     ],
                     $applied,
-                ));
+                ), $available);
             }
 
             return new AllocationOutcome($applied, $remainingAvailable, count($applied));
@@ -639,6 +645,9 @@ final class ManagePayments
      *
      * La restricción es UNICA sobre idempotency_key a nivel global (no por payment).
      * Misma clave y otro pago → 409 conflicto.
+     *
+     * No usar app('payment') ni $payment->obligations(). Persistir únicamente
+     * los datos que ya conocemos de las aplicaciones creadas en la transacción.
      */
     private function storeAutoAllocation(
         Payment $payment,
@@ -646,35 +655,40 @@ final class ManagePayments
         string $status,
         array $applications,
     ): void {
-        // Datos reales de las aplicaciones: IDs, obligaciones, importes, orden.
-        $applicationsData = array_map(function ($a) use ($payment): array {
-            $obligation = $payment->obligations()
-                ->where('monthly_obligations.id', $a->obligation_id)
-                ->first();
-
+        // Datos de las aplicaciones: IDs, importes y orden.
+        // Usar los IDs y importes directamente sin consultar la BD.
+        $applicationsData = array_map(function ($a): array {
             return [
                 'allocation_id' => $a->id,
                 'obligation_id' => $a->obligation_id,
-                'obligation_period' => $obligation?->period?->period_month?->format('Y-m') ?? null,
                 'amount_cop' => $a->amount_cop,
                 'created_at' => $a->created_at?->toISO8601String() ?? null,
             ];
         }, $applications);
 
         // Saldo real restante: dinero del pago no consumido por las aplicaciones.
-        $remainingAvailable = $applications !== []
-            ? (int) (app('payment')->availableOnPayment($payment) - array_sum(array_column($applications, 'amount_cop')))
-            : app('payment')->availableOnPayment($payment);
+        // Calcular desde los importes que ya tenemos, sin app('payment’).
+        $totalAllocated = $applications !== [] ? array_sum(array_column($applications, 'amount_cop')) : 0;
+        $remainingAvailable = $available - $totalAllocated;
+
+        // El valor de $available debe estar disponible en el scope.
+        // Como este método se llama dentro de applyOldestFirstInternal transacción,
+        // usamos el disponible calculado en esa context.
+        // Si no hay aplicaciones, el remaining es el disponible completo.
+        if ($applications === []) {
+            $remainingAvailable = $available;
+        }
 
         $outcomeData = [
             'remainingAvailable' => $remainingAvailable,
             'appliedCount' => count($applications),
             'applications' => $applicationsData,
-            'appliedOrder' => array_keys(array_map(fn ($a) => $a->id, $applications)),
+            'appliedOrder' => $applications !== [] ? array_keys(array_map(fn ($a) => $a->id, $applications)) : [],
         ];
 
         // Restricción UNICA global sobre idempotency_key.
-        // Misma clave y otro pago fallará con violación de índice.
+        // Misma clave y otro pago fallará con violación de índice (SQLSTATE 23505).
+        // Usar upsert para insertar o actualizar si ya existe.
         DB::table('auto_allocations')->upsert(
             [
                 'idempotency_key' => $idempotencyKey,

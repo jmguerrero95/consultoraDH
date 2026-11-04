@@ -37,10 +37,25 @@ final readonly class AutoAllocationRegistration
 
     /**
      * The key is already used by an execution with different payment or data.
+     *
+     * @param  string  $existingOutcomeJson  The stored outcome from the previous execution
+     * @param  string  $existingStatus  The status of the previous execution
+     * @param  int  $existingAppliedCount  The applied count from the previous execution
+     * @param  int  $existingRemainingAvailable  The remaining available from the previous execution
      */
-    public static function conflict(): self
+    public static function conflict(string $existingOutcomeJson, string $existingStatus, int $existingAppliedCount, int $existingRemainingAvailable): self
     {
-        return new self(new AllocationOutcome([], 0, 0), conflict: true, voided: false);
+        $storedOutcome = json_decode($existingOutcomeJson, true);
+
+        return new self(
+            new AllocationOutcome(
+                [],
+                $storedOutcome['remainingAvailable'] ?? $existingRemainingAvailable,
+                $storedOutcome['appliedCount'] ?? $existingAppliedCount,
+            ),
+            conflict: true,
+            voided: false,
+        );
     }
 
     /**

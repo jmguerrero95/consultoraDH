@@ -816,7 +816,7 @@ export const api: ApiClient = {
                 plan: AutoAllocationPlan;
                 payment: PaymentSummary;
             }> {
-                return request('POST', `/api/payments/${paymentId}/auto-allocate`, payload);
+                return request('POST', `/api/payments/${paymentId}/auto-allocate`, { body: payload });
             },
 
             reverseAllocation(

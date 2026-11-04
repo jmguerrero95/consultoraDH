@@ -23,8 +23,8 @@ return new class extends Migration
 
             $table->foreignId('payment_id')->constrained('payments')->restrictOnDelete();
 
-            // Clave opcional del idempotencia. Única: dos ejecuciones con la misma
-            // clave sobre el mismo pago producen un solo resultado.
+            // Clave opcional del idempotencia. Única a nivel global: dos ejecuciones
+            // con la misma clave (sea del mismo o de distinto pago) producen un solo resultado.
             $table->string('idempotency_key', 255)->nullable();
 
             // Estado de la ejecución.
@@ -36,8 +36,8 @@ return new class extends Migration
 
             $table->timestamps();
 
-            // Índice único: una clave por pago.
-            $table->unique(['payment_id', 'idempotency_key'], 'auto_allocations_payment_key_unique');
+            // Índice único global sobre la clave de idempotencia.
+            $table->unique('idempotency_key', 'auto_allocations_key_unique');
 
             // Índice por pago para búsquedas de reintento.
             $table->index(['payment_id', 'status'], 'auto_allocations_payment_status_index');
