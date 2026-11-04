@@ -332,22 +332,38 @@ final class PaymentController extends Controller
     {
         abort_unless($request->user()?->can('payments.allocate'), 403, 'No tiene permisos para aplicar pagos.');
 
+        // --- idempotencia (OBS-03C) ---
+        $idempotencyKey = $request->validated('idempotency_key');
+        $idempotencyKey = is_string($idempotencyKey) && trim($idempotencyKey) !== ''
+            ? trim($idempotencyKey)
+            : null;
+
         try {
-            $outcome = $this->payments->applyOldestFirst($payment, $request->user());
+            $outcome = $this->payments->applyOldestFirst($payment, $request->user(), $idempotencyKey);
         } catch (PaymentRejected $e) {
             return $this->rejected($e);
         }
 
+        // Mapear AutoAllocationRegistration al formato JSON del controlador.
+        $appliedCount = $outcome->outcome->appliedCount;
+        $remainingAvailable = $outcome->outcome->remainingAvailable;
+
+        $message = $appliedCount === 0
+            ? 'No había obligaciones pendientes a las que aplicar este pago.'
+            : ($appliedCount === 1
+                ? 'Se aplicó el pago a la obligación.'
+                : sprintf('Se aplicó el pago a %d obligaciones.', $appliedCount));
+
         return response()->json([
-            // A proper plural, for the same reason as the generation message: this is
-            // the sentence that tells the operator how far the payment reached.
-            'message' => $outcome->appliedCount === 0
-                ? 'No había obligaciones pendientes a las que aplicar este pago.'
-                : ($outcome->appliedCount === 1
-                    ? 'Se aplicó el pago a la obligación.'
-                    : sprintf('Se aplicó el pago a %d obligaciones.', $outcome->appliedCount)),
-            'result' => $outcome->toArray(),
+            'message' => $message,
+            'result' => $outcome->outcome->toArray(),
             'payment' => $this->describe($this->loadForDetail($payment->refresh()), detailed: true),
+            'applied_count' => $appliedCount,
+            'unallocated_amount_cop' => $remainingAvailable,
+            // Información de idempotencia para el cliente.
+            'idempotency_key' => $outcome->created ? $idempotencyKey : null,
+            // Distinguir primera ejecución de recuperación.
+            'execution_status' => $outcome->created ? 'first' : 'replayed',
         ]);
     }
 

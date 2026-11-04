@@ -490,6 +490,174 @@ final class ManagePayments
     }
 
     /**
+     * Apply what is left of a payment to the client's oldest outstanding obligations
+     * with optional idempotency key (OBS-03C).
+     *
+     * When $idempotencyKey is null, behaves identically to `applyOldestFirst()`.
+     * When provided, the first execution stores its result and subsequent executions
+     * with the same key return the stored outcome without creating applications.
+     *
+     * @param  string|null  $idempotencyKey  clave opcional para idempotencia.
+     *
+     * @throws PaymentRejected
+     */
+    public function applyOldestFirstIdempotent(
+        Payment $payment,
+        User $actor,
+        ?string $idempotencyKey = null,
+    ): AutoAllocationRegistration {
+        // Si no hay clave, comportamiento idéntico al original.
+        if ($idempotencyKey === null) {
+            return $this->applyOldestFirstInternal($payment, $actor, null);
+        }
+
+        // Con clave: resolución antes de la transacción.
+        $existing = DB::table('auto_allocations')
+            ->where('payment_id', $payment->id)
+            ->where('idempotency_key', $idempotencyKey)
+            ->whereIn('status', ['completed', 'failed', 'voided', 'reversed'])
+            ->first();
+
+        if ($existing !== null) {
+            if (in_array($existing->status, ['voided', 'reversed'], true)) {
+                throw PaymentRejected::paymentIsVoided();
+            }
+
+            $storedOutcome = json_decode($existing->outcome, true);
+
+            return AutoAllocationRegistration::replayed(
+                new AllocationOutcome(
+                    [],
+                    $storedOutcome['remainingAvailable'] ?? 0,
+                    $storedOutcome['appliedCount'] ?? 0,
+                ),
+            );
+        }
+
+        return $this->applyOldestFirstInternal($payment, $actor, $idempotencyKey);
+    }
+
+    /**
+     * @param  string|null  $idempotencyKey  clave opcional o null para comportamiento normal.
+     * @return AllocationOutcome cuando la clave es null
+     * @return AutoAllocationRegistration cuando la clave está proporcionada
+     */
+    private function applyOldestFirstInternal(
+        Payment $payment,
+        User $actor,
+        ?string $idempotencyKey,
+    ): AllocationOutcome|AutoAllocationRegistration {
+        return DB::transaction(function () use ($payment, $actor, $idempotencyKey): AllocationOutcome|AutoAllocationRegistration {
+            $client = $this->lockClient($payment->client);
+
+            $lockedPayment = $this->lockPayment($payment);
+
+            if ($lockedPayment->isVoided()) {
+                throw PaymentRejected::paymentIsVoided();
+            }
+
+            $available = $this->availableOnPayment($lockedPayment);
+
+            if ($available <= 0) {
+                if ($idempotencyKey !== null) {
+                    $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', []);
+                }
+
+                return new AllocationOutcome([], $available, 0);
+            }
+
+            // Every obligation this client has, locked in ascending id, before any figure
+            // is read. Locking the whole set rather than a scan's worth of rows is what
+            // makes "what is outstanding" a statement about the committed state.
+            $candidates = MonthlyObligation::query()
+                ->where('client_id', $client->id)
+                ->with('period')
+                ->get();
+
+            if ($candidates->isEmpty()) {
+                if ($idempotencyKey !== null) {
+                    $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', []);
+                }
+
+                return new AllocationOutcome([], $available, 0);
+            }
+
+            $locked = collect($this->lockObligations($candidates->all()));
+
+            // One batched pass over adjustments and one over live allocations, rather than
+            // two aggregate queries per candidate: a client with fifty months of history
+            // used to cost a hundred queries to decide what to do with one payment.
+            $remainingByObligation = $this->remainingFor($locked->all());
+
+            $planner = new AllocationPlanner;
+
+            $plan = $planner->plan($locked->all(), $remainingByObligation, $available);
+
+            $applied = [];
+            $spent = 0;
+
+            foreach ($plan as $step) {
+                $allocation = PaymentAllocation::query()->create([
+                    'payment_id' => $lockedPayment->id,
+                    'obligation_id' => $step['obligation']->id,
+                    'amount_cop' => $step['amount_cop'],
+                    'created_by' => $actor->id,
+                ]);
+
+                event(new PaymentAllocated($allocation, $actor));
+
+                $applied[] = $allocation;
+                $spent += $step['amount_cop'];
+            }
+
+            if ($applied !== []) {
+                event(new PaymentAutoAllocated($lockedPayment->refresh(), $actor, count($applied)));
+            }
+
+            $remainingAvailable = $available - $spent;
+
+            // Guardar el resultado en auto_allocations ANTES de hacer commit,
+            // para que un fallo o reintento posterior pueda recuperarlo.
+            if ($idempotencyKey !== null) {
+                $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', array_map(
+                    fn ($a) => [
+                        'allocation_id' => $a->id,
+                        'obligation_id' => $a->obligation_id,
+                        'amount_cop' => $a->amount_cop,
+                    ],
+                    $applied,
+                ));
+            }
+
+            return new AllocationOutcome($applied, $remainingAvailable, count($applied));
+        });
+    }
+
+    /**
+     * Almacena el resultado de una ejecución de auto-allocation en la tabla
+     * auto_allocations para su recuperación posterior.
+     */
+    private function storeAutoAllocation(
+        Payment $payment,
+        string $idempotencyKey,
+        string $status,
+        array $applications,
+    ): void {
+        $outcomeData = [
+            'remainingAvailable' => $applications !== [] ? (int) (app('payment')->availableOnPayment($payment) - array_sum(array_column($applications, 'amount_cop'))) : 0,
+            'appliedCount' => count($applications),
+            'applications' => $applications,
+        ];
+
+        DB::table('auto_allocations')->updateOrCreate(
+            ['payment_id' => $payment->id, 'idempotency_key' => $idempotencyKey],
+            array_merge(
+                ['status' => $status, 'outcome' => json_encode($outcomeData), 'updated_at' => now()],
+            ),
+        );
+    }
+
+    /**
      * Undo an allocation, keeping the row.
      *
      * @throws PaymentRejected

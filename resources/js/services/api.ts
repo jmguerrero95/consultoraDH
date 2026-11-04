@@ -811,12 +811,12 @@ export const api: ApiClient = {
                 return request('POST', `/api/payments/${paymentId}/auto-allocate/preview`);
             },
 
-            autoAllocate(paymentId: number): Promise<{
+            autoAllocate(paymentId: number, payload?: { idempotency_key?: string }): Promise<{
                 message: string;
                 plan: AutoAllocationPlan;
                 payment: PaymentSummary;
             }> {
-                return request('POST', `/api/payments/${paymentId}/auto-allocate`);
+                return request('POST', `/api/payments/${paymentId}/auto-allocate`, payload);
             },
 
             reverseAllocation(

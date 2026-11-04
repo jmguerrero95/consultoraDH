@@ -627,13 +627,25 @@ async function applyOldestFirst(): Promise<void> {
     applyError.value = null;
 
     try {
-        const result = await businessApi.payments.autoAllocate(applyTarget.value.id);
+        const result = await businessApi.payments.autoAllocate(applyTarget.value.id, {
+            idempotency_key: applyIdempotencyKey.value,
+        });
 
         applyTarget.value = null;
         applyPlan.value = null;
         notice.value = result.message;
         await load();
     } catch (cause) {
+        if (cause instanceof ApiError && cause.isNetworkError) {
+            // The server may have committed the application even though the
+            // response never arrived. The key stays, so pressing the button again
+            // recovers that application instead of creating a second one.
+            applyError.value =
+                'No se pudo confirmar la respuesta del servidor. El intento se conserva: '
+                + 'puede reintentar sin aplicar el pago dos veces.';
+            return;
+        }
+
         applyError.value =
             cause instanceof ApiError ? cause.message : 'No fue posible aplicar el pago.';
     } finally {
