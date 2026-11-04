@@ -332,21 +332,25 @@ final class PaymentController extends Controller
     {
         abort_unless($request->user()?->can('payments.allocate'), 403, 'No tiene permisos para aplicar pagos.');
 
-        // --- idempotencia (OBS-03C) ---
-        $idempotencyKey = $request->validated('idempotency_key');
+        // --- idempotencia (OBS-03C-R1) ---
+        $idempotencyKey = $request->input('idempotency_key');
         $idempotencyKey = is_string($idempotencyKey) && trim($idempotencyKey) !== ''
             ? trim($idempotencyKey)
             : null;
 
         try {
-            $outcome = $this->payments->applyOldestFirst($payment, $request->user(), $idempotencyKey);
+            // Llamar a applyOldestFirstIdempotent, no a applyOldestFirst()
+            $outcome = $this->payments->applyOldestFirstIdempotent($payment, $request->user(), $idempotencyKey);
         } catch (PaymentRejected $e) {
             return $this->rejected($e);
         }
 
         // Mapear AutoAllocationRegistration al formato JSON del controlador.
-        $appliedCount = $outcome->outcome->appliedCount;
-        $remainingAvailable = $outcome->outcome->remainingAvailable;
+        // El value object siempre retorna AutoAllocationRegistration.
+        $registration = $outcome;
+
+        $appliedCount = $registration->outcome->appliedCount;
+        $remainingAvailable = $registration->outcome->remainingAvailable;
 
         $message = $appliedCount === 0
             ? 'No había obligaciones pendientes a las que aplicar este pago.'
@@ -356,14 +360,14 @@ final class PaymentController extends Controller
 
         return response()->json([
             'message' => $message,
-            'result' => $outcome->outcome->toArray(),
+            'result' => $registration->outcome->toArray(),
             'payment' => $this->describe($this->loadForDetail($payment->refresh()), detailed: true),
             'applied_count' => $appliedCount,
             'unallocated_amount_cop' => $remainingAvailable,
             // Información de idempotencia para el cliente.
-            'idempotency_key' => $outcome->created ? $idempotencyKey : null,
+            'idempotency_key' => $registration->created ? $idempotencyKey : null,
             // Distinguir primera ejecución de recuperación.
-            'execution_status' => $outcome->created ? 'first' : 'replayed',
+            'execution_status' => $registration->created ? 'first' : 'replayed',
         ]);
     }
 

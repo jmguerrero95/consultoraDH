@@ -636,6 +636,9 @@ final class ManagePayments
     /**
      * Almacena el resultado de una ejecución de auto-allocation en la tabla
      * auto_allocations para su recuperación posterior.
+     *
+     * La restricción es UNICA sobre idempotency_key a nivel global (no por payment).
+     * Misma clave y otro pago → 409 conflicto.
      */
     private function storeAutoAllocation(
         Payment $payment,
@@ -643,17 +646,45 @@ final class ManagePayments
         string $status,
         array $applications,
     ): void {
+        // Datos reales de las aplicaciones: IDs, obligaciones, importes, orden.
+        $applicationsData = array_map(function ($a) use ($payment): array {
+            $obligation = $payment->obligations()
+                ->where('monthly_obligations.id', $a->obligation_id)
+                ->first();
+
+            return [
+                'allocation_id' => $a->id,
+                'obligation_id' => $a->obligation_id,
+                'obligation_period' => $obligation?->period?->period_month?->format('Y-m') ?? null,
+                'amount_cop' => $a->amount_cop,
+                'created_at' => $a->created_at?->toISO8601String() ?? null,
+            ];
+        }, $applications);
+
+        // Saldo real restante: dinero del pago no consumido por las aplicaciones.
+        $remainingAvailable = $applications !== []
+            ? (int) (app('payment')->availableOnPayment($payment) - array_sum(array_column($applications, 'amount_cop')))
+            : app('payment')->availableOnPayment($payment);
+
         $outcomeData = [
-            'remainingAvailable' => $applications !== [] ? (int) (app('payment')->availableOnPayment($payment) - array_sum(array_column($applications, 'amount_cop'))) : 0,
+            'remainingAvailable' => $remainingAvailable,
             'appliedCount' => count($applications),
-            'applications' => $applications,
+            'applications' => $applicationsData,
+            'appliedOrder' => array_keys(array_map(fn ($a) => $a->id, $applications)),
         ];
 
-        DB::table('auto_allocations')->updateOrCreate(
-            ['payment_id' => $payment->id, 'idempotency_key' => $idempotencyKey],
-            array_merge(
-                ['status' => $status, 'outcome' => json_encode($outcomeData), 'updated_at' => now()],
-            ),
+        // Restricción UNICA global sobre idempotency_key.
+        // Misma clave y otro pago fallará con violación de índice.
+        DB::table('auto_allocations')->upsert(
+            [
+                'idempotency_key' => $idempotencyKey,
+                'payment_id' => $payment->id,
+                'status' => $status,
+                'outcome' => json_encode($outcomeData),
+                'updated_at' => now(),
+            ],
+            ['idempotency_key'],  // Único a nivel global
+            ['status', 'outcome', 'updated_at'],
         );
     }
 
