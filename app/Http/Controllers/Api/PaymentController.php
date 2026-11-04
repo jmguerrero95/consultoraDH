@@ -332,22 +332,37 @@ final class PaymentController extends Controller
     {
         abort_unless($request->user()?->can('payments.allocate'), 403, 'No tiene permisos para aplicar pagos.');
 
-        // --- idempotencia (OBS-03C-R1) ---
-        $idempotencyKey = $request->input('idempotency_key');
-        $idempotencyKey = is_string($idempotencyKey) && trim($idempotencyKey) !== ''
-            ? trim($idempotencyKey)
+        // --- idempotencia (OBS-03C) ---
+        $validated = $request->validate([
+            'idempotency_key' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $rawKey = $validated['idempotency_key'] ?? null;
+        $idempotencyKey = is_string($rawKey) && trim($rawKey) !== ''
+            ? trim($rawKey)
             : null;
 
         try {
-            // Llamar a applyOldestFirstIdempotent, no a applyOldestFirst()
-            $outcome = $this->payments->applyOldestFirstIdempotent($payment, $request->user(), $idempotencyKey);
+            $registration = $this->payments->applyOldestFirstIdempotent($payment, $request->user(), $idempotencyKey);
         } catch (PaymentRejected $e) {
             return $this->rejected($e);
         }
 
-        // Mapear AutoAllocationRegistration al formato JSON del controlador.
-        // El value object siempre retorna AutoAllocationRegistration.
-        $registration = $outcome;
+        if ($registration->conflict) {
+            return response()->json([
+                'message' => 'Ya existe una aplicación automática registrada con esta clave de '
+                    .'idempotencia para otro pago. No se aplicó dinero.',
+                'code' => 'auto_allocation_idempotency_key_conflict',
+            ], 409);
+        }
+
+        if ($registration->voided) {
+            return response()->json([
+                'message' => 'La clave de idempotencia pertenece a un pago anulado, a aplicaciones '
+                    .'revertidas o a un resultado incompleto. No se aplicó dinero.',
+                'code' => 'auto_allocation_idempotency_key_voided',
+            ], 409);
+        }
 
         $appliedCount = $registration->outcome->appliedCount;
         $remainingAvailable = $registration->outcome->remainingAvailable;
@@ -358,17 +373,22 @@ final class PaymentController extends Controller
                 ? 'Se aplicó el pago a la obligación.'
                 : sprintf('Se aplicó el pago a %d obligaciones.', $appliedCount));
 
-        return response()->json([
+        $payload = [
             'message' => $message,
             'result' => $registration->outcome->toArray(),
             'payment' => $this->describe($this->loadForDetail($payment->refresh()), detailed: true),
             'applied_count' => $appliedCount,
             'unallocated_amount_cop' => $remainingAvailable,
-            // Información de idempotencia para el cliente.
-            'idempotency_key' => $registration->created ? $idempotencyKey : null,
-            // Distinguir primera ejecución de recuperación.
-            'execution_status' => $registration->created ? 'first' : 'replayed',
-        ]);
+        ];
+
+        // Legacy calls (no key) keep exactly the previous JSON. The idempotency
+        // fields only appear when the caller supplied a key.
+        if ($idempotencyKey !== null) {
+            $payload['idempotency_key'] = $registration->created ? $idempotencyKey : null;
+            $payload['execution_status'] = $registration->created ? 'first' : 'replayed';
+        }
+
+        return response()->json($payload);
     }
 
     public function reverseAllocation(

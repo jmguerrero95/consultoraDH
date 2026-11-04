@@ -7,6 +7,7 @@ namespace App\Domain\Payments\Actions;
 use App\Domain\Payments\AllocationOutcome;
 use App\Domain\Payments\AllocationPlanner;
 use App\Domain\Payments\AllocationRegistration;
+use App\Domain\Payments\AutoAllocationRegistration;
 use App\Domain\Payments\Events\PaymentAllocated;
 use App\Domain\Payments\Events\PaymentAllocationReversed;
 use App\Domain\Payments\Events\PaymentAutoAllocated;
@@ -490,12 +491,32 @@ final class ManagePayments
     }
 
     /**
-     * Apply what is left of a payment to the client's oldest outstanding obligations
-     * with optional idempotency key (OBS-03C).
+     * Apply what is left of a payment to the client's oldest outstanding obligations,
+     * with an optional idempotency key (OBS-03C).
      *
-     * When $idempotencyKey is null, behaves identically to `applyOldestFirst()`.
-     * When provided, the first execution stores its result and subsequent executions
-     * with the same key return the stored outcome without creating applications.
+     * ## One financial algorithm
+     *
+     * The distribution itself is `applyOldestFirst()`, called unchanged. This method
+     * adds an outer transaction, a reservation row and a historical replay around it;
+     * it never re-implements the ordering, the balances or the money arithmetic.
+     *
+     * ## The reservation is the atomic guard
+     *
+     * For a new key the row is inserted **before** any money moves, protected by the
+     * global unique index on `auto_allocations.idempotency_key`. A concurrent request
+     * with the same key cannot see the uncommitted row, reaches its own insert and is
+     * blocked by PostgreSQL until the winner commits; it then receives `23505`, which
+     * is resolved outside the failed transaction. The reservation and the outcome are
+     * written in the same transaction as the applications, so a rollback leaves neither
+     * money nor a half-recorded execution.
+     *
+     * ## A retry is answered from history
+     *
+     * An existing key on the same payment is replayed from the stored
+     * `AllocationOutcome::toArray()`: the original allocation ids, in their original
+     * order, with their amounts and the original remaining balance. The planner is not
+     * called again. A key owned by another payment is a conflict; a voided payment or
+     * a reversed application is a controlled rejection. Neither redistributes money.
      *
      * @param  string|null  $idempotencyKey  clave opcional para idempotencia.
      *
@@ -506,200 +527,150 @@ final class ManagePayments
         User $actor,
         ?string $idempotencyKey = null,
     ): AutoAllocationRegistration {
-        // Si no hay clave, comportamiento idéntico al original (applyOldestFirst).
-        if ($idempotencyKey === null) {
-            $outcome = $this->applyOldestFirstInternal($payment, $actor, null);
+        $key = $this->normaliseText($idempotencyKey);
 
-            // Envolver el resultado en AutoAllocationRegistration para preservar el contrato.
-            return AutoAllocationRegistration::created($outcome);
+        // No key: the original contract, wrapped so every path returns the same type.
+        if ($key === null) {
+            return AutoAllocationRegistration::created($this->applyOldestFirst($payment, $actor));
         }
 
-        // Con clave: resolución fuera de la transacción para detectar conflictos globales.
-        // Con clave global única, misma clave y otro pago → conflicto 409.
-        $existing = DB::table('auto_allocations')
-            ->where('idempotency_key', $idempotencyKey)
-            ->where('payment_id', '!=', $payment->id)
-            ->whereIn('status', ['completed', 'failed', 'voided', 'reversed'])
-            ->first();
+        try {
+            return DB::transaction(function () use ($payment, $actor, $key): AutoAllocationRegistration {
+                $existing = DB::table('auto_allocations')
+                    ->where('idempotency_key', $key)
+                    ->lockForUpdate()
+                    ->first();
 
-        if ($existing !== null) {
-            // Conflicto: misma clave usada con otro pago.
-            if (in_array($existing->status, ['voided', 'reversed'], true)) {
-                throw PaymentRejected::idempotencyKeyConflict();
-            }
-
-            $storedOutcome = json_decode($existing->outcome, true);
-
-            return AutoAllocationRegistration::conflict(
-                json_encode($storedOutcome),
-                $existing->status,
-                $storedOutcome['appliedCount'] ?? $existing->applied_count ?? 0,
-                $storedOutcome['remainingAvailable'] ?? $existing->remaining_available ?? 0,
-            );
-        }
-
-        // Nueva clave: ejecutar el método original dentro de una transacción
-        // y persistir el resultado antes del commit.
-        return $this->applyOldestFirstInternal($payment, $actor, $idempotencyKey);
-    }
-
-    /**
-     * @param  string|null  $idempotencyKey  clave opcional o null para comportamiento normal.
-     * @return AllocationOutcome cuando la clave es null
-     * @return AutoAllocationRegistration cuando la clave está proporcionada
-     */
-    private function applyOldestFirstInternal(
-        Payment $payment,
-        User $actor,
-        ?string $idempotencyKey,
-    ): AllocationOutcome|AutoAllocationRegistration {
-        return DB::transaction(function () use ($payment, $actor, $idempotencyKey): AllocationOutcome|AutoAllocationRegistration {
-            $client = $this->lockClient($payment->client);
-
-            $lockedPayment = $this->lockPayment($payment);
-
-            if ($lockedPayment->isVoided()) {
-                throw PaymentRejected::paymentIsVoided();
-            }
-
-            $available = $this->availableOnPayment($lockedPayment);
-
-            if ($available <= 0) {
-                if ($idempotencyKey !== null) {
-                    $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', [], $available);
+                if ($existing !== null) {
+                    return $this->resolveExistingAutoAllocation($payment, $existing);
                 }
 
-                return new AllocationOutcome([], $available, 0);
-            }
-
-            // Every obligation this client has, locked in ascending id, before any figure
-            // is read. Locking the whole set rather than a scan's worth of rows is what
-            // makes "what is outstanding" a statement about the committed state.
-            $candidates = MonthlyObligation::query()
-                ->where('client_id', $client->id)
-                ->with('period')
-                ->get();
-
-            if ($candidates->isEmpty()) {
-                if ($idempotencyKey !== null) {
-                    $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', []);
-                }
-
-                return new AllocationOutcome([], $available, 0);
-            }
-
-            $locked = collect($this->lockObligations($candidates->all()));
-
-            // One batched pass over adjustments and one over live allocations, rather than
-            // two aggregate queries per candidate: a client with fifty months of history
-            // used to cost a hundred queries to decide what to do with one payment.
-            $remainingByObligation = $this->remainingFor($locked->all());
-
-            $planner = new AllocationPlanner;
-
-            $plan = $planner->plan($locked->all(), $remainingByObligation, $available);
-
-            $applied = [];
-            $spent = 0;
-
-            foreach ($plan as $step) {
-                $allocation = PaymentAllocation::query()->create([
-                    'payment_id' => $lockedPayment->id,
-                    'obligation_id' => $step['obligation']->id,
-                    'amount_cop' => $step['amount_cop'],
-                    'created_by' => $actor->id,
+                // Reserve the key before applying any money. The global unique index
+                // is what makes this exclusive across connections.
+                $reservationId = DB::table('auto_allocations')->insertGetId([
+                    'idempotency_key' => $key,
+                    'payment_id' => $payment->id,
+                    'status' => 'pending',
+                    'outcome' => null,
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ]);
 
-                event(new PaymentAllocated($allocation, $actor));
+                // The only financial implementation, reused inside this transaction.
+                $outcome = $this->applyOldestFirst($payment, $actor);
 
-                $applied[] = $allocation;
-                $spent += $step['amount_cop'];
+                DB::table('auto_allocations')
+                    ->where('id', $reservationId)
+                    ->update([
+                        'status' => 'completed',
+                        'outcome' => json_encode($outcome->toArray()),
+                        'updated_at' => now(),
+                    ]);
+
+                return AutoAllocationRegistration::created($outcome);
+            });
+        } catch (QueryException $exception) {
+            // Only the idempotency index is a replay signal. Any other SQL failure is
+            // a real failure and must not be turned into a success.
+            if (! $this->isAutoAllocationKeyViolation($exception)) {
+                throw $exception;
             }
 
-            if ($applied !== []) {
-                event(new PaymentAutoAllocated($lockedPayment->refresh(), $actor, count($applied)));
+            // The winner has committed: PostgreSQL waits for the conflicting insert
+            // before reporting the violation, so the row is visible now.
+            $existing = DB::table('auto_allocations')
+                ->where('idempotency_key', $key)
+                ->first();
+
+            if ($existing === null) {
+                // The violation did not leave a row this key can resolve against.
+                throw $exception;
             }
 
-            $remainingAvailable = $available - $spent;
-
-            // Guardar el resultado en auto_allocations ANTES de hacer commit,
-            // para que un fallo o reintento posterior pueda recuperarlo.
-            if ($idempotencyKey !== null) {
-                $this->storeAutoAllocation($payment, $idempotencyKey, 'completed', array_map(
-                    fn ($a) => [
-                        'allocation_id' => $a->id,
-                        'obligation_id' => $a->obligation_id,
-                        'amount_cop' => $a->amount_cop,
-                    ],
-                    $applied,
-                ), $available);
-            }
-
-            return new AllocationOutcome($applied, $remainingAvailable, count($applied));
-        });
+            return $this->resolveExistingAutoAllocation($payment, $existing);
+        }
     }
 
     /**
-     * Almacena el resultado de una ejecución de auto-allocation en la tabla
-     * auto_allocations para su recuperación posterior.
+     * Answer an existing idempotency key without touching the money.
      *
-     * La restricción es UNICA sobre idempotency_key a nivel global (no por payment).
-     * Misma clave y otro pago → 409 conflicto.
+     * @param  object  $existing  row from `auto_allocations`
      *
-     * No usar app('payment') ni $payment->obligations(). Persistir únicamente
-     * los datos que ya conocemos de las aplicaciones creadas en la transacción.
+     * @throws PaymentRejected
      */
-    private function storeAutoAllocation(
-        Payment $payment,
-        string $idempotencyKey,
-        string $status,
-        array $applications,
-    ): void {
-        // Datos de las aplicaciones: IDs, importes y orden.
-        // Usar los IDs y importes directamente sin consultar la BD.
-        $applicationsData = array_map(function ($a): array {
-            return [
-                'allocation_id' => $a->id,
-                'obligation_id' => $a->obligation_id,
-                'amount_cop' => $a->amount_cop,
-                'created_at' => $a->created_at?->toISO8601String() ?? null,
-            ];
-        }, $applications);
-
-        // Saldo real restante: dinero del pago no consumido por las aplicaciones.
-        // Calcular desde los importes que ya tenemos, sin app('payment’).
-        $totalAllocated = $applications !== [] ? array_sum(array_column($applications, 'amount_cop')) : 0;
-        $remainingAvailable = $available - $totalAllocated;
-
-        // El valor de $available debe estar disponible en el scope.
-        // Como este método se llama dentro de applyOldestFirstInternal transacción,
-        // usamos el disponible calculado en esa context.
-        // Si no hay aplicaciones, el remaining es el disponible completo.
-        if ($applications === []) {
-            $remainingAvailable = $available;
+    private function resolveExistingAutoAllocation(Payment $payment, object $existing): AutoAllocationRegistration
+    {
+        // A key owned by another payment is a conflict. Nothing is executed.
+        if ((int) $existing->payment_id !== (int) $payment->getKey()) {
+            return AutoAllocationRegistration::conflict();
         }
 
-        $outcomeData = [
-            'remainingAvailable' => $remainingAvailable,
-            'appliedCount' => count($applications),
-            'applications' => $applicationsData,
-            'appliedOrder' => $applications !== [] ? array_keys(array_map(fn ($a) => $a->id, $applications)) : [],
-        ];
+        // A visible row that never completed is an incomplete execution. Do not
+        // invent money from it.
+        if ($existing->status !== 'completed' || $existing->outcome === null) {
+            return AutoAllocationRegistration::voided();
+        }
 
-        // Restricción UNICA global sobre idempotency_key.
-        // Misma clave y otro pago fallará con violación de índice (SQLSTATE 23505).
-        // Usar upsert para insertar o actualizar si ya existe.
-        DB::table('auto_allocations')->upsert(
-            [
-                'idempotency_key' => $idempotencyKey,
-                'payment_id' => $payment->id,
-                'status' => $status,
-                'outcome' => json_encode($outcomeData),
-                'updated_at' => now(),
-            ],
-            ['idempotency_key'],  // Único a nivel global
-            ['status', 'outcome', 'updated_at'],
-        );
+        $stored = json_decode((string) $existing->outcome, true);
+
+        if (! is_array($stored) || ! isset($stored['allocations']) || ! is_array($stored['allocations'])) {
+            return AutoAllocationRegistration::voided();
+        }
+
+        // A voided payment cannot be replayed as if the money were still available.
+        $payment->refresh();
+
+        if ($payment->isVoided()) {
+            return AutoAllocationRegistration::voided();
+        }
+
+        $allocationIds = array_values(array_map(
+            static fn (array $row): int => (int) $row['allocation_id'],
+            $stored['allocations'],
+        ));
+
+        $allocations = PaymentAllocation::query()
+            ->whereIn('id', $allocationIds)
+            ->get()
+            ->keyBy('id');
+
+        // Missing rows mean the stored result is incomplete. Reversed rows mean the
+        // money it described is no longer applied. Neither may be redistributed.
+        if (count($allocations) !== count($allocationIds)) {
+            return AutoAllocationRegistration::voided();
+        }
+
+        $ordered = [];
+
+        foreach ($allocationIds as $id) {
+            $allocation = $allocations[$id] ?? null;
+
+            if ($allocation === null || $allocation->isReversed()) {
+                return AutoAllocationRegistration::voided();
+            }
+
+            $ordered[] = $allocation;
+        }
+
+        return AutoAllocationRegistration::replayed(new AllocationOutcome(
+            $ordered,
+            (int) ($stored['unallocated_amount_cop'] ?? 0),
+            (int) ($stored['applied_count'] ?? count($ordered)),
+        ));
+    }
+
+    /**
+     * Whether this is the unique violation of the auto-allocation idempotency key.
+     *
+     * Matching the constraint by name keeps every other integrity failure — a
+     * foreign key, a check, another unique index — from being mistaken for a replay.
+     */
+    private function isAutoAllocationKeyViolation(QueryException $exception): bool
+    {
+        $sqlstate = (string) ($exception->errorInfo[0] ?? $exception->getCode());
+
+        return $sqlstate === '23505'
+            && str_contains($exception->getMessage(), 'auto_allocations_key_unique');
     }
 
     /**

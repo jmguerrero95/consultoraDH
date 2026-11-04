@@ -7,10 +7,10 @@ namespace App\Domain\Payments;
 /**
  * What an auto-allocation execution produced.
  *
- * The controller needs to tell a first execution from a recovery.
- * Returning a bare `AllocationOutcome` forced that distinction to be
- * guessed from a pre-transaction read, which is exactly the read a
- * concurrent request can invalidate.
+ * The controller needs to tell a first execution from a recovery, from a key that
+ * belongs to another payment, and from a key whose money was voided or reversed.
+ * Returning a bare `AllocationOutcome` forced that distinction to be guessed from a
+ * pre-transaction read, which is exactly the read a concurrent request can invalidate.
  */
 final readonly class AutoAllocationRegistration
 {
@@ -36,31 +36,18 @@ final readonly class AutoAllocationRegistration
     }
 
     /**
-     * The key is already used by an execution with different payment or data.
-     *
-     * @param  string  $existingOutcomeJson  The stored outcome from the previous execution
-     * @param  string  $existingStatus  The status of the previous execution
-     * @param  int  $existingAppliedCount  The applied count from the previous execution
-     * @param  int  $existingRemainingAvailable  The remaining available from the previous execution
+     * The key is already used by an execution of a different payment.
+     * Nothing was executed and nothing will be.
      */
-    public static function conflict(string $existingOutcomeJson, string $existingStatus, int $existingAppliedCount, int $existingRemainingAvailable): self
+    public static function conflict(): self
     {
-        $storedOutcome = json_decode($existingOutcomeJson, true);
-
-        return new self(
-            new AllocationOutcome(
-                [],
-                $storedOutcome['remainingAvailable'] ?? $existingRemainingAvailable,
-                $storedOutcome['appliedCount'] ?? $existingAppliedCount,
-            ),
-            conflict: true,
-            voided: false,
-        );
+        return new self(new AllocationOutcome([], 0, 0), created: false, conflict: true, voided: false);
     }
 
     /**
-     * The key belongs to a voided or reversed execution. It cannot be reused,
-     * and no second execution may be created from it.
+     * The key belongs to a voided payment, to an execution with reversed
+     * applications, or to an incomplete result. It cannot be reused, and no
+     * second execution may be created from it.
      */
     public static function voided(): self
     {
