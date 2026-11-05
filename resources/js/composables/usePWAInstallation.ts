@@ -215,10 +215,43 @@ export function usePWAInstallation() {
         }
     }
 
+    /** Platform-appropriate instructions shown when native install is not available. */
+    function getPlatformInstructions(): string {
+        if (!inBrowser()) {
+            return ''
+        }
+
+        const p = platform.value
+
+        if (p === 'android') {
+            return 'En Android, pulse el menú de Chrome y seleccione "Instalar aplicación" para añadir Consultora DH a la pantalla principal.'
+        }
+
+        if (p === 'ios') {
+            return 'En iOS, pulse Compartir y elija "Añadir a pantalla de inicio".'
+        }
+
+        return 'Consulte la documentación de su navegador para instalar Consultora DH como aplicación web.'
+    }
+
     /** Plain text, because the menu renders it as text rather than HTML. */
     function getIOSInstructions(): string {
         return 'Para añadir Consultora DH a la pantalla de inicio, pulse Compartir y elija «Añadir a pantalla de inicio».'
     }
+
+    /** Whether the browser supplied a usable `beforeinstallprompt` event. */
+    const canUseNativePrompt = computed(() => promptEvent.value !== null)
+
+    /** Whether the install offer should be shown (true when app not installed and not dismissed). */
+    const canUseInstallOffer = computed(() => {
+        if (isInstalled.value || bannerWasDismissed()) {
+            return false
+        }
+        return showingBanner.value
+    })
+
+    /** Whether the install banner/offer should be displayed, combining native and fallback paths. */
+    const showInstallOffer = computed(() => canUseInstallOffer.value || !canUseNativePrompt.value)
 
     return {
         promptEvent: readonly(promptEvent),
@@ -226,12 +259,15 @@ export function usePWAInstallation() {
         isInstalled,
         showingBanner,
         platform,
+        canUseNativePrompt,
+        showInstallOffer,
 
         canInstall: computed(
             () => isInstallable.value
                 && !isInstalled.value
                 && showingBanner.value
-                && !bannerWasDismissed(),
+                && !bannerWasDismissed()
+                && canUseNativePrompt.value,
         ),
 
         detectPlatform,
@@ -242,5 +278,6 @@ export function usePWAInstallation() {
         bannerWasDismissed,
         bannerWasDismissedTemp,
         getIOSInstructions,
+        getPlatformInstructions,
     }
 }

@@ -276,18 +276,6 @@ self.addEventListener('notificationclick', (event) => {
     return;
   }
 
-  // Normal tap and "Ver": register attention via the signed `dismissUrl`
-  // (the server records `reminder_dismissed_at` idempotently) AND navigate
-  // to the canonical detail `/operacion/tareas/:id`. Opening the
-  // notification never completes or cancels the task.
-  //
-  // Navigation must be effective even when the PWA was closed. A
-  // `postMessage` to a non-existent client is fire-and-forget and was
-  // the defect in FIX-PWA-02-R1: it required a live page with a message
-  // listener. Here the worker owns the navigation: focus an existing
-  // window when one belongs to this origin, otherwise open a new one
-  // with the target. The message is still sent as a courtesy for clients
-  // that listen, but the result never depends on it.
   const target = safeDestination(event.notification.data?.url);
   const dismissUrl = event.notification.data?.dismissUrl;
 
@@ -298,13 +286,14 @@ self.addEventListener('notificationclick', (event) => {
       // lost attention. The server is idempotent, so replay is safe.
       await postOrQueue(dismissUrl);
 
-      let navigationHandled = false;
-      let focusedClient = null;
-
       const clientList = await clients.matchAll({
         type: 'window',
         includeUncontrolled: true,
       });
+
+      // Identify same-origin clients and attempt navigation.
+      let navigationHandled = false;
+      let focusedClient = null;
 
       for (const client of clientList) {
         let sameOrigin = false;
@@ -320,48 +309,34 @@ self.addEventListener('notificationclick', (event) => {
             await client.navigate(target);
             navigationHandled = true;
             focusedClient = client;
+            // Terminar procesamiento después de una navegación exitosa.
+            break;
           } catch {
             // navigate() failed — fall through to openWindow below.
           }
         }
+      }
 
-        // After successful navigate, focus the window to bring it to foreground.
-        if (focusedClient && 'focus' in focusedClient) {
-          try {
-            await focusedClient.focus();
-          } catch {
-            // focus() failed — not critical; navigation is still authoritative.
-          }
+      // Enfocar ESE cliente si navegación exitosa.
+      if (focusedClient && 'focus' in focusedClient) {
+        try {
+          await focusedClient.focus();
+        } catch {
+          // focus() failed — not critical; navigation is still authoritative.
         }
       }
 
-      // If navigate was not possible or did not succeed, try openWindow
-      // as a fallback that always works for new windows/tabs.
+      // Si ningún cliente permite navegar, llamar a openWindow una sola vez.
       if (!navigationHandled && clients.openWindow) {
         try {
-          await clients.openWindow(target);
+          const newClient = await clients.openWindow(target);
           navigationHandled = true;
-        } catch {
-          // openWindow failed too.
-        }
-      }
-
-      // If we opened a new window via openWindow, focus it.
-      if (navigationHandled && clients.openWindow) {
-        try {
-          // openWindow returns the new client; focus it.
-          const newClient = await clients.matchAll({
-            type: 'window',
-            includeUncontrolled: true,
-          });
-          for (const c of newClient) {
-            if (new URL(c.url).origin === self.location.origin) {
-              await c.focus();
-              break;
-            }
+          // Enfocar el cliente devuelto por openWindow.
+          if (newClient && 'focus' in newClient) {
+            await newClient.focus();
           }
         } catch {
-          // Best effort; not critical.
+          // openWindow failed too.
         }
       }
     })()

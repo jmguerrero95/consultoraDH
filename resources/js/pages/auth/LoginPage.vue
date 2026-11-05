@@ -39,7 +39,7 @@ const redirect = computed(() => {
 });
 
 // PWA installation state (reuses usePWAInstallation composable).
-const { isInstalled, canInstall, showingBanner, platform, install, dismissBanner, promptEvent, bannerWasDismissed } = usePWAInstallation();
+const { isInstalled, canInstall, showingBanner, platform, install, dismissBanner, dismissBannerTemp, bannerWasDismissed, bannerWasDismissedTemp, promptEvent, showInstallOffer, canUseNativePrompt } = usePWAInstallation();
 
 function fieldError(field: string): string | null {
     return fieldErrors.value[field] ?? null;
@@ -226,6 +226,7 @@ async function installPWA(): Promise<void> {
                             Ingresar
                         </AppButton>
 
+                        <!-- Install offer: native button when available, fallback instructions otherwise. -->
                         <p v-if="canInstall && !isInstalled" class="mt-3">
                             <AppButton
                                 @click="installPWA"
@@ -245,6 +246,30 @@ async function installPWA(): Promise<void> {
                             >
                                 Ahora no
                             </button>
+                        </p>
+
+                        <!-- Fallback instructions when no native beforeinstallprompt is available. -->
+                        <p v-if="showInstallOffer && !isInstalled && !canInstall" class="mt-3 cdh-text-muted">
+                            <span v-if="canUseNativePrompt">
+                                <AppButton
+                                    variant="ghost"
+                                    size="sm"
+                                    @click="installPWA"
+                                >
+                                    Instalar aplicación
+                                </AppButton>
+                            </span>
+                            <span v-else>
+                                <template v-if="platform === 'android'">
+                                    En Android, pulse el menú de Chrome y seleccione "Instalar aplicación" para añadir Consultora DH a la pantalla principal.
+                                </template>
+                                <template v-else-if="platform === 'ios'">
+                                    En iOS, pulse Compartir y elija "Añadir a pantalla de inicio".
+                                </template>
+                                <template>
+                                    Consulte la documentación de su navegador para instalar Consultora DH como aplicación web.
+                                </template>
+                            </span>
                         </p>
                     </div>
                 </form>
