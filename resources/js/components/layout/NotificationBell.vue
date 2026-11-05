@@ -73,14 +73,15 @@ async function cargar(): Promise<void> {
 async function marcarLeida(notification: AppNotification): Promise<void> {
     // Opening a task reminder from the bell is an explicit attention:
     // record it on the server first (idempotent, auth via session cookie),
-    // so the scheduler does not send the second reminder later. The
-    // `task_id` comes from the server payload (`dismiss-task`), never
-    // inferred from the client.
-    try {
-        await a05.notifications.dismissTaskFrom(notification.id);
-    } catch {
-        // Best effort: opening the task still works; the server may have
-        // already recorded it. Do not block navigation on this.
+    // so the scheduler does not send the second reminder later. Only call
+    // `dismissTaskFrom()` for task reminders (those with `task_id`).
+    if (notification.data.task_id !== null && typeof notification.data.task_id === 'number') {
+        try {
+            await a05.notifications.dismissTaskFrom(notification.id);
+        } catch {
+            // Best effort: opening the task still works; the server may have
+            // already recorded it. Do not block navigation on this.
+        }
     }
 
     if (notification.read_at !== null) {
@@ -120,12 +121,17 @@ async function marcarTodas(): Promise<void> {
 }
 
 async function abrir(notification: AppNotification): Promise<void> {
-    const destino = notification.data.route;
+    // Si es un recordatorio de tarea, navegar a /operacion/tareas/:id usando task_id
+    if (notification.data.task_id !== null && typeof notification.data.task_id === 'number') {
+        await router.push({ name: 'operacion.tareas.detalle', params: { id: notification.data.task_id } });
+    } else {
+        const destino = notification.data.route;
 
-    abierto.value = false;
+        abierto.value = false;
 
-    if (typeof destino === 'string' && destino !== '') {
-        await router.push(destino);
+        if (typeof destino === 'string' && destino !== '') {
+            await router.push(destino);
+        }
     }
 }
 

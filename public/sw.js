@@ -298,6 +298,8 @@ self.addEventListener('notificationclick', (event) => {
       // lost attention. The server is idempotent, so replay is safe.
       await postOrQueue(dismissUrl);
 
+      let navigationHandled = false;
+
       const clientList = await clients.matchAll({
         type: 'window',
         includeUncontrolled: true,
@@ -312,33 +314,29 @@ self.addEventListener('notificationclick', (event) => {
           sameOrigin = false;
         }
 
-        if (sameOrigin && 'focus' in client) {
+        if (sameOrigin && 'navigate' in client) {
           try {
-            // Courtesy only — see above. Some clients listen for the
-            // `navigate` message to let the router own the transition.
-            client.postMessage({ type: 'navigate', url: target });
+            await client.navigate(target);
+            navigationHandled = true;
           } catch {
-            // Advisory: the navigation below is authoritative.
+            // navigate() failed — fall through to openWindow below.
           }
+        }
 
-          // Navigate the existing window directly. A closed PWA has no
-          // client in this list, so this branch is skipped and the
-          // `openWindow` below is what guarantees a navigation.
-          if ('navigate' in client) {
-            try {
-              await client.navigate(target);
-            } catch {
-              // Some clients reject navigate(); fall through to openWindow.
-            }
+        // If navigate was not possible or did not succeed, try openWindow
+        // as a fallback that always works for new windows/tabs.
+        if (!navigationHandled && clients.openWindow) {
+          try {
+            await clients.openWindow(target);
+            navigationHandled = true;
+          } catch {
+            // openWindow failed too.
           }
-
-          await client.focus();
-
-          return;
         }
       }
 
-      if (clients.openWindow) {
+      // If we could not navigate an existing window, open a new one.
+      if (!navigationHandled && clients.openWindow) {
         await clients.openWindow(target);
       }
     })()

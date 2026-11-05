@@ -9,6 +9,7 @@ import AppFormField from '@/components/ui/AppFormField.vue';
 import AppPasswordField from '@/components/ui/AppPasswordField.vue';
 import { ApiError } from '@/services/http';
 import { useAuthStore } from '@/stores/auth';
+import { usePWAInstallation } from '@/composables/usePWAInstallation';
 
 /**
  * Sign in.
@@ -36,6 +37,9 @@ const redirect = computed(() => {
         ? target
         : '/';
 });
+
+// PWA installation state (reuses usePWAInstallation composable).
+const { isInstalled, canInstall, showingBanner, platform, install, dismissBanner } = usePWAInstallation();
 
 function fieldError(field: string): string | null {
     return fieldErrors.value[field] ?? null;
@@ -69,6 +73,26 @@ async function submit(): Promise<void> {
         } else {
             formError.value = 'No fue posible iniciar sesión. Inténtelo de nuevo.';
         }
+    }
+}
+
+async function installPWA(): Promise<void> {
+    if (!canInstall.value) {
+        return;
+    }
+
+    const result = await install();
+
+    if (result) {
+        // Banner automatically hidden by the composable after install
+        // Show platform-appropriate follow-up if needed
+        const p = platform.value;
+        if (p === 'ios') {
+            // iOS instructions are already in the composable; just toast
+        } else if (p === 'android') {
+            // Android: the native prompt should have appeared
+        }
+        // desktop: no further action needed
     }
 }
 </script>
@@ -184,6 +208,19 @@ async function submit(): Promise<void> {
                         >
                             Ingresar
                         </AppButton>
+
+                        <p v-if="canInstall && !isInstalled" class="mt-3">
+                            <AppButton
+                                @click="installPWA"
+                                variant="outline"
+                                small
+                            >
+                                Instalar aplicación
+                            </AppButton>
+                            <span class="cdh-text-xs cdh-text-muted ms-2">
+                                Accede sin conexión y con la pantalla completa
+                            </span>
+                        </p>
                     </div>
                 </form>
 

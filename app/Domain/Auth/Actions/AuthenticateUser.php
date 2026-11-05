@@ -99,8 +99,10 @@ final class AuthenticateUser
         //    cannot outlive them.
         // No credentials are ever written to localStorage — the cookie is
         // HttpOnly and opaque.
-        Auth::login($user, $remember);
-
+        //
+        // The duration MUST be set BEFORE `login()` because `SessionGuard`
+        // snapshots `$rememberDuration` at login time. Setting it after
+        // would not affect the cookie that Laravel generates.
         if ($remember) {
             $guard = Auth::guard('web');
 
@@ -108,6 +110,8 @@ final class AuthenticateUser
                 $guard->setRememberDuration(self::REMEMBER_MINUTES);
             }
         }
+
+        Auth::login($user, $remember);
 
         // A fresh session identifier after authentication.
         $request->session()->regenerate();

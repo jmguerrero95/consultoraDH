@@ -1908,6 +1908,7 @@ export interface AppNotification {
         title?: string;
         message?: string;
         route?: string;
+        task_id?: number | null;
     };
     read_at: string | null;
     created_at: string;
