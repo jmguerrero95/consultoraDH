@@ -42,6 +42,8 @@ const platform = ref<PWAPlatform>('desktop')
 
 const DISMISSED_KEY = 'cdh:pwa-banner-dismissed'
 
+const TEMP_DISMISSED_KEY = 'cdh:pwa-banner-temp-dismissed'
+
 let listening = false
 
 function inBrowser(): boolean {
@@ -189,6 +191,25 @@ export function usePWAInstallation() {
     function bannerWasDismissed(): boolean {
         try {
             return window.localStorage.getItem(DISMISSED_KEY) === '1'
+        } catch {
+            return false
+        }
+    }
+
+    function dismissBannerTemp(): void {
+        showingBanner.value = false
+
+        try {
+            window.sessionStorage.setItem(TEMP_DISMISSED_KEY, '1')
+        } catch {
+            // Storage can be unavailable (private mode, quota). The banner is
+            // hidden for this session either way.
+        }
+    }
+
+    function bannerWasDismissedTemp(): boolean {
+        try {
+            return window.sessionStorage.getItem(TEMP_DISMISSED_KEY) === '1'
         } catch {
             return false
         }

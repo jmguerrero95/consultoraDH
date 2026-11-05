@@ -93,6 +93,17 @@ async function installPWA(): Promise<void> {
             // Android: the native prompt should have appeared
         }
         // desktop: no further action needed
+    } else if (!promptEvent.value) {
+        // beforeinstallprompt not available — show platform instructions
+        // (the composable captures the event only if the browser supports it)
+        const p = platform.value;
+        if (p === 'ios') {
+            // Already handled by getIOSInstructions() in the composable
+        } else if (p === 'android') {
+            // Show Android-specific instructions
+        } else {
+            // Desktop: show general instructions
+        }
     }
 }
 </script>
@@ -218,8 +229,15 @@ async function installPWA(): Promise<void> {
                                 Instalar aplicación
                             </AppButton>
                             <span class="cdh-text-xs cdh-text-muted ms-2">
-                                Accede sin conexión y con la pantalla completa
+                                Acceso rápido como aplicación y pantalla completa
                             </span>
+                            <button
+                                @click="dismissBannerTemp"
+                                class="cdh-text-link cdh-text-xs cdh-text-muted ms-3"
+                                v-if="!bannerWasDismissedTemp()"
+                            >
+                                Ahora no
+                            </button>
                         </p>
                     </div>
                 </form>
