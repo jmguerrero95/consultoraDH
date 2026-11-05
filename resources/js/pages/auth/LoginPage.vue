@@ -250,25 +250,14 @@ async function installPWA(): Promise<void> {
 
                         <!-- Fallback instructions when no native beforeinstallprompt is available. -->
                         <p v-if="showInstallOffer && !isInstalled && !canInstall" class="mt-3 cdh-text-muted">
-                            <span v-if="canUseNativePrompt">
-                                <AppButton
-                                    variant="ghost"
-                                    size="sm"
-                                    @click="installPWA"
-                                >
-                                    Instalar aplicación
-                                </AppButton>
+                            <span v-if="platform === 'android'">
+                                En Android, pulse el menú de Chrome y seleccione "Instalar aplicación" para añadir Consultora DH a la pantalla principal.
+                            </span>
+                            <span v-else-if="platform === 'ios'">
+                                En iOS, pulse Compartir y elija "Añadir a pantalla de inicio".
                             </span>
                             <span v-else>
-                                <template v-if="platform === 'android'">
-                                    En Android, pulse el menú de Chrome y seleccione "Instalar aplicación" para añadir Consultora DH a la pantalla principal.
-                                </template>
-                                <template v-else-if="platform === 'ios'">
-                                    En iOS, pulse Compartir y elija "Añadir a pantalla de inicio".
-                                </template>
-                                <template>
-                                    Consulte la documentación de su navegador para instalar Consultora DH como aplicación web.
-                                </template>
+                                Consulte la documentación de su navegador para instalar Consultora DH como aplicación web.
                             </span>
                         </p>
                     </div>

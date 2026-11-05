@@ -242,16 +242,31 @@ export function usePWAInstallation() {
     /** Whether the browser supplied a usable `beforeinstallprompt` event. */
     const canUseNativePrompt = computed(() => promptEvent.value !== null)
 
-    /** Whether the install offer should be shown (true when app not installed and not dismissed). */
-    const canUseInstallOffer = computed(() => {
-        if (isInstalled.value || bannerWasDismissed()) {
+    /** Whether the install banner/offer should be displayed, combining native and fallback paths. */
+    /** Shows when:
+     *  - App not installed
+     *  - No permanent dismiss
+     *  - No temporary dismiss (for this session)
+     *  - Either native prompt available OR platform-appropriate manual instructions exist
+     */
+    const showInstallOffer = computed(() => {
+        // Si ya está instalada, no ofrecer
+        if (isInstalled.value) {
             return false
         }
-        return showingBanner.value
+        // Si tiene descarte permanente, no ofrecer
+        if (bannerWasDismissed()) {
+            return false
+        }
+        // Si hay descarte temporal vigente para esta sesión, no ofrecer
+        if (bannerWasDismissedTemp()) {
+            return false
+        }
+        // Mostrar si hay evento nativo disponible O si hay instrucciones manuales aplicables
+        const hasNativePrompt = canUseNativePrompt.value
+        const hasManualInstructions = platform.value !== 'unknown'
+        return hasNativePrompt || hasManualInstructions
     })
-
-    /** Whether the install banner/offer should be displayed, combining native and fallback paths. */
-    const showInstallOffer = computed(() => canUseInstallOffer.value || !canUseNativePrompt.value)
 
     return {
         promptEvent: readonly(promptEvent),
