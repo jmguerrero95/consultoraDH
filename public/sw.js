@@ -267,36 +267,81 @@ function safeDestination(candidate) {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
-  // "Descartar" is a write, not a way to hide the tray entry.
-  //
-  // Closing the notification changes nothing on the server: the scheduler
-  // would still send the second reminder ten minutes later. The signed URL in
-  // the payload is posted back so `reminder_dismissed_at` is recorded, and a
-  // failure is queued for background sync instead of being lost.
+  // "Descartar": register attention without opening the task. The signed
+  // `dismissUrl` is POSTed back so `reminder_dismissed_at` is written and
+  // the second reminder is suppressed. Idempotent server-side (the
+  // controller only writes when the column is still null).
   if (event.action === 'dismiss') {
     event.waitUntil(postOrQueue(event.notification.data?.dismissUrl));
     return;
   }
 
-  // Re-validated here as well as when the notification was shown: the payload
-  // sits in the notification store, which outlives this worker.
+  // Normal tap and "Ver": register attention via the signed `dismissUrl`
+  // (the server records `reminder_dismissed_at` idempotently) AND navigate
+  // to the canonical detail `/operacion/tareas/:id`. Opening the
+  // notification never completes or cancels the task.
+  //
+  // Navigation must be effective even when the PWA was closed. A
+  // `postMessage` to a non-existent client is fire-and-forget and was
+  // the defect in FIX-PWA-02-R1: it required a live page with a message
+  // listener. Here the worker owns the navigation: focus an existing
+  // window when one belongs to this origin, otherwise open a new one
+  // with the target. The message is still sent as a courtesy for clients
+  // that listen, but the result never depends on it.
   const target = safeDestination(event.notification.data?.url);
+  const dismissUrl = event.notification.data?.dismissUrl;
 
   event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+    (async () => {
+      // Attention first: if the POST fails (offline) it is queued in the
+      // outbox and replayed by `sync`, so a failed attention is not a
+      // lost attention. The server is idempotent, so replay is safe.
+      await postOrQueue(dismissUrl);
+
+      const clientList = await clients.matchAll({
+        type: 'window',
+        includeUncontrolled: true,
+      });
+
       for (const client of clientList) {
-        if (client.url.includes(self.location.origin) && 'focus' in client) {
-          // Handed to the app rather than navigating the window directly, so
-          // the router owns the transition and the session survives it.
-          client.postMessage({ type: 'navigate', url: target });
-          return client.focus();
+        let sameOrigin = false;
+
+        try {
+          sameOrigin = new URL(client.url).origin === self.location.origin;
+        } catch {
+          sameOrigin = false;
+        }
+
+        if (sameOrigin && 'focus' in client) {
+          try {
+            // Courtesy only — see above. Some clients listen for the
+            // `navigate` message to let the router own the transition.
+            client.postMessage({ type: 'navigate', url: target });
+          } catch {
+            // Advisory: the navigation below is authoritative.
+          }
+
+          // Navigate the existing window directly. A closed PWA has no
+          // client in this list, so this branch is skipped and the
+          // `openWindow` below is what guarantees a navigation.
+          if ('navigate' in client) {
+            try {
+              await client.navigate(target);
+            } catch {
+              // Some clients reject navigate(); fall through to openWindow.
+            }
+          }
+
+          await client.focus();
+
+          return;
         }
       }
 
       if (clients.openWindow) {
-        return clients.openWindow(target);
+        await clients.openWindow(target);
       }
-    })
+    })()
   );
 });
 

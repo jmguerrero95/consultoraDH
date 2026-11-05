@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 
 import AppAlert from '@/components/ui/AppAlert.vue';
 import AppButton from '@/components/ui/AppButton.vue';
@@ -26,6 +27,7 @@ import type { CalendarEvent, Novelty, OperationalTask, VocabularyOption } from '
  */
 
 const auth = useAuthStore();
+const router = useRouter();
 const pestana = ref<'novedades' | 'tareas' | 'calendario'>('novedades');
 
 const novelties = ref<Novelty[]>([]);
@@ -198,17 +200,22 @@ async function crearTarea(): Promise<void> {
 }
 
 async function verTarea(task: OperationalTask): Promise<void> {
+    // Vue Router navigation — never a full page reload. The detail screen
+    // fetches `GET /api/tasks/{task}` itself; the list is not re-queried to
+    // pre-load it. `tasks.view` is enforced server-side on that endpoint.
+    await router.push({ name: 'operacion.tareas.detalle', params: { id: task.id } });
+}
+
+async function completarTarea(task: OperationalTask): Promise<void> {
     errorMessage.value = null;
+    actionMessage.value = null;
 
     try {
-        await a05.tasks.show(task.id);
+        await a05.tasks.complete(task.id);
+        actionMessage.value = 'Tarea completada.';
         await cargarTodo();
-
-        // Navegar al detalle de la tarea usando la ruta canónica
-        // @ts-ignore - window.location se usa para navegación SPA
-        window.location.href = `/operacion/tareas/${task.id}`;
     } catch (e) {
-        errorMessage.value = e instanceof ApiError ? e.message : 'No se pudo cargar el detalle.';
+        errorMessage.value = e instanceof ApiError ? e.message : 'No se pudo completar la tarea.';
     }
 }
 
@@ -484,9 +491,14 @@ function moverMes(delta: number): void {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr v-for="t in tasks" :key="t.id" @click="verTarea(t)">
+                                    <tr v-for="t in tasks" :key="t.id">
                                         <td>
-                                            {{ t.title }}
+                                            <RouterLink
+                                                :to="{ name: 'operacion.tareas.detalle', params: { id: t.id } }"
+                                                class="link-underline link-underline-opacity-0 link-underline-opacity-100-hover"
+                                            >
+                                                {{ t.title }}
+                                            </RouterLink>
                                             <span v-if="t.client_name" class="d-block small text-body-secondary">
                                                 {{ t.client_name }}
                                             </span>
@@ -511,7 +523,7 @@ function moverMes(delta: number): void {
                                             <AppButton
                                                 v-if="auth.can('tasks.manage') && (t.status === 'pending' || t.status === 'in_progress')"
                                                 variant="ghost"
-                                                @click="completarTarea(t)"
+                                                @click.stop="completarTarea(t)"
                                             >
                                                 Completar
                                             </AppButton>

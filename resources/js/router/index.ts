@@ -384,6 +384,36 @@ const routes: RouteRecordRaw[] = [
                 },
             },
             {
+                // Old deep link: `/operacion/tareas?task=ID` -> canonical
+                // `/operacion/tareas/:id`. Without this, old Push payloads,
+                // bell rows and bookmarks land on the list with a query
+                // string the screen never reads. `operacion` is declared
+                // first, so the parent matches; this redirect handles the
+                // query for whichever component renders.
+                path: 'operacion/tareas',
+                name: 'operacion.tareas',
+                redirect: (to) => {
+                    const raw = to.query.task;
+                    const id = typeof raw === 'string' && /^\d+$/.test(raw) ? raw : null;
+
+                    return id === null
+                        ? { name: 'operacion' }
+                        : { name: 'operacion.tareas.detalle', params: { id } };
+                },
+                meta: { title: 'Operación' },
+            },
+            {
+                // Real task detail. The server route
+                // `/operacion/tareas/{id}` serves the shell; this record
+                // renders the screen. Permission `tasks.view` matches the
+                // API (`GET /api/tasks/{task}`, `can:tasks.view`).
+                path: 'operacion/tareas/:id(\\d+)',
+                name: 'operacion.tareas.detalle',
+                component: () => import('@/pages/operacion/TaskDetailPage.vue'),
+                props: true,
+                meta: { title: 'Detalle de la tarea', permission: 'tasks.view' },
+            },
+            {
                 path: 'documentos',
                 name: 'documentos',
                 component: () => import('@/pages/documentos/DocumentosPage.vue'),

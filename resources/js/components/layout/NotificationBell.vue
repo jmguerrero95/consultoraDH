@@ -71,6 +71,18 @@ async function cargar(): Promise<void> {
 }
 
 async function marcarLeida(notification: AppNotification): Promise<void> {
+    // Opening a task reminder from the bell is an explicit attention:
+    // record it on the server first (idempotent, auth via session cookie),
+    // so the scheduler does not send the second reminder later. The
+    // `task_id` comes from the server payload (`dismiss-task`), never
+    // inferred from the client.
+    try {
+        await a05.notifications.dismissTaskFrom(notification.id);
+    } catch {
+        // Best effort: opening the task still works; the server may have
+        // already recorded it. Do not block navigation on this.
+    }
+
     if (notification.read_at !== null) {
         await abrir(notification);
 

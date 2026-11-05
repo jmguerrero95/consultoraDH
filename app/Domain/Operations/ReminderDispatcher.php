@@ -478,7 +478,10 @@ final class ReminderDispatcher
             [
                 'type' => 'task_reminder',
                 'task_id' => $task->id,
-                'url' => '/operacion/tareas?task='.$task->id,
+                // Canonical deep link. Old payloads used
+                // `/operacion/tareas?task=ID`; the Vue router redirects
+                // those to this path, so both still resolve.
+                'url' => '/operacion/tareas/'.(int) $task->id,
             ],
         );
 

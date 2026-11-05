@@ -44,6 +44,18 @@ final class AuthenticateUser
     private const TIMING_DECOY_HASH = '$2y$12$3YAMJD3Y3KwXo8plOarzyuMDAvVSGZZCLF/444Qv1CB62s6wa9pTe';
 
     /**
+     * Persistent-session cookie lifetime, in minutes, when the user kept
+     * "Mantener sesión iniciada" selected.
+     *
+     * User-level Remember Me, not `session.lifetime` (120 min, idle timeout
+     * for the Redis session). The recaller is a native Laravel
+     * `remember_token` cookie (30 days), independent of Redis. When it
+     * expires the user signs in again — the Redis session is never extended
+     * for every account to years, and no credentials are stored client-side.
+     */
+    public const REMEMBER_MINUTES = 43200;
+
+    /**
      * @throws ValidationException on any rejected attempt.
      */
     public function execute(Request $request, string $email, string $password, bool $remember = false): User
@@ -76,7 +88,26 @@ final class AuthenticateUser
             ]);
         }
 
+        // Native Laravel Remember Me. `Auth::login(..., $remember)`:
+        //  - sets/rotates `users.remember_token`,
+        //  - queues an HttpOnly cookie `remember_web_<hash>` (see §3),
+        //  - and when the Redis session dies, `SessionGuard::user()` falls
+        //    back to the recaller and re-authenticates, regenerating the
+        //    session. Logout, password change and deactivation rotate or
+        //    invalidate the token (LogoutUser, RotateRememberToken,
+        //    AuthenticateSession "password changed" check), so the recaller
+        //    cannot outlive them.
+        // No credentials are ever written to localStorage — the cookie is
+        // HttpOnly and opaque.
         Auth::login($user, $remember);
+
+        if ($remember) {
+            $guard = Auth::guard('web');
+
+            if (method_exists($guard, 'setRememberDuration')) {
+                $guard->setRememberDuration(self::REMEMBER_MINUTES);
+            }
+        }
 
         // A fresh session identifier after authentication.
         $request->session()->regenerate();

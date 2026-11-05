@@ -6,6 +6,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Events\NotificationStateChanged;
 use App\Http\Controllers\Controller;
+use App\Models\OperationalTask;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -41,6 +42,7 @@ final class NotificationController extends Controller
                     'type' => $notification->data['type'] ?? null,
                     'title' => $notification->data['title'] ?? null,
                     'message' => $notification->data['message'] ?? null,
+                    'task_id' => $notification->data['task_id'] ?? null,
                     'route' => $notification->data['route'] ?? null,
                 ],
                 'read_at' => $notification->read_at?->toIso8601String(),
@@ -51,6 +53,62 @@ final class NotificationController extends Controller
         return response()->json([
             'data' => $recent,
             'unread' => $user->unreadNotifications()->count(),
+        ]);
+    }
+
+    /**
+     * Mark a task reminder as attended when the bell opens its own reminder.
+     *
+     * The Push "Descartar"/open actions write `reminder_dismissed_at` via the
+     * signed URL (the only writer from the device). This endpoint is the
+     * authenticated equivalent for the in-app bell: clicking a reminder
+     * reads it, so it is attended. The session cookie authorises the call;
+     * the notification must belong to the caller and must point at a task
+     * assigned to the caller. A second call is a no-op — idempotent.
+     *
+     * Without this, opening a reminder from the bell left the task as
+     * un-attended and the scheduler sent the second reminder anyway.
+     */
+    public function dismissTaskFromNotification(Request $request, string $id): JsonResponse
+    {
+        $notification = $request->user()->notifications()->where('id', $id)->first();
+
+        if ($notification === null) {
+            return response()->json(['message' => 'La notificación no existe.'], 404);
+        }
+
+        $data = is_array($notification->data) ? $notification->data : [];
+        $taskId = isset($data['task_id']) ? (int) $data['task_id'] : 0;
+
+        // A notification that is not a task reminder has no attention to
+        // record. It is still marked read by the regular endpoint.
+        if ($taskId <= 0) {
+            return response()->json(['dismissed' => false, 'task_id' => null]);
+        }
+
+        $task = OperationalTask::query()->find($taskId);
+
+        if ($task === null) {
+            return response()->json(['dismissed' => false, 'task_id' => $taskId]);
+        }
+
+        // Only the assignee's own reminder may be acknowledged as attended
+        // through their bell. Anything else is refused like the signed
+        // endpoints do — the signature is not needed because the session
+        // cookie already identifies the caller — but ownership of both the
+        // notification and the task is enforced.
+        if ((int) $task->assigned_to !== (int) $request->user()->id) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
+
+        if ($task->reminder_dismissed_at === null) {
+            $task->forceFill(['reminder_dismissed_at' => now()])->save();
+        }
+
+        return response()->json([
+            'dismissed' => true,
+            'task_id' => $task->id,
+            'dismissed_at' => $task->fresh()?->reminder_dismissed_at?->toIso8601String(),
         ]);
     }
 

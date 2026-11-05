@@ -651,6 +651,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
     Route::middleware('can:tasks.view')->group(function (): void {
         Route::get('/tasks', [TaskController::class, 'index'])->name('api.tasks.index');
         Route::get('/tasks/vocabulary', [TaskController::class, 'vocabulary'])->name('api.tasks.vocabulary');
+        Route::get('/tasks/{task}', [TaskController::class, 'show'])->name('api.tasks.show')->whereNumber('task');
     });
 
     Route::middleware('can:tasks.manage')->group(function (): void {
@@ -760,6 +761,7 @@ Route::middleware(['auth', 'auth.session', 'user.active', 'throttle:api'])->grou
         Route::get('/notifications', [NotificationController::class, 'index'])->name('api.notifications.index');
         Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount'])->name('api.notifications.unread-count');
         Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead'])->name('api.notifications.read-all');
+        Route::post('/notifications/{notification}/dismiss-task', [NotificationController::class, 'dismissTaskFromNotification'])->name('api.notifications.dismiss-task');
         Route::post('/notifications/{notification}/read', [NotificationController::class, 'markRead'])->name('api.notifications.read');
     });
 

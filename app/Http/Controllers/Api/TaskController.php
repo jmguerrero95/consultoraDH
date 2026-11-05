@@ -30,6 +30,23 @@ final class TaskController extends Controller
         private readonly AuditRecorder $audit,
     ) {}
 
+    /**
+     * One task for the deep-link detail screen.
+     *
+     * The paginated list (`index`, 25 rows) is never used to look up a
+     * single id: a task outside the first page would never be found. The
+     * route is guarded by `tasks.view`; implicit binding 404s an unknown
+     * id, and a user without the permission gets a 403 from the `can:`
+     * middleware before this runs. No additional scope is applied here -
+     * `tasks.view` is the existing authorisation and it is preserved as-is.
+     */
+    public function show(OperationalTask $task): JsonResponse
+    {
+        $task->loadMissing(['assignee', 'client']);
+
+        return response()->json($this->present($task));
+    }
+
     public function index(Request $request): JsonResponse
     {
         $query = OperationalTask::query()->with(['assignee', 'client'])->orderByDesc('created_at');

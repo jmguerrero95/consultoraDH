@@ -150,6 +150,10 @@ export const a05 = {
     },
 
     tasks: {
+        show(id: number): Promise<OperationalTask> {
+            return request('GET', `/api/tasks/${id}`);
+        },
+
         list(filters: Record<string, string | number | undefined> = {}): Promise<Paginated<OperationalTask>> {
             return request('GET', '/api/tasks', { query: filters });
         },
@@ -387,6 +391,10 @@ export const a05 = {
 
         markRead(id: string): Promise<{ unread: number }> {
             return request('POST', `/api/notifications/${id}/read`);
+        },
+
+        dismissTaskFrom(id: string): Promise<{ dismissed: boolean; task_id: number | null; dismissed_at?: string }> {
+            return request('POST', `/api/notifications/${id}/dismiss-task`);
         },
 
         markAllRead(): Promise<{ unread: number }> {

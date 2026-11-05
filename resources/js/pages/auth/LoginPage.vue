@@ -24,7 +24,7 @@ const route = useRoute();
 const email = ref('');
 const password = ref('');
 const passwordVisible = ref(false);
-const remember = ref(false);
+const remember = ref(true);
 const formError = ref<string | null>(null);
 const fieldErrors = ref<Record<string, string | null>>({});
 
