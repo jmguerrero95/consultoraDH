@@ -299,6 +299,7 @@ self.addEventListener('notificationclick', (event) => {
       await postOrQueue(dismissUrl);
 
       let navigationHandled = false;
+      let focusedClient = null;
 
       const clientList = await clients.matchAll({
         type: 'window',
@@ -318,26 +319,50 @@ self.addEventListener('notificationclick', (event) => {
           try {
             await client.navigate(target);
             navigationHandled = true;
+            focusedClient = client;
           } catch {
             // navigate() failed — fall through to openWindow below.
           }
         }
 
-        // If navigate was not possible or did not succeed, try openWindow
-        // as a fallback that always works for new windows/tabs.
-        if (!navigationHandled && clients.openWindow) {
+        // After successful navigate, focus the window to bring it to foreground.
+        if (focusedClient && 'focus' in focusedClient) {
           try {
-            await clients.openWindow(target);
-            navigationHandled = true;
+            await focusedClient.focus();
           } catch {
-            // openWindow failed too.
+            // focus() failed — not critical; navigation is still authoritative.
           }
         }
       }
 
-      // If we could not navigate an existing window, open a new one.
+      // If navigate was not possible or did not succeed, try openWindow
+      // as a fallback that always works for new windows/tabs.
       if (!navigationHandled && clients.openWindow) {
-        await clients.openWindow(target);
+        try {
+          await clients.openWindow(target);
+          navigationHandled = true;
+        } catch {
+          // openWindow failed too.
+        }
+      }
+
+      // If we opened a new window via openWindow, focus it.
+      if (navigationHandled && clients.openWindow) {
+        try {
+          // openWindow returns the new client; focus it.
+          const newClient = await clients.matchAll({
+            type: 'window',
+            includeUncontrolled: true,
+          });
+          for (const c of newClient) {
+            if (new URL(c.url).origin === self.location.origin) {
+              await c.focus();
+              break;
+            }
+          }
+        } catch {
+          // Best effort; not critical.
+        }
       }
     })()
   );

@@ -212,8 +212,8 @@ async function installPWA(): Promise<void> {
                         <p v-if="canInstall && !isInstalled" class="mt-3">
                             <AppButton
                                 @click="installPWA"
-                                variant="outline"
-                                small
+                                variant="ghost"
+                                size="sm"
                             >
                                 Instalar aplicación
                             </AppButton>

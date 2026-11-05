@@ -49,11 +49,12 @@ final class AuthenticateUser
      *
      * User-level Remember Me, not `session.lifetime` (120 min, idle timeout
      * for the Redis session). The recaller is a native Laravel
-     * `remember_token` cookie (30 days), independent of Redis. When it
-     * expires the user signs in again — the Redis session is never extended
-     * for every account to years, and no credentials are stored client-side.
+     * `remember_token` cookie. Default 365 days, configurable per deployment.
+     * When it expires the user signs in again — the Redis session is never
+     * extended for every account to years, and no credentials are stored
+     * client-side.
      */
-    public const REMEMBER_MINUTES = 43200;
+    public const REMEMBER_MINUTES = 525600; // 365 days
 
     /**
      * @throws ValidationException on any rejected attempt.
