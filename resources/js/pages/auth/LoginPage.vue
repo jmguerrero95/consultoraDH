@@ -90,7 +90,9 @@ async function installPWA(): Promise<void> {
         if (p === 'ios') {
             // iOS instructions are already in the composable; just toast
         } else if (p === 'android') {
-            // Android: the native prompt should have appeared
+            // Android: el menú de Chrome tiene la opción "Instalar aplicación"
+            // para añadir Consultora DH a la pantalla principal.
+            // Instrucción: pulse el menú de Chrome → "Instalar aplicación".
         }
         // desktop: no further action needed
     } else if (!promptEvent.value) {
@@ -98,11 +100,15 @@ async function installPWA(): Promise<void> {
         // (the composable captures the event only if the browser supports it)
         const p = platform.value;
         if (p === 'ios') {
-            // Already handled by getIOSInstructions() in the composable
+            // iOS: pulse Compartir y elija "Añadir a pantalla de inicio".
+            // Instrucción: pulse el botón "Compartir" y seleccione "Añadir a pantalla de inicio".
         } else if (p === 'android') {
-            // Show Android-specific instructions
+            // Android: el menú de Chrome tiene la opción "Instalar aplicación"
+            // para añadir Consultora DH a la pantalla principal.
+            // Instrucción: pulse el menú de Chrome → "Instalar aplicación".
         } else {
-            // Desktop: show general instructions
+            // Desktop: muestra la opción nativa del navegador para instalar la PWA.
+            // Instrucción: consulte la documentación de su navegador para instalar aplicaciones web.
         }
     }
 }
