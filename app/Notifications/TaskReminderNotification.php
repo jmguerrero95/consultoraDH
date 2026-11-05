@@ -32,7 +32,7 @@ final class TaskReminderNotification extends Notification
             'title' => 'Recordatorio de tarea',
             'message' => $this->task->title,
             'task_id' => (int) $this->task->id,
-            'route' => '/operacion/tareas',
+            'route' => '/operacion/tareas/'.(int) $this->task->id,
         ];
     }
 }

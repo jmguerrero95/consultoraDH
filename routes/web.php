@@ -36,5 +36,12 @@ Route::get('/reset-password/{token}', SpaController::class)
     ->name('password.reset');
 
 // Unknown document path: hand it to the interface, which shows the 404 screen.
+Route::get('/operacion/tareas/{id}', [SpaController::class, '__invoke'])
+    ->name('operacion.tarea.detalle')
+    ->where('id', '[0-9]+');
+
+Route::get('/operacion/tareas', [SpaController::class, '__invoke'])
+    ->name('operacion.tareas');
+
 Route::fallback(SpaController::class)
     ->where('fallbackPlaceholder', '^(?!api|sanctum|up)(?!storage)(?!build)(?!hot)(?!favicon\.ico).*$');

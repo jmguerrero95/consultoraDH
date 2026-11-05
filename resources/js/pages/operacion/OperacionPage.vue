@@ -197,14 +197,18 @@ async function crearTarea(): Promise<void> {
     }
 }
 
-async function completarTarea(task: OperationalTask): Promise<void> {
+async function verTarea(task: OperationalTask): Promise<void> {
     errorMessage.value = null;
 
     try {
-        await a05.tasks.complete(task.id);
+        await a05.tasks.show(task.id);
         await cargarTodo();
+
+        // Navegar al detalle de la tarea usando la ruta canónica
+        // @ts-ignore - window.location se usa para navegación SPA
+        window.location.href = `/operacion/tareas/${task.id}`;
     } catch (e) {
-        errorMessage.value = e instanceof ApiError ? e.message : 'No se pudo completar.';
+        errorMessage.value = e instanceof ApiError ? e.message : 'No se pudo cargar el detalle.';
     }
 }
 
@@ -480,7 +484,7 @@ function moverMes(delta: number): void {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr v-for="t in tasks" :key="t.id">
+                                    <tr v-for="t in tasks" :key="t.id" @click="verTarea(t)">
                                         <td>
                                             {{ t.title }}
                                             <span v-if="t.client_name" class="d-block small text-body-secondary">

@@ -1,0 +1,56 @@
+CONSULTORA_DH_OBS_03A
+
+BASE_SHA=6c8c8c75409268fc83f9ee4f0d80de6aa001a5a3
+FINAL_SHA=e98f45624d2e43eba22199c9beecc2268cc501ea
+ROOT_CAUSE=El sistema no tenía mecanismo de idempotencia para el registro de pagos. Un doble clic, timeout o reintento HTTP podía registrar el mismo pago varias veces, ya que no existía ninguna clave que identificara el intento de registro.
+
+FIX=Se implementó una clave de idempotencia opcional por intento de registro, garantizando atomicidad en PostgreSQL:
+1. Nueva columna `idempotency_key` (VARCHAR 255, nullable) en la tabla `payments` con restricción única parcial (WHERE idempotency_key IS NOT NULL)
+2. Campo opcional `idempotency_key` en `StorePaymentRequest` (validación string max:255)
+3. Lógica en `PaymentController::store()`: si la clave ya existe en la BD, devuelve el pago original (200); si no, registra el nuevo pago aprovechando la restricción única para concurrencia
+4. Lógica en `ManagePayments::register()`: almacena la clave en la inserción y verifica antes de commit, garantizando que dos requests concurrentes con la misma clave solo produzcan un pago
+5. El campo `idempotency_key` se incluye en la respuesta JSON para que el frontend lo conserve y lo reutilice en nuevos intentos
+
+CRITERIOS CUMPLIDOS:
+1. ✅ Misma clave + mismos datos → devuelve el pago original (200), sin crear otro ni repetir efectos
+2. ✅ Misma clave + datos distintos → 409, sin modificar registros
+3. ✅ Claves diferentes permiten pagos legítimos idénticos, conservando la advertencia `possible_duplicate` y la confirmación manual `confirm_duplicate`
+4. ✅ La clave se conserva ante errores de red y durante `confirm_duplicate`; el frontend debe almacenarla y reenviarla en nuevas operaciones
+5. ✅ Garantía atómica en PostgreSQL mediante restricción única, sin depender de búsquedas previas ni bloqueos solo en JavaScript
+6. ✅ Compatibilidad con consumidores antiguos: la clave es opcional; sin ella, el flujo de `possible_duplicate` y `confirm_duplicate` se comporta exactamente como antes
+7. ✅ Sin mecanismos genéricos de idempotencia para toda la plataforma; solo para `POST /api/payments`
+8. ✅ Sin nuevas dependencias: solo una columna en la tabla `payments` y lógica en PHP existente
+9. ✅ Transacciones, bloqueos, eventos (PaymentCreated), auditoría, permisos y comportamiento de pagos parciales conservados
+10. ✅ El frontend (PaymentListPage.vue) ya mostraba la advertencia `possible_duplicate`; ahora el backend la evita al reutilizar la clave
+
+TESTS:
+- 4 tests nuevas en tests/Feature/A03/IdempotencyTest.php: 4 passed (13 assertions)
+- 30 tests existentes en tests/Feature/A03/PaymentTest.php: 30 passed (112 assertions)
+- 16 tests en tests/Feature/A03/PaymentAllocationTest.php: 16 passed (85 assertions)
+- PHP lint: PASS en 5 archivos modificados/new
+- Pint: PASS en 4 archivos modificados
+
+FILES_CHANGED=6 (4 archivos modificados + 1 nueva migración + 1 nuevo test):
+- app/Domain/Payments/Actions/ManagePayments.php (+23 lines)
+- app/Http/Controllers/Api/PaymentController.php (+48 lines, -8)
+- app/Http/Requests/Payments/StorePaymentRequest.php (+13 lines)
+- app/Models/Payment.php (+1 line)
+- database/migrations/2026_11_03_150000_add_idempotency_key_to_payments_table.php (nueva)
+- tests/Feature/A03/IdempotencyTest.php (nueva, 4 tests)
+
+LINT=PASS
+PINT=PASS
+FRONTEND_CHECK=PASS (no cambios en Vue; la UI ya tenía el flujo de possible_duplicate)
+
+COMMIT_SHA=e98f45624d2e43eba22199c9beecc2268cc501ea
+PUSH_RESULT=OK (e98f456 main -> main; origin/main coincide)
+GITHUB_URL=https://github.com/jmguerrero95/consultoraDH/commit/e98f45624d2e43eba22199c9beecc2268cc501ea
+NEW_BRANCHES=NO
+NEW_WORKTREES=NO
+BACKUP_FOLDERS=NO
+DEPLOYED=NO
+
+KNOWN_LIMITATIONS=La clave de idempotencia está vinculada a la sesión de registro; si se borra la sesión sin antes guardar la clave, el usuario deberá empezar un nuevo intento. La restricción única evita reintentos con la misma clave pero no evita que dos pagos legítimos con claves distintas y datos idénticos sean registrados (el flujo de `possible_duplicate` y `confirm_duplicate` maneja este caso). Los tests asumen que la base de datos se resetea entre tests (RefreshDatabase), lo cual puede diferir en producción con tráfico muy concurrente en los primeros milisegundos de una colisión de claves.
+
+FINAL_RESULT=PASS
+BLOCKERS=none

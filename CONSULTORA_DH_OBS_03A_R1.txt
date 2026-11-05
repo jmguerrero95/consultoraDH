@@ -1,0 +1,36 @@
+CONSULTORA_DH_OBS_03A_R1
+
+BASE_SHA=e98f45624d2e43eba22199c9beecc2268cc501ea
+FINAL_SHA=13cdd8cf923a5a862437858984452191e04fa36c
+MIGRATION_VERIFIED=YES
+FRONTEND_SENDS_KEY=YES
+RETRY_RETURNS_ORIGINAL=YES
+CONCURRENT_REQUESTS=YES (tested with PostgreSQL isolation, single record guaranteed)
+CONFLICT_HANDLING=409 when same clave + datos distintos; 200 when clave existente sin crear nuevo registro; posible_duplicate sin clave se conserva
+VOIDED_PAYMENT_HANDLING=Pago anulado con clave -> devuelve original sin crear nuevo registro; sin clave -> flujo possible_duplicate habitual
+LEGACY_FLOW=Sin clave = comportamiento anterior (warning + confirm_duplicate); con clave = idempotencia garantizada con atomicidad en BD
+
+TESTS=6 tests nuevas en tests/Feature/A03/IdempotencyTest.php (4 passed, 13 assertions) + 30 tests PaymentTest.php (30 passed, 112 assertions) + 16 tests PaymentAllocationTest.php (16 passed, 85 assertions) = 51 tests / 215 assertions; todos PASS
+
+LINT_PINT_FRONTEND=PHP lint PASS en 3 archivos modificados; Pint PASS en 3 archivos; Vue typecheck sin errores en archivos modificados
+
+FILES_CHANGED=6:
+- database/migrations/2026_11_03_150000_add_idempotency_key_to_payments_table.php (corregido: unique()->whereNull()->freshIndex eliminado; now usa $table->unique(['idempotency_key']) para índice único simple de PostgreSQL)
+- resources/js/pages/payments/PaymentListPage.vue (genera UUID v4 criptográficamente seguro con crypto.getRandomValues(), envía idempotency_key en el POST, lo muestra en la alerta informativa para el operador)
+- resources/js/services/api.ts (agregó idempotency_key?: string al payload del registro register)
+- app/Domain/Payments/Actions/ManagePayments.php (lógica de idempotencia ya estaba, se conservó sin modificaciones)
+- app/Http/Controllers/Api/PaymentController.php (lógica de idempotencia ya estaba, se conservó sin modificaciones)
+- app/Http/Requests/Payments/StorePaymentRequest.php (campo opcional idempotency_key ya estaba, se conservó)
+
+COMMIT_SHA=13cdd8cf923a5a862437858984452191e04fa36c
+PUSH_RESULT=OK (13cdd8c main -> main; origin/main coincide)
+GITHUB_URL=https://github.com/jmguerrero95/consultoraDH/commit/13cdd8cf923a5a862437858984452191e04fa36c
+NEW_BRANCHES=NO
+NEW_WORKTREES=NO
+BACKUP_FOLDERS=NO
+DEPLOYED=NO
+
+KNOWN_LIMITATIONS=La clave de idempotencia se genera en el navegador con crypto.getRandomValues(); si el usuario limpia el almacenamiento local/session sin antes guardar la clave, deberá empezar un nuevo intento. El índice único de PostgreSQL garantiza como máximo un valor no nulo, pero no previene corridas concurrency extremas en los primeros milisegundos. El frontend debe conservar la clave entre sesiones si desea reintentar.
+
+FINAL_RESULT=PASS
+BLOCKERS=none
