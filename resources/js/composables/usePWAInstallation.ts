@@ -238,6 +238,9 @@ export function usePWAInstallation() {
         refreshInstalledState,
         install,
         dismissBanner,
+        dismissBannerTemp,
+        bannerWasDismissed,
+        bannerWasDismissedTemp,
         getIOSInstructions,
     }
 }
