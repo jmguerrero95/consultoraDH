@@ -39,7 +39,7 @@ const redirect = computed(() => {
 });
 
 // PWA installation state (reuses usePWAInstallation composable).
-const { isInstalled, canInstall, showingBanner, platform, install, dismissBanner } = usePWAInstallation();
+const { isInstalled, canInstall, showingBanner, platform, install, dismissBanner, promptEvent, bannerWasDismissed } = usePWAInstallation();
 
 function fieldError(field: string): string | null {
     return fieldErrors.value[field] ?? null;
