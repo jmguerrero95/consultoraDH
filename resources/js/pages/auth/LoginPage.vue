@@ -233,6 +233,7 @@ async function installPWA(): Promise<void> {
                             </span>
                             <button
                                 @click="dismissBannerTemp"
+                                type="button"
                                 class="cdh-text-link cdh-text-xs cdh-text-muted ms-3"
                                 v-if="!bannerWasDismissedTemp()"
                             >
