@@ -38,8 +38,8 @@ const redirect = computed(() => {
         : '/';
 });
 
-// PWA installation state (reuses usePWAInstallation composable).
-const { isInstalled, canInstall, showingBanner, platform, install, dismissBanner, dismissBannerTemp, bannerWasDismissed, bannerWasDismissedTemp, promptEvent, showInstallOffer, canUseNativePrompt } = usePWAInstallation();
+// PWA installation: one shared reactive decision drives the single offer block.
+const { platform, install, dismissBannerTemp, showInstallOffer, canUseNativePrompt } = usePWAInstallation();
 
 function fieldError(field: string): string | null {
     return fieldErrors.value[field] ?? null;
@@ -77,40 +77,7 @@ async function submit(): Promise<void> {
 }
 
 async function installPWA(): Promise<void> {
-    if (!canInstall.value) {
-        return;
-    }
-
-    const result = await install();
-
-    if (result) {
-        // Banner automatically hidden by the composable after install
-        // Show platform-appropriate follow-up if needed
-        const p = platform.value;
-        if (p === 'ios') {
-            // iOS instructions are already in the composable; just toast
-        } else if (p === 'android') {
-            // Android: el menú de Chrome tiene la opción "Instalar aplicación"
-            // para añadir Consultora DH a la pantalla principal.
-            // Instrucción: pulse el menú de Chrome → "Instalar aplicación".
-        }
-        // desktop: no further action needed
-    } else if (!promptEvent.value) {
-        // beforeinstallprompt not available — show platform instructions
-        // (the composable captures the event only if the browser supports it)
-        const p = platform.value;
-        if (p === 'ios') {
-            // iOS: pulse Compartir y elija "Añadir a pantalla de inicio".
-            // Instrucción: pulse el botón "Compartir" y seleccione "Añadir a pantalla de inicio".
-        } else if (p === 'android') {
-            // Android: el menú de Chrome tiene la opción "Instalar aplicación"
-            // para añadir Consultora DH a la pantalla principal.
-            // Instrucción: pulse el menú de Chrome → "Instalar aplicación".
-        } else {
-            // Desktop: muestra la opción nativa del navegador para instalar la PWA.
-            // Instrucción: consulte la documentación de su navegador para instalar aplicaciones web.
-        }
-    }
+    await install();
 }
 </script>
 
@@ -226,40 +193,42 @@ async function installPWA(): Promise<void> {
                             Ingresar
                         </AppButton>
 
-                        <!-- Install offer: native button when available, fallback instructions otherwise. -->
-                        <p v-if="canInstall && !isInstalled" class="mt-3">
-                            <AppButton
-                                @click="installPWA"
-                                variant="ghost"
-                                size="sm"
-                            >
-                                Instalar aplicación
-                            </AppButton>
-                            <span class="cdh-text-xs cdh-text-muted ms-2">
-                                Acceso rápido como aplicación y pantalla completa
-                            </span>
-                            <button
-                                @click="dismissBannerTemp"
-                                type="button"
-                                class="cdh-text-link cdh-text-xs cdh-text-muted ms-3"
-                                v-if="!bannerWasDismissedTemp()"
-                            >
-                                Ahora no
-                            </button>
-                        </p>
-
-                        <!-- Fallback instructions when no native beforeinstallprompt is available. -->
-                        <p v-if="showInstallOffer && !isInstalled && !canInstall" class="mt-3 cdh-text-muted">
-                            <span v-if="platform === 'android'">
-                                En Android, pulse el menú de Chrome y seleccione "Instalar aplicación" para añadir Consultora DH a la pantalla principal.
-                            </span>
-                            <span v-else-if="platform === 'ios'">
-                                En iOS, pulse Compartir y elija "Añadir a pantalla de inicio".
-                            </span>
-                            <span v-else>
-                                Consulte la documentación de su navegador para instalar Consultora DH como aplicación web.
-                            </span>
-                        </p>
+                        <!-- Single install invitation: native button when the event exists, manual instructions otherwise. The whole block disappears when dismissed. -->
+                        <div v-if="showInstallOffer" class="cdh-install-offer mt-3" data-testid="pwa-install-offer">
+                            <div class="d-flex flex-wrap align-items-center gap-2">
+                                <template v-if="canUseNativePrompt">
+                                    <AppButton
+                                        type="button"
+                                        @click="installPWA"
+                                        variant="ghost"
+                                        size="sm"
+                                    >
+                                        Instalar aplicación
+                                    </AppButton>
+                                    <span class="cdh-text-xs cdh-text-muted">
+                                        Acceso rápido como aplicación y pantalla completa
+                                    </span>
+                                </template>
+                                <template v-else>
+                                    <span v-if="platform === 'android'" class="cdh-text-xs cdh-text-muted">
+                                        En Android, pulse el menú de Chrome y seleccione «Instalar aplicación» para añadir Consultora DH a la pantalla de inicio.
+                                    </span>
+                                    <span v-else-if="platform === 'ios'" class="cdh-text-xs cdh-text-muted">
+                                        En iOS, pulse Compartir y elija «Añadir a pantalla de inicio».
+                                    </span>
+                                    <span v-else class="cdh-text-xs cdh-text-muted">
+                                        Puede instalar Consultora DH desde el menú de su navegador. Consulte su ayuda si no encuentra la opción.
+                                    </span>
+                                </template>
+                                <button
+                                    @click="dismissBannerTemp"
+                                    type="button"
+                                    class="cdh-text-link cdh-text-xs cdh-text-muted"
+                                >
+                                    Ahora no
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </form>
 

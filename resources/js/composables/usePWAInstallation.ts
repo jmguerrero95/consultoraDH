@@ -1,4 +1,4 @@
-import { computed, ref, readonly } from 'vue'
+import { computed, ref } from 'vue'
 
 /**
  * PWA installation experience.
@@ -11,8 +11,8 @@ import { computed, ref, readonly } from 'vue'
  *
  * The state lives at module scope on purpose. `app.ts` and `UserMenu.vue` each
  * call the composable; if the refs were created per call, the menu would watch
- * a different `isInstallable` than the one the listener wrote to and the option
- * would never appear.
+ * a different prompt than the one the listener captured and the option would
+ * never appear.
  */
 
 export type PWAPlatform = 'desktop' | 'android' | 'ios' | 'unknown'
@@ -35,9 +35,7 @@ interface IonStandaloneNavigator extends Navigator {
 }
 
 const promptEvent = ref<BeforeInstallPromptEvent | null>(null)
-const isInstallable = ref(false)
 const isInstalled = ref(false)
-const showingBanner = ref(false)
 const platform = ref<PWAPlatform>('desktop')
 
 const DISMISSED_KEY = 'cdh:pwa-banner-dismissed'
@@ -49,6 +47,58 @@ let listening = false
 function inBrowser(): boolean {
     return typeof window !== 'undefined' && typeof navigator !== 'undefined'
 }
+
+function localStorageOrNull(): Storage | null {
+    if (!inBrowser()) {
+        return null
+    }
+
+    try {
+        return window.localStorage
+    } catch {
+        return null
+    }
+}
+
+function sessionStorageOrNull(): Storage | null {
+    if (!inBrowser()) {
+        return null
+    }
+
+    try {
+        return window.sessionStorage
+    } catch {
+        return null
+    }
+}
+
+function readFlag(storage: Storage | null, key: string): boolean {
+    try {
+        return storage?.getItem(key) === '1'
+    } catch {
+        return false
+    }
+}
+
+function writeFlag(storage: Storage | null, key: string): void {
+    try {
+        storage?.setItem(key, '1')
+    } catch {
+        // Storage can be unavailable (private mode, quota). The in-memory ref
+        // still hides the offer for this session, so the UI stays consistent.
+    }
+}
+
+/**
+ * Dismissal is reactive state, not a storage read.
+ *
+ * Reading `sessionStorage` inside a computed would not track, because web
+ * storage has no reactivity. The ref is seeded once from storage (so a reload
+ * in the same session keeps the offer dismissed) and updated on dismissal, so
+ * every consumer of the composable re-renders from the same source.
+ */
+const permanentDismissed = ref(readFlag(localStorageOrNull(), DISMISSED_KEY))
+const tempDismissed = ref(readFlag(sessionStorageOrNull(), TEMP_DISMISSED_KEY))
 
 function prefersStandalone(): boolean {
     if (!inBrowser()) {
@@ -94,10 +144,6 @@ function refreshInstalledState(): void {
 
     isInstalled.value = prefersStandalone()
     platform.value = detectPlatform()
-
-    if (isInstalled.value) {
-        showingBanner.value = false
-    }
 }
 
 function handleBeforeInstallPrompt(event: Event): void {
@@ -106,15 +152,11 @@ function handleBeforeInstallPrompt(event: Event): void {
     event.preventDefault()
 
     promptEvent.value = event as BeforeInstallPromptEvent
-    isInstallable.value = true
-    showingBanner.value = !isInstalled.value
 }
 
 function handleAppInstalled(): void {
     promptEvent.value = null
-    isInstallable.value = false
     isInstalled.value = true
-    showingBanner.value = false
 }
 
 function listen(): void {
@@ -138,6 +180,28 @@ function listen(): void {
 export function usePWAInstallation() {
     listen()
 
+    /** Whether the browser supplied a usable `beforeinstallprompt` event. */
+    const canUseNativePrompt = computed(() => promptEvent.value !== null)
+
+    /**
+     * A single decision for both paths.
+     *
+     * The offer is hidden when the app is installed, when it was permanently
+     * dismissed, or when it was dismissed for this session. Otherwise it is
+     * shown when the native prompt exists or when there is a manual procedure
+     * for the detected platform.
+     */
+    const showInstallOffer = computed(() => {
+        if (isInstalled.value || permanentDismissed.value || tempDismissed.value) {
+            return false
+        }
+
+        return canUseNativePrompt.value || platform.value !== 'unknown'
+    })
+
+    /** The native button is only rendered when an event can actually be used. */
+    const canInstall = computed(() => canUseNativePrompt.value && showInstallOffer.value)
+
     /**
      * Use the captured prompt. The browser resolves `userChoice` exactly once;
      * the event is discarded afterwards whether it was accepted or dismissed,
@@ -159,8 +223,6 @@ export function usePWAInstallation() {
 
             if (choice.outcome === 'accepted') {
                 isInstalled.value = true
-                showingBanner.value = false
-                isInstallable.value = false
 
                 return true
             }
@@ -178,121 +240,23 @@ export function usePWAInstallation() {
     }
 
     function dismissBanner(): void {
-        showingBanner.value = false
-
-        try {
-            window.localStorage.setItem(DISMISSED_KEY, '1')
-        } catch {
-            // Storage can be unavailable (private mode, quota). The banner is
-            // hidden for this session either way.
-        }
-    }
-
-    function bannerWasDismissed(): boolean {
-        try {
-            return window.localStorage.getItem(DISMISSED_KEY) === '1'
-        } catch {
-            return false
-        }
+        permanentDismissed.value = true
+        writeFlag(localStorageOrNull(), DISMISSED_KEY)
     }
 
     function dismissBannerTemp(): void {
-        showingBanner.value = false
-
-        try {
-            window.sessionStorage.setItem(TEMP_DISMISSED_KEY, '1')
-        } catch {
-            // Storage can be unavailable (private mode, quota). The banner is
-            // hidden for this session either way.
-        }
+        tempDismissed.value = true
+        writeFlag(sessionStorageOrNull(), TEMP_DISMISSED_KEY)
     }
-
-    function bannerWasDismissedTemp(): boolean {
-        try {
-            return window.sessionStorage.getItem(TEMP_DISMISSED_KEY) === '1'
-        } catch {
-            return false
-        }
-    }
-
-    /** Platform-appropriate instructions shown when native install is not available. */
-    function getPlatformInstructions(): string {
-        if (!inBrowser()) {
-            return ''
-        }
-
-        const p = platform.value
-
-        if (p === 'android') {
-            return 'En Android, pulse el menú de Chrome y seleccione "Instalar aplicación" para añadir Consultora DH a la pantalla principal.'
-        }
-
-        if (p === 'ios') {
-            return 'En iOS, pulse Compartir y elija "Añadir a pantalla de inicio".'
-        }
-
-        return 'Consulte la documentación de su navegador para instalar Consultora DH como aplicación web.'
-    }
-
-    /** Plain text, because the menu renders it as text rather than HTML. */
-    function getIOSInstructions(): string {
-        return 'Para añadir Consultora DH a la pantalla de inicio, pulse Compartir y elija «Añadir a pantalla de inicio».'
-    }
-
-    /** Whether the browser supplied a usable `beforeinstallprompt` event. */
-    const canUseNativePrompt = computed(() => promptEvent.value !== null)
-
-    /** Whether the install banner/offer should be displayed, combining native and fallback paths. */
-    /** Shows when:
-     *  - App not installed
-     *  - No permanent dismiss
-     *  - No temporary dismiss (for this session)
-     *  - Either native prompt available OR platform-appropriate manual instructions exist
-     */
-    const showInstallOffer = computed(() => {
-        // Si ya está instalada, no ofrecer
-        if (isInstalled.value) {
-            return false
-        }
-        // Si tiene descarte permanente, no ofrecer
-        if (bannerWasDismissed()) {
-            return false
-        }
-        // Si hay descarte temporal vigente para esta sesión, no ofrecer
-        if (bannerWasDismissedTemp()) {
-            return false
-        }
-        // Mostrar si hay evento nativo disponible O si hay instrucciones manuales aplicables
-        const hasNativePrompt = canUseNativePrompt.value
-        const hasManualInstructions = platform.value !== 'unknown'
-        return hasNativePrompt || hasManualInstructions
-    })
 
     return {
-        promptEvent: readonly(promptEvent),
-        isInstallable: readonly(isInstallable),
         isInstalled,
-        showingBanner,
         platform,
         canUseNativePrompt,
         showInstallOffer,
-
-        canInstall: computed(
-            () => isInstallable.value
-                && !isInstalled.value
-                && showingBanner.value
-                && !bannerWasDismissed()
-                && canUseNativePrompt.value,
-        ),
-
-        detectPlatform,
-        refreshInstalledState,
+        canInstall,
         install,
         dismissBanner,
         dismissBannerTemp,
-        bannerWasDismissed,
-        bannerWasDismissedTemp,
-        getIOSInstructions,
-        getPlatformInstructions,
     }
 }
