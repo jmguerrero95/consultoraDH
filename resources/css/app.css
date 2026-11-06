@@ -71,13 +71,13 @@ p {
 }
 
 a {
-    color: var(--cdh-primary);
+    color: var(--cdh-link);
     text-decoration-thickness: 1px;
     text-underline-offset: 2px;
 }
 
 a:hover {
-    color: var(--cdh-primary-hover);
+    color: var(--cdh-link-hover);
 }
 
 code,
@@ -126,7 +126,7 @@ pre {
     z-index: 1080;
     padding: var(--cdh-space-2) var(--cdh-space-4);
     color: var(--cdh-text-inverse);
-    background: var(--cdh-primary);
+    background: var(--cdh-primary-interactive);
     border-radius: var(--cdh-radius);
     transform: translateY(-200%);
     transition: transform var(--cdh-transition);
@@ -172,17 +172,28 @@ pre {
 }
 
 .cdh-wordmark__mark {
-    display: grid;
+    display: block;
     flex: none;
-    place-items: center;
     width: 2rem;
     height: 2rem;
-    font-size: 0.8125rem;
-    font-weight: var(--cdh-font-weight-semibold);
-    letter-spacing: 0.02em;
-    color: var(--cdh-text-inverse);
-    background: linear-gradient(160deg, var(--cdh-primary) 0%, var(--cdh-accent) 100%);
-    border-radius: var(--cdh-radius);
+    object-fit: contain;
+    border-radius: var(--cdh-radius-sm);
+}
+
+/*
+    The full lockup already contains the name and the slogan, so it is rendered
+    on its own: repeating the text next to it would duplicate the brand. The
+    blue square version is used on light surfaces, the transparent white one on
+    the blue authentication panel.
+*/
+.cdh-wordmark__full {
+    display: block;
+    width: auto;
+    max-width: 11rem;
+    height: auto;
+    max-height: 11rem;
+    object-fit: contain;
+    border-radius: var(--cdh-radius-lg);
 }
 
 .cdh-wordmark__text {
@@ -203,7 +214,7 @@ pre {
     font-weight: var(--cdh-font-weight-normal);
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--cdh-text-subtle);
+    color: var(--cdh-text-muted);
 }
 
 .cdh-wordmark--light .cdh-wordmark__name {
@@ -211,13 +222,12 @@ pre {
 }
 
 .cdh-wordmark--light .cdh-wordmark__descriptor {
-    color: rgba(255, 255, 255, 0.7);
+    color: var(--cdh-text-inverse);
 }
 
 .cdh-wordmark--sm .cdh-wordmark__mark {
     width: 1.75rem;
     height: 1.75rem;
-    font-size: 0.75rem;
 }
 
 /* --- Authentication layout -------------------------------------------------- */
@@ -232,7 +242,9 @@ pre {
     flex-direction: column;
     justify-content: center;
     padding: var(--cdh-space-10) var(--cdh-space-8);
-    background: var(--cdh-surface);
+    background:
+        linear-gradient(180deg, var(--cdh-primary-subtle) 0%, var(--cdh-surface) 38%);
+    background-color: var(--cdh-surface);
 }
 
 .cdh-auth__aside {
@@ -242,10 +254,12 @@ pre {
     justify-content: space-between;
     padding: var(--cdh-space-10) var(--cdh-space-12);
     color: var(--cdh-text-inverse);
-    background-color: var(--cdh-primary);
+    background-color: var(--cdh-primary-interactive);
+    /* Darker blues only: white text keeps at least 4.9:1 everywhere on this
+       panel, including over the decorative radial. */
     background-image:
-        radial-gradient(circle at 18% 12%, rgba(15, 118, 110, 0.55) 0%, transparent 55%),
-        linear-gradient(155deg, #123a5e 0%, #0d2c48 55%, #0a2238 100%);
+        radial-gradient(circle at 18% 12%, rgba(2, 79, 143, 0.65) 0%, transparent 55%),
+        linear-gradient(155deg, #0273c7 0%, #0367bb 55%, #024f8f 100%);
 }
 
 .cdh-auth__aside-title {
@@ -259,7 +273,7 @@ pre {
     max-width: 30rem;
     margin: 0;
     font-size: var(--cdh-font-size-md);
-    color: rgba(255, 255, 255, 0.82);
+    color: var(--cdh-text-inverse);
 }
 
 .cdh-auth__aside-list {
@@ -274,18 +288,18 @@ pre {
     gap: var(--cdh-space-3);
     padding: var(--cdh-space-2) 0;
     font-size: var(--cdh-font-size-md);
-    color: rgba(255, 255, 255, 0.88);
+    color: var(--cdh-text-inverse);
 }
 
 .cdh-auth__aside-list i {
     flex: none;
     margin-top: 0.2rem;
-    color: #7dd3c7;
+    color: var(--cdh-primary-border);
 }
 
 .cdh-auth__aside-footer {
     font-size: var(--cdh-font-size-xs);
-    color: rgba(255, 255, 255, 0.6);
+    color: var(--cdh-text-inverse);
 }
 
 .cdh-auth__form {
@@ -457,13 +471,19 @@ a.cdh-btn[aria-busy='true'] {
 
 .cdh-btn--primary {
     color: var(--cdh-text-inverse);
-    background: var(--cdh-primary);
-    border-color: var(--cdh-primary);
+    background: var(--cdh-primary-interactive);
+    border-color: var(--cdh-primary-interactive);
 }
 
 .cdh-btn--primary:hover:not(:disabled) {
     background: var(--cdh-primary-hover);
     border-color: var(--cdh-primary-hover);
+    color: var(--cdh-text-inverse);
+}
+
+.cdh-btn--primary:active:not(:disabled) {
+    background: var(--cdh-primary-active);
+    border-color: var(--cdh-primary-active);
     color: var(--cdh-text-inverse);
 }
 
@@ -509,7 +529,7 @@ a.cdh-btn[aria-busy='true'] {
  * users can still see where they are.
  */
 .cdh-btn--link {
-    color: var(--cdh-primary);
+    color: var(--cdh-link);
     background: transparent;
     border-color: transparent;
     padding-inline: 0.25rem;
@@ -518,7 +538,7 @@ a.cdh-btn[aria-busy='true'] {
 }
 
 .cdh-btn--link:hover:not(:disabled) {
-    color: var(--cdh-primary-hover, var(--cdh-primary));
+    color: var(--cdh-link-hover);
     background: var(--cdh-surface-sunken);
 }
 
@@ -981,8 +1001,10 @@ a.cdh-btn[aria-busy='true'] {
     display: flex;
     flex-direction: column;
     width: var(--cdh-sidebar-width);
-    background: var(--cdh-primary);
-    background-image: linear-gradient(180deg, #123a5e 0%, #0d2c48 100%);
+    background: var(--cdh-primary-interactive);
+    /* The interactive blues are the shades where white navigation text keeps
+       WCAG AA contrast; #1094D6 remains the brand colour elsewhere. */
+    background-image: linear-gradient(180deg, #0273c7 0%, #0367bb 100%);
     transition: transform var(--cdh-transition);
 }
 
@@ -991,7 +1013,7 @@ a.cdh-btn[aria-busy='true'] {
     align-items: center;
     height: var(--cdh-topbar-height);
     padding: 0 var(--cdh-space-4);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 .cdh-sidebar__nav {
@@ -1006,7 +1028,7 @@ a.cdh-btn[aria-busy='true'] {
     font-weight: var(--cdh-font-weight-semibold);
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--cdh-text-inverse);
 }
 
 .cdh-sidebar__section-label:first-child {
@@ -1021,7 +1043,7 @@ a.cdh-btn[aria-busy='true'] {
     margin-bottom: 2px;
     font-size: var(--cdh-font-size-base);
     font-weight: var(--cdh-font-weight-medium);
-    color: rgba(255, 255, 255, 0.82);
+    color: var(--cdh-text-inverse);
     text-decoration: none;
     border-radius: var(--cdh-radius);
     transition:
@@ -1031,7 +1053,7 @@ a.cdh-btn[aria-busy='true'] {
 
 .cdh-nav-link:hover {
     color: var(--cdh-text-inverse);
-    background: rgba(255, 255, 255, 0.09);
+    background: rgba(0, 0, 0, 0.14);
 }
 
 .cdh-nav-link:focus-visible {
@@ -1048,22 +1070,22 @@ a.cdh-btn[aria-busy='true'] {
 
 .cdh-nav-link--active {
     color: var(--cdh-text-inverse);
-    background: rgba(255, 255, 255, 0.16);
-    box-shadow: inset 2px 0 0 #7dd3c7;
+    background: var(--cdh-primary-hover);
+    box-shadow: inset 3px 0 0 var(--cdh-primary-border);
 }
 
 .cdh-sidebar__footer {
     padding: var(--cdh-space-3) var(--cdh-space-4);
     font-size: var(--cdh-font-size-xs);
-    color: rgba(255, 255, 255, 0.55);
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.9);
+    border-top: 1px solid rgba(255, 255, 255, 0.18);
 }
 
 .cdh-sidebar__scrim {
     position: fixed;
     inset: 0;
     z-index: 1040;
-    background: rgba(16, 32, 48, 0.5);
+    background: rgba(2, 35, 61, 0.55);
     border: 0;
 }
 
@@ -1085,7 +1107,8 @@ a.cdh-btn[aria-busy='true'] {
     height: var(--cdh-topbar-height);
     padding: 0 var(--cdh-space-5);
     background: var(--cdh-surface);
-    border-bottom: 1px solid var(--cdh-border);
+    border-bottom: 2px solid var(--cdh-primary-border);
+    box-shadow: 0 1px 0 rgba(16, 148, 214, 0.08);
 }
 
 .cdh-topbar__spacer {
@@ -1153,7 +1176,7 @@ a.cdh-btn[aria-busy='true'] {
     height: 2rem;
     font-size: var(--cdh-font-size-xs);
     font-weight: var(--cdh-font-weight-semibold);
-    color: var(--cdh-primary);
+    color: var(--cdh-primary-active);
     background: var(--cdh-primary-subtle);
     border-radius: var(--cdh-radius);
 }
@@ -1321,7 +1344,7 @@ a.cdh-btn[aria-busy='true'] {
     font-size: 3rem;
     font-weight: var(--cdh-font-weight-semibold);
     line-height: 1;
-    color: var(--cdh-primary-subtle);
+    color: var(--cdh-primary);
 }
 
 .cdh-error-page__title {
@@ -1453,7 +1476,7 @@ a.cdh-btn[aria-busy='true'] {
     margin-left: var(--cdh-space-2);
     font-size: var(--cdh-font-size-lg);
     font-weight: var(--cdh-font-weight-semibold);
-    color: var(--cdh-text);
+    color: var(--cdh-primary-active);
 }
 
 @media (max-width: 767.98px) {
@@ -1508,7 +1531,7 @@ a.cdh-btn[aria-busy='true'] {
 }
 
 .cdh-link {
-    color: var(--cdh-primary, #1f5f8b);
+    color: var(--cdh-link, #1f5f8b);
     text-decoration: none;
 }
 
@@ -1575,7 +1598,7 @@ button.cdh-link {
 
 .cdh-table__link:hover,
 .cdh-table__link:focus-visible {
-    color: var(--cdh-primary, #1f5f8b);
+    color: var(--cdh-link, #1f5f8b);
     text-decoration: underline;
 }
 
@@ -1815,7 +1838,7 @@ button.cdh-link {
 }
 
 .cdh-tab[aria-selected='true'] {
-    color: var(--cdh-primary, #1f5f8b);
+    color: var(--cdh-link, #1f5f8b);
     border-bottom-color: var(--cdh-primary, #1f5f8b);
     font-weight: 600;
 }
@@ -2091,15 +2114,15 @@ button.cdh-link {
 }
 
 .cdh-stepper__step--current {
-    color: var(--cdh-primary, #1f5f8b);
+    color: var(--cdh-link, #1f5f8b);
     font-weight: 600;
     border-color: var(--cdh-primary, #1f5f8b);
 }
 
 .cdh-stepper__step--current::before {
     color: #fff;
-    background: var(--cdh-primary, #1f5f8b);
-    border-color: var(--cdh-primary, #1f5f8b);
+    background: var(--cdh-primary-interactive, #1f5f8b);
+    border-color: var(--cdh-primary-interactive, #1f5f8b);
 }
 
 /* --- Import status badges (A04) -------------------------------------------- */
@@ -2114,8 +2137,8 @@ button.cdh-link {
 .cdh-badge--queued,
 .cdh-badge--parsing,
 .cdh-badge--applying {
-    color: var(--cdh-primary, #1f5f8b);
-    background: #e8f0f7;
+    color: var(--cdh-primary-interactive, #1f5f8b);
+    background: var(--cdh-primary-subtle, #e8f0f7);
 }
 
 .cdh-badge--review {
@@ -2124,8 +2147,8 @@ button.cdh-link {
 }
 
 .cdh-badge--ready {
-    color: var(--cdh-primary, #1f5f8b);
-    background: #e8f0f7;
+    color: var(--cdh-primary-interactive, #1f5f8b);
+    background: var(--cdh-primary-subtle, #e8f0f7);
 }
 
 .cdh-badge--applied {

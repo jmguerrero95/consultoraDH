@@ -8,16 +8,26 @@
 
 :root {
     /* --- Brand palette ------------------------------------------------- */
-    /* A restrained navy/teal: trustworthy, professional, and legible in long
-       administrative sessions. */
-    --cdh-primary: #123a5e;
-    --cdh-primary-hover: #0d2c48;
-    --cdh-primary-active: #0a2238;
-    --cdh-primary-subtle: #e8f0f7;
-    --cdh-primary-border: #c3d7e8;
+    /* Official Consultora DH blue (#1094D6). It is the dominant brand colour
+       for large surfaces, icons and accents. Text and interactive surfaces use
+       the darker interactive blue: white on #1094D6 is only 3.37:1, which does
+       not meet WCAG AA for small text, while #0273C7 reaches 4.91:1. */
+    --cdh-primary: #1094d6;
+    --cdh-primary-interactive: #0273c7;
+    --cdh-primary-hover: #0367bb;
+    --cdh-primary-active: #025a9c;
+    --cdh-primary-subtle: #eaf7ff;
+    --cdh-primary-border: #bfe3f7;
 
-    --cdh-accent: #0f766e;
-    --cdh-accent-hover: #0b5f59;
+    --cdh-link: #0273c7;
+    --cdh-link-hover: #0367bb;
+
+    /* Alias used by the assistant surfaces, which were written before the
+       brand palette existed and fell back to the old navy when it was absent. */
+    --cdh-brand: var(--cdh-primary);
+
+    --cdh-accent: #0273c7;
+    --cdh-accent-hover: #0367bb;
 
     --cdh-secondary: #4a5a6a;
     --cdh-secondary-hover: #3d4b58;
@@ -44,8 +54,8 @@
     --cdh-danger: #b42318;
     --cdh-danger-hover: #96201a;
     --cdh-danger-subtle: #fdecea;
-    --cdh-info: #0b6b9a;
-    --cdh-info-subtle: #e7f2f8;
+    --cdh-info: #0273c7;
+    --cdh-info-subtle: #eaf7ff;
 
     /* --- Typography ----------------------------------------------------- */
     --cdh-font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system,
@@ -98,7 +108,7 @@
     --cdh-content-max-width: 84rem;
 
     /* --- Focus ----------------------------------------------------------- */
-    --cdh-focus-ring: 0 0 0 3px rgba(18, 58, 94, 0.35);
+    --cdh-focus-ring: 0 0 0 3px rgba(2, 115, 199, 0.35);
     --cdh-focus-ring-danger: 0 0 0 3px rgba(180, 35, 24, 0.3);
 
     /* --- Motion ---------------------------------------------------------- */
@@ -110,7 +120,7 @@
        framework components inherit the identity without `!important` fights.
        ------------------------------------------------------------------- */
     --bs-primary: var(--cdh-primary);
-    --bs-primary-rgb: 18, 58, 94;
+    --bs-primary-rgb: 16, 148, 214;
     --bs-secondary: var(--cdh-secondary);
     --bs-secondary-rgb: 74, 90, 106;
     --bs-success: var(--cdh-success);
@@ -120,7 +130,7 @@
     --bs-warning: var(--cdh-warning);
     --bs-warning-rgb: 154, 103, 0;
     --bs-info: var(--cdh-info);
-    --bs-info-rgb: 11, 107, 154;
+    --bs-info-rgb: 2, 115, 199;
     --bs-body-bg: var(--cdh-background);
     --bs-body-color: var(--cdh-text);
     --bs-border-color: var(--cdh-border);
@@ -131,8 +141,8 @@
     --bs-body-font-size: var(--cdh-font-size-base);
     --bs-emphasis-color: var(--cdh-text);
     --bs-secondary-color: var(--cdh-text-muted);
-    --bs-link-color: var(--cdh-primary);
-    --bs-link-hover-color: var(--cdh-primary-hover);
+    --bs-link-color: var(--cdh-link);
+    --bs-link-hover-color: var(--cdh-link-hover);
     --bs-emphasis-color-rgb: 28, 40, 51;
     --bs-secondary-color-rgb: 91, 107, 122;
 
